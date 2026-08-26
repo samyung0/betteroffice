@@ -1,5 +1,15 @@
 # @betteroffice/demo
 
+## 0.0.9
+
+### Patch Changes
+
+- Updated dependencies [cae162d]
+  - @betteroffice/xlsx@0.1.1
+  - @betteroffice/pptx@0.0.5
+  - @betteroffice/xlsx-react@0.1.1
+  - @betteroffice/pptx-react@0.0.5
+
 ## 0.0.8
 
 ### Patch Changes

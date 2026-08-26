@@ -1,5 +1,18 @@
 # @betteroffice/rust-crates
 
+## 0.1.1
+
+### Patch Changes
+
+- 45798dd: Compare layout blocks structurally instead of fingerprinting serialized JSON.
+- cf9a2f5: Share glyph caches across pages and stop re-parsing fonts per run.
+- 188540f: Redact relationship targets that carry a URI scheme, are protocol-relative or name a UNC share even when TargetMode is missing or oddly spelled, and declare the mode on the rewritten relationship.
+- 2d1b9d0: Media placeholders are now a fixed 64x64 blank image instead of matching the source dimensions, and WMF/EMF parts become blank metafile stubs instead of failing the whole redaction.
+- b59ba43: Resolve each font slot's fallback chain once per run during measurement.
+- aacdacc: Cache tokenized number formats across renders.
+- 79db755: Reuse formula parses and shift cell maps in place during structural edits.
+- b07afd7: Write sheetData in one pass instead of rescanning cells per row.
+
 ## 0.1.0
 
 ### Minor Changes

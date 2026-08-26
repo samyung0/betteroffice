@@ -1,5 +1,13 @@
 # @betteroffice/pptx-react
 
+## 0.0.5
+
+### Patch Changes
+
+- Updated dependencies [cae162d]
+  - @betteroffice/pptx@0.0.5
+  - @betteroffice/pptx-i18n@0.0.5
+
 ## 0.0.4
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @betteroffice/pptx
 
+## 0.0.5
+
+### Patch Changes
+
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+
 ## 0.0.4
 
 ### Patch Changes
