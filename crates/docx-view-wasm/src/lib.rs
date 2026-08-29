@@ -7,8 +7,7 @@ const DEFAULT_PAGE_GAP: f64 = 24.0;
 
 #[wasm_bindgen]
 pub struct DocxViewDocument {
-    engine: EngineSession,
-    request: Value,
+    display_list: String,
 }
 
 #[wasm_bindgen]
@@ -18,20 +17,25 @@ impl DocxViewDocument {
         let request = layout_request(&envelope.document.package);
         let engine = EngineSession::new(1);
         seed_parsed_docx(engine.doc(), envelope).map_err(js_error)?;
-        Ok(Self { engine, request })
+        let layout = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .map_err(js_error)?;
+        let display_list = engine.build_display_list_json(&layout).map_err(js_error)?;
+        // The editing/Yrs projection is currently shared code used while
+        // lowering OOXML. It is deliberately not retained by the viewer: only
+        // the immutable display list survives `open`, so view mode does not
+        // keep a second editable document graph resident.
+        Ok(Self { display_list })
     }
 
     #[wasm_bindgen(js_name = displayListJson)]
     pub fn display_list_json(&self, page_gap: Option<f64>) -> Result<String, JsValue> {
-        let mut request = self.request.clone();
-        request["options"]["pageGap"] = json!(page_gap.unwrap_or(DEFAULT_PAGE_GAP));
-        let layout = self
-            .engine
-            .layout_document_with_regions_json(&request.to_string())
-            .map_err(js_error)?;
-        self.engine
-            .build_display_list_json(&layout)
-            .map_err(js_error)
+        if page_gap.is_some_and(|gap| (gap - DEFAULT_PAGE_GAP).abs() > f64::EPSILON) {
+            return Err(JsValue::from_str(
+                "DOCX view page gap is fixed when the document opens",
+            ));
+        }
+        Ok(self.display_list.clone())
     }
 
     pub fn version() -> String {
