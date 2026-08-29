@@ -1,11 +1,12 @@
 # Evo Office browser proof
 
-This directory answers one narrow question before Evo Notes commits to a deep
+This directory answers two questions before Evo Notes commits to a deep
 BetterOffice fork: can the framework-free browser cores open, view, edit, save,
-and reopen modern Office files without silently discarding unrelated OOXML?
+and reopen modern Office files without silently discarding unrelated OOXML, and
+can view-only XLSX/PPTX sessions avoid loading their editor engines?
 
-The answer for this first fixture tier is **yes, with one benign XLSX package
-cleanup and a significant DOCX payload warning**.
+The answer for this fixture tier is **yes, with one benign XLSX package cleanup
+and a significant DOCX payload warning**.
 
 ## Run it
 
@@ -30,6 +31,9 @@ bun run test:poc
 5. Assert format-specific logical invariants rather than accepting a successful
    ZIP write as proof of fidelity.
 
+It then checks that the XLSX/PPTX viewer artifacts remain below their payload
+budgets and do not export save, edit, or collaboration methods.
+
 The generated fixtures are documented in `fixtures/README.md`. Their generation
 scripts stay beside the harness so a failing input can be reproduced exactly.
 
@@ -52,19 +56,35 @@ reports no slide overflow.
 
 The generated, uncompressed WASM assets are currently:
 
-| Runtime                   |      Bytes | Consequence                                      |
-| ------------------------- | ---------: | ------------------------------------------------ |
-| DOCX parse + layout + OPC |  8,210,524 | plausible viewer-only payload before compression |
-| DOCX edit                 | 11,417,142 | should remain out of the initial viewer path     |
-| XLSX combined engine      |  4,171,799 | view and edit are not physically split yet       |
-| PPTX combined engine      |  2,852,483 | view and edit are not physically split yet       |
+| Runtime                   | Raw bytes  | Brotli bytes | Share of editor |
+| ------------------------- | ---------: | -----------: | --------------: |
+| DOCX parse + layout + OPC |  8,210,524 |          n/a |             n/a |
+| DOCX edit                 | 11,417,142 |          n/a |            100% |
+| XLSX viewer               |    728,948 |      267,493 |           17.6% |
+| XLSX editor               |  4,140,006 |    1,208,100 |            100% |
+| PPTX viewer               |  1,407,997 |      509,359 |           50.0% |
+| PPTX editor               |  2,816,263 |      857,304 |            100% |
 
-DOCX already has separate WASM artifacts, but its current React viewer still
-creates an editing/Yrs session. A real lightweight viewer entry point is
-therefore achievable in the fork, but not available merely by setting a prop.
-XLSX and PPTX each ship one combined WASM module; a read-only UI mode alone will
-not materially reduce the engine payload. A true split there requires separate
-Rust feature builds or dedicated read-only cores.
+On the feature-rich fixtures, the WASM linear memory after the first render is
+1,376,256 bytes for the XLSX viewer versus 2,424,832 for its editor, and
+2,818,048 bytes for the PPTX viewer versus 3,342,336 for its editor. These
+numbers exclude file buffers, JavaScript objects, canvases, and browser process
+overhead; the check is useful as an engine regression gate, not a total-tab RAM
+claim.
+
+XLSX now has a dedicated parser/renderer crate with no Yrs, calculation, undo,
+save, collaboration, or raster dependencies. PPTX builds its initial render
+snapshot directly from parsed OOXML, so it does not construct a Yrs document.
+Its renderer still shares the snapshot type definitions with the edit crate;
+the linker removes the unused edit implementation from the viewer artifact.
+The XLSX viewer displays formula results cached in the file. Opening the editor
+can recalculate those values, so the host should treat that transition as a new
+document revision when the results differ.
+
+Use `@betteroffice/xlsx/viewer` and `@betteroffice/pptx/viewer` in a view iframe.
+The existing root imports remain editor-compatible, and explicit
+`@betteroffice/xlsx/editor` and `@betteroffice/pptx/editor` entry points are
+available for the replacement edit iframe.
 
 ## Decision
 
@@ -73,15 +93,14 @@ browser WASM engines, not optional multi-platform baggage. The Python bindings
 do not need to ship in Evo Notes and can be excluded from our release workflow
 without deleting them during the proof phase.
 
-The next implementation milestone should be an isolated browser host with two
-entry points (`viewer` and `editor`) and one versioned `postMessage` protocol.
-The editor iframe should replace the viewer iframe on demand so all viewer
-memory can be reclaimed. SharedArrayBuffer depends on cross-origin isolation;
-the iframe is useful as a containment and lifecycle boundary, but it does not by
-itself grant SharedArrayBuffer access.
+The next implementation milestone is an isolated browser host with one
+versioned `postMessage` protocol. The editor iframe should replace the viewer
+iframe on demand so the browser can reclaim viewer memory. SharedArrayBuffer
+depends on cross-origin isolation; the iframe is useful as a containment and
+lifecycle boundary, but it does not grant SharedArrayBuffer access by itself.
 
 This fixture tier is sufficient to continue engineering on the fork. It is not
 the final production-fidelity gate. Before integrating with Evo Notes, add a
-small corpus authored by desktop Word, Excel, and PowerPoint—especially tracked
+small corpus authored by desktop Word, Excel, and PowerPoint, especially tracked
 changes/comments, large formula workbooks, pivot tables, grouped/animated
 slides, embedded media, and files with unusual fonts.

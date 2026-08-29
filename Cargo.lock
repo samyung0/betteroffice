@@ -868,6 +868,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pptx-view-wasm"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
@@ -1578,6 +1589,20 @@ dependencies = [
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
+]
+
+[[package]]
+name = "xlsx-view-wasm"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "betteroffice-xlsx-model",
+ "betteroffice-xlsx-parse",
+ "betteroffice-xlsx-render",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ repository = "https://github.com/openooxml/betteroffice"
 
 [workspace.dependencies]
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.1.0", default-features = false }
-ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.1.0" }
+ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.1.0", default-features = false }
 xlsx-model = { package = "betteroffice-xlsx-model", path = "crates/xlsx-model", version = "0.1.0" }
 xlsx-parse = { package = "betteroffice-xlsx-parse", path = "crates/xlsx-parse", version = "0.1.0" }
 xlsx-calc = { package = "betteroffice-xlsx-calc", path = "crates/xlsx-calc", version = "0.1.0" }

@@ -17,7 +17,10 @@ Most apps want the turnkey React component in
 [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react).
 Use this package directly to build custom presentation chrome.
 
-## Open and render a slide
+## View without loading the editor
+
+The viewer entry point parses and renders slides without constructing a Yrs
+document or exporting edit, save, undo, or collaboration methods:
 
 ```ts
 import {
@@ -25,7 +28,29 @@ import {
   openPresentation,
   paintSlide,
   sizeCanvasForSlide,
-} from '@betteroffice/pptx';
+} from '@betteroffice/pptx/viewer';
+
+await initWasm();
+const deck = openPresentation(new Uint8Array(await file.arrayBuffer()), {
+  fonts: [{ family: 'My Sans', bytes: fontBytes }],
+});
+const frame = deck.layoutSlide(0);
+sizeCanvasForSlide(canvas, frame, devicePixelRatio);
+await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
+```
+
+Import `@betteroffice/pptx/editor` when the user chooses to edit. The root
+entry point remains an editor alias for compatibility.
+
+## Open and edit a slide
+
+```ts
+import {
+  initWasm,
+  openPresentation,
+  paintSlide,
+  sizeCanvasForSlide,
+} from '@betteroffice/pptx/editor';
 
 await initWasm();
 const bytes = new Uint8Array(await file.arrayBuffer());

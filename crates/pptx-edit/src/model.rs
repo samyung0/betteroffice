@@ -1,7 +1,12 @@
 use std::collections::BTreeMap;
 
-use ooxml_drawingml::{ShapeFill, ShapeOutline};
-use pptx_parse::{GraphicFrameData, Placeholder};
+use ooxml_drawingml::{
+    ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
+    resolve_color_value_to_hex_with_theme,
+};
+use pptx_parse::{
+    GraphicFrameData, Placeholder, PptxPackage, RunProperties, ShapeNode, Slide, TextBody,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -146,6 +151,277 @@ pub struct DeckSnapshot {
     pub width_emu: i64,
     pub height_emu: i64,
     pub slides: Vec<SlideSnapshot>,
+}
+
+pub fn snapshot_package(package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    Ok(DeckSnapshot {
+        width_emu: package.presentation.width_emu,
+        height_emu: package.presentation.height_emu,
+        slides: package
+            .slides
+            .iter()
+            .enumerate()
+            .map(|(slide_index, slide)| snapshot_slide(package, slide_index, slide))
+            .collect::<EditResult<Vec<_>>>()?,
+    })
+}
+
+fn snapshot_slide(
+    package: &PptxPackage,
+    slide_index: usize,
+    slide: &Slide,
+) -> EditResult<SlideSnapshot> {
+    let reference = package
+        .presentation
+        .slides
+        .get(slide_index)
+        .ok_or_else(|| {
+            EditError::InvalidState(format!("slide {slide_index} has no presentation reference"))
+        })?;
+    let id = format!("slide:{slide_index}:{}", reference.id);
+    let theme = slide_theme(package, slide);
+    Ok(SlideSnapshot {
+        id: id.clone(),
+        source_part_path: Some(slide.part_path.clone()),
+        layout_part_path: slide.layout_part_path.clone(),
+        name: slide.name.clone(),
+        shapes: slide
+            .shapes
+            .iter()
+            .enumerate()
+            .map(|(shape_index, shape)| {
+                snapshot_parsed_shape(&id, &shape_index.to_string(), shape, theme)
+            })
+            .collect(),
+    })
+}
+
+fn snapshot_parsed_shape(
+    slide_id: &str,
+    path: &str,
+    shape: &ShapeNode,
+    theme: Option<&Theme>,
+) -> ShapeSnapshot {
+    let id = format!("{slide_id}:shape:{path}");
+    let base = match shape {
+        ShapeNode::Shape(shape) => &shape.base,
+        ShapeNode::Picture(shape) => &shape.base,
+        ShapeNode::GraphicFrame(shape) => &shape.base,
+        ShapeNode::Group(shape) => &shape.base,
+    };
+    let (
+        kind,
+        geometry,
+        adjust_values,
+        fill,
+        outline,
+        media_part_path,
+        graphic,
+        text_stories,
+        children,
+    ) = match shape {
+        ShapeNode::Shape(shape) => {
+            let mut adjust_values = preset_geometry_default_adjustments(&shape.geometry)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            adjust_values.extend(shape.adjust_values.clone());
+            let text_stories = shape
+                .text
+                .as_ref()
+                .map(|body| vec![snapshot_text_body(&format!("story:{id}:0"), body, theme)])
+                .unwrap_or_default();
+            (
+                ShapeKind::Shape,
+                shape.geometry.clone(),
+                adjust_values,
+                shape.fill.clone(),
+                shape.outline.clone(),
+                None,
+                None,
+                text_stories,
+                Vec::new(),
+            )
+        }
+        ShapeNode::Picture(picture) => (
+            ShapeKind::Picture,
+            "rect".to_owned(),
+            BTreeMap::new(),
+            picture.fill.clone(),
+            picture.outline.clone(),
+            picture.media_part_path.clone(),
+            None,
+            Vec::new(),
+            Vec::new(),
+        ),
+        ShapeNode::GraphicFrame(frame) => {
+            let mut text_stories = Vec::new();
+            if let GraphicFrameData::Table { rows } = &frame.data {
+                for (row_index, row) in rows.iter().enumerate() {
+                    for (cell_index, body) in row.iter().enumerate() {
+                        text_stories.push(snapshot_text_body(
+                            &format!("story:{id}:table:{row_index}:{cell_index}"),
+                            body,
+                            theme,
+                        ));
+                    }
+                }
+            }
+            (
+                ShapeKind::GraphicFrame,
+                "rect".to_owned(),
+                BTreeMap::new(),
+                None,
+                None,
+                None,
+                Some(frame.data.clone()),
+                text_stories,
+                Vec::new(),
+            )
+        }
+        ShapeNode::Group(group) => (
+            ShapeKind::Group,
+            "group".to_owned(),
+            BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            group
+                .children
+                .iter()
+                .enumerate()
+                .map(|(child_index, child)| {
+                    snapshot_parsed_shape(slide_id, &format!("{path}.{child_index}"), child, theme)
+                })
+                .collect(),
+        ),
+    };
+    let resolved_fill_color = fill
+        .as_ref()
+        .filter(|fill| fill.fill_type != "none")
+        .and_then(|fill| resolve_color_value_to_hex_with_theme(fill.color.as_ref(), theme));
+    let resolved_outline_color = outline
+        .as_ref()
+        .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
+    ShapeSnapshot {
+        id,
+        source_id: base.id,
+        kind,
+        name: base.name.clone(),
+        x: base.transform.x,
+        y: base.transform.y,
+        width: base.transform.width,
+        height: base.transform.height,
+        rotation_deg: base.transform.rotation_deg,
+        flip_h: base.transform.flip_h,
+        flip_v: base.transform.flip_v,
+        geometry,
+        adjust_values,
+        placeholder: base.placeholder.clone(),
+        fill,
+        resolved_fill_color,
+        outline,
+        resolved_outline_color,
+        media_part_path,
+        graphic,
+        text_stories,
+        children,
+    }
+}
+
+fn snapshot_text_body(story_id: &str, body: &TextBody, theme: Option<&Theme>) -> StorySnapshot {
+    let paragraphs = if body.paragraphs.is_empty() {
+        vec![ParagraphSnapshot {
+            id: format!("para:{story_id}:0"),
+            alignment: None,
+            level: 0,
+            bullet_json: None,
+            runs: Vec::new(),
+        }]
+    } else {
+        body.paragraphs
+            .iter()
+            .enumerate()
+            .map(|(paragraph_index, paragraph)| ParagraphSnapshot {
+                id: format!("para:{story_id}:{paragraph_index}"),
+                alignment: paragraph.properties.alignment.clone(),
+                level: paragraph.properties.level,
+                bullet_json: paragraph
+                    .properties
+                    .bullet
+                    .as_ref()
+                    .and_then(|bullet| serde_json::to_string(bullet).ok()),
+                runs: paragraph
+                    .runs
+                    .iter()
+                    .filter(|run| !run.text.is_empty())
+                    .map(|run| TextRunSnapshot {
+                        text: run.text.clone(),
+                        style: style_from_run_properties(&run.properties, theme),
+                    })
+                    .collect(),
+            })
+            .collect()
+    };
+    let text_length = paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum::<u32>();
+    StorySnapshot {
+        id: story_id.to_owned(),
+        length: text_length.saturating_add(paragraphs.len() as u32),
+        paragraphs,
+    }
+}
+
+fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
+    TextStyle {
+        bold: properties.bold,
+        italic: properties.italic,
+        font_size_pt: properties.font_size_pt,
+        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
+        font_family: properties.font_family.clone(),
+        underline: properties.underline.clone(),
+    }
+}
+
+fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme> {
+    let layout = slide
+        .layout_part_path
+        .as_deref()
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
+    let master = layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        })
+        .or_else(|| package.masters.first());
+    master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .map(|part| &part.theme)
+        .or_else(|| package.themes.first().map(|part| &part.theme))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
