@@ -17,7 +17,9 @@ const splits: Split[] = [
     format: "DOCX",
     editor: "packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm",
     viewer: "packages/docx/src/wasm/generated/viewer/docx_view_wasm_bg.wasm",
-    maxRatio: 0.9,
+    // The view-only Cargo profile keeps the transient OOXML/Yrs lowering
+    // bridge size-optimized while the editor remains tuned for interaction.
+    maxRatio: 0.8,
     forbiddenViewerDeclarations: [
       /save|serialize|write_docx/,
       /applyInput|applyDelete|replace|formatRange/,
@@ -60,12 +62,16 @@ for (const split of splits) {
   const ratio = viewer.byteLength / editor.byteLength;
   if (ratio > split.maxRatio) {
     throw new Error(
-      `${split.format} viewer is ${(ratio * 100).toFixed(1)}% of editor; limit is ${split.maxRatio * 100}%`,
+      `${split.format} viewer is ${(ratio * 100).toFixed(
+        1
+      )}% of editor; limit is ${split.maxRatio * 100}%`
     );
   }
   for (const forbidden of split.forbiddenViewerDeclarations) {
     if (forbidden.test(declarations)) {
-      throw new Error(`${split.format} viewer exports editor API matching ${forbidden}`);
+      throw new Error(
+        `${split.format} viewer exports editor API matching ${forbidden}`
+      );
     }
   }
   rows.push({

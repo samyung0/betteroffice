@@ -25,30 +25,32 @@ building a custom adapter.
 A full round trip: open a `.docx`, inspect the typed model, write bytes back.
 
 ```ts
-import { readFile, writeFile } from 'node:fs/promises';
-import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
+import { readFile, writeFile } from "node:fs/promises";
+import { parseDocx, repackDocx } from "@betteroffice/docx/docx";
 
-const document = await parseDocx(await readFile('contract.docx'));
+const document = await parseDocx(await readFile("contract.docx"));
 // document.package: body, styles, numbering, theme, media, headers/footers
 
 const bytes = await repackDocx(document);
-await writeFile('contract-out.docx', Buffer.from(bytes));
+await writeFile("contract-out.docx", Buffer.from(bytes));
 ```
 
 `repackDocx` round-trips against the original buffer so untouched parts are
 preserved; use `createDocx` for documents built from scratch.
 
-The engine ships as four wasm assets (container, parser, layout, editing core)
-in `dist/generated/`. Browsers fetch them lazily behind the async entry points
-(`parseDocx`, save, the layout engine, `createYrsSession`); Node and Bun read
-them from disk synchronously on first use. No manual init call is required.
+The engine ships separate viewer and editor wasm assets alongside its container,
+parser, and layout cores. `@betteroffice/docx/viewer` opens a read-only document
+and retains only its immutable display list; editing and save methods are not
+exported. Browsers fetch assets lazily behind the async entry points; Node and
+Bun read them from disk synchronously on first use. No manual init call is
+required.
 
 ## Collaboration
 
 Connect the editor's Yrs replica to any reliable binary transport:
 
 ```ts
-import { CollaborationProvider } from '@betteroffice/docx/collaboration';
+import { CollaborationProvider } from "@betteroffice/docx/collaboration";
 
 const provider = new CollaborationProvider(replica, createTransport(), {
   user: { name: "Ada" }, // identity for this peer's remote caret

@@ -52,3 +52,20 @@ opt-level = 3
 
 [profile.release.package.yrs]
 opt-level = 3
+
+# Read-only documents are opened once in a disposable worker. Optimize the
+# transient OOXML -> layout bridge for download size; the resident editor keeps
+# the release profile's speed-oriented overrides above.
+[profile.viewer-release]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+
+[profile.viewer-release.package.betteroffice-docx-layout]
+opt-level = 3
+
+[profile.viewer-release.package.betteroffice-docx-parse]
+opt-level = 3
+
+[profile.viewer-release.package.betteroffice-ooxml-text]
+opt-level = 3

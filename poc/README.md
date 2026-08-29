@@ -3,10 +3,10 @@
 This directory answers two questions before Evo Notes commits to a deep
 BetterOffice fork: can the framework-free browser cores open, view, edit, save,
 and reopen modern Office files without silently discarding unrelated OOXML, and
-can view-only XLSX/PPTX sessions avoid loading their editor engines?
+can view-only DOCX/XLSX/PPTX sessions avoid loading their editor exports?
 
 The answer for this fixture tier is **yes, with one benign XLSX package cleanup
-and a significant DOCX payload warning**.
+and a remaining DOCX lowering caveat**.
 
 ## Run it
 
@@ -31,8 +31,8 @@ bun run test:poc
 5. Assert format-specific logical invariants rather than accepting a successful
    ZIP write as proof of fidelity.
 
-It then checks that the XLSX/PPTX viewer artifacts remain below their payload
-budgets and do not export save, edit, or collaboration methods.
+It then checks that the DOCX/XLSX/PPTX viewer artifacts remain below their
+payload budgets and do not export save, edit, or collaboration methods.
 
 The generated fixtures are documented in `fixtures/README.md`. Their generation
 scripts stay beside the harness so a failing input can be reproduced exactly.
@@ -56,14 +56,14 @@ reports no slide overflow.
 
 The generated, uncompressed WASM assets are currently:
 
-| Runtime                   | Raw bytes  | Brotli bytes | Share of editor |
-| ------------------------- | ---------: | -----------: | --------------: |
-| DOCX parse + layout + OPC |  8,210,524 |          n/a |             n/a |
-| DOCX edit                 | 11,417,142 |          n/a |            100% |
-| XLSX viewer               |    728,948 |      267,493 |           17.6% |
-| XLSX editor               |  4,140,006 |    1,208,100 |            100% |
-| PPTX viewer               |  1,407,997 |      509,359 |           50.0% |
-| PPTX editor               |  2,816,263 |      857,304 |            100% |
+| Runtime     | Raw bytes | Brotli bytes | Share of editor |
+| ----------- | --------: | -----------: | --------------: |
+| DOCX viewer | 6,767,841 |    1,716,992 |           76.2% |
+| DOCX editor | 8,883,671 |    2,090,860 |            100% |
+| XLSX viewer |   728,948 |      267,493 |           17.6% |
+| XLSX editor | 4,140,006 |    1,208,100 |            100% |
+| PPTX viewer | 1,407,997 |      509,359 |           50.0% |
+| PPTX editor | 2,816,263 |      857,304 |            100% |
 
 On the feature-rich fixtures, the WASM linear memory after the first render is
 1,376,256 bytes for the XLSX viewer versus 2,424,832 for its editor, and
@@ -77,14 +77,19 @@ save, collaboration, or raster dependencies. PPTX builds its initial render
 snapshot directly from parsed OOXML, so it does not construct a Yrs document.
 Its renderer still shares the snapshot type definitions with the edit crate;
 the linker removes the unused edit implementation from the viewer artifact.
+DOCX still uses the shared OOXML-to-Yrs lowering bridge while opening, but the
+viewer retains only the immutable display list. Its separate size-optimized
+Cargo profile saves about 12.6% raw and 5.6% Brotli compared with the normal
+release profile. A host should run this one-time lowering in a disposable
+worker so the temporary editing projection and WASM memory are reclaimed.
 The XLSX viewer displays formula results cached in the file. Opening the editor
 can recalculate those values, so the host should treat that transition as a new
 document revision when the results differ.
 
-Use `@betteroffice/xlsx/viewer` and `@betteroffice/pptx/viewer` in a view iframe.
-The existing root imports remain editor-compatible, and explicit
-`@betteroffice/xlsx/editor` and `@betteroffice/pptx/editor` entry points are
-available for the replacement edit iframe.
+Use `@betteroffice/docx/viewer`, `@betteroffice/xlsx/viewer`, and
+`@betteroffice/pptx/viewer` in a view iframe. The existing root imports remain
+editor-compatible, and explicit editor entry points are available for the
+replacement edit iframe.
 
 ## Decision
 
