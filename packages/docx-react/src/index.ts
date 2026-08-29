@@ -17,6 +17,12 @@ export {
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export {
+  DocxDisplayListViewer,
+  DocxViewer,
+  type DocxDisplayListViewerProps,
+  type DocxViewerProps,
+} from './components/DocxViewer';
 
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {

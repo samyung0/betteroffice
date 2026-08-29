@@ -2966,7 +2966,7 @@ fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
     Some((entry.first()?.as_str()?, entry.get(1)?))
 }
 
-pub(crate) fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
+pub fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
     docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default())
         .map_err(|error| error.to_string())
 }
@@ -2982,7 +2982,7 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
-pub(crate) fn seed_parsed_docx(
+pub fn seed_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {

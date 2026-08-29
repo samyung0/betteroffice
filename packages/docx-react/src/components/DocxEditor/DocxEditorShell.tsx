@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
 import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import { LocaleProvider } from '../../i18n';
@@ -107,9 +107,9 @@ export function DocxEditorShell({
   i18n: React.ComponentProps<typeof LocaleProvider>['i18n'];
   isDark?: boolean;
   onEditorError: (error: Error) => void;
-  containerRef: React.Ref<HTMLDivElement>;
-  scrollContainerRef: React.Ref<HTMLDivElement>;
-  editorContentRef: React.Ref<HTMLDivElement>;
+  containerRef: RefObject<HTMLDivElement | null>;
+  scrollContainerRef: RefObject<HTMLDivElement | null>;
+  editorContentRef: RefObject<HTMLDivElement | null>;
   className: string | undefined;
   containerStyle: CSSProperties;
   mainContentStyle: CSSProperties;

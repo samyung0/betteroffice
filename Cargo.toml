@@ -21,7 +21,7 @@ xlsx-render = { package = "betteroffice-xlsx-render", path = "crates/xlsx-render
 xlsx-raster = { package = "betteroffice-xlsx-raster", path = "crates/xlsx-raster", version = "0.1.0" }
 ooxml-text = { package = "betteroffice-ooxml-text", path = "crates/ooxml-text", version = "0.1.0" }
 ooxml-drawingml = { package = "betteroffice-drawingml", path = "crates/ooxml-drawingml", version = "0.1.0" }
-docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", version = "0.1.0" }
+docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", version = "0.1.0", default-features = false }
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.1.0" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.1.0" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.1.0" }

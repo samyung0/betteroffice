@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef } from 'react';
+import { useEffect, useImperativeHandle, useRef, type Ref } from 'react';
 
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { Document } from '@betteroffice/docx/types/document';
@@ -183,7 +183,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 }
 
 export interface UsePagedEditorRefApiOptions {
-  ref: React.Ref<PagedEditorRef>;
+  ref: Ref<PagedEditorRef>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: () => void;

@@ -152,7 +152,8 @@ export function CanvasPagesView({
    */
   interactive?: boolean;
   /** Outline source sharing the display engine's resident font store. */
-  glyphOutlineProvider?: GlyphOutlineProvider | null;
+  /** False disables the separate outline WASM for display lists that contain browser text runs. */
+  glyphOutlineProvider?: GlyphOutlineProvider | null | false;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
@@ -321,6 +322,7 @@ export function CanvasPagesView({
     let cancelled = false;
     glyphCacheRef.current = null;
     setGlyphCacheReady(false);
+    if (glyphOutlineProvider === false) return;
     const provider = glyphOutlineProvider
       ? Promise.resolve(glyphOutlineProvider)
       : loadGlyphOutlineProvider();

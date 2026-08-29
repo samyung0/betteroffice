@@ -14,6 +14,17 @@ interface Split {
 
 const splits: Split[] = [
   {
+    format: "DOCX",
+    editor: "packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm",
+    viewer: "packages/docx/src/wasm/generated/viewer/docx_view_wasm_bg.wasm",
+    maxRatio: 0.9,
+    forbiddenViewerDeclarations: [
+      /save|serialize|write_docx/,
+      /applyInput|applyDelete|replace|formatRange/,
+      /encodeState|applyUpdate|startUpdateObservation/,
+    ],
+  },
+  {
     format: "XLSX",
     editor: "packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm",
     viewer: "packages/xlsx/src/wasm/generated/viewer/xlsx_view_wasm_bg.wasm",
@@ -74,4 +85,3 @@ function brotli(bytes: Uint8Array): number {
     params: { [constants.BROTLI_PARAM_QUALITY]: 11 },
   }).byteLength;
 }
-

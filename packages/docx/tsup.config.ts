@@ -6,6 +6,7 @@ export default defineConfig([
       core: 'src/core.ts',
       'docx/index': 'src/docx/index.ts',
       'docx/wrapTypes': 'src/docx/wrapTypes.ts',
+      viewer: 'src/viewer.ts',
       'styles/index': 'src/styles/index.ts',
       'utils/index': 'src/utils/index.ts',
       'utils/cardStyles': 'src/utils/cardStyles.ts',
@@ -35,12 +36,13 @@ export default defineConfig([
       'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
       'yrs/residentEngineWorker': 'src/yrs/residentEngineWorker.ts',
-      // The four wasm loaders are ROOT-NAMED entries on purpose: their
+      // The five wasm loaders are ROOT-NAMED entries on purpose: their
       // `new URL('./generated/…', import.meta.url)` literals must resolve
       // against a root-level chunk next to dist/generated/ (copy-assets puts
       // the gitignored binaries there). Keep them at the dist root.
       'wasm-opc': 'src/wasm/opc.ts',
       'wasm-layout': 'src/wasm/layout.ts',
+      'wasm-viewer': 'src/wasm/viewer.ts',
       'wasm-edit': 'src/wasm/edit.ts',
       'wasm-parse': 'src/wasm/parse.ts',
     },

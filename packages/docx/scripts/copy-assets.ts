@@ -24,6 +24,10 @@ const assets: Asset[] = [
     from: 'src/wasm/generated/layout/docx_layout_bg.wasm',
     to: 'dist/generated/layout/docx_layout_bg.wasm',
   },
+  {
+    from: 'src/wasm/generated/viewer/docx_view_wasm_bg.wasm',
+    to: 'dist/generated/viewer/docx_view_wasm_bg.wasm',
+  },
   { from: 'src/wasm/generated/edit/docx_edit_bg.wasm', to: 'dist/generated/edit/docx_edit_bg.wasm' },
   {
     from: 'src/wasm/generated/parse/docx_parse_bg.wasm',

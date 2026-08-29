@@ -21,6 +21,10 @@
       "types": "./dist/docx/wrapTypes.d.mts",
       "import": "./dist/docx/wrapTypes.mjs"
     },
+    "./viewer": {
+      "types": "./dist/viewer.d.mts",
+      "import": "./dist/viewer.mjs"
+    },
     "./styles": {
       "types": "./dist/styles/index.d.mts",
       "import": "./dist/styles/index.mjs"
@@ -125,6 +129,9 @@
       ],
       "docx/wrapTypes": [
         "./dist/docx/wrapTypes.d.mts"
+      ],
+      "viewer": [
+        "./dist/viewer.d.mts"
       ],
       "styles": [
         "./dist/styles/index.d.mts"

@@ -894,56 +894,6 @@ export function open_display_list(display_list: string): number;
 export function outline_glyph_json(font_id: number, glyph_id: number): string;
 
 /**
- * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
- */
-export function parse_docx_relationships(data: Uint8Array): string;
-
-/**
- * Parses an S2 package projection.
- */
-export function parse_docx_s2(data: Uint8Array): string;
-
-/**
- * Parses an S3 package projection.
- */
-export function parse_docx_s3(data: Uint8Array): string;
-
-/**
- * Parses an S4 package projection.
- */
-export function parse_docx_s4(data: Uint8Array): string;
-
-/**
- * Parses an S5 package projection.
- */
-export function parse_docx_s5(data: Uint8Array): string;
-
-/**
- * Parses an S6 package projection.
- */
-export function parse_docx_s6(data: Uint8Array): string;
-
-/**
- * Parses an S7 package projection.
- */
-export function parse_docx_s7(data: Uint8Array): string;
-
-/**
- * Parses an S8 package projection.
- */
-export function parse_docx_s8(data: Uint8Array): string;
-
-/**
- * Parses the full document wire in one package pass.
- */
-export function parse_docx_s9(data: Uint8Array, options_json: string): string;
-
-/**
- * Focused wasm leaf used by hostile-input and facade tests.
- */
-export function parse_relationships_xml(xml: Uint8Array, part_path: string): string;
-
-/**
  * wasm wrapper over [`session::range_rects_by_handle`]: range rects against a
  * stored display list. `Err` on an unknown/closed handle so the caller can
  * fall back to [`range_rects_json`].
@@ -984,21 +934,6 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
- * Serializes an S10 request.
- */
-export function serialize_docx_s10(request_json: string): string;
-
-/**
- * Serializes an S11 request.
- */
-export function serialize_docx_s11(request_json: string): string;
-
-/**
- * Serializes an S12 request.
- */
-export function serialize_docx_s12(request_json: string): string;
-
-/**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
  * update to a stored display list so an incremental rebuild re-parses only
  * its changed pages. `Err` closes the handle first, so the caller's fallback
@@ -1009,11 +944,6 @@ export function update_display_list(handle: number, update: string): void;
 export function vertical_move_by_handle(handle: number, position: number, direction: string, goal_x: number): string;
 
 export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
-
-/**
- * Writes a DOCX from a typed model and original package.
- */
-export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -1124,20 +1054,6 @@ export interface InitOutput {
     readonly editsession_undo_depth: (a: number) => number;
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
-    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
-    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
-    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
-    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

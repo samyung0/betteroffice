@@ -99,7 +99,7 @@ pub use queries::{
 };
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
-pub use seed::seed_from_docx;
+pub use seed::{parse_docx_for_edit, seed_from_docx, seed_parsed_docx};
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
 
 #[cfg(feature = "wasm")]
