@@ -6,6 +6,7 @@ import {
   openWorkbook as openEditorWorkbook,
 } from './loader';
 import {
+  analyzeWorkbook,
   initWasm as initViewerWasm,
   openWorkbook as openViewerWorkbook,
 } from './viewer';
@@ -42,6 +43,17 @@ describe('XLSX viewer wasm', () => {
       viewer.dispose();
       editor.dispose();
     }
+  });
+
+  test('analyzes workbook metadata without retaining a document handle', async () => {
+    const bytes = new Uint8Array(await readFile(fixture));
+    expect(analyzeWorkbook(bytes)).toEqual({
+      format: 'xlsx',
+      sheetCount: 3,
+      sheetNames: ['Budget', 'Summary', 'Styled'],
+      contentWidth: 499.05078,
+      contentHeight: 1260,
+    });
   });
 
   test('renders and hit-tests charts through the read-only package', async () => {

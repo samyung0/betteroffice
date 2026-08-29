@@ -21,6 +21,14 @@ export interface PresentationViewerHandle {
   dispose(): void;
 }
 
+export interface PresentationAnalysis {
+  format: 'pptx';
+  slideCount: number;
+  widthEmu: number;
+  heightEmu: number;
+  textCharacterCount: number;
+}
+
 let initialized = false;
 let initialization: Promise<void> | undefined;
 
@@ -85,6 +93,28 @@ export function openPresentation(
   };
 }
 
+export function analyzePresentation(bytes: Uint8Array): PresentationAnalysis {
+  const presentation = openPresentation(bytes);
+  try {
+    const snapshot = presentation.snapshot();
+    let textCharacterCount = 0;
+    for (const slide of snapshot.slides) {
+      for (const shape of slide.shapes) {
+        textCharacterCount += countShapeTextCharacters(shape);
+      }
+    }
+    return {
+      format: 'pptx',
+      slideCount: snapshot.slides.length,
+      widthEmu: snapshot.widthEmu,
+      heightEmu: snapshot.heightEmu,
+      textCharacterCount,
+    };
+  } finally {
+    presentation.dispose();
+  }
+}
+
 export function wasmVersion(): string {
   if (!initialized) throw new Error('pptx viewer wasm is not initialized; call initWasm() first');
   return PptxViewDocument.version();
@@ -92,6 +122,17 @@ export function wasmVersion(): string {
 
 function registerFont(renderer: PptxViewRenderer, face: PptxFontFace): number {
   return renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes);
+}
+
+function countShapeTextCharacters(shape: DeckSnapshot['slides'][number]['shapes'][number]): number {
+  let count = 0;
+  for (const story of shape.textStories) {
+    for (const paragraph of story.paragraphs) {
+      for (const run of paragraph.runs) count += run.text.length;
+    }
+  }
+  for (const child of shape.children) count += countShapeTextCharacters(child);
+  return count;
 }
 
 function createRenderer(

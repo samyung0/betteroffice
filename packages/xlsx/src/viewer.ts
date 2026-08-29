@@ -10,16 +10,20 @@ export { buildA11yGrid } from './a11y';
 export type { A11yGrid, A11yStrings } from './a11y';
 export { cellAtPoint, cellRect, chartRegionAtPoint, rangeRect } from './hittest';
 export {
+  analyzeWorkbook,
   initWasm,
   isWasmAvailable,
   openWorkbook,
   wasmVersion,
 } from './wasm/viewer';
-export type { WasmInitInput, WorkbookViewerHandle } from './wasm/viewer';
+export type {
+  WasmInitInput,
+  WorkbookAnalysis,
+  WorkbookViewerHandle,
+} from './wasm/viewer';
 export type {
   CellPosition,
   MergedRange,
   SheetInfo,
   Viewport,
 } from './wasm/loader';
-

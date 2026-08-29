@@ -16,6 +16,14 @@ export interface WorkbookViewerHandle {
   dispose(): void;
 }
 
+export interface WorkbookAnalysis {
+  format: 'xlsx';
+  sheetCount: number;
+  sheetNames: string[];
+  contentWidth: number;
+  contentHeight: number;
+}
+
 let initialized = false;
 let initialization: Promise<void> | undefined;
 
@@ -76,6 +84,22 @@ export function openWorkbook(bytes: Uint8Array): WorkbookViewerHandle {
   };
 }
 
+export function analyzeWorkbook(bytes: Uint8Array): WorkbookAnalysis {
+  const workbook = openWorkbook(bytes);
+  try {
+    const info = workbook.sheetInfo();
+    return {
+      format: 'xlsx',
+      sheetCount: info.sheetNames.length,
+      sheetNames: [...info.sheetNames],
+      contentWidth: info.contentWidth,
+      contentHeight: info.contentHeight,
+    };
+  } finally {
+    workbook.dispose();
+  }
+}
+
 export function wasmVersion(): string {
   if (!initialized) throw new Error('xlsx viewer wasm is not initialized; call initWasm() first');
   return XlsxViewDocument.version();
@@ -97,4 +121,3 @@ function toError(error: unknown): Error {
   if (error instanceof Error) return error;
   return new Error(typeof error === 'string' ? error : String(error));
 }
-

@@ -6,6 +6,7 @@ import {
   openPresentation as openEditorPresentation,
 } from './loader';
 import {
+  analyzePresentation,
   initWasm as initViewerWasm,
   openPresentation as openViewerPresentation,
 } from './viewer';
@@ -41,5 +42,15 @@ describe('PPTX viewer wasm', () => {
       viewer.dispose();
       editor.dispose();
     }
+  });
+
+  test('analyzes presentation metadata without retaining a document handle', async () => {
+    const bytes = new Uint8Array(await readFile(fixture));
+    const analysis = analyzePresentation(bytes);
+    expect(analysis.format).toBe('pptx');
+    expect(analysis.slideCount).toBeGreaterThan(0);
+    expect(analysis.widthEmu).toBeGreaterThan(0);
+    expect(analysis.heightEmu).toBeGreaterThan(0);
+    expect(analysis.textCharacterCount).toBeGreaterThan(0);
   });
 });
