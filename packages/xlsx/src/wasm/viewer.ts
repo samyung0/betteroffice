@@ -87,17 +87,22 @@ export function openWorkbook(bytes: Uint8Array): WorkbookViewerHandle {
 export function analyzeWorkbook(bytes: Uint8Array): WorkbookAnalysis {
   const workbook = openWorkbook(bytes);
   try {
-    const info = workbook.sheetInfo();
-    return {
-      format: 'xlsx',
-      sheetCount: info.sheetNames.length,
-      sheetNames: [...info.sheetNames],
-      contentWidth: info.contentWidth,
-      contentHeight: info.contentHeight,
-    };
+    return analyzeOpenWorkbook(workbook);
   } finally {
     workbook.dispose();
   }
+}
+
+/** Read upload metadata from an already-open viewer without reparsing bytes. */
+export function analyzeOpenWorkbook(workbook: WorkbookViewerHandle): WorkbookAnalysis {
+  const info = workbook.sheetInfo();
+  return {
+    format: 'xlsx',
+    sheetCount: info.sheetNames.length,
+    sheetNames: [...info.sheetNames],
+    contentWidth: info.contentWidth,
+    contentHeight: info.contentHeight,
+  };
 }
 
 export function wasmVersion(): string {

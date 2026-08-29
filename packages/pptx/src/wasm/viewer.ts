@@ -96,23 +96,30 @@ export function openPresentation(
 export function analyzePresentation(bytes: Uint8Array): PresentationAnalysis {
   const presentation = openPresentation(bytes);
   try {
-    const snapshot = presentation.snapshot();
-    let textCharacterCount = 0;
-    for (const slide of snapshot.slides) {
-      for (const shape of slide.shapes) {
-        textCharacterCount += countShapeTextCharacters(shape);
-      }
-    }
-    return {
-      format: 'pptx',
-      slideCount: snapshot.slides.length,
-      widthEmu: snapshot.widthEmu,
-      heightEmu: snapshot.heightEmu,
-      textCharacterCount,
-    };
+    return analyzeOpenPresentation(presentation);
   } finally {
     presentation.dispose();
   }
+}
+
+/** Read upload metadata from an already-open viewer without reparsing bytes. */
+export function analyzeOpenPresentation(
+  presentation: PresentationViewerHandle
+): PresentationAnalysis {
+  const snapshot = presentation.snapshot();
+  let textCharacterCount = 0;
+  for (const slide of snapshot.slides) {
+    for (const shape of slide.shapes) {
+      textCharacterCount += countShapeTextCharacters(shape);
+    }
+  }
+  return {
+    format: 'pptx',
+    slideCount: snapshot.slides.length,
+    widthEmu: snapshot.widthEmu,
+    heightEmu: snapshot.heightEmu,
+    textCharacterCount,
+  };
 }
 
 export function wasmVersion(): string {

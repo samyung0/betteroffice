@@ -151,11 +151,16 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
   return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
 }
 
-async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void) {
+async function mountEditor(
+  fixture: Fixture = plain,
+  onSave?: (bytes: Uint8Array) => void,
+  onChange?: () => void
+) {
   const ready: { handle: WorkbookHandle | null } = { handle: null };
   const view = render(
     <XlsxEditor
       file={fixture.bytes.slice()}
+      onChange={onChange}
       onSave={onSave}
       onReady={(api) => {
         ready.handle = api.handle;
@@ -181,6 +186,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
         view.rerender(
           <XlsxEditor
             file={next.bytes.slice()}
+            onChange={onChange}
             onSave={onSave}
             onReady={(api) => {
               ready.handle = api.handle;
@@ -248,6 +254,21 @@ async function selectChart(
 }
 
 describe('XlsxEditor grid pointer handling', () => {
+  it('reports semantic workbook changes without treating selection as an edit', async () => {
+    let changes = 0;
+    const view = await mountEditor(plain, undefined, () => {
+      changes += 1;
+    });
+
+    view.click({ row: 2, col: 0 });
+    expect(changes).toBe(0);
+
+    view.doubleClick({ row: 2, col: 0 });
+    view.type('Edited item');
+    view.click({ row: 3, col: 1 });
+    expect(changes).toBe(1);
+  });
+
   it('commits the open editor and moves the selection when another cell is clicked', async () => {
     const view = await mountEditor();
 

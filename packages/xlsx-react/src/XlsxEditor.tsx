@@ -101,6 +101,8 @@ export interface XlsxEditorProps {
   fileName?: string;
   /** Receive saved bytes instead of triggering a browser download. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Called after a workbook mutation has been applied. */
+  onChange?: () => void;
   /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
   collaboration?: XlsxEditorCollaborationOptions;
   i18n?: Translations;
@@ -370,6 +372,7 @@ function XlsxEditorContent({
   file,
   fileName,
   onSave,
+  onChange,
   collaboration,
   onReady,
   className,
@@ -809,8 +812,9 @@ function XlsxEditorContent({
       setSheetInfo(result.sheetInfo);
       setRevision((r) => r + 1);
       refreshProposals();
+      onChange?.();
     },
-    [refreshProposals]
+    [onChange, refreshProposals]
   );
 
   const selectedRangeA1 = useCallback(

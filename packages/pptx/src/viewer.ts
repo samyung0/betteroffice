@@ -1,6 +1,7 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export {
+  analyzeOpenPresentation,
   analyzePresentation,
   initWasm,
   isWasmAvailable,
