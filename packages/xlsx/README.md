@@ -24,13 +24,22 @@ The viewer entry point omits Yrs, calculation, undo, save, collaboration, and
 raster export from its WASM module:
 
 ```ts
-import { initWasm, openWorkbook, paintDisplayList } from "@betteroffice/xlsx/viewer";
+import {
+  analyzeOpenWorkbook,
+  initWasm,
+  openWorkbook,
+  paintDisplayList,
+} from "@betteroffice/xlsx/viewer";
 
 await initWasm();
 const workbook = openWorkbook(new Uint8Array(await file.arrayBuffer()));
+const analysis = analyzeOpenWorkbook(workbook);
 const frame = workbook.displayList({ x: 0, y: 0, width: 800, height: 600 });
 paintDisplayList(canvas.getContext("2d")!, frame, devicePixelRatio);
 ```
+
+`analysis` reports sheet count, names, dimensions, formulas, charts, images,
+and comments without parsing the workbook a second time.
 
 Import `@betteroffice/xlsx/editor` when the user chooses to edit. The root
 entry point remains an editor alias for compatibility.

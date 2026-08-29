@@ -24,6 +24,7 @@ document or exporting edit, save, undo, or collaboration methods:
 
 ```ts
 import {
+  analyzeOpenPresentation,
   initWasm,
   openPresentation,
   paintSlide,
@@ -34,10 +35,14 @@ await initWasm();
 const deck = openPresentation(new Uint8Array(await file.arrayBuffer()), {
   fonts: [{ family: 'My Sans', bytes: fontBytes }],
 });
+const analysis = analyzeOpenPresentation(deck);
 const frame = deck.layoutSlide(0);
 sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
+
+`analysis` reports slide count, titles, shapes, text runs, images, charts,
+tables, and notes without parsing the presentation a second time.
 
 Import `@betteroffice/pptx/editor` when the user chooses to edit. The root
 entry point remains an editor alias for compatibility.

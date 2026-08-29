@@ -51,6 +51,7 @@ export function App() {
       <XlsxEditor
         file={file}
         fileName="workbook.xlsx"
+        onChange={() => console.log("workbook changed")}
         onSave={(bytes) => console.log(`saved ${bytes.length} bytes`)}
       />
     </>
@@ -60,8 +61,12 @@ export function App() {
 
 Without `onSave`, the save button downloads the edited bytes.
 
-Props: `file`, `fileName`, `onSave`, `onReady` (a handle for host/agent-driven
-edits), `collaboration`, `i18n`, and `className`.
+`onChange` fires after a semantic workbook mutation, not after selection or
+navigation. Hosts can use it to arm unsaved-change protection without marking
+the workbook dirty on ordinary clicks.
+
+Props: `file`, `fileName`, `onChange`, `onSave`, `onReady` (a handle for
+host/agent-driven edits), `collaboration`, `i18n`, and `className`.
 
 ## What works today
 
