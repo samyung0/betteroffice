@@ -1,6 +1,6 @@
-# Evo Office browser proof
+# Capy Notebook office browser proof
 
-This directory answers two questions before Evo Notes commits to a deep
+This directory answers two questions before Capy Notebook commits to a deep
 BetterOffice fork: can the framework-free browser cores open, view, edit, save,
 and reopen modern Office files without silently discarding unrelated OOXML, and
 can view-only XLSX/PPTX sessions avoid loading their editor engines?
@@ -90,7 +90,7 @@ available for the replacement edit iframe.
 
 Keep the fork as a separate repository and keep the Rust crates: they are the
 browser WASM engines, not optional multi-platform baggage. The Python bindings
-do not need to ship in Evo Notes and can be excluded from our release workflow
+do not need to ship in Capy Notebook and can be excluded from our release workflow
 without deleting them during the proof phase.
 
 The next implementation milestone is an isolated browser host with one
@@ -100,7 +100,7 @@ depends on cross-origin isolation; the iframe is useful as a containment and
 lifecycle boundary, but it does not grant SharedArrayBuffer access by itself.
 
 This fixture tier is sufficient to continue engineering on the fork. It is not
-the final production-fidelity gate. Before integrating with Evo Notes, add a
+the final production-fidelity gate. Before integrating with Capy Notebook, add a
 small corpus authored by desktop Word, Excel, and PowerPoint, especially tracked
 changes/comments, large formula workbooks, pivot tables, grouped/animated
 slides, embedded media, and files with unusual fonts.
