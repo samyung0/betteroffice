@@ -5,30 +5,35 @@ inputs:
   binaryen:
     description: Binaryen release tag.
     default: version_132
-  sha256:
+  sha256_x86_64:
     description: Checksum of the x86_64-linux tarball.
     default: 195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572
+  sha256_aarch64:
+    description: Checksum of the aarch64-linux tarball.
+    default: c58562417836c5d0493d89bdefc434933bdc097db641b483df86bcfa557a107f
 
 runs:
   using: composite
   steps:
+    # Both caches hold native executables, so the key has to carry the arch.
     - uses: actions/cache@v4
       id: binaryen
       with:
         path: ~/.cache/binaryen/${{ inputs.binaryen }}
-        key: binaryen-${{ runner.os }}-${{ inputs.binaryen }}
+        key: binaryen-${{ runner.os }}-${{ runner.arch }}-${{ inputs.binaryen }}
 
     - if: steps.binaryen.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        if [ "$(uname -m)" != "x86_64" ]; then
-          echo "::error::no pinned binaryen for $(uname -m); add its checksum to .github/actions/wasm-toolchain"
-          exit 1
-        fi
+        case "$(uname -m)" in
+          x86_64) arch=x86_64; sha256="${{ inputs.sha256_x86_64 }}" ;;
+          aarch64) arch=aarch64; sha256="${{ inputs.sha256_aarch64 }}" ;;
+          *) echo "::error::no pinned binaryen for $(uname -m); add its checksum to .github/actions/wasm-toolchain"; exit 1 ;;
+        esac
         tarball="$RUNNER_TEMP/binaryen.tar.gz"
         curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
-          "https://github.com/WebAssembly/binaryen/releases/download/${{ inputs.binaryen }}/binaryen-${{ inputs.binaryen }}-x86_64-linux.tar.gz"
-        echo "${{ inputs.sha256 }}  $tarball" | sha256sum -c -
+          "https://github.com/WebAssembly/binaryen/releases/download/${{ inputs.binaryen }}/binaryen-${{ inputs.binaryen }}-$arch-linux.tar.gz"
+        echo "$sha256  $tarball" | sha256sum -c -
         mkdir -p "$HOME/.cache/binaryen/${{ inputs.binaryen }}"
         tar -xzf "$tarball" -C "$HOME/.cache/binaryen/${{ inputs.binaryen }}" --strip-components=1
 
@@ -39,5 +44,5 @@ runs:
     - uses: actions/cache@v4
       with:
         path: ~/.cache/.wasm-pack
-        key: wasm-pack-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-        restore-keys: wasm-pack-tools-${{ runner.os }}-
+        key: wasm-pack-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: wasm-pack-tools-${{ runner.os }}-${{ runner.arch }}-
