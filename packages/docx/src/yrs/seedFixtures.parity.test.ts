@@ -3,9 +3,13 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
+import { projectYrsComments, commentNumericId } from './comments';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm } from '../wasm/opc';
+import { preloadParseWasm } from '../wasm/parse';
 import { createYrsSession, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
 import { yrsToDocument } from './yrsToDocument';
@@ -187,12 +191,28 @@ const fixtures = readdirSync(FIXTURE_ROOT, { withFileTypes: true })
 
 // Yrs formatting marker counts make seeded state vectors nondeterministic.
 describe('DOCX seeding across document features', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() =>
+    Promise.all([
+      preloadEditWasm(new Uint8Array(readFileSync(WASM))),
+      preloadOpcWasm(
+        new Uint8Array(
+          readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))
+        )
+      ),
+      preloadParseWasm(
+        new Uint8Array(
+          readFileSync(resolve(import.meta.dir, '../wasm/generated/parse/docx_parse_bg.wasm'))
+        )
+      ),
+    ])
+  );
 
   for (const name of fixtures) {
     it(`preserves ${name} stories, comments, and save output`, async () => {
       const bytes = buildFixtureDocx(name);
-      const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+      const parsed = await parseDocx(bytes.buffer as ArrayBuffer, {
+        preloadFonts: false,
+      });
 
       const kinds = nodeKinds(parsed.package.document);
       for (const required of REQUIRED_NODES[name] ?? []) expect([...kinds]).toContain(required);
@@ -218,4 +238,119 @@ describe('DOCX seeding across document features', () => {
       }
     });
   }
+});
+
+describe('shared DOCX comment lifecycle', () => {
+  beforeAll(() =>
+    Promise.all([
+      preloadEditWasm(new Uint8Array(readFileSync(WASM))),
+      preloadOpcWasm(
+        new Uint8Array(
+          readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))
+        )
+      ),
+      preloadParseWasm(
+        new Uint8Array(
+          readFileSync(resolve(import.meta.dir, '../wasm/generated/parse/docx_parse_bg.wasm'))
+        )
+      ),
+    ])
+  );
+
+  it('merges concurrent threads, replies and resolve metadata, then exports and reopens them', async () => {
+    const bytes = buildFixtureDocx('comments');
+    const left = await createYrsSession({ clientId: 62001 });
+    const right = await createYrsSession({ clientId: 62002 });
+    const reopened = await createYrsSession({ clientId: 62003 });
+    const body = (text: string) => [
+      {
+        type: 'paragraph',
+        content: [{ type: 'run', content: [{ type: 'text', text }] }],
+      },
+    ];
+    try {
+      const { document } = left.seedFromDocx(bytes);
+      right.loadState(left.encodeState());
+      const anchors = left.resolveComment('1');
+      const anchor = anchors[0]!;
+      for (const [session, id] of [
+        [left, 'peer-left-thread'],
+        [right, 'peer-right-thread'],
+      ] as const) {
+        session.applyRawOps(anchor.story, [
+          {
+            op: 'setComment',
+            id,
+            ranges: [[anchor.start, anchor.end]],
+            author: id,
+            date: '2026-09-06T00:00:00Z',
+            body: body(id),
+          },
+        ]);
+      }
+      left.applyRawOps('body', [{ op: 'patchComment', id: '1', fields: { done: true } }]);
+      right.applyRawOps('body', [
+        {
+          op: 'patchComment',
+          id: 'peer-right-reply',
+          fields: {
+            parentId: '1',
+            author: 'Peer',
+            date: '2026-09-06T00:00:00Z',
+            body: body('Shared reply'),
+            done: false,
+          },
+        },
+      ]);
+      const leftState = left.encodeState();
+      const rightState = right.encodeState();
+      left.applyUpdate(rightState);
+      right.applyUpdate(leftState);
+      expect(left.listComments()).toEqual(right.listComments());
+      expect(left.yrsBlocksForStory('body', {})).toBeTruthy();
+      expect(left.resolveComment('1')).toEqual(anchors);
+      const comments = projectYrsComments(left, document.package.document.comments);
+      expect(comments.find((entry) => entry.sharedId === '1')?.done).toBe(true);
+      expect(comments.find((entry) => entry.sharedId === 'peer-right-reply')?.parentId).toBe(1);
+      expect(new Set(comments.map((entry) => entry.id)).size).toBe(comments.length);
+      const output = await repackDocx(yrsToDocument(left, document));
+      const parsed = await parseDocx(output, { preloadFonts: false });
+      const exported = parsed.package.document.comments!;
+      expect(exported).toHaveLength(comments.length);
+      expect(exported.find((entry) => entry.id === 1)?.done).toBe(true);
+      expect(
+        exported.find((entry) => entry.id === commentNumericId('peer-right-reply'))?.parentId
+      ).toBe(1);
+      expect(JSON.stringify(exported)).toContain('Shared reply');
+      expect(JSON.stringify(exported)).toContain('peer-left-thread');
+      expect(JSON.stringify(exported)).toContain('peer-right-thread');
+      reopened.seedFromDocx(new Uint8Array(output));
+      expect(reopened.listComments()).toHaveLength(comments.length);
+      expect(reopened.listComments().find((entry) => entry.id === '1')?.done).toBe(true);
+      left.applyRawOps('body', [{ op: 'removeComment', id: 'peer-left-thread' }]);
+      right.applyUpdate(left.encodeState());
+      expect(right.listComments().some((entry) => entry.id === 'peer-left-thread')).toBe(false);
+    } finally {
+      left.destroy();
+      right.destroy();
+      reopened.destroy();
+    }
+  });
+
+  it('preserves imported numeric IDs when a shared key hashes to the same export ID', () => {
+    const shared = 'thread-collision';
+    const occupied = commentNumericId(shared);
+    const records = [String(occupied), shared].map((id) => ({
+      id,
+      author: 'Peer',
+      date: '',
+      done: false,
+      parentId: null,
+      body: [],
+    }));
+    const projected = projectYrsComments({ listComments: () => records });
+    expect(projected.find((entry) => entry.sharedId === String(occupied))?.id).toBe(occupied);
+    expect(projected.find((entry) => entry.sharedId === shared)?.id).not.toBe(occupied);
+    expect(projectYrsComments({ listComments: () => [...records].reverse() })).toEqual(projected);
+  });
 });

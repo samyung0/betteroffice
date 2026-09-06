@@ -215,6 +215,20 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = saveBytesAt)]
+    pub fn save_bytes_at(&mut self, now_serial: f64) -> Result<Vec<u8>, JsValue> {
+        self.session
+            .save_at(now_serial)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = checkpointProjectionJson)]
+    pub fn checkpoint_projection_json(&self) -> Result<String, JsValue> {
+        self.session
+            .checkpoint_projection_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {

@@ -45,6 +45,11 @@ pub enum RawOp {
         date: String,
         body: Any,
     },
+    /// Updates comment metadata without replacing its sticky anchors.
+    PatchComment {
+        id: String,
+        fields: Vec<(String, Any)>,
+    },
     /// Remove the side-map comment keyed by `id`. Errors when it does not exist.
     RemoveComment { id: String },
 }
@@ -451,6 +456,29 @@ fn apply_raw_op_absolute(
             comment.insert(txn, "body", body);
             comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
         }
+        RawOp::PatchComment { id, fields } => {
+            for (key, _) in &fields {
+                if !matches!(
+                    key.as_str(),
+                    "author" | "date" | "body" | "parentId" | "done"
+                ) {
+                    return Err(OpError::InvalidComment(format!(
+                        "unknown comment field: {key}"
+                    )));
+                }
+            }
+            let comments = txn.get_map(COMMENTS).expect("comments root is declared");
+            let comment = match comments.get(txn, &id) {
+                Some(Out::YMap(comment)) => comment,
+                _ => comments.insert(txn, id.as_str(), MapPrelim::default()),
+            };
+            if comment.get(txn, "anchors").is_none() {
+                comment.insert(txn, "anchors", Any::Array(Arc::from([])));
+            }
+            for (key, value) in fields {
+                comment.insert(txn, key, value);
+            }
+        }
         RawOp::RemoveComment { id } => {
             let comments = txn
                 .get_map(COMMENTS)
@@ -613,6 +641,29 @@ mod tests {
                     comment.insert(txn, "done", false);
                     comment.insert(txn, "body", body);
                     comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
+                }
+                RawOp::PatchComment { id, fields } => {
+                    for (key, _) in &fields {
+                        if !matches!(
+                            key.as_str(),
+                            "author" | "date" | "body" | "parentId" | "done"
+                        ) {
+                            return Err(OpError::InvalidComment(format!(
+                                "unknown comment field: {key}"
+                            )));
+                        }
+                    }
+                    let comments = txn.get_map(COMMENTS).expect("comments root is declared");
+                    let comment = match comments.get(txn, &id) {
+                        Some(Out::YMap(comment)) => comment,
+                        _ => comments.insert(txn, id.as_str(), MapPrelim::default()),
+                    };
+                    if comment.get(txn, "anchors").is_none() {
+                        comment.insert(txn, "anchors", Any::Array(Arc::from([])));
+                    }
+                    for (key, value) in fields {
+                        comment.insert(txn, key, value);
+                    }
                 }
                 RawOp::RemoveComment { id } => {
                     let comments = txn
@@ -1558,6 +1609,49 @@ mod tests {
             &ctx,
         );
         assert!(matches!(outside, Err(OpError::OutOfBounds { .. })));
+    }
+
+    #[test]
+    fn reply_metadata_keeps_valid_empty_anchors_and_preserves_parent_anchors() {
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetComment {
+                id: "root".into(),
+                ranges: vec![(0, 2)],
+                author: "Author".into(),
+                date: String::new(),
+                body: Any::Null,
+            }],
+            &ctx,
+        )
+        .unwrap();
+        let anchors = doc.resolve_comment("root").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::PatchComment {
+                    id: "root".into(),
+                    fields: vec![("done".into(), Any::Bool(true))],
+                },
+                RawOp::PatchComment {
+                    id: "reply".into(),
+                    fields: vec![("parentId".into(), Any::from("root"))],
+                },
+            ],
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(doc.resolve_comment("root").unwrap(), anchors);
+        assert!(doc.resolve_comment("reply").unwrap().is_empty());
+        assert!(
+            doc.list_comments()
+                .unwrap()
+                .iter()
+                .any(|comment| comment.id == "root" && comment.done)
+        );
     }
 
     #[test]

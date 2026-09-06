@@ -3,7 +3,12 @@ import { useEffect, useImperativeHandle, useRef, type Ref } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { ScrollToParaIdOptions } from '@betteroffice/docx/utils';
-import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
+import {
+  projectYrsComments,
+  commentSharedId,
+  type YrsLoc,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -159,7 +164,10 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       if (!session) return false;
       try {
-        const anchor = session.resolveComment(String(commentId))[0];
+        const comment = projectYrsComments(session).find((entry) => entry.id === Number(commentId));
+        const anchor = session.resolveComment(
+          comment ? commentSharedId(comment) : String(commentId)
+        )[0];
         if (!anchor) return false;
         const start = storyOffsetToLoc(session, anchor.story, anchor.start);
         const end = storyOffsetToLoc(session, anchor.story, anchor.end);

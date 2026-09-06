@@ -1,3 +1,6 @@
+mod stable;
+mod topology;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -37,7 +40,7 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -249,7 +252,8 @@ impl ChartIdentity {
 pub(crate) struct WorkbookStructure {
     generation: i64,
     pub(crate) sheet_keys: Vec<String>,
-    sheet_names: Vec<String>,
+    pub(crate) sheet_names: Vec<String>,
+    pub(crate) axis_changes: BTreeMap<String, (Option<u32>, Option<u32>)>,
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<ChartIdentity>>,
@@ -350,32 +354,66 @@ pub(crate) struct WorkbookAuthority {
 impl WorkbookAuthority {
     #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, None, &[])
+        Self::from_model_internal(model, None, &[], None)
     }
 
     #[cfg(test)]
-    fn from_model_with_client_id(
+    fn legacy_with_client_id(
         model: &WorkbookModel,
         client_id: u64,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, Some(client_id), &[])
+        let mut authority = Self::from_model_internal(model, None, &[], None)?;
+        if client_id == authority.base.bootstrap_client_id {
+            return Err(AuthorityError::ClientIdConflict(client_id));
+        }
+        let doc = Doc::with_client_id(client_id);
+        hydrate_doc(&doc, &authority.encode_state_as_update_v1())
+            .map_err(AuthorityError::InvalidState)?;
+        authority.doc = doc;
+        Ok(authority)
     }
 
     pub(crate) fn from_source(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        source_sha: Option<&str>,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, client_id, legacy_dimensions)
+        Self::from_model_internal(model, client_id, legacy_dimensions, source_sha)
     }
 
     fn from_model_internal(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        source_sha: Option<&str>,
     ) -> Result<Self, AuthorityError> {
-        let base = WorkbookBase::from_model_with_legacy_dimensions(model, legacy_dimensions)
+        let mut base = WorkbookBase::from_model_with_legacy_dimensions(model, legacy_dimensions)
             .map_err(AuthorityError::InvalidState)?;
+        if client_id.is_none() {
+            let (fingerprint, bootstrap_client_id) =
+                fingerprint_model_for_schema(model, CHARTS_SCHEMA_VERSION)
+                    .map_err(AuthorityError::InvalidState)?;
+            base.fingerprint = fingerprint;
+            base.bootstrap_client_id = bootstrap_client_id;
+        }
+        if let Some(source_sha) = source_sha {
+            let bind = |fingerprint: &str| {
+                format!(
+                    "{:x}",
+                    Sha256::digest(format!("{source_sha}:{fingerprint}"))
+                )
+            };
+            for fingerprints in base.fingerprints.values_mut() {
+                for fingerprint in fingerprints {
+                    *fingerprint = bind(fingerprint);
+                }
+            }
+            base.fingerprint = bind(&base.fingerprint);
+            base.bootstrap_client_id = u64::from_str_radix(&base.fingerprint[..13], 16)
+                .map_err(|error| AuthorityError::InvalidState(error.to_string()))?
+                .max(1);
+        }
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -384,7 +422,12 @@ impl WorkbookAuthority {
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
-        seed(&bootstrap, &base, model, &keys).map_err(AuthorityError::InvalidState)?;
+        if client_id.is_some() {
+            seed(&bootstrap, &base, model, &keys)
+        } else {
+            seed_legacy(&bootstrap, &base, model, &keys)
+        }
+        .map_err(AuthorityError::InvalidState)?;
         let bootstrap_update = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
@@ -413,6 +456,35 @@ impl WorkbookAuthority {
         Ok(authority)
     }
 
+    pub(crate) fn supports_structure(&self) -> bool {
+        self.schema_version().ok() == Some(stable::VERSION)
+    }
+    pub(crate) fn cell_identity(
+        &self,
+        sheet: SheetId,
+        at: CellRef,
+    ) -> Result<String, AuthorityError> {
+        if self.supports_structure() {
+            stable::cell_identity(&self.doc, sheet, at).map_err(AuthorityError::InvalidState)
+        } else {
+            Ok(format!("sheet:{}:{}", sheet.0, at.to_a1()))
+        }
+    }
+
+    pub(crate) fn cell_identities(
+        &self,
+        cells: impl IntoIterator<Item = (SheetId, CellRef)>,
+    ) -> Result<Vec<String>, AuthorityError> {
+        if self.supports_structure() {
+            stable::cell_identities(&self.doc, cells).map_err(AuthorityError::InvalidState)
+        } else {
+            Ok(cells
+                .into_iter()
+                .map(|(sheet, at)| format!("sheet:{}:{}", sheet.0, at.to_a1()))
+                .collect())
+        }
+    }
+
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
     }
@@ -439,6 +511,16 @@ impl WorkbookAuthority {
         origin: SyncOrigin,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
+        if self
+            .schema_version()
+            .map_err(AuthorityError::InvalidState)?
+            == stable::VERSION
+        {
+            stable::apply(&self.doc, &self.base, ops, origin)
+                .map_err(AuthorityError::InvalidState)?;
+            let update = self.doc.transact().encode_diff_v1(&state_vector);
+            return Ok((update.as_slice() != Update::EMPTY_V1).then_some(update));
+        }
         let mut model = self.materialize()?;
         for op in ops {
             xlsx_ops::apply(&mut model, op).map_err(|error| {
@@ -515,6 +597,11 @@ impl WorkbookAuthority {
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
+        if self.supports_structure() && candidate.schema_version().ok() != Some(stable::VERSION) {
+            return SnapshotAdoption::Incompatible(
+                "incoming workbook schema does not match this session".into(),
+            );
+        }
         if let Err(error) = candidate.upgrade_schema() {
             return SnapshotAdoption::Incompatible(error);
         }
@@ -538,6 +625,9 @@ impl WorkbookAuthority {
     /// nor the metadata a whole workbook carries.
     fn is_whole_document(&self) -> bool {
         let txn = self.doc.transact();
+        if self.schema_version().ok() == Some(stable::VERSION) {
+            return stable::materialize(&txn, &self.base).is_ok();
+        }
         if require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS]).is_err() {
             return false;
         }
@@ -561,6 +651,34 @@ impl WorkbookAuthority {
                 "no updates were provided".to_string(),
             ));
         }
+        for bytes in updates {
+            let incoming_doc = Doc::with_client_id(self.client_id());
+            hydrate_doc(&incoming_doc, bytes).map_err(AuthorityError::InvalidUpdate)?;
+            let txn = incoming_doc.transact();
+            if let Some(meta) = txn.get_map(META) {
+                if let Some(version) = meta
+                    .get(&txn, "schemaVersion")
+                    .and_then(|value| value.cast::<i64>().ok())
+                {
+                    if self.supports_structure() && version != stable::VERSION {
+                        return Err(AuthorityError::InvalidState(
+                            "incoming workbook schema does not match this session".into(),
+                        ));
+                    }
+                    if let Some(fingerprint) = meta
+                        .get(&txn, BASE_FINGERPRINT)
+                        .and_then(|value| value.cast::<String>().ok())
+                    {
+                        if !self.base.accepts_fingerprint(version, &fingerprint) {
+                            return Err(AuthorityError::InvalidState(
+                                "incoming workbook base does not match the exact source package"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         let decoded = updates
             .iter()
             .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
@@ -570,14 +688,45 @@ impl WorkbookAuthority {
         } else {
             Update::merge_updates(decoded)
         };
-        let before_vector = self.doc.transact().state_vector();
+        let before_snapshot = self.doc.transact().snapshot();
+        let before_vector = &before_snapshot.state_map;
+        let mut gapped_clients = Vec::new();
+        for (client, ranges) in incoming.insertions(true).iter() {
+            let mut clock = before_vector.get(client);
+            for range in ranges.iter() {
+                if range.end <= clock {
+                    continue;
+                }
+                if range.start > clock {
+                    gapped_clients.push(*client);
+                    break;
+                }
+                clock = range.end;
+            }
+        }
         let before = self.encode_state_as_update_v1();
-        let staged_doc = Doc::with_client_id(self.client_id());
+        let mut staged_doc = Doc::with_client_id(self.client_id());
         hydrate_doc(&staged_doc, &before).map_err(AuthorityError::InvalidState)?;
         staged_doc
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+        let has_pending = {
+            let txn = staged_doc.transact();
+            !gapped_clients.is_empty()
+                || txn.store().pending_update().is_some()
+                || txn.store().pending_ds().is_some()
+        };
+        if has_pending {
+            // Pending structs can appear in a full projection before their
+            // client clock advances. Reapply exactly the committable diff to
+            // the original state; retain the original pending tail separately.
+            let integrated = staged_doc.transact().encode_diff_v1(before_vector);
+            let canonical = Doc::with_client_id(self.client_id());
+            hydrate_doc(&canonical, &before).map_err(AuthorityError::InvalidState)?;
+            hydrate_doc(&canonical, &integrated).map_err(AuthorityError::InvalidState)?;
+            staged_doc = canonical;
+        }
 
         let staged = Self {
             doc: staged_doc,
@@ -587,18 +736,26 @@ impl WorkbookAuthority {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
-        let pending = {
+        let mut pending = {
             let txn = staged.doc.transact();
-            txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
+            has_pending
+                || txn.store().pending_update().is_some()
+                || txn.store().pending_ds().is_some()
         };
+        if !pending && staged.schema_version().ok() == Some(stable::VERSION) {
+            pending = staged
+                .strict_materialize()
+                .is_err_and(|error| error.starts_with("pending axis run "));
+        }
         if let Err(error) = staged.upgrade_schema()
             && !pending
         {
             return Err(AuthorityError::InvalidState(error));
         }
         let after = staged.encode_state_as_update_v1();
-        let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
-        let after_vector = staged.doc.transact().state_vector();
+        let integrated = staged.doc.transact().encode_diff_v1(before_vector);
+        let after_snapshot = staged.doc.transact().snapshot();
+        let after_vector = &after_snapshot.state_map;
         let state_vector_entries = after_vector.len();
         if pending {
             let (current_model, current_structure) = self
@@ -606,9 +763,9 @@ impl WorkbookAuthority {
                 .map_err(AuthorityError::InvalidState)?;
             if integrated.as_slice() != Update::EMPTY_V1
                 && let Ok((model, structure)) = staged.strict_materialize()
-                && (after_vector != before_vector
-                    || model != current_model
-                    || structure != current_structure)
+                // Retrying a queued tail requires durable clock/deletion
+                // progress, not just a different transient projection.
+                && after_snapshot != before_snapshot
             {
                 return Ok(StagedUpdate {
                     commit_update: integrated.clone(),
@@ -699,6 +856,21 @@ impl WorkbookAuthority {
                 .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
             self.undo_stack = undo.undo_stack().to_vec();
             self.redo_stack = undo.redo_stack().to_vec();
+            if self.supports_structure() {
+                let immutable = stable::immutable_sheet_insertions(&self.doc)
+                    .map_err(AuthorityError::InvalidState)?;
+                self.undo_stack = self
+                    .undo_stack
+                    .iter()
+                    .map(|item| {
+                        StackItem::new(
+                            self.doc.guid(),
+                            item.deletions().clone(),
+                            item.insertions().diff(&immutable),
+                        )
+                    })
+                    .collect();
+            }
             Ok(())
         } else {
             self.doc
@@ -828,8 +1000,11 @@ impl WorkbookAuthority {
     fn upgrade_schema(&self) -> Result<bool, String> {
         let version = self.schema_version()?;
         validate_schema_version(version)?;
+        if version == stable::VERSION {
+            return Ok(false);
+        }
         self.deduplicate_sheet_order()?;
-        if version == SCHEMA_VERSION {
+        if version == 6 {
             return Ok(false);
         }
         let (model, structure) = self.materialize_internal(false)?;
@@ -889,8 +1064,17 @@ impl WorkbookAuthority {
         let meta = txn
             .get_map(META)
             .ok_or_else(|| "missing workbook metadata".to_string())?;
-        meta.try_update(&mut txn, BASE_FINGERPRINT, self.base.fingerprint.as_str());
-        meta.try_update(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        meta.try_update(
+            &mut txn,
+            BASE_FINGERPRINT,
+            self.base
+                .fingerprints
+                .get(&CHARTS_SCHEMA_VERSION)
+                .and_then(|values| values.first())
+                .ok_or("missing legacy schema fingerprint")?
+                .as_str(),
+        );
+        meta.try_update(&mut txn, "schemaVersion", CHARTS_SCHEMA_VERSION);
         Ok(true)
     }
 
@@ -925,6 +1109,9 @@ impl WorkbookAuthority {
         strict: bool,
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
         let txn = self.doc.transact();
+        if self.schema_version()? == stable::VERSION {
+            return stable::materialize(&txn, &self.base);
+        }
         if strict {
             require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
         }
@@ -1047,6 +1234,7 @@ impl WorkbookAuthority {
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
         let structure = WorkbookStructure {
+            axis_changes: BTreeMap::new(),
             generation,
             sheet_keys: keys,
             sheet_names: model
@@ -1407,12 +1595,21 @@ fn seed(
     model: &WorkbookModel,
     keys: &[String],
 ) -> Result<(), String> {
+    stable::seed(doc, base, model, keys)
+}
+
+fn seed_legacy(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+    keys: &[String],
+) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
     let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
     sync_cell_formats(&cell_formats, &mut txn, &model.styles)?;
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
-    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(&mut txn, "schemaVersion", CHARTS_SCHEMA_VERSION);
     meta.insert(&mut txn, STRUCTURE_GENERATION, 0_i64);
     let order = txn.get_or_insert_array(SHEET_ORDER);
     order.insert_range(&mut txn, 0, keys.iter().cloned());
@@ -1450,8 +1647,20 @@ fn build_undo_manager(
         init_redo_stack: redo_stack,
     };
     let mut undo = UndoManager::with_options(options);
-    undo.expand_scope(doc, &sheets);
+    if txn_schema_version(doc) == Some(stable::VERSION) {
+        stable::undo_scopes(doc, &mut undo)?;
+    } else {
+        undo.expand_scope(doc, &sheets);
+    }
     Ok(undo)
+}
+
+fn txn_schema_version(doc: &Doc) -> Option<i64> {
+    let txn = doc.transact();
+    txn.get_map(META)?
+        .get(&txn, "schemaVersion")?
+        .cast::<i64>()
+        .ok()
 }
 
 fn undo_clock() -> Arc<dyn Clock> {
@@ -3237,7 +3446,8 @@ fn fingerprint_model_with_schema(
         3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        6 => b"betteroffice-xlsx-yrs-v6".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v7".as_slice(),
     };
     hasher.update(domain);
     let base = if include_defined_names {
@@ -3362,7 +3572,7 @@ fn hash_u64(hasher: &mut Sha256, value: u64) {
 }
 
 #[cfg(test)]
-mod tests {
+mod legacy_tests {
     use super::*;
     use xlsx_model::Xf;
 
@@ -3423,7 +3633,7 @@ mod tests {
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
-        seed(&doc, &base, model, &keys).unwrap();
+        seed_legacy(&doc, &base, model, &keys).unwrap();
         {
             let (fingerprint, _) =
                 fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
@@ -3472,8 +3682,8 @@ mod tests {
     #[test]
     fn deterministic_bootstrap_round_trips_formula_fallbacks() {
         let model = rich_model();
-        let left = WorkbookAuthority::from_model_with_client_id(&model, 11).unwrap();
-        let right = WorkbookAuthority::from_model_with_client_id(&model, 12).unwrap();
+        let left = WorkbookAuthority::legacy_with_client_id(&model, 11).unwrap();
+        let right = WorkbookAuthority::legacy_with_client_id(&model, 12).unwrap();
         assert_eq!(left.materialize().unwrap(), model);
         assert_eq!(right.materialize().unwrap(), model);
         assert_eq!(
@@ -3487,7 +3697,7 @@ mod tests {
     }
 
     #[test]
-    fn known_schema_versions_materialize_and_upgrade_to_current() {
+    fn legacy_schema_versions_materialize_and_upgrade_to_six() {
         let model = rich_model();
         for (index, (version, include_defined_names)) in
             [(3, false), (3, true), (4, true), (5, true)]
@@ -3501,21 +3711,21 @@ mod tests {
             let staged = authority.stage_updates_v1(&[Update::EMPTY_V1]).unwrap();
             assert!(staged.effective);
             authority.apply_update_v1(&staged.commit_update).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), CHARTS_SCHEMA_VERSION);
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
 
     #[test]
-    fn legacy_snapshot_merges_into_current_bootstrap() {
+    fn legacy_snapshot_merges_into_legacy_bootstrap() {
         let model = rich_model();
         for (version, include_defined_names) in [(3, false), (3, true), (4, true), (5, true)] {
             let update = legacy_update(&model, version, include_defined_names);
-            let authority = WorkbookAuthority::from_model_with_client_id(&model, 108).unwrap();
+            let authority = WorkbookAuthority::legacy_with_client_id(&model, 108).unwrap();
             let staged = authority.stage_updates_v1(&[&update]).unwrap();
             assert_eq!(staged.model, model);
             authority.apply_update_v1(&staged.commit_update).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), CHARTS_SCHEMA_VERSION);
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
@@ -3529,7 +3739,7 @@ mod tests {
         model.sheets.push(charted("Second", "Second!$A$1"));
         let base = WorkbookBase::from_model(&model).unwrap();
         let doc = Doc::with_client_id(base.bootstrap_client_id);
-        seed(
+        seed_legacy(
             &doc,
             &base,
             &model,
@@ -3587,7 +3797,7 @@ mod tests {
     fn a_charted_workbook_pairs_with_a_legacy_fingerprint() {
         let mut model = WorkbookModel::default();
         model.sheets.push(charted("Report", "Report!$A$1"));
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..CHARTS_SCHEMA_VERSION {
             let update = legacy_update(&model, version, true);
             let authority = authority_from_update(&model, &update, 130 + version as u64);
             let materialized = authority.materialize().unwrap();
@@ -3613,7 +3823,7 @@ mod tests {
 
         let mut model = WorkbookModel::default();
         model.sheets.push(charted("Report", "Report!$A$1"));
-        let authority = WorkbookAuthority::from_model_with_client_id(&model, 140).unwrap();
+        let authority = WorkbookAuthority::legacy_with_client_id(&model, 140).unwrap();
 
         // present: the document's own chart state wins over the fallback.
         let mut moved = model.sheets[0].charts.clone();
@@ -3663,7 +3873,7 @@ mod tests {
     #[test]
     fn unknown_schema_version_reports_supported_range() {
         let model = rich_model();
-        let authority = WorkbookAuthority::from_model_with_client_id(&model, 110).unwrap();
+        let authority = WorkbookAuthority::legacy_with_client_id(&model, 110).unwrap();
         {
             let mut txn = authority.doc.transact_mut_with("test:unknown-schema");
             let meta = txn.get_map(META).unwrap();
@@ -3674,7 +3884,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 7; supported versions are 3 through 6"
+            "unsupported schema version 8; supported versions are 3 through 7"
         );
     }
 
@@ -3747,8 +3957,7 @@ mod tests {
             (111, 10_000, "sheet has too many charts"),
             (112, 80_000, "sheet chart state exceeds its size limit"),
         ] {
-            let authority =
-                WorkbookAuthority::from_model_with_client_id(&model, client_id).unwrap();
+            let authority = WorkbookAuthority::legacy_with_client_id(&model, client_id).unwrap();
             let peer = Doc::with_client_id(client_id + 1);
             hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
             let before = peer.transact().state_vector();
@@ -3873,7 +4082,7 @@ mod tests {
         let model = rich_model();
         let base = WorkbookBase::from_model(&model).unwrap();
         assert!(matches!(
-            WorkbookAuthority::from_model_with_client_id(&model, base.bootstrap_client_id),
+            WorkbookAuthority::from_source(&model, Some(base.bootstrap_client_id), &[], None),
             Err(AuthorityError::ClientIdConflict(_))
         ));
     }
@@ -3881,8 +4090,8 @@ mod tests {
     #[test]
     fn shared_map_replacement_changes_the_frozen_structure() {
         let model = rich_model();
-        let source = WorkbookAuthority::from_model_with_client_id(&model, 21).unwrap();
-        let target = WorkbookAuthority::from_model_with_client_id(&model, 22).unwrap();
+        let source = WorkbookAuthority::legacy_with_client_id(&model, 21).unwrap();
+        let target = WorkbookAuthority::legacy_with_client_id(&model, 22).unwrap();
         let target_structure = target.structure().unwrap();
         let target_vector = target.encode_state_vector_v1();
 
@@ -3905,7 +4114,7 @@ mod tests {
     #[test]
     fn retained_sheet_maps_stay_valid_and_keep_identity_through_undo() {
         let model = rich_model();
-        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 31).unwrap();
+        let mut authority = WorkbookAuthority::legacy_with_client_id(&model, 31).unwrap();
         authority
             .apply_ops(&[Op::RemoveSheet { index: 1 }], SyncOrigin::User)
             .unwrap();
@@ -3998,7 +4207,7 @@ mod tests {
     #[test]
     fn a_peer_cannot_disguise_a_chart_remap_as_a_move() {
         let model = sliding_model();
-        let authority = WorkbookAuthority::from_model_with_client_id(&model, 41).unwrap();
+        let authority = WorkbookAuthority::legacy_with_client_id(&model, 41).unwrap();
         let frozen = authority.structure().unwrap();
         let generation = frozen.generation;
 
@@ -4036,7 +4245,7 @@ mod tests {
     #[test]
     fn a_peer_cannot_reshape_an_anchor_a_save_can_only_slide() {
         let model = sliding_model();
-        let authority = WorkbookAuthority::from_model_with_client_id(&model, 43).unwrap();
+        let authority = WorkbookAuthority::legacy_with_client_id(&model, 43).unwrap();
         let frozen = authority.structure().unwrap();
 
         for (label, charts) in [
@@ -4073,7 +4282,7 @@ mod tests {
     #[test]
     fn a_restored_checkpoint_brings_back_a_working_history() {
         let model = sliding_model();
-        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 61).unwrap();
+        let mut authority = WorkbookAuthority::legacy_with_client_id(&model, 61).unwrap();
         let commit = |authority: &mut WorkbookAuthority, to| {
             let ops = [Op::SetChartAnchor {
                 sheet: SheetId(0),
@@ -4139,7 +4348,7 @@ mod tests {
     #[test]
     fn a_hidden_chart_conflict_leaves_the_replica_usable() {
         let model = sliding_model();
-        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 304).unwrap();
+        let mut authority = WorkbookAuthority::legacy_with_client_id(&model, 304).unwrap();
         let frozen = authority.structure().unwrap();
         let hostile = peer_chart_update(
             &authority,

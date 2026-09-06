@@ -56,18 +56,10 @@ import type {
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { EditorToolbar } from './components/EditorToolbar';
-import type {
-  FormattingAction,
-  MergeAction,
-  SelectionFormatting,
-} from './components/Toolbar';
+import type { FormattingAction, MergeAction, SelectionFormatting } from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
-import {
-  expandRangeToMergedCells,
-  PresenceStrip,
-  RemoteSelections,
-} from './presence/Presence';
+import { expandRangeToMergedCells, PresenceStrip, RemoteSelections } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 
 /**
@@ -77,6 +69,7 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
  */
 export interface XlsxEditorApi {
   handle: WorkbookHandle;
+  flush: () => void;
   refreshProposals: () => void;
 }
 
@@ -103,6 +96,7 @@ export interface XlsxEditorProps {
   onSave?: (bytes: Uint8Array) => void;
   /** Called after a workbook mutation has been applied. */
   onChange?: () => void;
+  onPendingChange?: (pending: boolean) => void;
   /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
   collaboration?: XlsxEditorCollaborationOptions;
   i18n?: Translations;
@@ -357,10 +351,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
 /**
  * The xlsx editor React component.
  */
-export function XlsxEditor({
-  i18n,
-  ...props
-}: XlsxEditorProps) {
+export function XlsxEditor({ i18n, ...props }: XlsxEditorProps) {
   return (
     <LocaleProvider i18n={i18n}>
       <XlsxEditorContent {...props} />
@@ -375,6 +366,7 @@ function XlsxEditorContent({
   onChange,
   collaboration,
   onReady,
+  onPendingChange,
   className,
 }: Omit<XlsxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
@@ -414,6 +406,7 @@ function XlsxEditorContent({
   const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
+  const flushEditorRef = useRef<() => void>(() => {});
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -423,17 +416,13 @@ function XlsxEditorContent({
   const [dragging, setDragging] = useState(false);
   // the selected chart, and the live pointer offset while it is dragged.
   // `movable` rides along so the arrow keys never depend on a frame lookup.
-  const [selectedChart, setSelectedChart] = useState<{ id: string; movable: boolean } | null>(
-    null
-  );
+  const [selectedChart, setSelectedChart] = useState<{ id: string; movable: boolean } | null>(null);
   const [chartDragOffset, setChartDragOffset] = useState<{ x: number; y: number } | null>(null);
   // logical-px preview of an arrow burst that has not landed yet.
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [selectionFormatting, setSelectionFormatting] = useState<SelectionFormatting>({});
   const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-  const [mergedRanges, setMergedRanges] = useState<
-    Array<{ start: CellAddr; end: CellAddr }>
-  >([]);
+  const [mergedRanges, setMergedRanges] = useState<Array<{ start: CellAddr; end: CellAddr }>>([]);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
   const [borderStyleChoice, setBorderStyleChoice] = useState<SelectionFormatting['borderStyle']>();
   const [borderColorChoice, setBorderColorChoice] = useState<string>();
@@ -441,8 +430,9 @@ function XlsxEditorContent({
   const paintSourceRef = useRef<string | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
-  const [collaborationReplica, setCollaborationReplica] =
-    useState<CollaborationReplica | null>(null);
+  const [collaborationReplica, setCollaborationReplica] = useState<CollaborationReplica | null>(
+    null
+  );
   const [awarenessPeers, setAwarenessPeers] = useState<readonly AwarenessPeer[]>([]);
   // a1 lists keyed by proposal id: cells that drifted since a proposal was
   // staged, surfaced when accepting it throws a StaleProposalError.
@@ -565,7 +555,11 @@ function XlsxEditorContent({
           setCollaborationReplica(handle);
           setError(null);
           refreshProposals();
-          const cleanup = onReadyRef.current?.({ handle, refreshProposals });
+          const cleanup = onReadyRef.current?.({
+            handle,
+            refreshProposals,
+            flush: () => flushEditorRef.current(),
+          });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
           runReadyCleanup();
@@ -919,25 +913,29 @@ function XlsxEditorContent({
   const flushNudgeRef = useRef(flushNudge);
   flushNudgeRef.current = flushNudge;
 
-  const nudgeChart = useCallback((id: string, dx: number, dy: number) => {
-    const pending = nudgeRef.current;
-    if (pending && pending.id !== id) flushNudgeRef.current();
-    const base = nudgeRef.current ?? { id, dx: 0, dy: 0 };
-    const next = { id, dx: base.dx + dx, dy: base.dy + dy };
-    nudgeRef.current = next;
-    setNudgeOffset({ x: next.dx, y: next.dy });
-    if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
-    nudgeTimerRef.current = setTimeout(() => {
-      nudgeTimerRef.current = null;
-      // a burst that returns to where it started is not an edit.
-      const settled = nudgeRef.current;
-      nudgeRef.current = null;
-      setNudgeOffset(null);
-      if (settled && (settled.dx !== 0 || settled.dy !== 0)) {
-        moveChartByRef.current(settled.id, settled.dx, settled.dy);
-      }
-    }, CHART_NUDGE_SETTLE_MS) as unknown as number;
-  }, []);
+  const nudgeChart = useCallback(
+    (id: string, dx: number, dy: number) => {
+      const pending = nudgeRef.current;
+      if (pending && pending.id !== id) flushNudgeRef.current();
+      const base = nudgeRef.current ?? { id, dx: 0, dy: 0 };
+      const next = { id, dx: base.dx + dx, dy: base.dy + dy };
+      nudgeRef.current = next;
+      onPendingChange?.(true);
+      setNudgeOffset({ x: next.dx, y: next.dy });
+      if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
+      nudgeTimerRef.current = setTimeout(() => {
+        nudgeTimerRef.current = null;
+        // a burst that returns to where it started is not an edit.
+        const settled = nudgeRef.current;
+        nudgeRef.current = null;
+        setNudgeOffset(null);
+        if (settled && (settled.dx !== 0 || settled.dy !== 0)) {
+          moveChartByRef.current(settled.id, settled.dx, settled.dy);
+        }
+      }, CHART_NUDGE_SETTLE_MS) as unknown as number;
+    },
+    [onPendingChange]
+  );
 
   const moveChartByRef = useRef(moveChartBy);
   moveChartByRef.current = moveChartBy;
@@ -1294,12 +1292,7 @@ function XlsxEditorContent({
           ops.push({
             type: 'unmergeCells',
             sheet: activeSheet,
-            range: mergeRange(
-              merged.start.row,
-              merged.start.col,
-              merged.end.row,
-              merged.end.col
-            ),
+            range: mergeRange(merged.start.row, merged.start.col, merged.end.row, merged.end.col),
           });
         }
       }
@@ -1353,8 +1346,8 @@ function XlsxEditorContent({
   const save = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) return;
-    flushNudgeRef.current();
     try {
+      flushEditorRef.current();
       const bytes = handle.save();
       if (onSave) onSave(bytes);
       else downloadBytes(bytes, fileName ?? 'workbook.xlsx', XLSX_MIME);
@@ -1398,6 +1391,28 @@ function XlsxEditorContent({
     },
     [selection, formulaDraft, activeSheet, applyResult, limits]
   );
+
+  flushEditorRef.current = () => {
+    const handle = handleRef.current;
+    if (!handle) throw new Error('Workbook is still loading');
+    flushNudgeRef.current();
+    if (editing) {
+      const value = editorInputRef.current?.value ?? editing.value;
+      applyResult(handle.editCell(activeSheet, editing.row, editing.col, value));
+      suppressBlurRef.current = true;
+      setEditing(null);
+    }
+    if (formulaDraft !== null && selection) {
+      applyResult(
+        handle.editCell(activeSheet, selection.focus.row, selection.focus.col, formulaDraft)
+      );
+      setFormulaDraft(null);
+    }
+    onPendingChange?.(false);
+  };
+  useEffect(() => {
+    onPendingChange?.(editing !== null || formulaDraft !== null || nudgeOffset !== null);
+  }, [editing, formulaDraft, nudgeOffset, onPendingChange]);
 
   // grid-level keyboard: chrome shortcuts first, then the pure selection reducer.
   const onKeyDown = useCallback(
@@ -1687,11 +1702,7 @@ function XlsxEditorContent({
       if (editing) return;
       if (pointToChart(e.clientX, e.clientY)) return;
       const addr = pointToCell(e.clientX, e.clientY);
-      if (
-        addr &&
-        frameRef.current &&
-        hyperlinkAtCell(frameRef.current, addr.row, addr.col)
-      ) {
+      if (addr && frameRef.current && hyperlinkAtCell(frameRef.current, addr.row, addr.col)) {
         return;
       }
       if (selection) openEditor();
@@ -1728,9 +1739,7 @@ function XlsxEditorContent({
 
   // the selected chart's outline, placed from the engine-published region and
   // offset by the live drag so the box tracks the pointer before it commits.
-  const chartOutlineRect = selectedChartRegion
-    ? scaledRect(selectedChartRegion.rect, zoom)
-    : null;
+  const chartOutlineRect = selectedChartRegion ? scaledRect(selectedChartRegion.rect, zoom) : null;
 
   const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
   const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
@@ -1854,7 +1863,10 @@ function XlsxEditorContent({
                 placeholder={t('toolbar.formulaPlaceholder')}
                 aria-label={t('toolbar.formulaPlaceholder')}
                 disabled={!sheetInfo}
-                onChange={(e) => setFormulaDraft(e.target.value)}
+                onChange={(e) => {
+                  onPendingChange?.(true);
+                  setFormulaDraft(e.target.value);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     commitFormula(e.shiftKey ? 'up' : 'down');
@@ -2017,9 +2029,10 @@ function XlsxEditorContent({
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev))
-                }
+                onChange={(e) => {
+                  onPendingChange?.(true);
+                  setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev));
+                }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
                   if (e.key === 'Enter') {
@@ -2083,7 +2096,12 @@ function XlsxEditorContent({
             ))}
           </div>
           {a11yGrid.charts.map((chart, index) => (
-            <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />
+            <div
+              key={`${index}:${chart.label}`}
+              style={visuallyHidden}
+              role="img"
+              aria-label={chart.label}
+            />
           ))}
         </>
       )}

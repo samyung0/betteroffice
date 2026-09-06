@@ -44,7 +44,10 @@ use js_sys::{Function, Uint8Array};
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::types::text::YChange;
+use yrs::{
+    Any, Assoc, IndexedSequence, Map, Out, ReadTxn, StickyIndex, Subscription, Text, Transact,
+};
 
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
@@ -838,6 +841,14 @@ fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
                 body: json_to_any(value.get("body").unwrap_or(&Value::Null))?,
             })
         }
+        "patchComment" => Ok(RawOp::PatchComment {
+            id: value
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| js_err("patchComment requires an id"))?
+                .to_owned(),
+            fields: parse_payload(value.get("fields"))?,
+        }),
         "removeComment" => Ok(RawOp::RemoveComment {
             id: value
                 .get("id")
@@ -3335,6 +3346,20 @@ impl EditSession {
     /// characters; each pilcrow and embed is its own segment worth one unit.
     /// `attributes` holds the segment's run marks together with any `ins`/`del`
     /// tracked-change stamps. Errors on an unknown story.
+    pub fn story_object_ids(&self, story: &str) -> Result<String, JsValue> {
+        let txn = self.engine.doc().yrs_doc().transact();
+        let story = story_ref(&txn, story).map_err(js_err)?;
+        let ids: Vec<_> = story
+            .diff(&txn, YChange::identity)
+            .into_iter()
+            .filter_map(|diff| match diff.insert {
+                Out::YMap(map) => Some(format!("{:?}", map.as_ref().id())),
+                _ => None,
+            })
+            .collect();
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
         let items = segments
@@ -3378,6 +3403,20 @@ impl EditSession {
     /// `[{"story","start","end"}, …]`, one entry per anchored range, in
     /// story-global UTF-16 units. Errors on an unknown comment id and when an
     /// anchor no longer resolves.
+    pub fn list_comments(&self) -> Result<String, JsValue> {
+        let comments = self.engine.doc().list_comments().map_err(js_err)?;
+        let values: Vec<Value> = comments
+            .into_iter()
+            .map(|comment| {
+                json!({
+                    "id": comment.id, "author": comment.author, "date": comment.date,
+                    "done": comment.done, "parentId": comment.parent_id, "body": comment.body,
+                })
+            })
+            .collect();
+        serde_json::to_string(&values).map_err(js_err)
+    }
+
     pub fn resolve_comment(&self, comment_id: &str) -> Result<String, JsValue> {
         let anchors = self
             .engine

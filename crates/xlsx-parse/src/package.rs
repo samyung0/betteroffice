@@ -174,6 +174,14 @@ impl PreservedPackage {
         })
     }
 
+    pub fn source_images(&self, index: usize) -> Result<Vec<crate::EmbeddedImage>, ParseError> {
+        let sheet = self
+            .sheets
+            .get(index)
+            .ok_or_else(|| ParseError::Malformed("source sheet absent".into()))?;
+        crate::chart::sheet_images(&self.parts, &sheet.path)
+    }
+
     /// Returns retained bytes for a package part.
     pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
         find_part(&self.parts, path)

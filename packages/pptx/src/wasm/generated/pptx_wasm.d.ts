@@ -26,10 +26,7 @@ export class PptxDocument {
     moveSlideJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     /**
-     * `source` is the file the update was seeded from; when it matches the
-     * recorded fingerprint the session keeps its part bytes and can save.
-     * Any other bytes fall back to the bare update session, whose `saveBytes`
-     * fails — joining a room must not depend on carrying the right file.
+     * A supplied source must match the update's exact package fingerprint.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     redoJson(): string;

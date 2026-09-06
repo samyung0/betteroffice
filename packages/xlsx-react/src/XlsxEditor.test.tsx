@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { cellRect, initWasm, openWorkbook } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
-import { XlsxEditor } from './XlsxEditor';
+import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -75,9 +75,7 @@ function withHyperlink(bytes: Uint8Array): Uint8Array {
       {
         type: 'setHyperlinks',
         sheet: 0,
-        hyperlinks: [
-          { range: { start: LINK_CELL, end: LINK_CELL }, external_target: LINK_TARGET },
-        ],
+        hyperlinks: [{ range: { start: LINK_CELL, end: LINK_CELL }, external_target: LINK_TARGET }],
       },
     ]);
     return handle.save();
@@ -156,7 +154,7 @@ async function mountEditor(
   onSave?: (bytes: Uint8Array) => void,
   onChange?: () => void
 ) {
-  const ready: { handle: WorkbookHandle | null } = { handle: null };
+  const ready: { handle: WorkbookHandle | null; flush?: XlsxEditorApi['flush'] } = { handle: null };
   const view = render(
     <XlsxEditor
       file={fixture.bytes.slice()}
@@ -164,6 +162,7 @@ async function mountEditor(
       onSave={onSave}
       onReady={(api) => {
         ready.handle = api.handle;
+        ready.flush = api.flush;
       }}
     />
   );
@@ -181,6 +180,9 @@ async function mountEditor(
     nameBox,
     editor,
     workbook: () => ready.handle!,
+    flush: () => act(() => ready.flush!()),
+    typeFormula: (value: string) =>
+      fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value } }),
     reopenWith: (next: Fixture) =>
       act(async () => {
         view.rerender(
@@ -190,6 +192,7 @@ async function mountEditor(
             onSave={onSave}
             onReady={(api) => {
               ready.handle = api.handle;
+              ready.flush = api.flush;
             }}
           />
         );
@@ -267,6 +270,24 @@ describe('XlsxEditor grid pointer handling', () => {
     view.type('Edited item');
     view.click({ row: 3, col: 1 });
     expect(changes).toBe(1);
+  });
+
+  it('flushes open cell and formula drafts before a host checkpoint without blur', async () => {
+    const view = await mountEditor();
+    view.doubleClick({ row: 2, col: 0 });
+    view.type('Unblurred cell');
+    expect(view.workbook().cell(0, 2, 0).input).toBe('Line item 1');
+    view.flush();
+    expect(view.workbook().cell(0, 2, 0).input).toBe('Unblurred cell');
+    view.typeFormula('Unblurred formula');
+    expect(view.workbook().cell(0, 2, 0).input).toBe('Unblurred cell');
+    view.flush();
+    const reopened = openWorkbook(view.workbook().save());
+    try {
+      expect(reopened.cell(0, 2, 0).input).toBe('Unblurred formula');
+    } finally {
+      reopened.dispose();
+    }
   });
 
   it('commits the open editor and moves the selection when another cell is clicked', async () => {

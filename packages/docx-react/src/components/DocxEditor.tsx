@@ -12,7 +12,12 @@
 import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
-import type { YrsLoc, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import {
+  projectYrsComments,
+  type YrsLoc,
+  type YrsSession,
+  type YrsStoryRange,
+} from '@betteroffice/docx/yrs';
 import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
@@ -657,6 +662,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const {
     comments,
     setComments,
+    updateComments,
     isAddingComment,
     setIsAddingComment,
     isAddingCommentRef,
@@ -736,12 +742,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     groupingInterval: 500,
     enableKeyboardShortcuts: true,
   });
-  const [yrsHistoryState, setYrsHistoryState] = useState({ canUndo: false, canRedo: false });
+  const [yrsHistoryState, setYrsHistoryState] = useState({
+    canUndo: false,
+    canRedo: false,
+  });
   const handleYrsHistoryChange = useCallback((canUndo: boolean, canRedo: boolean) => {
     setYrsHistoryState((previous) =>
-      previous.canUndo === canUndo && previous.canRedo === canRedo
-        ? previous
-        : { canUndo, canRedo }
+      previous.canUndo === canUndo && previous.canRedo === canRedo ? previous : { canUndo, canRedo }
     );
   }, []);
 
@@ -770,7 +777,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const historyStateRef = useRef(history.state);
   historyStateRef.current = history.state;
   // Track current border color/width for border presets (like Google Docs)
-  const borderSpecRef = useRef({ style: 'single', size: 4, color: { rgb: '000000' } });
+  const borderSpecRef = useRef({
+    style: 'single',
+    size: 4,
+    color: { rgb: '000000' },
+  });
   // Cache style resolver to avoid recreating on every selection change
   const styleResolverCacheRef = useRef<{
     styles: unknown;
@@ -841,7 +852,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     history,
     pagedEditorRef,
     setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
-      setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
+      setState((prev) => ({
+        ...prev,
+        isLoading: s.isLoading,
+        parseError: s.parseError,
+      }));
     }, []),
     setComments,
     setShowCommentsSidebar,
@@ -866,6 +881,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     }
   );
 
+  useEffect(() => {
+    const session = yrsCore.session;
+    if (!session) return;
+    const refresh = () =>
+      setComments(projectYrsComments(session, historyStateRef.current?.package.document.comments));
+    refresh();
+    return session.onUpdate(refresh);
+  }, [yrsCore.session, setComments]);
+
   const {
     imageInputRef,
     docxInputRef,
@@ -880,7 +904,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pagedEditorRef,
     displayList: canvasRenderer.displayList,
     resolveImage: canvasRenderer.resolveImage,
-    comments,
     documentName,
     onSave,
     onOpen,
@@ -1263,7 +1286,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const session = pagedEditorRef.current?.getYrsSession();
       if (!session) return null;
       try {
-        const anchors = session.resolveComment(String(id));
+        const comment = comments.find((entry) => entry.id === id);
+        const anchors = session.resolveComment(comment?.sharedId ?? String(id));
         const projection = createYrsSidebarProjection(session);
         const start = anchors
           .map((anchor) => projection.storyOffsetToDisplayPoint(anchor.story, anchor.start))
@@ -1285,10 +1309,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const tc = trackedChanges.find((c) => String(c.revisionId) === revId);
       if (!tc || (tc as { hfRid?: string }).hfRid) return null;
       const isDeletion = /deletion|deleted/i.test(tc.type);
-      return { from: tc.from, to: tc.to, variant: isDeletion ? 'deletion' : 'insertion' };
+      return {
+        from: tc.from,
+        to: tc.to,
+        variant: isDeletion ? 'deletion' : 'insertion',
+      };
     }
     return null;
-  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges]);
+  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
   // Expose ref methods
   useDocxEditorRefApi({
@@ -1305,7 +1333,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     loadParsedDocument,
     loadBuffer,
     comments,
-    setComments,
+    setComments: updateComments,
     setShowCommentsSidebar,
     contentChangeSubscribersRef,
     selectionChangeSubscribersRef,
@@ -1365,12 +1393,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onCommentReply: (id, text) => {
       const reply = createComment(commentIdAllocatorRef.current, text, author, id);
       const parent = comments.find((c) => c.id === id);
-      setComments((prev) => [...prev, reply]);
+      updateComments((prev) => [...prev, reply]);
       if (parent) onCommentReply?.(reply, parent);
     },
     onCommentResolve: (id) => {
       const target = comments.find((c) => c.id === id);
-      setComments((prev) => prev.map((c) => (c.id === id ? { ...c, done: true } : c)));
+      updateComments((prev) => prev.map((c) => (c.id === id ? { ...c, done: true } : c)));
       // Collapse the card to its checkmark marker immediately.
       if (expandedSidebarItem === `comment-${id}`) {
         setExpandedSidebarItem(null);
@@ -1378,21 +1406,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       if (target) onCommentResolve?.({ ...target, done: true });
     },
     onCommentUnresolve: (id) => {
-      setComments((prev) => prev.map((c) => (c.id === id ? { ...c, done: undefined } : c)));
+      updateComments((prev) => prev.map((c) => (c.id === id ? { ...c, done: undefined } : c)));
     },
     onCommentDelete: (id) => {
       const target = comments.find((c) => c.id === id);
-      setComments((prev) => prev.filter((c) => c.id !== id && c.parentId !== id));
-      const editor = pagedEditorRef.current;
-      const session = editor?.getYrsSession();
-      if (session) {
-        try {
-          session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
-          editor?.syncYrsInputState(true);
-        } catch {
-          // The anchor may already have disappeared with its content.
-        }
-      }
+      updateComments((prev) => prev.filter((c) => c.id !== id && c.parentId !== id));
       if (target) onCommentDelete?.(target);
     },
     onAddComment: (addText) => {
@@ -1407,7 +1425,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           session.applyRawOps(start.story, [
             {
               op: 'setComment',
-              id: String(comment.id),
+              id: comment.sharedId ?? String(comment.id),
               ranges: [[yrsStoryOffset(session, start), yrsStoryOffset(session, end)]],
               author,
               date: comment.date,
@@ -1417,7 +1435,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           editor.syncYrsInputState(true);
         }
       }
-      setComments((prev) => [...prev, comment]);
+      updateComments((prev) => [...prev, comment]);
       setIsAddingComment(false);
       setCommentSelectionRange(null);
       setAddCommentYPosition(null);
@@ -1471,10 +1489,28 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
     },
     onTrackedChangeReply: (revisionId, text) => {
-      setComments((prev) => [
-        ...prev,
-        createComment(commentIdAllocatorRef.current, text, author, revisionId),
+      const editor = pagedEditorRef.current;
+      const session = editor?.getYrsSession();
+      const revision = session
+        ?.listRevisions()
+        .find((entry) => yrsIdToNumericId(entry.revisionId) === revisionId);
+      if (!editor || !session || !revision) return;
+      const comment = createComment(commentIdAllocatorRef.current, text, author);
+      const start = yrsStoryOffset(session, { story: revision.story, ...revision.range.start });
+      const end = yrsStoryOffset(session, { story: revision.story, ...revision.range.end });
+      if (start >= end) return;
+      session.applyRawOps(revision.story, [
+        {
+          op: 'setComment',
+          id: comment.sharedId!,
+          ranges: [[start, end]],
+          author,
+          date: comment.date,
+          body: comment.content,
+        },
       ]);
+      editor.syncYrsInputState(true);
+      updateComments((prev) => [...prev, comment]);
     },
   };
 
@@ -1593,8 +1629,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       try {
         if (
           session
-            .resolveComment(String(comment.id))
-            .some((anchor) => anchor.story === head.story && anchor.start <= offset && offset <= anchor.end)
+            .resolveComment(comment.sharedId ?? String(comment.id))
+            .some(
+              (anchor) =>
+                anchor.story === head.story && anchor.start <= offset && offset <= anchor.end
+            )
         ) {
           cursorSidebarItem = `comment-${comment.id}`;
           break;
@@ -1606,8 +1645,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!cursorSidebarItem) {
       for (const revision of session.listRevisions()) {
         if (revision.range.story !== head.story) continue;
-        const start = session.locateParagraph(head.story, revision.range.start.paraId).start + revision.range.start.offset;
-        const end = session.locateParagraph(head.story, revision.range.end.paraId).start + revision.range.end.offset;
+        const start =
+          session.locateParagraph(head.story, revision.range.start.paraId).start +
+          revision.range.start.offset;
+        const end =
+          session.locateParagraph(head.story, revision.range.end.paraId).start +
+          revision.range.end.offset;
         if (start <= offset && offset <= end) {
           const revId = String(yrsIdToNumericId(revision.revisionId));
           const prefix = `tc-${revId}-`;
@@ -1625,7 +1668,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setShowCommentsSidebar(true);
     }
     setExpandedSidebarItem(cursorSidebarItem);
-  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, setShowCommentsSidebar]);
+  }, [
+    comments,
+    resolvedCommentIds,
+    commentSidebarItems,
+    revisionIdAliases,
+    setShowCommentsSidebar,
+  ]);
 
   const handleYrsToolbarSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {

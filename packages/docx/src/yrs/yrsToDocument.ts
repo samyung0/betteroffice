@@ -2,11 +2,9 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { projectYrsComments, commentSharedId } from './comments';
 import { pixelsToEmu } from '../utils/units';
-import {
-  applyContentControlValue,
-  type ContentControlValue,
-} from './contentControlValues';
+import { applyContentControlValue, type ContentControlValue } from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import {
   paragraphAttrsToFormatting,
@@ -731,7 +729,9 @@ function shapeRunFromPayload(payload: Attrs): Run {
     } catch {
       shape.fill = {
         type: 'solid',
-        color: { rgb: (asString(payload.fillColor) || '000000').replace('#', '') },
+        color: {
+          rgb: (asString(payload.fillColor) || '000000').replace('#', ''),
+        },
       };
     }
   } else if (typeof payload.fillColor === 'string') {
@@ -861,7 +861,10 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes);
   switch (item.embedKind) {
     case 'break':
-      return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+      return {
+        type: 'run',
+        content: [{ type: 'break', breakType: 'textWrapping' }],
+      };
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
@@ -1246,7 +1249,12 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
     else if (bookmark.kind === 'end') result.push({ id, kind: 'end', offset, ...metadata });
     else {
       result.push({ id, kind: 'start', offset: 0, ...metadata });
-      result.push({ id, kind: 'end', offset: Number.MAX_SAFE_INTEGER, ...metadata });
+      result.push({
+        id,
+        kind: 'end',
+        offset: Number.MAX_SAFE_INTEGER,
+        ...metadata,
+      });
     }
   }
   return result;
@@ -1298,7 +1306,11 @@ function paragraphFromStory(
             ...(boundary.colLast !== undefined ? { colLast: boundary.colLast } : {}),
             position: { offset: boundary.offset },
           }
-        : { type: 'bookmarkEnd', id: boundary.id, position: { offset: boundary.offset } };
+        : {
+            type: 'bookmarkEnd',
+            id: boundary.id,
+            position: { offset: boundary.offset },
+          };
     });
   }
 
@@ -1519,7 +1531,10 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       col += covering.colspan;
     }
 
-    const attrs = { ...TABLE_ROW_ATTR_DEFAULTS, ...(rowPayload.trPr ?? {}) } as TableRowSaveAttrs;
+    const attrs = {
+      ...TABLE_ROW_ATTR_DEFAULTS,
+      ...(rowPayload.trPr ?? {}),
+    } as TableRowSaveAttrs;
     const row: TableRow = {
       type: 'tableRow',
       formatting: tableRowAttrsToFormatting(attrs),
@@ -1666,7 +1681,7 @@ function commentRanges(
   for (const comment of comments ?? []) {
     let anchors: ReturnType<YrsSession['resolveComment']>;
     try {
-      anchors = session.resolveComment(String(comment.id));
+      anchors = session.resolveComment(commentSharedId(comment));
     } catch {
       continue;
     }
@@ -1690,21 +1705,27 @@ function commentRanges(
 
 class SaveContext {
   readonly storyIds: Set<string>;
+  readonly projectedComments: Comment[];
   private readonly baseParagraphs: Map<string, Paragraph>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly storyOwners = new WeakMap<object, string>();
+  private readonly projectedStories = new Set<string>();
 
   constructor(
     private readonly session: YrsSession,
-    base: Document
+    base: Document,
+    private readonly onEmbed?: YrsToDocumentOptions['onEmbed']
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
     this.baseStories = collectBaseStories(base);
-    this.comments = commentRanges(session, base.package.document.comments);
+    this.projectedComments = projectYrsComments(session, base.package.document.comments);
+    this.comments = commentRanges(session, this.projectedComments);
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
+    this.projectedStories.add(storyId);
     const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
     const segments = this.session.storySegments(storyId);
@@ -1718,10 +1739,18 @@ class SaveContext {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
         if (range.start >= paragraphStart && range.start <= end) {
-          boundaries.push({ id: range.id, kind: 'start', offset: range.start - paragraphStart });
+          boundaries.push({
+            id: range.id,
+            kind: 'start',
+            offset: range.start - paragraphStart,
+          });
         }
         if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({ id: range.id, kind: 'end', offset: range.end - paragraphStart });
+          boundaries.push({
+            id: range.id,
+            kind: 'end',
+            offset: range.end - paragraphStart,
+          });
         }
       }
       return boundaries;
@@ -1732,8 +1761,17 @@ class SaveContext {
       for (let index = 0; index < text.length; index += 1) {
         if (text[index] !== '\t') continue;
         if (index > cursor)
-          items.push({ kind: 'text', text: text.slice(cursor, index), attributes });
-        items.push({ kind: 'embed', embedKind: 'tab', payload: {}, attributes });
+          items.push({
+            kind: 'text',
+            text: text.slice(cursor, index),
+            attributes,
+          });
+        items.push({
+          kind: 'embed',
+          embedKind: 'tab',
+          payload: {},
+          attributes,
+        });
         cursor = index + 1;
       }
       if (cursor < text.length) items.push({ kind: 'text', text: text.slice(cursor), attributes });
@@ -1767,8 +1805,10 @@ class SaveContext {
         continue;
       }
 
+      let projectedEmbed: ParagraphContent | BlockContent | null = null;
       if (segment.embedKind === 'table') {
-        blocks.push(tableFromPayload(this, segment.payload as TablePayload));
+        projectedEmbed = tableFromPayload(this, segment.payload as TablePayload);
+        blocks.push(projectedEmbed);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
         let properties = sdtAttrsToProps(segment.payload);
@@ -1784,20 +1824,20 @@ class SaveContext {
             // Retain the child story if the authored value is invalid.
           }
         }
-        blocks.push({
-          type: 'blockSdt',
-          properties,
-          content,
-        });
+        projectedEmbed = { type: 'blockSdt', properties, content };
+        blocks.push(projectedEmbed);
       } else if (segment.embedKind === 'opaque') {
         const blob = asObject(segment.payload.blob);
-        if (blob?.type === 'pageBreak') blocks.push(pageBreakParagraph());
-        else {
+        if (blob?.type === 'pageBreak') {
+          projectedEmbed = pageBreakParagraph();
+          blocks.push(projectedEmbed);
+        } else {
           // Opaque authored blocks have no editable yrs sub-story yet. Carry a
           // same-position base block when it is still structurally compatible;
           // this keeps block SDTs lossless until they become native.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
+            projectedEmbed = baseBlock;
             blocks.push(baseBlock);
           }
           // Standalone text-box blobs do not have a one-to-one base block (the
@@ -1806,7 +1846,9 @@ class SaveContext {
         }
       } else {
         items.push(segment as EmbedItem);
+        if (this.onEmbed) projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
       }
+      if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
     }
 
@@ -1814,7 +1856,36 @@ class SaveContext {
     if (items.length > 0) {
       blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
     }
+    for (const block of blocks) this.storyOwners.set(block, storyId);
     return blocks;
+  }
+
+  visitReachableStories(document: Document, visit: (storyId: string) => void): void {
+    const reachable = new Set<string>();
+    const walk = (blocks: readonly BlockContent[]): void => {
+      for (const block of blocks) {
+        const owner = this.storyOwners.get(block);
+        if (owner) reachable.add(owner);
+        if (block.type === 'table') {
+          for (const row of block.rows) for (const cell of row.cells) walk(cell.content);
+        } else if (block.type === 'blockSdt') walk(block.content);
+      }
+    };
+    walk(document.package.document.content);
+    for (const parts of [document.package.headers, document.package.footers]) {
+      for (const part of parts?.values() ?? []) walk(part.content);
+    }
+    for (const [prefix, notes] of [
+      ['fn:', document.package.footnotes],
+      ['en:', document.package.endnotes],
+    ] as const) {
+      for (const note of notes ?? []) {
+        const storyId = `${prefix}${note.id}`;
+        if (this.projectedStories.has(storyId)) reachable.add(storyId);
+        walk(note.content);
+      }
+    }
+    for (const storyId of reachable) visit(storyId);
   }
 }
 
@@ -1828,6 +1899,10 @@ export interface YrsToDocumentOptions {
    * projection includes its nested table/content-control stories.
    */
   storyIds?: ReadonlySet<string>;
+  /** Stories whose projected blocks remain reachable in the authored output. */
+  onStory?: (storyId: string) => void;
+  /** Current serializer-facing content for a native embed at a UTF-16 offset. */
+  onEmbed?: (storyId: string, offset: number, content: ParagraphContent | BlockContent) => void;
 }
 
 export function yrsToDocument(
@@ -1835,17 +1910,19 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const context = new SaveContext(session, base);
+  const context = new SaveContext(session, base, options.onEmbed);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
-  const bodyContent = context.storyIds.has('body') && shouldProject('body')
-    ? context.storyToBlocks('body')
-    : base.package.document.content;
+  const bodyContent =
+    context.storyIds.has('body') && shouldProject('body')
+      ? context.storyToBlocks('body')
+      : base.package.document.content;
 
   let headers = base.package.headers;
   if (
     headers &&
-    (options.storyIds === undefined || [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
+    (options.storyIds === undefined ||
+      [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
   ) {
     headers = new Map(
       [...headers].map(([rId, part]) => {
@@ -1863,7 +1940,8 @@ export function yrsToDocument(
   let footers = base.package.footers;
   if (
     footers &&
-    (options.storyIds === undefined || [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
+    (options.storyIds === undefined ||
+      [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
   ) {
     footers = new Map(
       [...footers].map(([rId, part]) => {
@@ -1883,8 +1961,7 @@ export function yrsToDocument(
     prefix: string
   ): T[] | undefined => {
     const shouldProjectNotes =
-      options.storyIds === undefined ||
-      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+      options.storyIds === undefined || notes?.some((note) => shouldProject(`${prefix}${note.id}`));
     if (!shouldProjectNotes) return notes;
     return notes?.map((note) => {
       const storyId = `${prefix}${note.id}`;
@@ -1900,13 +1977,14 @@ export function yrsToDocument(
   const footnotes = projectNotes(base.package.footnotes, 'fn:');
   const endnotes = projectNotes(base.package.endnotes, 'en:');
 
-  return {
+  const document: Document = {
     ...base,
     package: {
       ...base.package,
       document: {
         ...base.package.document,
         content: bodyContent,
+        comments: context.projectedComments,
       },
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
@@ -1914,4 +1992,6 @@ export function yrsToDocument(
       ...(endnotes ? { endnotes } : {}),
     },
   };
+  if (options.onStory) context.visitReachableStories(document, options.onStory);
+  return document;
 }

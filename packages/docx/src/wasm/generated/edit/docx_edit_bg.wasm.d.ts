@@ -54,6 +54,7 @@ export const editsession_insert_watermark: (a: number, b: number, c: number, d: 
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_list_comments: (a: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -98,6 +99,7 @@ export const editsession_start_update_event_observation: (a: number) => [number,
 export const editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_story_ids: (a: number) => [number, number];
 export const editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
+export const editsession_story_object_ids: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_track_table_undo: (a: number, b: number, c: number) => [number, number];

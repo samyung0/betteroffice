@@ -1,15 +1,18 @@
-import { beforeAll, describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-import type { CollaborationReplica } from '../collaboration/types';
-import { XlsxDocument } from './generated/xlsx_wasm.js';
-import { initWasm, openWorkbook } from './loader';
-import type { WorkbookHandle, WorkbookUpdateOrigin } from './loader';
+import type { CollaborationReplica } from "../collaboration/types";
+import { XlsxDocument } from "./generated/xlsx_wasm.js";
+import { initWasm, openWorkbook } from "./loader";
+import type { WorkbookHandle, WorkbookUpdateOrigin } from "./loader";
 
-const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
-const CHART_FIXTURE = resolve(import.meta.dir, '../../test-fixtures/charts.xlsx');
-const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
+const FIXTURE = resolve(import.meta.dir, "../../test-fixtures/sample.xlsx");
+const CHART_FIXTURE = resolve(
+  import.meta.dir,
+  "../../test-fixtures/charts.xlsx"
+);
+const WASM = resolve(import.meta.dir, "./generated/xlsx_wasm_bg.wasm");
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
@@ -31,20 +34,30 @@ function requireReplica(replica: CollaborationReplica): CollaborationReplica {
   return replica;
 }
 
-describe('wasm collaboration', () => {
+describe("wasm collaboration", () => {
   beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
 
-  it('opens explicit and generated replicas and validates client IDs', () => {
+  it("opens explicit and generated replicas and validates client IDs", () => {
     expect(() => openWorkbook(sampleBytes(), { clientId: 1 })).toThrow(
-      'clientId requires collaborative mode'
+      "clientId requires collaborative mode"
     );
-    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
-      expect(() => openWorkbook(sampleBytes(), { collaborative: true, clientId })).toThrow(
-        'clientId must be a nonzero safe integer'
-      );
+    for (const clientId of [
+      0,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Infinity,
+      NaN,
+    ]) {
+      expect(() =>
+        openWorkbook(sampleBytes(), { collaborative: true, clientId })
+      ).toThrow("clientId must be a nonzero safe integer");
     }
     expect(() =>
-      openWorkbook(Uint8Array.of(1, 2, 3), { collaborative: true, clientId: 77 })
+      openWorkbook(Uint8Array.of(1, 2, 3), {
+        collaborative: true,
+        clientId: 77,
+      })
     ).toThrow();
 
     const explicit = collaborative(Number.MAX_SAFE_INTEGER);
@@ -52,14 +65,18 @@ describe('wasm collaboration', () => {
     const standalone = openWorkbook(sampleBytes());
     try {
       expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER);
-      expect(explicit.sheetInfo().sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
+      expect(explicit.sheetInfo().sheetIds).toEqual([
+        "sheet:0",
+        "sheet:1",
+        "sheet:2",
+      ]);
       expect(generated.clientId).toBeGreaterThan(0);
       expect(generated.clientId).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
       expect(requireReplica(explicit)).toBe(explicit);
       expect(standalone.encodeStateVector()).toBeInstanceOf(Uint8Array);
       expect(standalone.encodeStateAsUpdate()).toBeInstanceOf(Uint8Array);
       expect(() => standalone.applyUpdate(Uint8Array.of(0, 0))).toThrow(
-        'remote updates require a collaborative workbook'
+        "remote updates require a collaborative workbook"
       );
     } finally {
       explicit.dispose();
@@ -68,15 +85,24 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('validates client IDs at the generated wasm boundary before casting', () => {
-    for (const clientId of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
-      expect(() => XlsxDocument.openCollaborative(sampleBytes(), clientId)).toThrow(
-        'client ID must be a nonzero integer no greater than Number.MAX_SAFE_INTEGER'
+  it("validates client IDs at the generated wasm boundary before casting", () => {
+    for (const clientId of [
+      0,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Infinity,
+      NaN,
+    ]) {
+      expect(() =>
+        XlsxDocument.openCollaborative(sampleBytes(), clientId)
+      ).toThrow(
+        "client ID must be a nonzero integer no greater than Number.MAX_SAFE_INTEGER"
       );
     }
   });
 
-  it('uses all 53 random client ID bits', () => {
+  it("uses all 53 random client ID bits", () => {
     const crypto = globalThis.crypto;
     const original = crypto.getRandomValues;
     crypto.getRandomValues = ((array: Uint32Array) => {
@@ -95,113 +121,146 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('encodes vectors and diffs and converges concurrent edits', () => {
+  it("encodes vectors and diffs and converges concurrent edits", () => {
     const left = collaborative(1001);
     const right = collaborative(1002);
     try {
       const baseline = left.encodeStateVector();
       expect([...right.encodeStateVector()]).toEqual([...baseline]);
-      expect([...left.encodeStateAsUpdate()]).toEqual([...right.encodeStateAsUpdate()]);
-      expect([...left.encodeStateAsUpdate(right.encodeStateVector())]).toEqual([0, 0]);
+      expect([...left.encodeStateAsUpdate()]).toEqual([
+        ...right.encodeStateAsUpdate(),
+      ]);
+      expect([...left.encodeStateAsUpdate(right.encodeStateVector())]).toEqual([
+        0, 0,
+      ]);
 
-      left.editCell(0, 19, 0, 'left');
-      right.editCell(0, 19, 1, 'right');
+      left.editCell(0, 19, 0, "left");
+      right.editCell(0, 19, 1, "right");
       const leftUpdate = left.encodeStateAsUpdate(baseline);
       const rightUpdate = right.encodeStateAsUpdate(baseline);
       left.applyUpdate(rightUpdate);
       right.applyUpdate(leftUpdate);
-      expect(left.cell(0, 19, 0).input).toBe('left');
-      expect(right.cell(0, 19, 0).input).toBe('left');
-      expect(left.cell(0, 19, 1).input).toBe('right');
-      expect(right.cell(0, 19, 1).input).toBe('right');
-      expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
+      expect(left.cell(0, 19, 0).input).toBe("left");
+      expect(right.cell(0, 19, 0).input).toBe("left");
+      expect(left.cell(0, 19, 1).input).toBe("right");
+      expect(right.cell(0, 19, 1).input).toBe("right");
+      expect([...left.encodeStateVector()]).toEqual([
+        ...right.encodeStateVector(),
+      ]);
 
       const leftBefore = left.encodeStateVector();
       const rightBefore = right.encodeStateVector();
-      left.editCell(0, 19, 2, 'left-wins-or-loses');
-      right.editCell(0, 19, 2, 'right-wins-or-loses');
+      left.editCell(0, 19, 2, "left-wins-or-loses");
+      right.editCell(0, 19, 2, "right-wins-or-loses");
       const concurrentLeft = left.encodeStateAsUpdate(rightBefore);
       const concurrentRight = right.encodeStateAsUpdate(leftBefore);
       left.applyUpdate(concurrentRight);
       right.applyUpdate(concurrentLeft);
       expect(left.cell(0, 19, 2).input).toBe(right.cell(0, 19, 2).input);
-      expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
+      expect([...left.encodeStateVector()]).toEqual([
+        ...right.encodeStateVector(),
+      ]);
     } finally {
       left.dispose();
       right.dispose();
     }
   });
 
-  it('round-trips formatting and collaborative undo between handles', () => {
+  it("round-trips formatting and collaborative undo between handles", () => {
     const left = collaborative(1101);
     const right = collaborative(1102);
     try {
-      const beforeDisplay = right.displayList({ x: 0, y: 0, width: 500, height: 120 });
-      left.patchRangeStyle(0, 'A1:B2', {
-        bold: true,
-        fillColor: '#ffcc00',
-        textColor: '#123456',
+      const beforeDisplay = right.displayList({
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 120,
       });
-      left.setNumberFormat(0, 'A1:B2', { type: 'custom', pattern: '0.0000' });
-      const captured = left.captureFormat(0, 'A1');
-      left.applyFormat(0, 'C1', captured);
+      left.patchRangeStyle(0, "A1:B2", {
+        bold: true,
+        fillColor: "#ffcc00",
+        textColor: "#123456",
+      });
+      left.setNumberFormat(0, "A1:B2", { type: "custom", pattern: "0.0000" });
+      const captured = left.captureFormat(0, "A1");
+      left.applyFormat(0, "C1", captured);
 
       const update = left.encodeStateAsUpdate(right.encodeStateVector());
       expect(right.applyUpdate(update).applied).toBe(true);
-      expect(right.selectionFormatting(0, 'A1:B2')).toMatchObject({
+      expect(right.selectionFormatting(0, "A1:B2")).toMatchObject({
         bold: true,
-        fillColor: '#ffcc00',
-        textColor: '#123456',
-        numberFormat: 'custom',
-        numberFormatPattern: '0.0000',
+        fillColor: "#ffcc00",
+        textColor: "#123456",
+        numberFormat: "custom",
+        numberFormatPattern: "0.0000",
       });
-      expect(right.selectionFormatting(0, 'C1')).toEqual(left.selectionFormatting(0, 'A1'));
-      const afterDisplay = right.displayList({ x: 0, y: 0, width: 500, height: 120 });
+      expect(right.selectionFormatting(0, "C1")).toEqual(
+        left.selectionFormatting(0, "A1")
+      );
+      const afterDisplay = right.displayList({
+        x: 0,
+        y: 0,
+        width: 500,
+        height: 120,
+      });
       expect(afterDisplay).not.toEqual(beforeDisplay);
       expect(
-        afterDisplay.commands.find((command) => command.op === 'text' && command.text === 'Q1')
-      ).toMatchObject({ op: 'text', fontSize: 11, bold: true });
-      expect(left.historyState()).toMatchObject({ canUndo: true, undoDepth: 3 });
+        afterDisplay.commands.find(
+          (command) => command.op === "text" && command.text === "Q1"
+        )
+      ).toMatchObject({ op: "text", fontSize: 11, bold: true });
+      expect(left.historyState()).toMatchObject({
+        canUndo: true,
+        undoDepth: 3,
+      });
 
       const rightBeforeUndo = right.encodeStateVector();
       expect(left.undo().applied).toBe(true);
-      expect(right.applyUpdate(left.encodeStateAsUpdate(rightBeforeUndo)).applied).toBe(true);
-      expect(right.selectionFormatting(0, 'C1').bold).toBe(false);
-      expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
+      expect(
+        right.applyUpdate(left.encodeStateAsUpdate(rightBeforeUndo)).applied
+      ).toBe(true);
+      expect(right.selectionFormatting(0, "C1").bold).toBe(false);
+      expect([...left.encodeStateVector()]).toEqual([
+        ...right.encodeStateVector(),
+      ]);
     } finally {
       left.dispose();
       right.dispose();
     }
   });
 
-  it('delivers owned local and remote bytes and isolates listener exceptions', () => {
+  it("delivers owned local and remote bytes and isolates listener exceptions", () => {
     const left = collaborative(2001);
     const right = collaborative(2002);
     const mutated: Uint8Array[] = [];
-    const received: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
-    const remote: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
+    const received: Array<{
+      update: Uint8Array;
+      origin: WorkbookUpdateOrigin;
+    }> = [];
+    const remote: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> =
+      [];
     try {
       left.onUpdate((update) => {
         mutated.push(update);
         update.fill(0);
-        throw new Error('listener failure');
+        throw new Error("listener failure");
       });
       left.onUpdate((update, origin) => received.push({ update, origin }));
       right.onUpdate((update, origin) => remote.push({ update, origin }));
 
-      expect(() => left.editCell(0, 20, 0, 'observed')).not.toThrow();
+      expect(() => left.editCell(0, 20, 0, "observed")).not.toThrow();
       expect(received).toHaveLength(1);
-      expect(received[0].origin).toBe('local');
+      expect(received[0].origin).toBe("local");
       expect(mutated[0]).not.toBe(received[0].update);
       expect([...mutated[0]].every((byte) => byte === 0)).toBe(true);
       expect([...received[0].update].some((byte) => byte !== 0)).toBe(true);
 
       right.applyUpdate(received[0].update);
       expect(remote).toHaveLength(1);
-      expect(remote[0].origin).toBe('remote');
+      expect(remote[0].origin).toBe("remote");
       expect(remote[0].update).not.toBe(received[0].update);
       expect([...remote[0].update]).toEqual([...received[0].update]);
-      expect(right.cell(0, 20, 0).input).toBe('observed');
+      expect(right.cell(0, 20, 0).input).toBe("observed");
     } finally {
       left.dispose();
       right.dispose();
@@ -211,25 +270,25 @@ describe('wasm collaboration', () => {
   // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
   // for `.buffer` must not find the origin tag riding along — and the shape must
   // not depend on how many other listeners happen to be subscribed.
-  it('delivers exact update buffers regardless of subscriber count', () => {
+  it("delivers exact update buffers regardless of subscriber count", () => {
     for (const extraSubscriber of [false, true]) {
       const source = collaborative(extraSubscriber ? 2102 : 2101);
       const peer = collaborative(extraSubscriber ? 2104 : 2103);
       const received: Uint8Array[] = [];
       try {
         source.onUpdate((update, origin) => {
-          if (origin === 'local') received.push(update);
+          if (origin === "local") received.push(update);
         });
         if (extraSubscriber) source.onUpdate(() => {});
 
-        source.editCell(0, 22, 0, 'exact buffer');
+        source.editCell(0, 22, 0, "exact buffer");
         expect(received).toHaveLength(1);
         const update = received[0];
         expect(update.byteOffset).toBe(0);
         expect(update.buffer.byteLength).toBe(update.byteLength);
 
         peer.applyUpdate(new Uint8Array(update.buffer));
-        expect(peer.cell(0, 22, 0).input).toBe('exact buffer');
+        expect(peer.cell(0, 22, 0).input).toBe("exact buffer");
       } finally {
         source.dispose();
         peer.dispose();
@@ -237,7 +296,7 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('unsubscribes idempotently', () => {
+  it("unsubscribes idempotently", () => {
     const handle = collaborative(3001);
     let calls = 0;
     try {
@@ -246,14 +305,14 @@ describe('wasm collaboration', () => {
       });
       unsubscribe();
       unsubscribe();
-      handle.editCell(0, 21, 0, 'not observed');
+      handle.editCell(0, 21, 0, "not observed");
       expect(calls).toBe(0);
     } finally {
       handle.dispose();
     }
   });
 
-  it('keeps duplicate listener registrations independent', () => {
+  it("keeps duplicate listener registrations independent", () => {
     const handle = collaborative(3002);
     let calls = 0;
     const listener = () => {
@@ -263,7 +322,7 @@ describe('wasm collaboration', () => {
       const unsubscribeFirst = handle.onUpdate(listener);
       const unsubscribeSecond = handle.onUpdate(listener);
       unsubscribeFirst();
-      handle.editCell(0, 21, 1, 'observed once');
+      handle.editCell(0, 21, 1, "observed once");
       expect(calls).toBe(1);
       unsubscribeSecond();
     } finally {
@@ -271,16 +330,20 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('exposes safe polling on the generated API', () => {
+  it("exposes safe polling on the generated API", () => {
     const doc = XlsxDocument.openCollaborative(sampleBytes(), 3003);
     try {
       doc.startUpdateObservation();
-      doc.editCellJson(JSON.stringify({ sheet: 0, row: 21, col: 2, input: 'polled' }));
+      doc.editCellJson(
+        JSON.stringify({ sheet: 0, row: 21, col: 2, input: "polled" })
+      );
 
       const event = doc.drainUpdateEvent();
       expect(event[0]).toBe(0);
       expect(event.byteLength).toBeGreaterThan(1);
-      expect(doc.cellJson(JSON.stringify({ sheet: 0, row: 21, col: 2 }))).toContain('polled');
+      expect(
+        doc.cellJson(JSON.stringify({ sheet: 0, row: 21, col: 2 }))
+      ).toContain("polled");
       expect(doc.drainUpdateEvent()).toEqual(new Uint8Array());
       doc.clearUpdateObservation();
     } finally {
@@ -288,7 +351,7 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('allows reentrant reads and edits after the raw wasm call returns', () => {
+  it("allows reentrant reads and edits after the raw wasm call returns", () => {
     const handle = collaborative(4001);
     const reads: string[] = [];
     let events = 0;
@@ -296,37 +359,43 @@ describe('wasm collaboration', () => {
       handle.onUpdate(() => {
         events += 1;
         reads.push(handle.cell(0, 22, 0).input);
-        if (events === 1) handle.editCell(0, 22, 1, 'nested');
+        if (events === 1) handle.editCell(0, 22, 1, "nested");
       });
-      handle.editCell(0, 22, 0, 'outer');
+      handle.editCell(0, 22, 0, "outer");
 
       expect(events).toBe(2);
-      expect(reads).toEqual(['outer', 'outer']);
-      expect(handle.cell(0, 22, 1).input).toBe('nested');
+      expect(reads).toEqual(["outer", "outer"]);
+      expect(handle.cell(0, 22, 1).input).toBe("nested");
     } finally {
       handle.dispose();
     }
   });
 
-  it('ignores duplicate updates and rolls back invalid updates', () => {
+  it("ignores duplicate updates and rolls back invalid updates", () => {
     const source = collaborative(5001);
     const target = collaborative(5002);
     let remoteEvents = 0;
     try {
       target.onUpdate((_update, origin) => {
-        if (origin === 'remote') remoteEvents += 1;
+        if (origin === "remote") remoteEvents += 1;
       });
-      source.editCell(0, 23, 0, 'once');
+      source.editCell(0, 23, 0, "once");
       const update = source.encodeStateAsUpdate(target.encodeStateVector());
       const applied = target.applyUpdate(update);
       expect(applied.applied).toBe(true);
-      expect(applied.sheetInfo.sheetNames).toEqual(['Budget', 'Summary', 'Styled']);
+      expect(applied.sheetInfo.sheetNames).toEqual([
+        "Budget",
+        "Summary",
+        "Styled",
+      ]);
       expect(target.applyUpdate(update).applied).toBe(false);
       expect(remoteEvents).toBe(1);
 
       const state = target.encodeStateAsUpdate();
       const cell = target.cell(0, 23, 0);
-      expect(() => target.applyUpdate(Uint8Array.of(0xff))).toThrow('invalid Yrs v1 update');
+      expect(() => target.applyUpdate(Uint8Array.of(0xff))).toThrow(
+        "invalid Yrs v1 update"
+      );
       expect([...target.encodeStateAsUpdate()]).toEqual([...state]);
       expect(target.cell(0, 23, 0)).toEqual(cell);
       expect(remoteEvents).toBe(1);
@@ -336,30 +405,34 @@ describe('wasm collaboration', () => {
     }
   });
 
-  it('rejects local and remote structural changes without mutation', () => {
+  it("converges structural edits with concurrent cells and preserves local Undo", () => {
     const target = collaborative(6001);
-    const structuralSource = openWorkbook(sampleBytes());
+    const source = collaborative(6002);
     try {
-      const state = target.encodeStateAsUpdate();
-      const insertRows = [{ type: 'insertRows', sheet: 0, at: 0, count: 1 }];
-      expect(() => target.applyOps(insertRows)).toThrow(
-        'structural operations are unavailable in collaborative mode'
+      source.editCell(0, 19, 0, "concurrent cell");
+      expect(
+        target.applyOps([{ type: "insertRows", sheet: 0, at: 0, count: 1 }])
+          .applied
+      ).toBe(true);
+      const left = target.encodeStateAsUpdate();
+      const right = source.encodeStateAsUpdate();
+      target.applyUpdate(right);
+      source.applyUpdate(left);
+      expect(target.cell(0, 20, 0).input).toBe("concurrent cell");
+      expect(source.cell(0, 20, 0).input).toBe("concurrent cell");
+      target.undo();
+      source.applyUpdate(
+        target.encodeStateAsUpdate(source.encodeStateVector())
       );
-      expect([...target.encodeStateAsUpdate()]).toEqual([...state]);
-
-      expect(structuralSource.applyOps(insertRows).applied).toBe(true);
-      const update = structuralSource.encodeStateAsUpdate(target.encodeStateVector());
-      expect(() => target.applyUpdate(update)).toThrow(
-        'remote update changes the frozen workbook structure'
-      );
-      expect([...target.encodeStateAsUpdate()]).toEqual([...state]);
+      expect(target.cell(0, 19, 0).input).toBe("concurrent cell");
+      expect(source.cell(0, 19, 0).input).toBe("concurrent cell");
     } finally {
       target.dispose();
-      structuralSource.dispose();
+      source.dispose();
     }
   });
 
-  it('drags a chart in a collaborative session and converges the peer', () => {
+  it("drags a chart in a collaborative session and converges the peer", () => {
     const source = collaborativeCharts(6101);
     const target = collaborativeCharts(6102);
     const viewport = { x: 0, y: 0, width: 800, height: 800 };
@@ -373,14 +446,16 @@ describe('wasm collaboration', () => {
 
       const update = source.encodeStateAsUpdate(target.encodeStateVector());
       expect(target.applyUpdate(update).applied).toBe(true);
-      expect((target.displayList(viewport).charts ?? [])[0].rect).toEqual(moved.rect);
+      expect((target.displayList(viewport).charts ?? [])[0].rect).toEqual(
+        moved.rect
+      );
     } finally {
       source.dispose();
       target.dispose();
     }
   });
 
-  it('supports reentrant disposal and rejects all later operations consistently', () => {
+  it("supports reentrant disposal and rejects all later operations consistently", () => {
     const handle = collaborative(7001);
     let calls = 0;
     const unsubscribe = handle.onUpdate(() => {
@@ -388,15 +463,21 @@ describe('wasm collaboration', () => {
       handle.dispose();
     });
 
-    expect(() => handle.editCell(0, 24, 0, 'dispose')).not.toThrow();
+    expect(() => handle.editCell(0, 24, 0, "dispose")).not.toThrow();
     expect(calls).toBe(1);
     expect(() => handle.dispose()).not.toThrow();
     expect(() => handle.dispose()).not.toThrow();
     expect(() => unsubscribe()).not.toThrow();
-    expect(() => handle.clientId).toThrow('workbook handle is disposed');
-    expect(() => handle.sheetInfo()).toThrow('workbook handle is disposed');
-    expect(() => handle.encodeStateVector()).toThrow('workbook handle is disposed');
-    expect(() => handle.editCell(0, 0, 0, 'later')).toThrow('workbook handle is disposed');
-    expect(() => handle.onUpdate(() => {})).toThrow('workbook handle is disposed');
+    expect(() => handle.clientId).toThrow("workbook handle is disposed");
+    expect(() => handle.sheetInfo()).toThrow("workbook handle is disposed");
+    expect(() => handle.encodeStateVector()).toThrow(
+      "workbook handle is disposed"
+    );
+    expect(() => handle.editCell(0, 0, 0, "later")).toThrow(
+      "workbook handle is disposed"
+    );
+    expect(() => handle.onUpdate(() => {})).toThrow(
+      "workbook handle is disposed"
+    );
   });
 });

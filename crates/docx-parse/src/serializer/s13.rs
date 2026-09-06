@@ -391,15 +391,41 @@ fn serialize_comment_parts(
     package: &mut Package,
     context: &mut SerializerContext,
 ) {
-    let Some(comments) = document
-        .comments
-        .as_ref()
-        .filter(|comments| !comments.is_empty())
-    else {
+    let Some(comments) = document.comments.as_ref() else {
         return;
     };
     let (comments_xml, infos) = serialize_comments_with_info(comments, context);
     package.set_text("word/comments.xml", comments_xml);
+    if comments.is_empty() {
+        // An explicit empty projection owns comment deletion. Clear companion
+        // thread metadata too; leaving source parts would resurrect it on open.
+        for (path, root, namespace) in [
+            (
+                "word/commentsExtended.xml",
+                "commentsEx",
+                "http://schemas.microsoft.com/office/word/2012/wordml",
+            ),
+            (
+                "word/commentsIds.xml",
+                "commentsIds",
+                "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+            ),
+            (
+                "word/commentsExtensible.xml",
+                "commentsExtensible",
+                "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+            ),
+        ] {
+            package.set_text(
+                path,
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><c:{root} xmlns:c=\"{namespace}\"/>"
+                ),
+            );
+        }
+        ensure_comment_parts(package);
+        return;
+    }
 
     let companions = [
         (
@@ -625,17 +651,37 @@ fn process_image_part<'a>(
 ) -> Result<(), ParseError> {
     let relationships_xml = read_rels_or_stub(package, relationships_path);
     let mut relationship_id = find_max_relationship_id(&relationships_xml);
+    let owner = relationships_path.replace("/_rels/", "/");
+    let owner = owner
+        .strip_suffix(".rels")
+        .ok_or_else(|| save_error("invalid image relationships path"))?;
+    let existing_targets: HashMap<String, String> =
+        XmlTagIter::new(&relationships_xml, "Relationship")
+            .filter(|tag| xml_attribute(tag, "TargetMode") != Some("External"))
+            .filter_map(|tag| {
+                Some((
+                    xml_attribute(tag, "Id")?.to_owned(),
+                    xml_attribute(tag, "Target")?.to_owned(),
+                ))
+            })
+            .collect();
     let mut entries = Vec::new();
     for blocks in stories {
         visit_new_images(blocks, &mut |image| {
             let Some(source) = image
                 .src
                 .as_deref()
-                .filter(|source| source.starts_with("data:") && image.relationship_id.is_empty())
+                .filter(|source| source.starts_with("data:"))
             else {
                 return Ok(());
             };
             let (bytes, extension) = decode_image_data_url(source)?;
+            if let Some(target) = existing_targets.get(&image.relationship_id) {
+                let path = crate::relationships::resolve_relative_path(owner, target)?;
+                if package.bytes(&path) == Some(bytes.as_slice()) {
+                    return Ok(());
+                }
+            }
             *image_number += 1;
             relationship_id += 1;
             let filename = format!("image{image_number}.{extension}");
@@ -1657,5 +1703,79 @@ mod tests {
             String::from_utf8_lossy(&parts["word/_rels/document.xml.rels"])
                 .contains("Id=\"rIdHeader\"")
         );
+    }
+    #[test]
+    fn inserted_image_with_temporary_relationship_is_written() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let mut paragraph = image_paragraph("data:image/png;base64,AQID");
+        paragraph["content"][0]["content"][0]["image"]["rId"] = json!("rId_img_temporary");
+        let request = serde_json::from_value(json!({
+            "determinism": determinism(), "document": { "content": [paragraph] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .unwrap();
+        let saved = write_docx_s13(request, &original).unwrap();
+        let parts = part_map(&saved);
+        assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+        assert!(
+            !String::from_utf8_lossy(&parts["word/document.xml"]).contains("rId_img_temporary")
+        );
+    }
+
+    #[test]
+    fn replacing_one_image_does_not_overwrite_a_shared_source_part() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let request = serde_json::from_value(json!({ "determinism": determinism(), "document": {"content": [image_paragraph("data:image/png;base64,AQID")]}, "options": {"updateModifiedDate": false} })).unwrap();
+        let source = write_docx_s13(request, &original).unwrap();
+        let mut replacement = image_paragraph("data:image/png;base64,BAUG");
+        replacement["content"][0]["content"][0]["image"]["rId"] = json!("rId1");
+        let request = serde_json::from_value(json!({ "determinism": determinism(), "document": {"content": [replacement]}, "options": {"updateModifiedDate": false} })).unwrap();
+        let output = write_docx_s13(request, &source).unwrap();
+        let parts = part_map(&output);
+        assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+        assert_eq!(parts["word/media/image2.png"], [4, 5, 6]);
+        assert!(String::from_utf8_lossy(&parts["word/document.xml"]).contains("rId2"));
+    }
+    #[test]
+    fn empty_comment_projection_clears_original_thread_parts() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let create = serde_json::from_value(json!({
+            "determinism": determinism(), "document": {"content": [], "comments": [
+                {"id": 1, "author": "Ada", "date": "2026-09-06T00:00:00Z", "content": [{"type": "paragraph", "content": [{"type":"run", "content": [{"type":"text", "text":"Original comment"}]}]}]},
+                {"id": 2, "parentId": 1, "done": true, "author": "Bob", "date": "2026-09-06T00:00:00Z", "content": [{"type": "paragraph", "content": [{"type":"run", "content": [{"type":"text", "text":"Original reply"}]}]}]}
+            ]}, "options": {"updateModifiedDate": false}
+        })).unwrap();
+        let source = write_docx_s13(create, &original).unwrap();
+        for comments in [None, Some(json!([]))] {
+            let mut document = json!({"content": []});
+            if let Some(comments) = comments.clone() {
+                document["comments"] = comments;
+            }
+            let request = serde_json::from_value(json!({"determinism": determinism(), "document": document, "options": {"updateModifiedDate": false}})).unwrap();
+            let output = part_map(&write_docx_s13(request, &source).unwrap());
+            for path in [
+                "word/comments.xml",
+                "word/commentsExtended.xml",
+                "word/commentsIds.xml",
+                "word/commentsExtensible.xml",
+            ] {
+                let xml = String::from_utf8_lossy(&output[path]);
+                if comments.is_none() {
+                    assert_eq!(output[path], part_map(&source)[path]);
+                } else {
+                    assert!(!xml.contains("Original comment"));
+                    assert!(!xml.contains("Original reply"));
+                    assert!(!xml.contains("paraId="));
+                    assert!(!xml.contains("durableId="));
+                    assert!(!xml.contains("w:id="));
+                }
+            }
+        }
     }
 }

@@ -14,7 +14,25 @@ export {
   createCommentIdAllocator,
   type CommentIdAllocator,
 } from '@betteroffice/docx/utils';
-export { createComment } from '@betteroffice/docx/utils';
+import {
+  createComment as createBaseComment,
+  type CommentIdAllocator as Allocator,
+} from '@betteroffice/docx/utils';
+import { commentNumericId } from '@betteroffice/docx/yrs';
+
+export function createComment(
+  allocator: Allocator,
+  text: string,
+  author: string,
+  parentId?: number
+) {
+  const sharedId = crypto.randomUUID();
+  return {
+    ...createBaseComment(allocator, text, author, parentId),
+    id: commentNumericId(sharedId),
+    sharedId,
+  };
+}
 
 /** Stable empty Map used as the initial anchor-positions state. */
 export const EMPTY_ANCHOR_POSITIONS = new Map<string, number>();

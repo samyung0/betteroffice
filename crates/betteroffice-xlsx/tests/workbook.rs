@@ -2671,7 +2671,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
         .unwrap();
     assert!(matches!(
         workbook.apply_update_v1(&update, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged)
+        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
     ));
     assert_unchanged(&workbook, &model, &state, &calculation);
 
@@ -2691,7 +2691,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
         .unwrap();
     assert!(matches!(
         workbook.apply_update_v1(&update, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged)
+        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
     ));
     assert_unchanged(&workbook, &model, &state, &calculation);
 }
@@ -2744,7 +2744,7 @@ fn rejected_update_preserves_unrelated_valid_causal_backlog() {
         .unwrap();
     assert!(matches!(
         target.apply_update_v1(&invalid, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged)
+        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
     ));
 
     assert!(
@@ -3059,10 +3059,13 @@ fn unresolved_invalid_updates_never_enter_live_yrs_state() {
             .applied
     );
     assert_eq!(target.encode_state_as_update_v1(), state);
-    assert!(matches!(
-        target.apply_update_v1(&updates[0], CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged)
-    ));
+    // A legacy incremental tail has no schema metadata or matching bootstrap.
+    // It may remain pending, but must never mutate this session's live state.
+    match target.apply_update_v1(&updates[0], CalculationOptions::default()) {
+        Ok(result) => assert!(!result.applied),
+        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_)) => {}
+        Err(error) => panic!("unexpected error: {error}"),
+    }
     assert_eq!(target.encode_state_as_update_v1(), state);
     assert_eq!(target.sheet_id("Data"), Some(SheetId(0)));
 
@@ -3241,7 +3244,7 @@ fn panicking_native_observers_do_not_split_authority_and_projection() {
 }
 
 #[test]
-fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
+fn collaborative_structural_ops_converge_and_internal_restore_stays_private() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 1001).unwrap();
     let range = CellRange::new(cell("A1"), cell("A2"));
@@ -3289,16 +3292,27 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             formulas: Vec::new(),
         },
     ];
-    let model = workbook.model().clone();
-    let state = workbook.encode_state_as_update_v1();
     for op in structural_ops {
-        assert!(matches!(
-            workbook.apply_ops(vec![op], CalculationOptions::default()),
-            Err(Error::CollaborativeStructureOperation)
-        ));
-        assert_eq!(workbook.model(), &model);
-        assert_eq!(workbook.encode_state_as_update_v1(), state);
-        assert!(!workbook.can_undo());
+        let mut source = Workbook::open_collaborative(&bytes, 1002).unwrap();
+        let mut peer = Workbook::open_collaborative(&bytes, 1003).unwrap();
+        if matches!(op, Op::RestoreSheet { .. }) {
+            assert!(matches!(
+                source.apply_ops(vec![op], CalculationOptions::default()),
+                Err(Error::InvalidOperation(_))
+            ));
+            continue;
+        }
+        source
+            .apply_ops(vec![op], CalculationOptions::default())
+            .unwrap();
+        peer.apply_update_v1(
+            &source.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        source.recalculate_all(CalculationOptions::default());
+        assert_eq!(peer.model(), source.model());
+        assert_eq!(peer.save().unwrap(), source.save().unwrap());
     }
 
     assert!(
@@ -5423,51 +5437,31 @@ fn collaborative_sessions_move_a_chart_and_converge() {
     assert_eq!(right.model().sheets[0].charts[0].anchor, before);
 }
 
-/// Letting an anchor travel does not unfreeze the rest of a chart: an op that
-/// remaps what a chart reads is still structural, refused locally and refused
-/// again when a standalone peer offers it. This rides on the structure
-/// generation every structural op bumps; the identity fields themselves are
-/// pinned by `a_peer_cannot_disguise_a_chart_remap_as_a_move`, which leaves
-/// that counter alone.
+/// Chart anchors and source references follow structural row changes on every peer.
 #[test]
-fn collaborative_sessions_still_refuse_a_chart_remap() {
+fn collaborative_chart_remaps_survive_a_fresh_replica() {
     let bytes = charted_fixture();
     let mut workbook = Workbook::open_collaborative(&bytes, 305).unwrap();
-    let before = workbook.model().clone();
-    let insert_rows = Op::InsertRows {
-        sheet: SheetId(0),
-        at: 0,
-        count: 1,
-    };
-
-    let error = workbook
-        .apply_ops(vec![insert_rows.clone()], CalculationOptions::default())
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::CollaborativeStructureOperation),
-        "{error:?}"
-    );
-    assert_eq!(workbook.model(), &before);
-
-    let mut standalone = Workbook::open(&bytes).unwrap();
-    standalone
-        .apply_ops(vec![insert_rows], CalculationOptions::default())
+    let before = workbook.model().sheets[0].charts[0].refs.clone();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
         .unwrap();
-    assert_ne!(
-        standalone.model().sheets[0].charts[0].refs,
-        before.sheets[0].charts[0].refs
-    );
-    let update = standalone
-        .encode_diff_v1(&workbook.encode_state_vector_v1())
-        .unwrap();
-    assert!(
-        matches!(
-            workbook.apply_update_v1(&update, CalculationOptions::default()),
-            Err(Error::CollaborativeStructureChanged)
-        ),
-        "a chart remap must not slip past the freeze"
-    );
-    assert_eq!(workbook.model(), &before);
+    assert_ne!(workbook.model().sheets[0].charts[0].refs, before);
+    let mut peer = Workbook::open_collaborative(&bytes, 306).unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_state_as_update_v1(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(peer.model(), workbook.model());
+    assert_eq!(peer.save().unwrap(), workbook.save().unwrap());
 }
 
 /// Two replicas dragging the same chart at once must land on one anchor, and
@@ -5585,6 +5579,49 @@ fn a_drag_repins_every_sheet_sharing_the_drawing() {
 /// can leave the chart's identity alone and change only its anchor.
 const CHARTED_FIXTURE_REFS: &str = r#"[{"kind":"seriesName","formula":"Data!$B$1"},{"kind":"categories","formula":"Data!$A$2:$A$4"},{"kind":"values","formula":"Data!$B$2:$B$4"},{"kind":"dataLabels","formula":"Data!$C$2:$C$4"}]"#;
 
+fn write_peer_chart_records(
+    txn: &mut yrs::TransactionMut<'_>,
+    sheet: &yrs::MapRef,
+    sheet_key: &str,
+    charts: &str,
+) {
+    use yrs::{Map, MapRef, ReadTxn};
+    let records = sheet.get(txn, "charts").unwrap().cast::<MapRef>().unwrap();
+    let catalog = txn
+        .get_map("xlsx:axis-catalog")
+        .unwrap()
+        .get(txn, sheet_key)
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap()
+        .get(txn, "charts")
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    let charts: Vec<serde_json::Value> = serde_json::from_str(charts).unwrap();
+    for chart in charts {
+        let id = format!(
+            "{}#{}",
+            chart["drawing"].as_str().unwrap(),
+            chart["anchorIndex"].as_u64().unwrap()
+        );
+        let raw = records
+            .get(txn, &id)
+            .or_else(|| catalog.get(txn, &id))
+            .unwrap()
+            .cast::<String>()
+            .unwrap();
+        let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        record["value"] = chart.clone();
+        for corner in ["from", "to"] {
+            if let Some(cell) = chart["anchor"].get(corner) {
+                record[corner] = serde_json::json!({"rows":[{"run":"base","start":cell["row"],"len":1}],"cols":[{"run":"base","start":cell["col"],"len":1}],"flags":[false,false,false,false]});
+            }
+        }
+        records.insert(txn, id, serde_json::to_string(&record).unwrap());
+    }
+}
+
 /// A whole document, as a persisted snapshot would be, forked from `target`
 /// and carrying a handcrafted chart state on one sheet.
 fn peer_snapshot_with_charts(
@@ -5606,7 +5643,7 @@ fn peer_snapshot_with_charts(
             .get(&txn, sheet_key)
             .and_then(|value| value.cast::<MapRef>().ok())
             .unwrap();
-        sheet.try_update(&mut txn, "charts", charts);
+        write_peer_chart_records(&mut txn, &sheet, sheet_key, charts);
     }
     peer.transact()
         .encode_state_as_update_v1(&StateVector::default())
@@ -5663,7 +5700,7 @@ fn peer_sheet_charts_update(
             .get(&txn, sheet_key)
             .and_then(|value| value.cast::<MapRef>().ok())
             .unwrap();
-        sheet.try_update(&mut txn, "charts", charts);
+        write_peer_chart_records(&mut txn, &sheet, sheet_key, charts);
     }
     peer.transact().encode_diff_v1(&before)
 }
@@ -6312,10 +6349,9 @@ fn set_charts_is_rejected_as_an_internal_operation() {
     );
 }
 
-/// Every op that rewrites `defined_names` is structural, and structural ops are
-/// refused while collaborative. Peers therefore cannot disagree about a name.
+/// Defined-name bindings follow structural operations in live sessions.
 #[test]
-fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
+fn collaborative_structural_ops_keep_defined_names_in_sync() {
     let bytes = defined_names_fixture();
     let rewriting_ops = vec![
         Op::InsertRows {
@@ -6349,13 +6385,23 @@ fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
 
     for op in rewriting_ops {
         let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
-        let error = left
-            .apply_ops(vec![op.clone()], CalculationOptions::default())
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::CollaborativeStructureOperation),
-            "{op:?} must be refused while collaborative, or peers diverge on defined names"
-        );
+        let mut peer = Workbook::open_collaborative(&bytes, 202).unwrap();
+        if matches!(op, Op::SetDefinedNames { .. }) {
+            assert!(matches!(
+                left.apply_ops(vec![op], CalculationOptions::default()),
+                Err(Error::InvalidOperation(_))
+            ));
+            continue;
+        }
+        left.apply_ops(vec![op], CalculationOptions::default())
+            .unwrap();
+        peer.apply_update_v1(
+            &left.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(left.model(), peer.model());
+        assert_eq!(left.save().unwrap(), peer.save().unwrap());
     }
 
     let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();

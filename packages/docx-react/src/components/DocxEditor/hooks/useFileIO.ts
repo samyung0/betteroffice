@@ -1,5 +1,4 @@
 import { useCallback, useRef } from 'react';
-import type { Comment } from '@betteroffice/docx/types/content';
 import {
   createDocx,
   injectReplyRangeMarkers,
@@ -104,7 +103,6 @@ export function useFileIO({
   pagedEditorRef,
   displayList,
   resolveImage,
-  comments,
   documentName,
   onSave,
   onOpen,
@@ -117,7 +115,6 @@ export function useFileIO({
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   displayList: DisplayList | null;
   resolveImage: ImageResolver;
-  comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
@@ -130,35 +127,31 @@ export function useFileIO({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSave = useCallback(
-    async (): Promise<ArrayBuffer | null> => {
-      try {
-        const document = pagedEditorRef.current?.getDocument();
-        if (!document) return null;
+  const handleSave = useCallback(async (): Promise<ArrayBuffer | null> => {
+    try {
+      const document = pagedEditorRef.current?.getDocument();
+      if (!document) return null;
 
-        // Sync React comments state (including new replies) back to the document model
-        document.package.document.comments = comments;
+      const comments = document.package.document.comments ?? [];
 
-        // Inject commentRangeStart/End for reply comments that share the parent's range.
-        // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        injectReplyRangeMarkers(document.package.document.content, comments);
-        // Also inject range markers for comments that reply to tracked changes.
-        injectTCReplyRangeMarkers(document.package.document.content, comments);
+      // Inject commentRangeStart/End for reply comments that share the parent's range.
+      // Pages/Word require every comment (including replies) to have range markers in document.xml.
+      injectReplyRangeMarkers(document.package.document.content, comments);
+      // Also inject range markers for comments that reply to tracked changes.
+      injectTCReplyRangeMarkers(document.package.document.content, comments);
 
-        const buffer = document.originalBuffer
-          ? await repackDocx(document)
-          : await createDocx(document);
-        document.originalBuffer = buffer;
+      const buffer = document.originalBuffer
+        ? await repackDocx(document)
+        : await createDocx(document);
+      document.originalBuffer = buffer;
 
-        onSave?.(buffer);
-        return buffer;
-      } catch (error) {
-        onError?.(toFileIOError(error, 'Failed to save document'));
-        return null;
-      }
-    },
-    [pagedEditorRef, comments, onSave, onError]
-  );
+      onSave?.(buffer);
+      return buffer;
+    } catch (error) {
+      onError?.(toFileIOError(error, 'Failed to save document'));
+      return null;
+    }
+  }, [pagedEditorRef, onSave, onError]);
 
   const handleDirectPrint = useCallback(() => {
     if (!displayList) {

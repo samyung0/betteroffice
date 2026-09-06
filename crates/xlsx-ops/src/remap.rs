@@ -869,6 +869,148 @@ enum Symbol<'a> {
     Unknown,
 }
 
+#[derive(Clone, Debug)]
+pub enum ReferenceAddress {
+    Cells(CellRange),
+    Rows {
+        start: u32,
+        end: u32,
+        start_absolute: bool,
+        end_absolute: bool,
+    },
+    Cols {
+        start: u32,
+        end: u32,
+        start_absolute: bool,
+        end_absolute: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct LocatedReference {
+    pub start: usize,
+    pub end: usize,
+    pub sheet: Option<String>,
+    pub address: ReferenceAddress,
+    pub prefix: String,
+    pub suffix: String,
+}
+
+/// Locates OOXML references without rewriting literal formula text.
+pub fn formula_references(source: &str) -> Result<Vec<LocatedReference>, String> {
+    if source.len() > MAX_FORMULA_BYTES {
+        return Err("formula length exceeds limit".into());
+    }
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < source.len() {
+        match source.as_bytes()[index] {
+            b'"' => {
+                index = skip_string(source, index);
+                continue;
+            }
+            b'{' => {
+                index = skip_array_constant(source, index).ok_or("invalid array constant")?;
+                continue;
+            }
+            b'#' => {
+                if index == 0 && error_literal_end(source, index).is_none() {
+                    index += 1;
+                    continue;
+                }
+                index = error_literal_end(source, index).ok_or("unknown error literal")?;
+                continue;
+            }
+            b'[' | b']' => return Err("unsupported external or structured reference".into()),
+            _ => {}
+        }
+        let token = match scan_reference(source, index) {
+            Scanned::Skip(end) => {
+                index = end;
+                continue;
+            }
+            Scanned::Unreadable => return Err("unreadable reference".into()),
+            Scanned::Reference(token) => token,
+        };
+        index = token.span.end;
+        if let Some(joined) = &token.joined {
+            if token.first.sheet == joined.endpoint.sheet || joined.endpoint.sheet.is_none() {
+                if let (Some(Address::Cell(start_cell)), Some(Address::Cell(end_cell))) = (
+                    classify_address(token.first.address),
+                    classify_address(joined.endpoint.address),
+                ) {
+                    if start_cell.row <= end_cell.row && start_cell.col <= end_cell.col {
+                        result.push(LocatedReference {
+                            start: token.span.start,
+                            end: token.span.end,
+                            sheet: token.first.sheet.clone(),
+                            address: ReferenceAddress::Cells(CellRange::new(start_cell, end_cell)),
+                            prefix: if token.first.qualifier.starts_with('@') {
+                                "@".into()
+                            } else {
+                                String::new()
+                            },
+                            suffix: if joined.endpoint.spill {
+                                "#".into()
+                            } else {
+                                String::new()
+                            },
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+        let mut endpoints = vec![token.first];
+        if let Some(joined) = token.joined {
+            endpoints.push(joined.endpoint);
+        }
+        for endpoint in endpoints {
+            let Some(address) = classify_address(endpoint.address) else {
+                continue;
+            };
+            let address = match address {
+                Address::Cell(cell) => ReferenceAddress::Cells(CellRange::new(cell, cell)),
+                Address::Span(range) => ReferenceAddress::Cells(range),
+                Address::Axis(axis) => match axis.axis {
+                    Axis::Row => ReferenceAddress::Rows {
+                        start: axis.start,
+                        end: axis.end,
+                        start_absolute: axis.start_absolute,
+                        end_absolute: axis.end_absolute,
+                    },
+                    Axis::Col => ReferenceAddress::Cols {
+                        start: axis.start,
+                        end: axis.end,
+                        start_absolute: axis.start_absolute,
+                        end_absolute: axis.end_absolute,
+                    },
+                },
+            };
+            let address_start = endpoint.address.as_ptr() as usize - source.as_ptr() as usize;
+            let start = address_start - endpoint.qualifier.len();
+            let end = address_start + endpoint.address.len() + usize::from(endpoint.spill);
+            result.push(LocatedReference {
+                start,
+                end,
+                sheet: endpoint.sheet,
+                address,
+                prefix: if endpoint.qualifier.starts_with('@') {
+                    "@".into()
+                } else {
+                    String::new()
+                },
+                suffix: if endpoint.spill {
+                    "#".into()
+                } else {
+                    String::new()
+                },
+            });
+        }
+    }
+    Ok(result)
+}
+
 /// Rewrites a component the formula parser cannot read by remapping its
 /// references one token at a time. Whole-axis references, `Sheet!#REF!`, 3-D
 /// qualifiers and the range operator applied to a call all defeat the lexer,

@@ -39,6 +39,16 @@ export {
 } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
+export { projectYrsComments, commentSharedId, commentNumericId } from './comments';
+
+export interface YrsCommentInfo {
+  id: string;
+  author: string;
+  date: string;
+  done: boolean;
+  parentId: string | null;
+  body: unknown;
+}
 
 export interface YrsDocxHost {
   document: Document;
@@ -95,8 +105,7 @@ export type YrsRunMark =
 
 /** A direct text color written by {@link YrsSession.formatRange}. */
 export type YrsTextColor =
-  | { rgb: string; themeColor?: never }
-  | { rgb?: never; themeColor: string };
+  { rgb: string; themeColor?: never } | { rgb?: never; themeColor: string };
 
 /**
  * Set-valued inline formatting for {@link YrsSession.formatRange}. Omitted
@@ -319,9 +328,19 @@ export interface YrsSplitReceipt {
 
 /** Low-level UTF-16 story operation for {@link YrsSession.applyRawOps}. */
 export type YrsRawOp =
-  | { op: 'insert'; index: number; text: string; attrs?: Record<string, unknown> }
+  | {
+      op: 'insert';
+      index: number;
+      text: string;
+      attrs?: Record<string, unknown>;
+    }
   | { op: 'delete'; index: number; len: number }
-  | { op: 'format'; index: number; len: number; attrs?: Record<string, unknown> }
+  | {
+      op: 'format';
+      index: number;
+      len: number;
+      attrs?: Record<string, unknown>;
+    }
   | {
       op: 'insertEmbed';
       index: number;
@@ -338,6 +357,17 @@ export type YrsRawOp =
       author?: string;
       date?: string;
       body?: unknown;
+    }
+  | {
+      op: 'patchComment';
+      id: string;
+      fields: {
+        author?: string;
+        date?: string;
+        body?: unknown;
+        parentId?: string | null;
+        done?: boolean;
+      };
     }
   | {
       /** Removes the side-map comment keyed by `id`; errors when missing. */
@@ -667,11 +697,7 @@ export interface YrsSession extends CollaborationReplica {
   residentWorkerProbe(): { layoutRevision: number } | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
-  displayVerticalMoveJson(
-    position: number,
-    direction: 'up' | 'down',
-    goalX: number
-  ): string;
+  displayVerticalMoveJson(position: number, direction: 'up' | 'down', goalX: number): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -708,9 +734,7 @@ export interface YrsSession extends CollaborationReplica {
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
    */
-  onUpdate(
-    listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
-  ): () => void;
+  onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
 
   // -- local input state --
 
@@ -876,6 +900,7 @@ export interface YrsSession extends CollaborationReplica {
   listRevisions(): YrsRevisionInfo[];
   /** Current offsets of a comment's sticky anchors. Throws when an anchor no longer resolves. */
   resolveComment(commentId: string): YrsResolvedCommentAnchor[];
+  listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
@@ -890,6 +915,7 @@ export interface YrsSession extends CollaborationReplica {
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
+  storyObjectIds(story: string): string[];
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
 
@@ -1734,6 +1760,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return context;
     },
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
+    listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     storyIds: () => session.story_ids(),
@@ -1748,6 +1775,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    storyObjectIds: (story) => JSON.parse(session.story_object_ids(story)) as string[],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
 

@@ -35,6 +35,8 @@ export interface CommentAnchorRange {
 export interface Comment {
   /** Comment ID (matches commentRangeStart/End) */
   id: number;
+  /** Stable collaboration key; numeric IDs belong to OOXML. */
+  sharedId?: string;
   /** Author name */
   author: string;
   /** Author initials */

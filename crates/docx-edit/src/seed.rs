@@ -3071,6 +3071,30 @@ pub fn seed_parsed_docx(
             );
         }
     }
+    let comment_ops = array(field(field(Some(package), "document"), "comments"))
+        .iter()
+        .filter_map(|comment| {
+            let id = field(Some(comment), "id")?;
+            Some((js_string(id), comment))
+        })
+        .map(|(id, comment)| {
+            let mut fields = Vec::new();
+            for key in ["author", "date", "parentId", "done"] {
+                if let Some(value) = field(Some(comment), key) {
+                    let value = if key == "parentId" && !value.is_null() {
+                        Value::String(js_string(value))
+                    } else {
+                        value.clone()
+                    };
+                    fields.push((key.to_owned(), any_from_value(value)?));
+                }
+            }
+            if let Some(content) = field(Some(comment), "content") {
+                fields.push(("body".to_owned(), any_from_value(content.clone())?));
+            }
+            Ok(RawOp::PatchComment { id, fields })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     drop(parsed);
     document
         .create_empty_stories(
@@ -3087,6 +3111,7 @@ pub fn seed_parsed_docx(
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
+    batches.push(("body".to_owned(), comment_ops));
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;

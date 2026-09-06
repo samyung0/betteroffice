@@ -330,6 +330,62 @@ pub(crate) fn parse_sheet_charts(
     Ok(charts)
 }
 
+/// One embedded drawing image reached from a worksheet's relationships.
+#[derive(Clone, Debug)]
+pub struct EmbeddedImage {
+    pub id: String,
+    pub part: String,
+    pub anchor: ChartAnchor,
+    pub bytes: Vec<u8>,
+}
+
+pub(crate) fn sheet_images(
+    parts: &[(String, Vec<u8>)],
+    sheet_path: &str,
+) -> Result<Vec<EmbeddedImage>, ParseError> {
+    fn images<'a>(element: &'a Element, out: &mut Vec<&'a str>) {
+        if element.local_name() == "blip" {
+            if let Some(id) = element.attribute_ns(NS_RELATIONSHIPS, "embed") {
+                out.push(id);
+            }
+        }
+        for child in element.child_elements() {
+            images(child, out);
+        }
+    }
+    let mut result = Vec::new();
+    for (drawing, xml) in sheet_drawings(parts, sheet_path)? {
+        let root = parse_tree(xml)?;
+        let anchors = read_anchors(&root)?;
+        let rels = find_part(parts, &relationship_part_path(&drawing))
+            .map(parse_relationships)
+            .transpose()?
+            .unwrap_or_default();
+        for (index, (element, anchor)) in
+            anchor_elements(&root).into_iter().zip(anchors).enumerate()
+        {
+            let mut ids = Vec::new();
+            images(element, &mut ids);
+            for (image_index, id) in ids.into_iter().enumerate() {
+                let target = relationship_target(&rels, id, "image").ok_or_else(|| {
+                    ParseError::Malformed("embedded image relationship missing".into())
+                })?;
+                let part = resolve_part_path(directory_of(&drawing), target);
+                let bytes = find_part(parts, &part)
+                    .ok_or_else(|| ParseError::MissingPart(part.clone()))?
+                    .to_vec();
+                result.push(EmbeddedImage {
+                    id: format!("{drawing}#{index}:{image_index}"),
+                    part,
+                    anchor: anchor.anchor,
+                    bytes,
+                });
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Every drawing part a sheet relates to, with its bytes. A part two
 /// relationships both name is one drawing, and following it twice would emit
 /// every anchor twice, so it is walked once.

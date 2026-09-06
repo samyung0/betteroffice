@@ -11,6 +11,7 @@ export const xlsxdocument_captureFormatJson: (a: number, b: number, c: number) =
 export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_checkpointProjectionJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_clearUpdateObservation: (a: number) => void;
 export const xlsxdocument_clientId: (a: number) => number;
 export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -34,6 +35,7 @@ export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) 
 export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+export const xlsxdocument_saveBytesAt: (a: number, b: number) => [number, number, number, number];
 export const xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
 export const xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];

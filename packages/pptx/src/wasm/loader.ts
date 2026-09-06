@@ -37,9 +37,8 @@ export interface OpenPresentationOptions {
   fonts?: ReadonlyArray<PptxFontFace>;
   /**
    * Opens from a collaboration update instead of parsing the file bytes.
-   * When the bytes are the file the update was seeded from, the session
-   * keeps them and `save()` works; any other bytes open without a source
-   * and `save()` throws.
+   * Bytes must match the exact source package the update was seeded from.
+   * A mismatch rejects opening the session.
    */
   initialUpdate?: Uint8Array;
 }

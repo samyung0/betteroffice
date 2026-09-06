@@ -9,6 +9,7 @@
  *
  */
 
+import { projectYrsComments, commentSharedId } from '../../yrs/comments';
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
 import type { DisplayListQueries, DisplayListRect } from './displayListQueries';
 import { canvasPageTops } from './canvasPageMetrics';
@@ -60,7 +61,9 @@ export function visitAnchorKeys(
         const revId = (entry as { revisionId?: unknown } | null | undefined)?.revisionId;
         if (typeof revId === 'number') register(`revision-${revId}`, pos);
       }
-      const cellMarker = attrs.cellMarker as { info?: { revisionId?: unknown } } | null;
+      const cellMarker = attrs.cellMarker as {
+        info?: { revisionId?: unknown };
+      } | null;
       const cellRev = cellMarker?.info?.revisionId;
       if (typeof cellRev === 'number') register(`revision-${cellRev}`, pos);
       const propChangeArrays = [
@@ -168,10 +171,15 @@ export function computeAnchorPositionsFromYrs(
     return true;
   };
 
+  const commentKeys = new Map(
+    projectYrsComments(session).map((comment) => [comment.id, commentSharedId(comment)])
+  );
   for (const commentId of commentIds) {
     const key = `comment-${commentId}`;
     try {
-      for (const anchor of session.resolveComment(String(commentId))) {
+      for (const anchor of session.resolveComment(
+        commentKeys.get(Number(commentId)) ?? String(commentId)
+      )) {
         if (register(key, projection.storyOffsetToDisplayPoint(anchor.story, anchor.start))) break;
       }
     } catch {
@@ -182,7 +190,10 @@ export function computeAnchorPositionsFromYrs(
   for (const revision of revisions) {
     register(
       `revision-${yrsIdToNumericId(revision.revisionId)}`,
-      projection.locToDisplayPoint({ story: revision.story, ...revision.range.start })
+      projection.locToDisplayPoint({
+        story: revision.story,
+        ...revision.range.start,
+      })
     );
   }
 

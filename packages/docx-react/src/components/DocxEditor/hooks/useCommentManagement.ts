@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
+import { commentSharedId, projectYrsComments, type YrsRawOp } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 
 interface FloatingCommentBtn {
@@ -63,6 +64,46 @@ export function useCommentManagement({
     [isControlledComments]
   );
 
+  const updateComments = useCallback(
+    (next: React.SetStateAction<Comment[]>) => {
+      const previous = commentsRef.current;
+      const resolved = typeof next === 'function' ? next(previous) : next;
+      const editor = pagedEditorRef.current;
+      const session = editor?.getYrsSession();
+      if (!session) return;
+      const live = new Map(session.listComments().map((comment) => [comment.id, comment]));
+      const ops: YrsRawOp[] = [];
+      const remaining = new Set(resolved.map(commentSharedId));
+      for (const comment of previous) {
+        const id = commentSharedId(comment);
+        if (!remaining.has(id) && live.has(id)) ops.push({ op: 'removeComment', id });
+      }
+      for (const comment of resolved) {
+        const id = commentSharedId(comment);
+        const old = previous.find((item) => commentSharedId(item) === id);
+        const fields: Extract<YrsRawOp, { op: 'patchComment' }>['fields'] = {};
+        if (!old) {
+          fields.author = comment.author;
+          fields.date = comment.date ?? '';
+          fields.body = comment.content;
+          fields.done = comment.done ?? false;
+          const parent = resolved.find((item) => item.id === comment.parentId);
+          fields.parentId = parent ? commentSharedId(parent) : null;
+        } else {
+          if (old.done !== comment.done) fields.done = comment.done ?? false;
+          if (old.content !== comment.content) fields.body = comment.content;
+        }
+        if (Object.keys(fields).length) ops.push({ op: 'patchComment', id, fields });
+      }
+      if (ops.length) {
+        session.applyRawOps('body', ops);
+        editor?.syncYrsInputState(true);
+      }
+      setComments(projectYrsComments(session, resolved));
+    },
+    [pagedEditorRef, setComments]
+  );
+
   // Remove comments whose sticky Yrs anchors no longer exist in the document. Called
   // debounced from the document-change handler so the user doesn't see
   // comments vanish mid-edit.
@@ -75,7 +116,7 @@ export function useCommentManagement({
     for (const comment of commentsRef.current) {
       if (comment.parentId != null) continue;
       try {
-        if (session.resolveComment(String(comment.id)).length > 0) liveIds.add(comment.id);
+        if (session.resolveComment(commentSharedId(comment)).length > 0) liveIds.add(comment.id);
       } catch {
         // Missing anchors are handled as orphaned comments below.
       }
@@ -110,6 +151,7 @@ export function useCommentManagement({
   return {
     comments,
     setComments,
+    updateComments,
     isAddingComment,
     setIsAddingComment,
     isAddingCommentRef,

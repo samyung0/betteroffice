@@ -327,6 +327,49 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn save_at(&mut self, now_serial: f64) -> Result<Vec<u8>, String> {
+        if !now_serial.is_finite() {
+            return Err("export time must be finite".into());
+        }
+        self.workbook.recalculate_all(CalculationOptions {
+            now_serial: Some(now_serial),
+        });
+        self.workbook.save().map_err(|error| error.to_string())
+    }
+
+    pub fn checkpoint_projection_json(&self) -> Result<String, String> {
+        let info = self
+            .workbook
+            .sheet_info()
+            .map_err(|error| error.to_string())?;
+        let model = self.workbook.model();
+        let mut identities = self
+            .workbook
+            .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
+                sheet
+                    .iter_cells()
+                    .map(move |(at, _)| (SheetId(index as u32), at))
+            }))
+            .map_err(|error| error.to_string())?
+            .into_iter();
+        let sheets: Vec<_> = model.sheets.iter().enumerate().map(|(index, sheet)| -> Result<_, String> {
+            let cells: Vec<_> = sheet.iter_cells().map(|(at, cell)| serde_json::json!({
+                "id": identities.next().expect("one identity per projected cell"),
+                "address": at.to_a1(), "value": cell.value, "formula": cell.formula,
+                "format": model.styles.cell_format(cell.style)
+            })).collect();
+            let images = self.workbook.embedded_images(SheetId(index as u32)).map_err(|error| error.to_string())?.into_iter().map(|image| serde_json::json!({"id": image.id, "part": image.part, "anchor": image.anchor, "bytes": image.bytes})).collect::<Vec<_>>();
+            Ok(serde_json::json!({"id": info.sheet_ids[index], "name": sheet.name,
+                "cells": cells, "freezePane": sheet.freeze_pane, "hyperlinks": sheet.hyperlinks,
+                "merges": sheet.merges, "colWidths": sheet.col_widths,
+                "rowHeights": sheet.row_heights, "charts": sheet.charts, "images": images}))
+        }).collect::<Result<_, _>>()?;
+        serde_json::to_string(
+            &serde_json::json!({"sheets": sheets, "definedNames": model.defined_names}),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     pub fn sheet_info_json(&self) -> Result<String, String> {
         serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
     }

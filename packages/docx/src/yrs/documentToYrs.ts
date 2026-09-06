@@ -683,7 +683,11 @@ function sdtPayload(
       }
       return;
     }
-    content.push({ kind: unit.embedKind, payload: unit.payload, attrs: unit.attrs });
+    content.push({
+      kind: unit.embedKind,
+      payload: unit.payload,
+      attrs: unit.attrs,
+    });
   };
 
   for (const child of sdt.content) {
@@ -1026,7 +1030,11 @@ function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
     const cells = row.cells.map((cell) => {
       const current = column;
       column += cell.formatting?.gridSpan ?? 1;
-      return { column: current, vMerge: cell.formatting?.vMerge, key: `${rowIndex}-${current}` };
+      return {
+        column: current,
+        vMerge: cell.formatting?.vMerge,
+        key: `${rowIndex}-${current}`,
+      };
     });
     const empty =
       cells.length > 0 &&
@@ -1095,7 +1103,12 @@ function projectCell(
     firstColumn: boolean;
     lastColumn: boolean;
     tableBorders?: TableBorders;
-    defaultMargins?: { top?: number; bottom?: number; left?: number; right?: number };
+    defaultMargins?: {
+      top?: number;
+      bottom?: number;
+      left?: number;
+      right?: number;
+    };
     theme: Theme | null;
     tableBidi: boolean;
   }
@@ -1542,4 +1555,18 @@ export function documentToYrs(session: YrsSession, document: Document): void {
 
   for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
   for (const plan of context.plans) seedPlan(session, plan);
+  session.applySeedRawOps(
+    'body',
+    (document.package.document.comments ?? []).map((comment) => ({
+      op: 'patchComment',
+      id: String(comment.id),
+      fields: {
+        author: comment.author,
+        date: comment.date ?? '',
+        body: comment.content,
+        parentId: comment.parentId == null ? null : String(comment.parentId),
+        done: comment.done ?? false,
+      },
+    }))
+  );
 }

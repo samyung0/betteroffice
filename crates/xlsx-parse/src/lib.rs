@@ -10,7 +10,7 @@ mod tree;
 mod write;
 mod xml;
 
-pub use chart::{chart_space, preserved_chart_space};
+pub use chart::{EmbeddedImage, chart_space, preserved_chart_space};
 pub use package::PreservedPackage;
 pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use reference::UnpatchableReference;

@@ -17,5 +17,7 @@ pub use formatting::{
 pub use input::{ParsedInput, cell_state_for_input, cell_state_for_input_no_eval, parse_input};
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
-pub use remap::insertion_keeps_chart_anchor_on_grid;
+pub use remap::{
+    LocatedReference, ReferenceAddress, formula_references, insertion_keeps_chart_anchor_on_grid,
+};
 pub use undo::UndoStack;

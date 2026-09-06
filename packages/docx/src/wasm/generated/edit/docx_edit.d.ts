@@ -397,6 +397,13 @@ export class EditSession {
      */
     layout_font_requirements_json(input: string): string;
     /**
+     * Where a comment's sticky anchors currently sit:
+     * `[{"story","start","end"}, …]`, one entry per anchored range, in
+     * story-global UTF-16 units. Errors on an unknown comment id and when an
+     * anchor no longer resolves.
+     */
+    list_comments(): string;
+    /**
      * Every pending tracked change across all stories, in deterministic
      * story-then-position order:
      * `[{"revisionId","author","date","kind","story","preview",
@@ -542,12 +549,6 @@ export class EditSession {
      * geometry for it. `frameEpoch` identifies the frame the rect belongs to.
      */
     resident_caret_snapshot_json(): string;
-    /**
-     * Where a comment's sticky anchors currently sit:
-     * `[{"story","start","end"}, …]`, one entry per anchored range, in
-     * story-global UTF-16 units. Errors on an unknown comment id and when an
-     * anchor no longer resolves.
-     */
     resolve_comment(comment_id: string): string;
     /**
      * Resolves another peer's encoded selection against this replica's
@@ -764,6 +765,7 @@ export class EditSession {
      * `attributes` holds the segment's run marks together with any `ins`/`del`
      * tracked-change stamps. Errors on an unknown story.
      */
+    story_object_ids(story: string): string;
     story_segments(story: string): string;
     /**
      * Applies one run mark over `[start, end)`. `mark_json`:
@@ -1002,6 +1004,7 @@ export interface InitOutput {
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1046,6 +1049,7 @@ export interface InitOutput {
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_ids: (a: number) => [number, number];
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
+    readonly editsession_story_object_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_table_undo: (a: number, b: number, c: number) => [number, number];

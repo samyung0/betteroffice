@@ -66,6 +66,8 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
+  projectYrsComments,
+  commentSharedId,
   yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
@@ -520,9 +522,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       return {
         themeColors,
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
-        numericIds: {},
+        numericIds: yrsCore.session
+          ? Object.fromEntries(
+              projectYrsComments(yrsCore.session).map((comment) => [
+                commentSharedId(comment),
+                comment.id,
+              ])
+            )
+          : {},
       };
-    }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
+    }, [
+      _theme?.colorScheme,
+      document?.package.settings?.defaultTabStop,
+      yrsCore.session,
+      sidebarCommentIds,
+    ]);
     const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
@@ -617,16 +631,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Rust measurement — the sole measurement path. Wiring lives in the
     // hook; engine-ready and fonts-ready re-layouts reach back through its
     // runLayoutPipelineRef, and deferLayoutPass gates provisional passes.
-    const {
-      deferLayoutPass,
-      residentMeasurementConfig,
-      runLayoutPipelineRef,
-    } = useRustMeasurement({
-      document,
-      fontProvider: measurementFontProvider,
-      fontChainsProviderRef: rustFontChainsProviderRef,
-      textEngine: yrsCore.session,
-    });
+    const { deferLayoutPass, residentMeasurementConfig, runLayoutPipelineRef } = useRustMeasurement(
+      {
+        document,
+        fontProvider: measurementFontProvider,
+        fontChainsProviderRef: rustFontChainsProviderRef,
+        textEngine: yrsCore.session,
+      }
+    );
 
     // Layout pipeline — owns layout/blocks/measures state, the rAF-coalesced
     // scheduler, scroll-restore plumbing, and the page-count
@@ -708,13 +720,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const publishYrsDirectInput = useCallback((dirtyStory?: string): void => {
-      yrsCore.publishDirectInput(dirtyStory);
-      // Structural input can mint a paragraph before the existing projection
-      // can map its new sticky caret. Invalidate first so emitSelection can
-      // rebuild the projection and reach the normal layout-refresh callback.
-      yrsProjectionVersionRef.current += 1;
-    }, [yrsCore.publishDirectInput]);
+    const publishYrsDirectInput = useCallback(
+      (dirtyStory?: string): void => {
+        yrsCore.publishDirectInput(dirtyStory);
+        // Structural input can mint a paragraph before the existing projection
+        // can map its new sticky caret. Invalidate first so emitSelection can
+        // rebuild the projection and reach the normal layout-refresh callback.
+        yrsProjectionVersionRef.current += 1;
+      },
+      [yrsCore.publishDirectInput]
+    );
     useEffect(
       () => () => {
         if (documentChangeTimerRef.current !== null) {
@@ -853,11 +868,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
-      (
-        docChanged: boolean,
-        origin: LayoutUpdateOrigin = 'local',
-        dirtyStory?: string
-      ): boolean => {
+      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local', dirtyStory?: string): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
@@ -1289,9 +1300,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const resolveYrsDisplayTarget = useCallback(
       (position: number) => {
         const target = getYrsPositionProjection(activeYrsRootStory)?.targetAt(position);
-        return target
-          ? { story: target.story, displayPosition: target.displayPosition }
-          : null;
+        return target ? { story: target.story, displayPosition: target.displayPosition } : null;
       },
       [activeYrsRootStory, getYrsPositionProjection]
     );
@@ -1684,7 +1693,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           applyResidentDelete={applyResidentDelete}
           onFocusChange={setIsFocused}
           onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
-          onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
+          onCaretInputDispatched={
+            activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined
+          }
           onCaretInterrupt={handleLocalCaretInterrupt}
         />
 

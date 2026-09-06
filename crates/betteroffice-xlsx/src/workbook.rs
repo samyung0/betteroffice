@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -162,6 +163,8 @@ pub struct Workbook {
     edited_since_open: bool,
     moved_references_since_open: bool,
     active_sheet: SheetId,
+    source_active_sheet: SheetId,
+    source_sheet_names: Vec<String>,
     undo: UndoStack,
     graph: Option<DepGraph>,
     proposals: ProposalSet,
@@ -184,11 +187,7 @@ impl Workbook {
 
     /// Opens a replica. `client_id` must be unique among connected peers.
     ///
-    /// The source package is local state and base compatibility covers only the
-    /// modeled workbook, so peers whose cells and charts agree but whose macros
-    /// or custom XML differ are accepted as the same base and save different
-    /// documents. Distributing whole-package identity needs a further authority
-    /// schema version.
+    /// Replicas must use the byte-identical original source package.
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
         Self::open_internal(bytes, true, Some(client_id))
     }
@@ -209,6 +208,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
+            Some(&format!("{:x}", Sha256::digest(bytes))),
         )
     }
 
@@ -252,6 +252,7 @@ impl Workbook {
             build_graph,
             client_id,
             &[],
+            None,
         )
     }
 
@@ -262,6 +263,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        source_sha: Option<&str>,
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -273,8 +275,9 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let authority = WorkbookAuthority::from_source(&model, client_id, legacy_dimensions)
-            .map_err(authority_error)?;
+        let authority =
+            WorkbookAuthority::from_source(&model, client_id, legacy_dimensions, source_sha)
+                .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
@@ -312,6 +315,11 @@ impl Workbook {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
+            source_sheet_names: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
             model,
             source_package,
             preserved,
@@ -320,6 +328,7 @@ impl Workbook {
             edited_since_open: false,
             moved_references_since_open: false,
             active_sheet,
+            source_active_sheet: active_sheet,
             undo: UndoStack::new(),
             graph,
             proposals: ProposalSet::new(),
@@ -377,7 +386,7 @@ impl Workbook {
             return Ok(self.remote_mutation_result(&before, true));
         }
         let staged = self.stage_remote_updates(&[update])?;
-        if staged.structure != structure {
+        if !self.authority.supports_structure() && staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
         }
         if staged.pending {
@@ -421,11 +430,11 @@ impl Workbook {
             SnapshotAdoption::Replacement(candidate) => *candidate,
         };
         let structure = candidate.structure().map_err(authority_error)?;
-        if !structure.describes_same_workbook(&frozen) {
+        if !candidate.supports_structure() && !structure.describes_same_workbook(&frozen) {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
-        self.gate_incoming(&model)
+        self.gate_incoming(&model, &structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
@@ -459,7 +468,7 @@ impl Workbook {
             .stage_updates_v1(updates)
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
-        self.gate_incoming(&staged.model)
+        self.gate_incoming(&staged.model, &staged.structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
     }
@@ -467,9 +476,36 @@ impl Workbook {
     /// Everything a model arriving from outside must satisfy before this
     /// replica takes it on, whichever door it came through: a staged update and
     /// an adopted snapshot are the same foreign bytes and get the same answer.
-    fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
+    fn gate_incoming(&self, model: &WorkbookModel, structure: &WorkbookStructure) -> Result<()> {
         validate_model(model)?;
         validate_chart_source(model, self.source_package.is_some())?;
+        if let Some(package) = &self.source_package {
+            for (index, original) in self.source_sheet_names.iter().enumerate() {
+                let key = format!("sheet:{index}");
+                let position = structure.sheet_keys.iter().position(|item| item == &key);
+                if position.is_none_or(|position| {
+                    structure.sheet_names[position] != *original || position != index
+                }) {
+                    if let Some(part) = package.reference_naming_sheet(original) {
+                        return Err(Error::InvalidOperation(format!(
+                            "structural update strands preserved part {part}"
+                        )));
+                    }
+                }
+                if let Some((rows, cols)) = structure.axis_changes.get(&key) {
+                    let part = rows
+                        .and_then(|at| package.reference_moved_by_rows(original, at))
+                        .or_else(|| {
+                            cols.and_then(|at| package.reference_moved_by_cols(original, at))
+                        });
+                    if let Some(part) = part {
+                        return Err(Error::InvalidOperation(format!(
+                            "structural update moves references in preserved part {part}"
+                        )));
+                    }
+                }
+            }
+        }
         self.validate_incoming_anchors(model)
     }
 
@@ -487,9 +523,15 @@ impl Workbook {
     fn validate_incoming_anchors(&self, staged: &WorkbookModel) -> Result<()> {
         for sheet in &staged.sheets {
             for chart in &sheet.charts {
-                if self.opened_anchors.get(&chart.frame_id()) == Some(&chart.anchor) {
+                let authored = self.opened_anchors.get(&chart.frame_id()).ok_or_else(|| {
+                    Error::InvalidOperation(
+                        "checkpoint contains a chart outside its exact source package".into(),
+                    )
+                })?;
+                if authored == &chart.anchor {
                     continue;
                 }
+                validate_anchor_change(*authored, chart.anchor, &chart.frame_id())?;
                 validate_intrinsic_anchor(chart.anchor).map_err(|error| {
                     Error::InvalidOperation(format!("remote update repins {}: {error}", chart.part))
                 })?;
@@ -508,7 +550,9 @@ impl Workbook {
         while index < self.pending_remote_updates.len() {
             let update = self.pending_remote_updates[index].clone();
             match self.stage_remote_updates(&[&update]) {
-                Ok(staged) if &staged.structure != structure => {
+                Ok(staged)
+                    if !self.authority.supports_structure() && &staged.structure != structure =>
+                {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
@@ -631,6 +675,20 @@ impl Workbook {
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
+        let active_sheet = if self.is_collaborative() {
+            let source_key = format!("sheet:{}", self.source_active_sheet.0);
+            SheetId(
+                self.authority
+                    .structure()
+                    .map_err(authority_error)?
+                    .sheet_keys
+                    .iter()
+                    .position(|key| key == &source_key)
+                    .unwrap_or(0) as u32,
+            )
+        } else {
+            self.active_sheet
+        };
         let parts = match &self.source_package {
             Some(package) => {
                 xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
@@ -642,14 +700,47 @@ impl Workbook {
                         changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
                     },
-                    self.active_sheet,
+                    active_sheet,
                 )?
             }
             None => {
-                xlsx_parse::serialize_workbook_with_active_sheet(&self.model, self.active_sheet)?
+                xlsx_parse::serialize_workbook_with_active_sheet(&self.model, active_sheet)?
             }
         };
         ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
+    }
+
+    pub fn embedded_images(&self, sheet: SheetId) -> Result<Vec<xlsx_parse::EmbeddedImage>> {
+        self.sheet(sheet)?;
+        match (
+            &self.source_package,
+            self.preserved
+                .origins
+                .get(sheet.0 as usize)
+                .copied()
+                .flatten(),
+        ) {
+            (Some(package), Some(index)) => {
+                package.source_images(index).map_err(Error::Spreadsheet)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    pub fn cell_identity(&self, sheet: SheetId, at: CellRef) -> Result<String> {
+        self.authority
+            .cell_identity(sheet, at)
+            .map_err(authority_error)
+    }
+
+    /// Resolve a projection's cells against one topology snapshot.
+    pub fn cell_identities(
+        &self,
+        cells: impl IntoIterator<Item = (SheetId, CellRef)>,
+    ) -> Result<Vec<String>> {
+        self.authority
+            .cell_identities(cells)
+            .map_err(authority_error)
     }
 
     pub fn model(&self) -> &WorkbookModel {
@@ -1048,7 +1139,10 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && !self.authority.supports_structure()
+            && ops.iter().any(is_structural_op)
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -1066,7 +1160,17 @@ impl Workbook {
             rename_sheet_view(&mut names, op);
         }
         validate_shared_drawings(&preview)?;
-        if preview == self.model {
+        let changes_topology = self.authority.supports_structure()
+            && ops.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::InsertRows { .. }
+                        | Op::DeleteRows { .. }
+                        | Op::InsertCols { .. }
+                        | Op::DeleteCols { .. }
+                )
+            });
+        if preview == self.model && !changes_topology {
             return Ok(MutationResult::default());
         }
         let active_name = self.active_sheet_name();
@@ -1246,7 +1350,7 @@ impl Workbook {
             WorkbookMode::Collaborative { structure } => structure,
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
-        if &history.structure != structure {
+        if !self.authority.supports_structure() && &history.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
         }
         let active_name = self.active_sheet_name();
@@ -1871,7 +1975,7 @@ impl Workbook {
             .authority
             .stage_local_ops_v1(ops, origin)
             .map_err(authority_error)?;
-        if &staged.structure != structure {
+        if !self.authority.supports_structure() && &staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
         }
         validate_collaboration_size(&staged.update)?;
@@ -1955,6 +2059,9 @@ impl Workbook {
         for op in ops {
             self.moved_references_since_open |= self.moves_referenced_cells(&names, op);
             rename_sheet_view(&mut names, op);
+        }
+        if self.is_collaborative() && self.authority.supports_structure() {
+            return;
         }
         for op in ops {
             match *op {
@@ -2256,6 +2363,21 @@ impl Workbook {
     /// from the shared document is projected on the way out, so what is left to
     /// check here is what a local batch can still get wrong.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
+        if self.is_collaborative() && self.authority.supports_structure() {
+            let structure = self.authority.structure().map_err(authority_error)?;
+            self.preserved.origins = structure
+                .sheet_keys
+                .iter()
+                .map(|key| {
+                    key.strip_prefix("sheet:")
+                        .and_then(|index| index.parse::<usize>().ok())
+                })
+                .collect();
+            self.preserved.shared_string_cells =
+                vec![Default::default(); structure.sheet_keys.len()];
+            self.mode = WorkbookMode::Collaborative { structure };
+        }
+
         self.model = model;
         Ok(())
     }

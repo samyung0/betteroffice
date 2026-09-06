@@ -42,6 +42,7 @@ export function ReplyInput({ onSubmit }: ReplyInputProps) {
       <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 12 }}>
         <input
           readOnly
+          value=""
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
