@@ -1,7 +1,7 @@
 # Browser round-trip fixtures
 
-These files are deterministic inputs for the Evo Office proof of concept. Each
-contains a unique `EVO_EDIT_MARKER_*` string so the harness can make one narrow
+These files are deterministic inputs for the Capy Notebook office proof of concept. Each
+contains a unique `CAPY_EDIT_MARKER_*` string so the harness can make one narrow
 edit, save, reopen, and distinguish the intended change from collateral OOXML
 rewrites.
 

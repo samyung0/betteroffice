@@ -85,7 +85,7 @@ async function buildWorkbook() {
   summary.getRange("B5:C6").format.numberFormat = '0 "ms"';
 
   summary.getRange("A9:D9").merge();
-  summary.getRange("A9").values = [["EVO_EDIT_MARKER_XLSX"]];
+  summary.getRange("A9").values = [["CAPY_EDIT_MARKER_XLSX"]];
   summary.getRange("A9:D9").format = {
     fill: "#DBEAFE",
     font: { bold: true, color: "#1E3A8A" },
@@ -162,7 +162,7 @@ async function buildPresentation() {
   );
   addTextBox(
     titleSlide,
-    "EVO_EDIT_MARKER_PPTX",
+    "CAPY_EDIT_MARKER_PPTX",
     { left: 72, top: 380, width: 420, height: 44 },
     { fontSize: 18, bold: true, color: "blue-700" }
   );

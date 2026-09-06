@@ -18,7 +18,7 @@ from docx.shared import Inches, Pt, RGBColor
 ACCENT = "2563EB"
 INK = RGBColor(15, 23, 42)
 MUTED = RGBColor(71, 85, 105)
-MARKER = "EVO_EDIT_MARKER_DOCX"
+MARKER = "CAPY_EDIT_MARKER_DOCX"
 
 
 def set_cell_fill(cell, color: str) -> None:
@@ -90,7 +90,7 @@ def build(output_path: Path) -> None:
         style.font.color.rgb = INK
 
     header = section.header.paragraphs[0]
-    header.text = "EVO OFFICE · ROUND-TRIP PROOF"
+    header.text = "CAPY NOTEBOOK OFFICE · ROUND-TRIP PROOF"
     header.runs[0].font.size = Pt(8)
     header.runs[0].font.bold = True
     header.runs[0].font.color.rgb = MUTED
@@ -168,7 +168,7 @@ def build(output_path: Path) -> None:
     note_row = table.add_row().cells
     merged = note_row[0].merge(note_row[3])
     set_cell_fill(merged, "EFF6FF")
-    merged.text = "Merged-cell sentinel: EVO_TABLE_MERGE_SENTINEL"
+    merged.text = "Merged-cell sentinel: CAPY_TABLE_MERGE_SENTINEL"
     merged.paragraphs[0].runs[0].italic = True
 
     document.add_page_break()
@@ -185,7 +185,7 @@ def build(output_path: Path) -> None:
     second_section.footer.is_linked_to_previous = True
     document.add_heading("Section boundary", level=1)
     document.add_paragraph(
-        "EVO_SECTION_SENTINEL — a second OOXML section should survive both save paths."
+        "CAPY_SECTION_SENTINEL — a second OOXML section should survive both save paths."
     )
 
     document.save(output_path)

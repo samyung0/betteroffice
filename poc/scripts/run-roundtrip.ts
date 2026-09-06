@@ -24,9 +24,9 @@ const fixtureDirectory = path.join(root, "poc/fixtures");
 const outputDirectory = path.join(root, "poc/output");
 
 const markers = {
-  docx: ["EVO_EDIT_MARKER_DOCX", "EVO_EDIT_MARKER_DOCX_EDITED"],
-  xlsx: ["EVO_EDIT_MARKER_XLSX", "EVO_EDITED_XLSX"],
-  pptx: ["EVO_EDIT_MARKER_PPTX", "EVO_EDITED_PPTX"],
+  docx: ["CAPY_EDIT_MARKER_DOCX", "CAPY_EDIT_MARKER_DOCX_EDITED"],
+  xlsx: ["CAPY_EDIT_MARKER_XLSX", "CAPY_EDITED_XLSX"],
+  pptx: ["CAPY_EDIT_MARKER_PPTX", "CAPY_EDITED_PPTX"],
 } as const;
 
 interface PartDiff {
