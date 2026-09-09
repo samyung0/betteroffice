@@ -32,6 +32,45 @@ export interface ExportDeterminism {
   seed: string;
   now: string;
 }
+export interface OfficeEntry {
+  id: string;
+  label: string;
+  value: string;
+  position: string;
+}
+export type OfficeCommand =
+  | {
+      type: "replace_text";
+      targetId: string;
+      expectedText: string;
+      text: string;
+    }
+  | {
+      type: "set_cell";
+      sheet: string;
+      cell: string;
+      expectedValue: string;
+      value: string;
+    };
+export interface OfficeTarget {
+  id: string;
+  path: string[];
+  range?: [number, number];
+}
+export interface OfficeCommandResult {
+  state: Uint8Array;
+  inverse: OfficeCommand[];
+  targets: OfficeTarget[];
+}
+export type OfficeEditCode =
+  | "invalid_input"
+  | "stale_target"
+  | "unavailable_target"
+  | "unsupported_operation";
+export declare class OfficeEditError extends Error {
+  readonly code: OfficeEditCode;
+  constructor(code: OfficeEditCode, message: string);
+}
 export declare function seedOffice(
   format: OfficeFormat,
   baseBytes: Uint8Array
@@ -51,4 +90,13 @@ export declare function exportOffice(
   checkpoint: OfficeCheckpoint,
   determinism: ExportDeterminism
 ): Promise<Uint8Array>;
+export declare function inspectOffice(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint
+): Promise<OfficeEntry[]>;
+export declare function applyOfficeCommands(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+  commands: OfficeCommand[]
+): Promise<OfficeCommandResult>;
 export declare function runtimeManifest(): Promise<Record<string, string>>;

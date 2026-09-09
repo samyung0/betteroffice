@@ -12,7 +12,11 @@ import initXlsx, {
 import initPptx, {
   PptxDocument,
 } from "../packages/pptx/src/wasm/generated/pptx_wasm.js";
-import type { DeckSnapshot, ShapeSnapshot } from "../packages/pptx/src/types";
+import type {
+  DeckSnapshot,
+  ShapeSnapshot,
+  StorySnapshot,
+} from "../packages/pptx/src/types";
 
 export type OfficeFormat = "docx" | "xlsx" | "pptx";
 export interface OfficeCheckpoint {
@@ -48,6 +52,51 @@ export interface ExportDeterminism {
   seed: string;
   now: string;
 }
+export interface OfficeEntry {
+  id: string;
+  label: string;
+  value: string;
+  position: string;
+}
+export type OfficeCommand =
+  | {
+      type: "replace_text";
+      targetId: string;
+      expectedText: string;
+      text: string;
+    }
+  | {
+      type: "set_cell";
+      sheet: string;
+      cell: string;
+      expectedValue: string;
+      value: string;
+    };
+/** Yrs location of one edited target: root map name, nested keys, and the text range for stories. */
+export interface OfficeTarget {
+  id: string;
+  path: string[];
+  range?: [number, number];
+}
+export interface OfficeCommandResult {
+  state: Uint8Array;
+  inverse: OfficeCommand[];
+  targets: OfficeTarget[];
+}
+export type OfficeEditCode =
+  | "invalid_input"
+  | "stale_target"
+  | "unavailable_target"
+  | "unsupported_operation";
+/** The code prefixes the message so it survives worker boundaries that carry strings only. */
+export class OfficeEditError extends Error {
+  constructor(
+    readonly code: OfficeEditCode,
+    message: string
+  ) {
+    super(`${code}: ${message}`);
+  }
+}
 interface Entry {
   id: string;
   kind: NetEffect["kind"];
@@ -60,6 +109,9 @@ interface Entry {
 interface Session {
   state(): Uint8Array;
   entries(): Entry[];
+  editable(): OfficeEntry[];
+  apply(command: OfficeCommand): { id: string; inverse: OfficeCommand };
+  locate(id: string): OfficeTarget;
   exportBytes(determinism: ExportDeterminism): Promise<Uint8Array>;
   dispose(): void;
 }
@@ -486,6 +538,206 @@ function pptxEntries(doc: PptxDocument): Entry[] {
   });
   return entries;
 }
+function checkReplacement(
+  current: string,
+  command: OfficeCommand,
+  format: string
+): string {
+  if (command.type !== "replace_text")
+    throw new OfficeEditError(
+      "unsupported_operation",
+      `${format} sources support replace_text only`
+    );
+  if (command.text.includes("\n"))
+    throw new OfficeEditError(
+      "invalid_input",
+      "replacement text must stay within one paragraph"
+    );
+  if (command.expectedText !== current)
+    throw new OfficeEditError(
+      "stale_target",
+      "the paragraph text differs from expected_text"
+    );
+  return command.text;
+}
+interface DocxParagraph {
+  paraId: string;
+  start: number;
+  length: number;
+  text: string;
+  plain: boolean;
+}
+function docxParagraphs(
+  session: YrsSession,
+  storyId: string
+): DocxParagraph[] {
+  let segments;
+  try {
+    segments = session.storySegments(storyId);
+  } catch {
+    throw new OfficeEditError("unavailable_target", "unknown DOCX story");
+  }
+  const paragraphs: DocxParagraph[] = [];
+  let start = 0;
+  let cursor = 0;
+  let text = "";
+  let plain = true;
+  for (const segment of segments) {
+    if (segment.kind === "text") {
+      if (segment.attributes.del) plain = false;
+      text += segment.text;
+      cursor += segment.text.length;
+      continue;
+    }
+    if (segment.kind === "pilcrow") {
+      paragraphs.push({
+        paraId: segment.paraId,
+        start,
+        length: cursor - start,
+        text,
+        plain,
+      });
+      cursor++;
+      start = cursor;
+      text = "";
+      plain = true;
+      continue;
+    }
+    plain = false;
+    cursor++;
+  }
+  return paragraphs;
+}
+function docxTarget(id: string): { story: string; paraId: string } {
+  const marker = id.lastIndexOf(":paragraph:");
+  if (marker <= 0)
+    throw new OfficeEditError(
+      "unavailable_target",
+      "target_id is not a DOCX paragraph"
+    );
+  return {
+    story: id.slice(0, marker),
+    paraId: id.slice(marker + ":paragraph:".length),
+  };
+}
+function docxParagraph(session: YrsSession, id: string) {
+  const { story, paraId } = docxTarget(id);
+  const paragraph = docxParagraphs(session, story).find(
+    (item) => item.paraId === paraId
+  );
+  if (!paragraph)
+    throw new OfficeEditError(
+      "unavailable_target",
+      "the paragraph is no longer in the document"
+    );
+  return { story, paragraph };
+}
+interface PptxParagraph {
+  id: string;
+  start: number;
+  length: number;
+  text: string;
+  style: StorySnapshot["paragraphs"][number]["runs"][number]["style"];
+}
+function pptxStoryParagraphs(
+  doc: PptxDocument,
+  storyId: string
+): PptxParagraph[] {
+  const story = JSON.parse(
+    doc.storyJson(JSON.stringify({ storyId }))
+  ) as StorySnapshot;
+  let cursor = 0;
+  return story.paragraphs.map((paragraph) => {
+    const text = paragraph.runs.map((run) => run.text).join("");
+    const item = {
+      id: paragraph.id,
+      start: cursor,
+      length: text.length,
+      text,
+      style: paragraph.runs[0]?.style ?? {},
+    };
+    cursor += text.length + 1;
+    return item;
+  });
+}
+function pptxTextEntries(
+  doc: PptxDocument
+): Array<OfficeEntry & { storyId: string }> {
+  const deck = JSON.parse(doc.snapshotJson()) as DeckSnapshot;
+  const entries: Array<OfficeEntry & { storyId: string }> = [];
+  deck.slides.forEach((slide, slideIndex) => {
+    const visit = (shapes: ShapeSnapshot[]): void =>
+      shapes.forEach((shape) => {
+        for (const story of shape.textStories)
+          story.paragraphs.forEach((paragraph, index) => {
+            entries.push({
+              id: paragraph.id,
+              label: `Slide ${slideIndex + 1}, ${shape.name}`,
+              value: paragraph.runs.map((run) => run.text).join(""),
+              position: `${story.id}:${index}`,
+              storyId: story.id,
+            });
+          });
+        visit(shape.children);
+      });
+    visit(slide.shapes);
+  });
+  return entries;
+}
+function pptxParagraph(doc: PptxDocument, id: string) {
+  const entry = pptxTextEntries(doc).find((item) => item.id === id);
+  if (!entry)
+    throw new OfficeEditError(
+      "unavailable_target",
+      "the paragraph is no longer in the deck"
+    );
+  const paragraph = pptxStoryParagraphs(doc, entry.storyId).find(
+    (item) => item.id === id
+  );
+  if (!paragraph)
+    throw new OfficeEditError(
+      "unavailable_target",
+      "the paragraph is no longer in the deck"
+    );
+  return { storyId: entry.storyId, paragraph };
+}
+function xlsxCellValue(cell: XlsxProjection["sheets"][number]["cells"][number]) {
+  if (cell.formula !== null) return `=${cell.formula}`;
+  if (cell.value.kind === "empty" || cell.value.value === undefined) return "";
+  return typeof cell.value.value === "string"
+    ? cell.value.value
+    : canonical(cell.value.value);
+}
+function xlsxProjection(doc: XlsxDocument): XlsxProjection {
+  return JSON.parse(doc.checkpointProjectionJson()) as XlsxProjection;
+}
+function xlsxSheet(
+  projection: XlsxProjection,
+  sheet: string
+): { index: number; sheet: XlsxProjection["sheets"][number] } {
+  const wanted = sheet.trim().toLowerCase();
+  const index = projection.sheets.findIndex(
+    (item, position) =>
+      item.id === sheet ||
+      item.name.toLowerCase() === wanted ||
+      String(position) === wanted
+  );
+  if (index < 0)
+    throw new OfficeEditError("unavailable_target", "unknown sheet");
+  return { index, sheet: projection.sheets[index] };
+}
+function a1(cell: string): { row: number; col: number; address: string } {
+  const match = /^\$?([A-Za-z]{1,3})\$?(\d{1,7})$/.exec(cell.trim());
+  if (!match)
+    throw new OfficeEditError("invalid_input", "cell must be an A1 address");
+  const letters = match[1].toUpperCase();
+  let col = 0;
+  for (const letter of letters) col = col * 26 + letter.charCodeAt(0) - 64;
+  const row = Number(match[2]);
+  if (row < 1)
+    throw new OfficeEditError("invalid_input", "cell must be an A1 address");
+  return { row: row - 1, col: col - 1, address: `${letters}${row}` };
+}
 async function open(
   format: OfficeFormat,
   baseBytes: Uint8Array,
@@ -530,6 +782,68 @@ async function open(
           project();
           return docxEntries(session, stories, embeds);
         },
+        editable: () => {
+          project();
+          return [...stories].flatMap((storyId) =>
+            docxParagraphs(session, storyId)
+              .map((paragraph, index) => ({
+                id: `${storyId}:paragraph:${paragraph.paraId}`,
+                label: `${storyId}, paragraph ${index + 1}`,
+                value: paragraph.text,
+                position: `${storyId}:${index}`,
+                plain: paragraph.plain,
+              }))
+              .filter((entry) => entry.plain)
+              .map(({ plain: _plain, ...entry }) => entry)
+          );
+        },
+        apply: (command) => {
+          if (command.type !== "replace_text")
+            throw new OfficeEditError(
+              "unsupported_operation",
+              "DOCX sources support replace_text only"
+            );
+          const { story, paragraph } = docxParagraph(
+            session,
+            command.targetId
+          );
+          if (!paragraph.plain)
+            throw new OfficeEditError(
+              "unavailable_target",
+              "the paragraph holds objects or tracked changes"
+            );
+          const text = checkReplacement(paragraph.text, command, "DOCX");
+          const paraId = paragraph.paraId;
+          if (text)
+            session.insertText(
+              { story, paraId, offset: paragraph.length },
+              text
+            );
+          if (paragraph.length)
+            session.deleteRange({
+              story,
+              start: { paraId, offset: 0 },
+              end: { paraId, offset: paragraph.length },
+            });
+          projected = undefined;
+          return {
+            id: command.targetId,
+            inverse: {
+              type: "replace_text",
+              targetId: command.targetId,
+              expectedText: text,
+              text: paragraph.text,
+            },
+          };
+        },
+        locate: (id) => {
+          const { story, paragraph } = docxParagraph(session, id);
+          return {
+            id,
+            path: ["stories", story],
+            range: [paragraph.start, paragraph.start + paragraph.length],
+          };
+        },
         exportBytes: async (determinism) =>
           new Uint8Array(
             (
@@ -553,9 +867,81 @@ async function open(
     const doc = XlsxDocument.openCollaborative(baseBytes, clientId);
     try {
       if (checkpoint) doc.applyUpdateJson(checkpoint.state);
+      const paths = new Map<string, string[]>();
+      const cellAt = (
+        sheet: XlsxProjection["sheets"][number],
+        address: string
+      ) => sheet.cells.find((cell) => cell.address === address);
       return {
         state: () => doc.encodeStateAsUpdate(),
         entries: () => xlsxEntries(doc),
+        editable: () =>
+          xlsxProjection(doc).sheets.flatMap((sheet) =>
+            sheet.cells.map((cell) => ({
+              id: cell.id,
+              label: `${sheet.name}!${cell.address}`,
+              value: xlsxCellValue(cell),
+              position: `${sheet.id}:${cell.address}`,
+            }))
+          ),
+        apply: (command) => {
+          if (command.type !== "set_cell")
+            throw new OfficeEditError(
+              "unsupported_operation",
+              "XLSX sources support set_cell only"
+            );
+          const { index, sheet } = xlsxSheet(xlsxProjection(doc), command.sheet);
+          const { row, col, address } = a1(command.cell);
+          const at = JSON.stringify({ sheet: index, row, col });
+          const readInput = () =>
+            (JSON.parse(doc.cellJson(at)) as { input: string }).input;
+          const before = cellAt(sheet, address);
+          const input = readInput();
+          if (
+            command.expectedValue !== input &&
+            command.expectedValue !== (before ? xlsxCellValue(before) : "")
+          )
+            throw new OfficeEditError(
+              "stale_target",
+              "the cell differs from expected_value"
+            );
+          if (!before && !command.value)
+            throw new OfficeEditError("invalid_input", "the cell is already empty");
+          const result = JSON.parse(
+            doc.editCellJson(
+              JSON.stringify({ sheet: index, row, col, input: command.value })
+            )
+          ) as { applied?: boolean };
+          if (result.applied === false)
+            throw new OfficeEditError(
+              "invalid_input",
+              "the workbook rejected this cell value"
+            );
+          const cell =
+            before ?? cellAt(xlsxSheet(xlsxProjection(doc), sheet.id).sheet, address);
+          if (!cell) throw new Error("edited cell is missing from the projection");
+          paths.set(cell.id, [
+            "xlsx:sheets",
+            sheet.id,
+            "contents",
+            cell.id.slice(sheet.id.length + 1),
+          ]);
+          return {
+            id: cell.id,
+            inverse: {
+              type: "set_cell",
+              sheet: sheet.id,
+              cell: address,
+              expectedValue: readInput(),
+              value: input,
+            },
+          };
+        },
+        locate: (id) => {
+          const path = paths.get(id);
+          if (!path) throw new Error("cell was not edited in this session");
+          return { id, path };
+        },
         exportBytes: async (determinism) =>
           doc.saveBytesAt(Date.parse(determinism.now) / 86_400_000 + 25569),
         dispose: () => doc.free(),
@@ -575,6 +961,43 @@ async function open(
   return {
     state: () => doc.encodeStateAsUpdate(),
     entries: () => pptxEntries(doc),
+    editable: () =>
+      pptxTextEntries(doc).map(({ storyId: _storyId, ...entry }) => entry),
+    apply: (command) => {
+      if (command.type !== "replace_text")
+        throw new OfficeEditError(
+          "unsupported_operation",
+          "PPTX sources support replace_text only"
+        );
+      const { storyId, paragraph } = pptxParagraph(doc, command.targetId);
+      const text = checkReplacement(paragraph.text, command, "PPTX");
+      const end = paragraph.start + paragraph.length;
+      if (text)
+        doc.insertTextJson(
+          JSON.stringify({ storyId, index: end, text, style: paragraph.style })
+        );
+      if (paragraph.length)
+        doc.deleteTextJson(
+          JSON.stringify({ storyId, start: paragraph.start, end })
+        );
+      return {
+        id: command.targetId,
+        inverse: {
+          type: "replace_text",
+          targetId: command.targetId,
+          expectedText: text,
+          text: paragraph.text,
+        },
+      };
+    },
+    locate: (id) => {
+      const { storyId, paragraph } = pptxParagraph(doc, id);
+      return {
+        id,
+        path: ["pptx:stories", storyId],
+        range: [paragraph.start, paragraph.start + paragraph.length],
+      };
+    },
     exportBytes: async () => doc.saveBytes(),
     dispose: () => doc.free(),
   };
@@ -690,6 +1113,43 @@ export async function exportOffice(
   const session = await open(checkpoint.format, baseBytes, checkpoint);
   try {
     return await session.exportBytes(determinism);
+  } finally {
+    session.dispose();
+  }
+}
+export async function inspectOffice(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint
+): Promise<OfficeEntry[]> {
+  const session = await open(checkpoint.format, baseBytes, checkpoint);
+  try {
+    return session.editable();
+  } finally {
+    session.dispose();
+  }
+}
+/** Applies content commands in order; the inverse list is returned in undo order and targets describe the post-edit state. */
+export async function applyOfficeCommands(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+  commands: OfficeCommand[]
+): Promise<OfficeCommandResult> {
+  if (!Array.isArray(commands) || !commands.length)
+    throw new OfficeEditError("invalid_input", "no commands");
+  const session = await open(checkpoint.format, baseBytes, checkpoint);
+  try {
+    const inverse: OfficeCommand[] = [];
+    const ids = new Set<string>();
+    for (const command of commands) {
+      const applied = session.apply(command);
+      inverse.unshift(applied.inverse);
+      ids.add(applied.id);
+    }
+    return {
+      state: session.state(),
+      inverse,
+      targets: [...ids].map((id) => session.locate(id)),
+    };
   } finally {
     session.dispose();
   }

@@ -1,9 +1,11 @@
 import { test, expect } from "bun:test";
 import { readFile, readdir } from "node:fs/promises";
 import {
+  applyOfficeCommands,
   seedOffice,
   compare,
   exportOffice,
+  inspectOffice,
   resolveAsset,
 } from "./office-checkpoint";
 import { createYrsSession } from "../packages/docx/src/yrs";
@@ -566,4 +568,138 @@ test("DOCX table range deletion removes reachable text and image evidence while 
       doc.destroy();
     }
   }
+});
+
+test("agent edits replace one DOCX paragraph, locate it for guards and undo through the inverse", async () => {
+  const bytes = await fixture("betteroffice-demo.docx");
+  const before = await seedOffice("docx", bytes);
+  const entries = await inspectOffice(bytes, before);
+  const target = entries.find((entry) => entry.value.length > 0)!;
+  expect(target.id).toContain(":paragraph:");
+  const edit = await applyOfficeCommands(bytes, before, [
+    {
+      type: "replace_text",
+      targetId: target.id,
+      expectedText: target.value,
+      text: "Edited by the agent",
+    },
+  ]);
+  const after = { ...before, state: edit.state };
+  expect(edit.targets).toEqual([
+    {
+      id: target.id,
+      path: ["stories", target.id.split(":paragraph:")[0]],
+      range: [expect.any(Number), expect.any(Number)],
+    },
+  ]);
+  expect(edit.targets[0].range![1] - edit.targets[0].range![0]).toBe(
+    "Edited by the agent".length
+  );
+  const effects = await compare(bytes, before, after);
+  expect(effects.find((effect) => effect.id === target.id)).toMatchObject({
+    operation: "replace",
+    before: target.value,
+    after: "Edited by the agent",
+  });
+  await expect(
+    applyOfficeCommands(bytes, after, [
+      {
+        type: "replace_text",
+        targetId: target.id,
+        expectedText: target.value,
+        text: "stale",
+      },
+    ])
+  ).rejects.toThrow("stale_target");
+  const undone = await applyOfficeCommands(bytes, after, edit.inverse);
+  expect(
+    (await inspectOffice(bytes, { ...before, state: undone.state })).find(
+      (entry) => entry.id === target.id
+    )?.value
+  ).toBe(target.value);
+});
+
+test("agent edits set XLSX cells by sheet name and address and clear them through the inverse", async () => {
+  const bytes = await fixture("sample.xlsx");
+  const before = await seedOffice("xlsx", bytes);
+  const entries = await inspectOffice(bytes, before);
+  const sheetName = entries[0].label.split("!")[0];
+  const edit = await applyOfficeCommands(bytes, before, [
+    {
+      type: "set_cell",
+      sheet: sheetName,
+      cell: "ZZ100",
+      expectedValue: "",
+      value: "agent value",
+    },
+  ]);
+  const after = { ...before, state: edit.state };
+  const added = (await inspectOffice(bytes, after)).find(
+    (entry) => entry.label === `${sheetName}!ZZ100`
+  )!;
+  expect(added.value).toBe("agent value");
+  expect(edit.targets).toEqual([
+    { id: added.id, path: ["xlsx:sheets", expect.any(String), "contents", expect.any(String)] },
+  ]);
+  expect(edit.targets[0].path[1] + ":" + edit.targets[0].path[3]).toBe(added.id);
+  expect(edit.inverse).toEqual([
+    {
+      type: "set_cell",
+      sheet: edit.targets[0].path[1],
+      cell: "ZZ100",
+      expectedValue: "agent value",
+      value: "",
+    },
+  ]);
+  const undone = await applyOfficeCommands(bytes, after, edit.inverse);
+  expect(
+    await compare(bytes, before, { ...before, state: undone.state })
+  ).toEqual([]);
+  await expect(
+    applyOfficeCommands(bytes, before, [
+      { type: "set_cell", sheet: "Nope", cell: "A1", expectedValue: "", value: "x" },
+    ])
+  ).rejects.toThrow("unavailable_target");
+});
+
+test("agent edits replace one PPTX paragraph and keep the paragraph identity for guards", async () => {
+  const bytes = await fixture("betteroffice-demo.pptx");
+  const before = await seedOffice("pptx", bytes);
+  const target = (await inspectOffice(bytes, before)).find(
+    (entry) => entry.value.length > 0
+  )!;
+  const edit = await applyOfficeCommands(bytes, before, [
+    {
+      type: "replace_text",
+      targetId: target.id,
+      expectedText: target.value,
+      text: "Agent headline",
+    },
+  ]);
+  const after = { ...before, state: edit.state };
+  expect(edit.targets[0]).toEqual({
+    id: target.id,
+    path: [
+      "pptx:stories",
+      target.position.slice(0, target.position.lastIndexOf(":")),
+    ],
+    range: [expect.any(Number), expect.any(Number)],
+  });
+  expect(
+    (await compare(bytes, before, after)).find((effect) => effect.id === target.id)
+  ).toMatchObject({ operation: "replace", after: "Agent headline" });
+  const undone = await applyOfficeCommands(bytes, after, edit.inverse);
+  expect(
+    await compare(bytes, before, { ...before, state: undone.state })
+  ).toEqual([]);
+  await expect(
+    applyOfficeCommands(bytes, before, [
+      {
+        type: "replace_text",
+        targetId: target.id,
+        expectedText: target.value,
+        text: "two\nparagraphs",
+      },
+    ])
+  ).rejects.toThrow("invalid_input");
 });
