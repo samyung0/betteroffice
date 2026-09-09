@@ -99,4 +99,9 @@ export declare function applyOfficeCommands(
   checkpoint: OfficeCheckpoint,
   commands: OfficeCommand[]
 ): Promise<OfficeCommandResult>;
+export declare function locateOfficeTargets(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+  ids: string[]
+): Promise<OfficeTarget[]>;
 export declare function runtimeManifest(): Promise<Record<string, string>>;

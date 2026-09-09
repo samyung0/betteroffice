@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { readFile, readdir } from "node:fs/promises";
 import {
   applyOfficeCommands,
+  locateOfficeTargets,
   seedOffice,
   compare,
   exportOffice,
@@ -702,4 +703,56 @@ test("agent edits replace one PPTX paragraph and keep the paragraph identity for
       },
     ])
   ).rejects.toThrow("invalid_input");
+});
+
+test("agent edit targets re-locate by stable id after earlier paragraphs move and count astral characters in UTF-16", async () => {
+  const bytes = await fixture("betteroffice-demo.docx");
+  const before = await seedOffice("docx", bytes);
+  const entries = (await inspectOffice(bytes, before)).filter(
+    (entry) => entry.value.length > 0
+  );
+  const [first, second] = entries;
+  const edited = await applyOfficeCommands(bytes, before, [
+    {
+      type: "replace_text",
+      targetId: second.id,
+      expectedText: second.value,
+      text: "Emoji 😀 paragraph",
+    },
+  ]);
+  const shifted = await applyOfficeCommands(
+    bytes,
+    { ...before, state: edited.state },
+    [
+      {
+        type: "replace_text",
+        targetId: first.id,
+        expectedText: first.value,
+        text: `${first.value} plus a longer first paragraph`,
+      },
+    ]
+  );
+  const checkpoint = { ...before, state: shifted.state };
+  const [located] = await locateOfficeTargets(bytes, checkpoint, [second.id]);
+  const offset = "plus a longer first paragraph".length + 1;
+  expect(located.range).toEqual([
+    edited.targets[0].range![0] + offset,
+    edited.targets[0].range![1] + offset,
+  ]);
+  expect(located.range![1] - located.range![0]).toBe("Emoji 😀 paragraph".length);
+  const undone = await applyOfficeCommands(bytes, checkpoint, edited.inverse);
+  expect(
+    (await inspectOffice(bytes, { ...before, state: undone.state })).find(
+      (entry) => entry.id === second.id
+    )?.value
+  ).toBe(second.value);
+  await expect(
+    locateOfficeTargets(bytes, checkpoint, ["body:paragraph:missing"])
+  ).rejects.toThrow("unavailable_target");
+  const workbook = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", workbook);
+  const [cell] = await inspectOffice(workbook, seeded);
+  const [cellTarget] = await locateOfficeTargets(workbook, seeded, [cell.id]);
+  expect(cellTarget.path[0]).toBe("xlsx:sheets");
+  expect(`${cellTarget.path[1]}:${cellTarget.path[3]}`).toBe(cell.id);
 });

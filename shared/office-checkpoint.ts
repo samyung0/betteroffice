@@ -867,7 +867,6 @@ async function open(
     const doc = XlsxDocument.openCollaborative(baseBytes, clientId);
     try {
       if (checkpoint) doc.applyUpdateJson(checkpoint.state);
-      const paths = new Map<string, string[]>();
       const cellAt = (
         sheet: XlsxProjection["sheets"][number],
         address: string
@@ -920,12 +919,6 @@ async function open(
           const cell =
             before ?? cellAt(xlsxSheet(xlsxProjection(doc), sheet.id).sheet, address);
           if (!cell) throw new Error("edited cell is missing from the projection");
-          paths.set(cell.id, [
-            "xlsx:sheets",
-            sheet.id,
-            "contents",
-            cell.id.slice(sheet.id.length + 1),
-          ]);
           return {
             id: cell.id,
             inverse: {
@@ -938,9 +931,21 @@ async function open(
           };
         },
         locate: (id) => {
-          const path = paths.get(id);
-          if (!path) throw new Error("cell was not edited in this session");
-          return { id, path };
+          const marker = id.indexOf(":[");
+          if (marker <= 0)
+            throw new OfficeEditError(
+              "unavailable_target",
+              "target_id is not an XLSX cell"
+            );
+          return {
+            id,
+            path: [
+              "xlsx:sheets",
+              id.slice(0, marker),
+              "contents",
+              id.slice(marker + 1),
+            ],
+          };
         },
         exportBytes: async (determinism) =>
           doc.saveBytesAt(Date.parse(determinism.now) / 86_400_000 + 25569),
@@ -1150,6 +1155,18 @@ export async function applyOfficeCommands(
       inverse,
       targets: [...ids].map((id) => session.locate(id)),
     };
+  } finally {
+    session.dispose();
+  }
+}
+export async function locateOfficeTargets(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+  ids: string[]
+): Promise<OfficeTarget[]> {
+  const session = await open(checkpoint.format, baseBytes, checkpoint);
+  try {
+    return ids.map((id) => session.locate(id));
   } finally {
     session.dispose();
   }
