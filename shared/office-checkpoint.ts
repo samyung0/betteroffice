@@ -937,14 +937,15 @@ async function open(
               "unavailable_target",
               "target_id is not an XLSX cell"
             );
+          const sheetId = id.slice(0, marker);
+          if (!xlsxProjection(doc).sheets.some((item) => item.id === sheetId))
+            throw new OfficeEditError(
+              "unavailable_target",
+              "the sheet is no longer in the workbook"
+            );
           return {
             id,
-            path: [
-              "xlsx:sheets",
-              id.slice(0, marker),
-              "contents",
-              id.slice(marker + 1),
-            ],
+            path: ["xlsx:sheets", sheetId, "contents", id.slice(marker + 1)],
           };
         },
         exportBytes: async (determinism) =>

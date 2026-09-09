@@ -756,3 +756,59 @@ test("agent edit targets re-locate by stable id after earlier paragraphs move an
   expect(cellTarget.path[0]).toBe("xlsx:sheets");
   expect(`${cellTarget.path[1]}:${cellTarget.path[3]}`).toBe(cell.id);
 });
+
+test("PPTX and XLSX agent edits count astral characters in UTF-16, and a cleared cell still locates while a missing sheet does not", async () => {
+  const deck = await fixture("betteroffice-demo.pptx");
+  const seededDeck = await seedOffice("pptx", deck);
+  const paragraph = (await inspectOffice(deck, seededDeck)).find(
+    (entry) => entry.value.length > 0
+  )!;
+  const edited = await applyOfficeCommands(deck, seededDeck, [
+    {
+      type: "replace_text",
+      targetId: paragraph.id,
+      expectedText: paragraph.value,
+      text: "Slide 😀 title",
+    },
+  ]);
+  const [located] = await locateOfficeTargets(
+    deck,
+    { ...seededDeck, state: edited.state },
+    [paragraph.id]
+  );
+  expect(located.range![1] - located.range![0]).toBe("Slide 😀 title".length);
+  expect(
+    (await inspectOffice(deck, { ...seededDeck, state: edited.state })).find(
+      (entry) => entry.id === paragraph.id
+    )?.value
+  ).toBe("Slide 😀 title");
+
+  const workbook = await fixture("sample.xlsx");
+  const seededBook = await seedOffice("xlsx", workbook);
+  const [cell] = await inspectOffice(workbook, seededBook);
+  const sheetName = cell.label.split("!")[0];
+  const written = await applyOfficeCommands(workbook, seededBook, [
+    {
+      type: "set_cell",
+      sheet: sheetName,
+      cell: "ZZ200",
+      expectedValue: "",
+      value: "cell 😀 value",
+    },
+  ]);
+  const withCell = { ...seededBook, state: written.state };
+  const added = (await inspectOffice(workbook, withCell)).find(
+    (entry) => entry.label === `${sheetName}!ZZ200`
+  )!;
+  expect(added.value).toBe("cell 😀 value");
+  await expect(
+    locateOfficeTargets(workbook, withCell, [added.id])
+  ).resolves.toHaveLength(1);
+  const cleared = await applyOfficeCommands(workbook, withCell, written.inverse);
+  await expect(
+    locateOfficeTargets(workbook, { ...seededBook, state: cleared.state }, [added.id])
+  ).resolves.toHaveLength(1);
+  await expect(
+    locateOfficeTargets(workbook, withCell, [`missing-sheet:${added.id.slice(added.id.indexOf(":[") + 1)}`])
+  ).rejects.toThrow("unavailable_target");
+});
