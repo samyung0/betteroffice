@@ -1,3 +1,5 @@
+pub(crate) mod rebase;
+
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -157,6 +159,7 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
+    source_sha: Option<String>,
     preserved: PreservedSheetState,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
@@ -322,6 +325,7 @@ impl Workbook {
                 .collect(),
             model,
             source_package,
+            source_sha: source_sha.map(str::to_owned),
             preserved,
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
@@ -374,6 +378,10 @@ impl Workbook {
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
         validate_collaboration_size(update)?;
+        let before = self.model.clone();
+        if self.restore_rebase(update, options)? {
+            return Ok(self.remote_mutation_result(&before, true));
+        }
         if let Some(index) = self
             .pending_remote_updates
             .iter()
@@ -381,7 +389,6 @@ impl Workbook {
         {
             self.pending_remote_updates.remove(index);
         }
-        let before = self.model.clone();
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }

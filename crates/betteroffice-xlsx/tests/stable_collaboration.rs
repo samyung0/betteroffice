@@ -801,3 +801,278 @@ fn reordered_structural_update_after_undo_returns_and_restores() {
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("reordered update must complete");
 }
+
+fn reopen_rebased(source: &[u8], state: &[u8], client: u64) -> Workbook {
+    let mut book = Workbook::open_collaborative(source, client).unwrap();
+    book.apply_update_v1(state, CalculationOptions::default())
+        .unwrap();
+    book
+}
+
+#[test]
+fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source() {
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 7011).unwrap();
+    apply(
+        &mut book,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 2,
+        },
+    );
+    apply(
+        &mut book,
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    );
+    book.edit_cell(SheetId(0), at("A2"), "same", CalculationOptions::default())
+        .unwrap();
+    book.edit_cell(SheetId(0), at("A3"), "same", CalculationOptions::default())
+        .unwrap();
+    let captured = book.encode_state_as_update_v1();
+    let published = book.save().unwrap();
+    apply(
+        &mut book,
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    );
+    apply(
+        &mut book,
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    );
+    apply(
+        &mut book,
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".into(),
+        },
+    );
+    apply(
+        &mut book,
+        Op::AddSheet {
+            index: 0,
+            name: "New".into(),
+        },
+    );
+    book.edit_cell(SheetId(1), at("C2"), "=B3", CalculationOptions::default())
+        .unwrap();
+    let expected = Workbook::open(&book.save().unwrap()).unwrap().into_model();
+    let result = Workbook::rebase_checkpoint(
+        &source,
+        &captured,
+        &book.encode_state_as_update_v1(),
+        &published,
+        7012,
+    )
+    .unwrap();
+    drop(source);
+    let mut reopened = reopen_rebased(&published, &result.state, 7013);
+    let indexed = reopen_rebased(&published, &result.indexed_state, 7014);
+    assert_eq!(reopened.model(), &expected);
+    assert_eq!(
+        indexed.checkpoint_sheet_ids().unwrap(),
+        vec!["sheet:1", "sheet:2"]
+    );
+    assert_eq!(
+        indexed
+            .checkpoint_cell_identities([(SheetId(0), at("A3"))])
+            .unwrap()[0],
+        reopened.cell_identity(SheetId(1), at("B2")).unwrap()
+    );
+    assert_ne!(
+        indexed
+            .checkpoint_cell_identities([(SheetId(0), at("A2"))])
+            .unwrap()[0],
+        reopened.cell_identity(SheetId(1), at("B2")).unwrap()
+    );
+    assert_eq!(
+        reopened.model().sheets[2]
+            .cell(at("A1"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("'Renamed'!B3")
+    );
+    apply(
+        &mut reopened,
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 0,
+            count: 1,
+        },
+    );
+    assert_eq!(
+        reopened.model().sheets[2]
+            .cell(at("A1"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("'Renamed'!B4")
+    );
+    let peer = reopen_rebased(&published, &reopened.encode_state_as_update_v1(), 7015);
+    assert_eq!(peer.model(), reopened.model());
+    assert_eq!(
+        Workbook::open(&peer.save().unwrap()).unwrap().model(),
+        reopened.model()
+    );
+}
+
+#[test]
+fn second_rebase_releases_previous_overlay_and_preserves_later_edits() {
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 7021).unwrap();
+    let captured = book.encode_state_as_update_v1();
+    let published = book.save().unwrap();
+    book.edit_cell(SheetId(0), at("B1"), "first", CalculationOptions::default())
+        .unwrap();
+    let first = Workbook::rebase_checkpoint(
+        &source,
+        &captured,
+        &book.encode_state_as_update_v1(),
+        &published,
+        7022,
+    )
+    .unwrap();
+    let mut book = reopen_rebased(&published, &first.state, 7023);
+    let captured = book.encode_state_as_update_v1();
+    let next_published = book.save().unwrap();
+    apply(
+        &mut book,
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    );
+    book.edit_cell(
+        SheetId(0),
+        at("A2"),
+        "second",
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let second = Workbook::rebase_checkpoint(
+        &published,
+        &captured,
+        &book.encode_state_as_update_v1(),
+        &next_published,
+        7024,
+    )
+    .unwrap();
+    let mut rebased = reopen_rebased(&next_published, &second.state, 7025);
+    assert_eq!(rebased.model(), book.model());
+    let mut wrong_source = Workbook::open_collaborative(&source, 7026).unwrap();
+    assert!(
+        wrong_source
+            .apply_update_v1(&second.state, CalculationOptions::default())
+            .is_err()
+    );
+    let mut peer = reopen_rebased(&next_published, &second.state, 7027);
+    rebased
+        .edit_cell(SheetId(0), at("C3"), "left", CalculationOptions::default())
+        .unwrap();
+    peer.edit_cell(SheetId(0), at("D3"), "right", CalculationOptions::default())
+        .unwrap();
+    sync(&mut rebased, &mut peer);
+}
+
+#[test]
+fn rebase_overlay_is_sparse_binary_and_immutable_after_bootstrap() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, Out, ReadTxn, StateVector, Transact, WriteTxn};
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 7031).unwrap();
+    let captured = book.encode_state_as_update_v1();
+    let published = book.save().unwrap();
+    book.edit_cell(SheetId(0), at("C5"), "saved", CalculationOptions::default())
+        .unwrap();
+    book.recalculate_all(CalculationOptions::default());
+    let current = book.save().unwrap();
+    let result = Workbook::rebase_checkpoint(
+        &source,
+        &captured,
+        &book.encode_state_as_update_v1(),
+        &published,
+        7032,
+    )
+    .unwrap();
+    let snapshot = Doc::with_client_id(7033);
+    snapshot
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&result.state).unwrap())
+        .unwrap();
+    let before = ooxml_opc::unzip_parts(&published)
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let after = ooxml_opc::unzip_parts(&current)
+        .unwrap()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    {
+        let txn = snapshot.transact();
+        let root = txn.get_map("xlsx:rebase").unwrap();
+        let mut copied = 0;
+        for (key, value) in root.iter(&txn) {
+            if key == "$manifest" {
+                continue;
+            }
+            let path = key.strip_prefix("part:").unwrap();
+            let Out::Any(yrs::Any::Buffer(bytes)) = value else {
+                panic!("part was not stored as bytes")
+            };
+            assert_eq!(bytes.as_ref(), after[path]);
+            assert!(
+                before.get(path).is_none_or(|old| old != &after[path]),
+                "copied an unchanged part"
+            );
+            copied += 1;
+        }
+        assert_eq!(
+            copied,
+            after
+                .iter()
+                .filter(|(path, bytes)| before.get(*path).is_none_or(|old| old != *bytes))
+                .count()
+        );
+    }
+    let mut target = reopen_rebased(&published, &result.state, 7034);
+    let previous = target.encode_state_as_update_v1();
+    {
+        let mut txn = snapshot.transact_mut();
+        let root = txn.get_or_insert_map("xlsx:rebase");
+        root.insert(
+            &mut txn,
+            "part:xl/worksheets/sheet1.xml",
+            yrs::Any::Buffer(vec![0].into()),
+        );
+    }
+    let corrupt = snapshot
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    assert!(
+        target
+            .apply_update_v1(&corrupt, CalculationOptions::default())
+            .is_err()
+    );
+    assert_eq!(target.encode_state_as_update_v1(), previous);
+    assert!(
+        target
+            .apply_update_v1(
+                &book.encode_state_as_update_v1(),
+                CalculationOptions::default()
+            )
+            .is_err()
+    );
+}

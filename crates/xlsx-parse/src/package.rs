@@ -34,6 +34,13 @@ pub struct PreservedPackage {
 }
 
 impl PreservedPackage {
+    pub fn parts(&self) -> &[(String, Vec<u8>)] {
+        &self.parts
+    }
+    pub fn model(&self) -> &Workbook {
+        &self.original_workbook
+    }
+
     pub(crate) fn capture(
         parts: &[(String, Vec<u8>)],
         workbook: &Workbook,

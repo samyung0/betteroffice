@@ -774,17 +774,19 @@ pub(super) fn materialize<T: ReadTxn>(
     txn: &T,
     base: &WorkbookBase,
 ) -> Result<(WorkbookModel, WorkbookStructure), String> {
-    require_root_keys(
-        txn,
-        &[
-            CELL_FORMATS,
-            META,
-            SHEET_ORDER,
-            SHEETS,
-            CATALOG,
-            DEFINED_NAMES,
-        ],
-    )?;
+    let mut roots = vec![
+        CELL_FORMATS,
+        META,
+        SHEET_ORDER,
+        SHEETS,
+        CATALOG,
+        DEFINED_NAMES,
+    ];
+    if let Some(data) = &base.rebase {
+        roots.push(crate::workbook::rebase::ROOT);
+        data.validate(txn)?;
+    }
+    require_root_keys(txn, &roots)?;
     let meta = map(txn, META)?;
     let fingerprint = meta
         .get(txn, BASE_FINGERPRINT)
@@ -1426,6 +1428,94 @@ pub(super) fn cell_identities(
         .map(|(sheet, at)| {
             let key = context.sheet(sheet)?;
             Ok(format!("{key}:{}", context.key(key, at)?))
+        })
+        .collect()
+}
+
+pub(super) fn rebase_aliases(
+    before: &Doc,
+    latest: &Doc,
+) -> Result<Vec<crate::workbook::rebase::SheetAlias>, String> {
+    use crate::workbook::rebase::{AliasSpan, SheetAlias};
+    let before = context(&before.transact())?;
+    let latest = context(&latest.transact())?;
+    fn spans(old: &Axis, current: Option<&Axis>) -> Vec<AliasSpan> {
+        let mut targets = BTreeMap::<&str, Vec<(u64, u64, u64)>>::new();
+        let mut position = 0;
+        for span in current.into_iter().flat_map(|axis| &axis.spans) {
+            targets.entry(&span.run).or_default().push((
+                span.start,
+                span.start + span.len,
+                position,
+            ));
+            position += span.len;
+        }
+        for spans in targets.values_mut() {
+            spans.sort_by_key(|span| span.0);
+        }
+        let mut result: Vec<AliasSpan> = Vec::new();
+        let mut append = |start: u64, len: u64, target: Option<u64>| {
+            if let Some(last) = result.last_mut() {
+                if last.start + last.len == start
+                    && match (last.target, target) {
+                        (Some(previous), Some(current)) => previous + last.len == current,
+                        (None, None) => true,
+                        _ => false,
+                    }
+                {
+                    last.len += len;
+                    return;
+                }
+            }
+            result.push(AliasSpan { start, len, target });
+        };
+        let mut old_position = 0;
+        for span in &old.spans {
+            let mut cursor = span.start;
+            let end = span.start + span.len;
+            if let Some(targets) = targets.get(span.run.as_str()) {
+                let first = targets.partition_point(|(_, end, _)| *end <= cursor);
+                for &(start, target_end, position) in &targets[first..] {
+                    if start >= end {
+                        break;
+                    }
+                    let low = cursor.max(start);
+                    let high = end.min(target_end);
+                    if low > cursor {
+                        append(old_position + cursor - span.start, low - cursor, None);
+                    }
+                    append(
+                        old_position + low - span.start,
+                        high - low,
+                        Some(position + low - start),
+                    );
+                    cursor = high;
+                }
+            }
+            if cursor < end {
+                append(old_position + cursor - span.start, end - cursor, None);
+            }
+            old_position += span.len;
+        }
+        result
+    }
+
+    before
+        .keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let (rows, cols) = before.axes(key)?;
+            let target = latest.index(key);
+            let axes = target.map(|_| latest.axes(key)).transpose()?;
+            Ok(SheetAlias {
+                target: target.map_or_else(
+                    || format!("indexed-deleted-sheet:{index}"),
+                    |index| format!("sheet:{index}"),
+                ),
+                rows: spans(rows, axes.map(|axes| &axes.0)),
+                cols: spans(cols, axes.map(|axes| &axes.1)),
+            })
         })
         .collect()
 }

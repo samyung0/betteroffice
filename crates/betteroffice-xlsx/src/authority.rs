@@ -95,6 +95,7 @@ pub(crate) enum AuthorityError {
 
 #[derive(Clone)]
 struct WorkbookBase {
+    rebase: Option<crate::workbook::rebase::RebaseData>,
     bootstrap_client_id: u64,
     date_system: DateSystem,
     defined_names: Vec<DefinedName>,
@@ -154,6 +155,7 @@ impl WorkbookBase {
             }
         }
         Ok(Self {
+            rebase: None,
             bootstrap_client_id,
             date_system: model.date_system,
             defined_names: model.defined_names.clone(),
@@ -456,6 +458,32 @@ impl WorkbookAuthority {
         Ok(authority)
     }
 
+    pub(crate) fn attach_rebase(
+        &mut self,
+        data: crate::workbook::rebase::RebaseData,
+    ) -> Result<(), AuthorityError> {
+        data.write(&self.doc);
+        self.base.rebase = Some(data);
+        self.strict_materialize()
+            .map_err(AuthorityError::InvalidState)?;
+        Ok(())
+    }
+    pub(crate) fn expect_rebase(&mut self, data: crate::workbook::rebase::RebaseData) {
+        self.base.rebase = Some(data);
+    }
+    pub(crate) fn has_rebase(&self) -> bool {
+        self.base.rebase.is_some()
+    }
+    pub(crate) fn rebase_alias_projection(&self) -> Option<&[crate::workbook::rebase::SheetAlias]> {
+        self.base.rebase.as_ref().and_then(|data| data.aliases())
+    }
+    pub(crate) fn rebase_aliases(
+        &self,
+        latest: &Self,
+    ) -> Result<Vec<crate::workbook::rebase::SheetAlias>, AuthorityError> {
+        stable::rebase_aliases(&self.doc, &latest.doc).map_err(AuthorityError::InvalidState)
+    }
+
     pub(crate) fn supports_structure(&self) -> bool {
         self.schema_version().ok() == Some(stable::VERSION)
     }
@@ -586,7 +614,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let candidate = Self {
+        let mut candidate = Self {
             doc,
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
@@ -607,7 +635,12 @@ impl WorkbookAuthority {
         }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
-            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
+            Ok(_) => {
+                if let Some(data) = &mut candidate.base.rebase {
+                    data.bind_values(&candidate.doc);
+                }
+                SnapshotAdoption::Replacement(Box::new(candidate))
+            }
         }
     }
 
@@ -1621,7 +1654,7 @@ fn seed_legacy(
     Ok(())
 }
 
-fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
+pub(crate) fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
     let update = decode_update_v1(update)?;
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)

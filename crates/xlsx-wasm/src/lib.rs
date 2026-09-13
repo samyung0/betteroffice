@@ -33,6 +33,24 @@ pub struct XlsxDocument {
     update_observer: Option<UpdateObserver>,
 }
 
+#[wasm_bindgen]
+pub struct XlsxRebaseResult {
+    state: Vec<u8>,
+    indexed_state: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl XlsxRebaseResult {
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> Vec<u8> {
+        self.state.clone()
+    }
+    #[wasm_bindgen(getter, js_name = indexedState)]
+    pub fn indexed_state(&self) -> Vec<u8> {
+        self.indexed_state.clone()
+    }
+}
+
 struct UpdateObserver {
     pending: Arc<Mutex<PendingUpdateEvents>>,
     _subscription: UpdateSubscription,
@@ -67,6 +85,28 @@ impl XlsxDocument {
                 update_observer: None,
             })
             .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = rebaseCheckpoint)]
+    pub fn rebase_checkpoint(
+        old_source: &[u8],
+        captured: &[u8],
+        latest: &[u8],
+        new_source: &[u8],
+        client_id: f64,
+    ) -> Result<XlsxRebaseResult, JsValue> {
+        let result = betteroffice_xlsx::Workbook::rebase_checkpoint(
+            old_source,
+            captured,
+            latest,
+            new_source,
+            parse_client_id(client_id)?,
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        Ok(XlsxRebaseResult {
+            state: result.state,
+            indexed_state: result.indexed_state,
+        })
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]

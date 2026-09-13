@@ -338,18 +338,20 @@ impl Session {
     }
 
     pub fn checkpoint_projection_json(&self) -> Result<String, String> {
-        let info = self
+        let sheet_ids = self
             .workbook
-            .sheet_info()
+            .checkpoint_sheet_ids()
             .map_err(|error| error.to_string())?;
         let model = self.workbook.model();
         let mut identities = self
             .workbook
-            .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
-                sheet
-                    .iter_cells()
-                    .map(move |(at, _)| (SheetId(index as u32), at))
-            }))
+            .checkpoint_cell_identities(model.sheets.iter().enumerate().flat_map(
+                |(index, sheet)| {
+                    sheet
+                        .iter_cells()
+                        .map(move |(at, _)| (SheetId(index as u32), at))
+                },
+            ))
             .map_err(|error| error.to_string())?
             .into_iter();
         let sheets: Vec<_> = model.sheets.iter().enumerate().map(|(index, sheet)| -> Result<_, String> {
@@ -359,7 +361,7 @@ impl Session {
                 "format": model.styles.cell_format(cell.style)
             })).collect();
             let images = self.workbook.embedded_images(SheetId(index as u32)).map_err(|error| error.to_string())?.into_iter().map(|image| serde_json::json!({"id": image.id, "part": image.part, "anchor": image.anchor, "bytes": image.bytes})).collect::<Vec<_>>();
-            Ok(serde_json::json!({"id": info.sheet_ids[index], "name": sheet.name,
+            Ok(serde_json::json!({"id": sheet_ids[index], "name": sheet.name,
                 "cells": cells, "freezePane": sheet.freeze_pane, "hyperlinks": sheet.hyperlinks,
                 "merges": sheet.merges, "colWidths": sheet.col_widths,
                 "rowHeights": sheet.row_heights, "charts": sheet.charts, "images": images}))
@@ -1287,18 +1289,21 @@ mod tests {
     }
 
     #[test]
-    fn collaborative_sessions_reject_structural_updates() {
+    fn collaborative_structure_converges_and_refuses_positional_updates() {
         let bytes = sample_xlsx();
         let mut target = Session::open_collaborative(&bytes, 404, None).unwrap();
+        target
+            .apply_ops_json(
+                r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                None,
+            )
+            .unwrap();
         let target_state = target.encode_state_as_update();
-        assert!(
-            target
-                .apply_ops_json(
-                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
-                    None,
-                )
-                .unwrap_err()
-                .contains("structural operations")
+        let mut peer = Session::open_collaborative(&bytes, 405, None).unwrap();
+        peer.apply_update_json(&target_state, None).unwrap();
+        assert_eq!(
+            peer.checkpoint_projection_json().unwrap(),
+            target.checkpoint_projection_json().unwrap()
         );
 
         let mut source = Session::open(&bytes, None).unwrap();
@@ -1313,7 +1318,7 @@ mod tests {
             target
                 .apply_update_json(&update, None)
                 .unwrap_err()
-                .contains("frozen workbook structure")
+                .contains("schema")
         );
         assert_eq!(target.encode_state_as_update(), target_state);
     }
