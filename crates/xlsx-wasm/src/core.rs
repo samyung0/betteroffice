@@ -882,6 +882,39 @@ mod tests {
     }
 
     #[test]
+    fn deletion_only_edit_survives_a_full_peer_snapshot_after_recalculation() {
+        let bytes = sample_xlsx();
+        let now = Some(36526.0);
+        let mut local = Session::open_collaborative(&bytes, 7071, now).unwrap();
+        let vector = local.encode_state_vector();
+        local
+            .apply_ops_json(r#"{"ops":[{"type":"removeSheet","index":1}]}"#, now)
+            .unwrap();
+        assert_eq!(local.encode_state_vector(), vector);
+        let mut peer = Session::open_collaborative(&bytes, 7072, now).unwrap();
+        peer.edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"peer"}"#, now)
+            .unwrap();
+        local
+            .apply_update_json(&peer.encode_state_as_update(), now)
+            .unwrap();
+        let info: serde_json::Value =
+            serde_json::from_str(&local.sheet_info_json().unwrap()).unwrap();
+        assert_eq!(info["sheetNames"], serde_json::json!(["Data"]));
+        assert!(
+            local
+                .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                .unwrap()
+                .contains(r#""input":"peer""#)
+        );
+        peer.apply_update_json(&local.encode_state_as_update(), now)
+            .unwrap();
+        assert_eq!(
+            peer.checkpoint_projection_json().unwrap(),
+            local.checkpoint_projection_json().unwrap()
+        );
+    }
+
+    #[test]
     fn preserves_display_and_sheet_info_wire_shapes() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let display = session

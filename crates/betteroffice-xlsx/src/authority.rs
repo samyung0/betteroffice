@@ -346,6 +346,7 @@ enum HistoryAction {
 
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
+    bootstrap_snapshot: yrs::Snapshot,
     base: WorkbookBase,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -430,6 +431,7 @@ impl WorkbookAuthority {
             seed_legacy(&bootstrap, &base, model, &keys)
         }
         .map_err(AuthorityError::InvalidState)?;
+        let bootstrap_snapshot = bootstrap.transact().snapshot();
         let bootstrap_update = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
@@ -446,6 +448,7 @@ impl WorkbookAuthority {
         hydrate_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
         let authority = Self {
             doc,
+            bootstrap_snapshot,
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id: 0,
@@ -616,6 +619,7 @@ impl WorkbookAuthority {
         }
         let mut candidate = Self {
             doc,
+            bootstrap_snapshot: self.bootstrap_snapshot.clone(),
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
             next_sheet_id: self.next_sheet_id,
@@ -646,11 +650,7 @@ impl WorkbookAuthority {
 
     /// True while the replica still holds nothing but its own bootstrap.
     pub(crate) fn is_pristine(&self) -> bool {
-        let state_vector = self.doc.transact().state_vector();
-        state_vector.len() == 1
-            && state_vector
-                .iter()
-                .all(|(client, _)| client.get() == self.base.bootstrap_client_id)
+        self.doc.transact().snapshot() == self.bootstrap_snapshot
     }
 
     /// True when the document stands on its own rather than being the tail of
@@ -763,6 +763,7 @@ impl WorkbookAuthority {
 
         let staged = Self {
             doc: staged_doc,
+            bootstrap_snapshot: self.bootstrap_snapshot.clone(),
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
             next_sheet_id: self.next_sheet_id,
@@ -853,6 +854,7 @@ impl WorkbookAuthority {
         hydrate_doc(&staged_doc, &baseline).map_err(AuthorityError::InvalidState)?;
         let mut staged = Self {
             doc: staged_doc,
+            bootstrap_snapshot: self.bootstrap_snapshot.clone(),
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
             next_sheet_id: self.next_sheet_id,
@@ -3704,8 +3706,10 @@ mod legacy_tests {
     ) -> WorkbookAuthority {
         let doc = Doc::with_client_id(client_id);
         hydrate_doc(&doc, update).unwrap();
+        let bootstrap_snapshot = doc.transact().snapshot();
         WorkbookAuthority {
             doc,
+            bootstrap_snapshot,
             base: WorkbookBase::from_model(model).unwrap(),
             history: SheetOrderHistory::default(),
             next_sheet_id: 0,
