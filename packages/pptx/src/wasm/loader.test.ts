@@ -30,14 +30,14 @@ beforeAll(async () => {
 afterAll(() => handle.dispose());
 
 describe('PPTX wasm boundary', () => {
-  test('opens shared updates without parsing the file bytes', () => {
+  test('restores shared updates with the original source file', () => {
     const source = openPresentation(fixture, { clientId: 9002 });
     const seed = source.encodeStateAsUpdate();
-    const left = openPresentation(Uint8Array.of(0xff), {
+    const left = openPresentation(fixture, {
       clientId: 9003,
       initialUpdate: seed,
     });
-    const right = openPresentation(Uint8Array.of(0xff), {
+    const right = openPresentation(fixture, {
       clientId: 9004,
       initialUpdate: seed,
     });
@@ -64,11 +64,11 @@ describe('PPTX wasm boundary', () => {
       seed.dispose();
     }
     for (const extraSubscriber of [false, true]) {
-      const source = openPresentation(Uint8Array.of(0xff), {
+      const source = openPresentation(fixture, {
         clientId: extraSubscriber ? 9202 : 9203,
         initialUpdate: update,
       });
-      const peer = openPresentation(Uint8Array.of(0xff), {
+      const peer = openPresentation(fixture, {
         clientId: extraSubscriber ? 9204 : 9205,
         initialUpdate: update,
       });
@@ -186,7 +186,7 @@ describe('PPTX wasm boundary', () => {
     expect(cleared?.stroke).toBeUndefined();
   });
 
-  test('a session opened from an update saves when the source file is attached', () => {
+  test('restored sessions save with the original source and reject mismatched bytes', () => {
     const seeded = openPresentation(fixture, { clientId: 9007 });
     const seed = seeded.encodeStateAsUpdate();
 
@@ -197,13 +197,13 @@ describe('PPTX wasm boundary', () => {
     const moved = reopened.snapshot().slides[0].shapes[0];
     expect([moved.x, moved.y]).toEqual([777_000, 888_000]);
 
-    const bare = openPresentation(Uint8Array.of(0xff), { clientId: 9010, initialUpdate: seed });
-    expect(() => bare.save()).toThrow(/source file bytes/);
+    expect(() =>
+      openPresentation(Uint8Array.of(0xff), { clientId: 9010, initialUpdate: seed })
+    ).toThrow(/source bytes do not match the fingerprint/);
 
     seeded.dispose();
     attached.dispose();
     reopened.dispose();
-    bare.dispose();
   });
 
   test('edits survive a save and reopen', () => {
