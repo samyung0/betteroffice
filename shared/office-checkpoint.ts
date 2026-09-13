@@ -1,6 +1,7 @@
 import { createHash, randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
+import { rebaseDocxCheckpoint } from "../packages/docx/src/yrs/rebaseCheckpoint";
 import { yrsToDocument } from "../packages/docx/src/yrs/yrsToDocument";
 import { preloadEditWasm } from "../packages/docx/src/wasm/edit";
 import { preloadParseWasm } from "../packages/docx/src/wasm/parse";
@@ -1101,6 +1102,84 @@ export async function compare(
     await officeBaseline(baseBytes, toCheckpoint),
   );
 }
+/** Rebind both projections to the new package; keep only the compact indexed baseline. */
+export async function rebaseOffice(
+  baseBytes: Uint8Array,
+  captured: OfficeCheckpoint,
+  latest: OfficeCheckpoint,
+  exportedSource: Uint8Array,
+): Promise<{
+  state: Uint8Array;
+  baseline: OfficeBaselineEntry[];
+  effects: NetEffect[];
+}> {
+  const format = captured.format;
+  if (
+    !["docx", "xlsx", "pptx"].includes(format) ||
+    !(baseBytes instanceof Uint8Array) ||
+    !baseBytes.length ||
+    !(exportedSource instanceof Uint8Array) ||
+    !exportedSource.length
+  )
+    throw new TypeError(
+      "Expected supported Office format and nonempty source bytes",
+    );
+  for (const checkpoint of [captured, latest]) {
+    if (
+      checkpoint.format !== format ||
+      checkpoint.schemaVersion !== 1 ||
+      checkpoint.baseSha256 !== hash(baseBytes) ||
+      !(checkpoint.state instanceof Uint8Array) ||
+      !checkpoint.state.length
+    )
+      throw new Error(
+        "Office checkpoint does not match the exact base package and schema",
+      );
+  }
+  await initialize(format);
+  let rebased: { state: Uint8Array; indexedState: Uint8Array };
+  if (format === "docx") {
+    rebased = await rebaseDocxCheckpoint({
+      oldSource: baseBytes,
+      capturedState: captured.state,
+      latestState: latest.state,
+      exportedSource,
+    });
+  } else {
+    const engine = format === "xlsx" ? XlsxDocument : PptxDocument;
+    const result = engine.rebaseCheckpoint(
+      baseBytes,
+      captured.state,
+      latest.state,
+      exportedSource,
+      randomInt(1, 0x1fffffffffff),
+    );
+    try {
+      rebased = { state: result.state, indexedState: result.indexedState };
+    } finally {
+      result.free();
+    }
+  }
+  const checkpoint = {
+    format,
+    schemaVersion: 1 as const,
+    baseSha256: hash(exportedSource),
+  };
+  const baseline = await officeBaseline(exportedSource, {
+    ...checkpoint,
+    state: rebased.indexedState,
+  });
+  const current = await officeBaseline(exportedSource, {
+    ...checkpoint,
+    state: rebased.state,
+  });
+  return {
+    state: rebased.state,
+    baseline,
+    effects: compareBaselines(baseline, current),
+  };
+}
+
 export async function resolveAsset(
   baseBytes: Uint8Array,
   checkpoint: OfficeCheckpoint,

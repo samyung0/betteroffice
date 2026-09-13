@@ -1,6 +1,14 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export class PptxCheckpointRebase {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly indexedState: Uint8Array;
+    readonly state: Uint8Array;
+}
+
 export class PptxDocument {
     private constructor();
     free(): void;
@@ -29,6 +37,7 @@ export class PptxDocument {
      * A supplied source must match the update's exact package fingerprint.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    static rebaseCheckpoint(old_source: Uint8Array, captured_state: Uint8Array, latest_state: Uint8Array, new_source: Uint8Array, client_id: number): PptxCheckpointRebase;
     redoJson(): string;
     removeShapeJson(args: string): string;
     resizeShapeJson(args: string): string;
@@ -74,7 +83,10 @@ export interface InitOutput {
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
+    readonly __wbg_pptxcheckpointrebase_free: (a: number, b: number) => void;
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
+    readonly pptxcheckpointrebase_indexedState: (a: number) => [number, number];
+    readonly pptxcheckpointrebase_state: (a: number) => [number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -97,6 +109,7 @@ export interface InitOutput {
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly pptxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];

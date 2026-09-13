@@ -119,3 +119,14 @@ export declare function compareBaselines(
   from: OfficeBaselineEntry[],
   to: OfficeBaselineEntry[],
 ): NetEffect[];
+
+export declare function rebaseOffice(
+  baseBytes: Uint8Array,
+  captured: OfficeCheckpoint,
+  latest: OfficeCheckpoint,
+  exportedSource: Uint8Array,
+): Promise<{
+  state: Uint8Array;
+  baseline: OfficeBaselineEntry[];
+  effects: NetEffect[];
+}>;
