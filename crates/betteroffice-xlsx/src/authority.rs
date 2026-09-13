@@ -645,7 +645,7 @@ impl WorkbookAuthority {
     }
 
     /// True while the replica still holds nothing but its own bootstrap.
-    fn is_pristine(&self) -> bool {
+    pub(crate) fn is_pristine(&self) -> bool {
         let state_vector = self.doc.transact().state_vector();
         state_vector.len() == 1
             && state_vector

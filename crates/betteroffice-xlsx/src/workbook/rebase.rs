@@ -311,7 +311,7 @@ impl Workbook {
         update: &[u8],
         options: CalculationOptions,
     ) -> Result<bool> {
-        if self.edited_since_open || self.authority.has_rebase() {
+        if !self.authority.is_pristine() || self.authority.has_rebase() {
             return Ok(false);
         }
         let Some(data) = RebaseData::read(update)? else {

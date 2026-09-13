@@ -814,6 +814,74 @@ mod tests {
     }
 
     #[test]
+    fn recalculated_sessions_restore_rebased_live_and_indexed_checkpoints() {
+        let source = formula_xlsx();
+        let now = Some(36526.0);
+        let mut original = Session::open_collaborative(&source, 7061, now).unwrap();
+        original
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"20"}"#, now)
+            .unwrap();
+        let captured = original.encode_state_as_update();
+        let published = original.save_at(now.unwrap()).unwrap();
+        original
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"30"}"#, now)
+            .unwrap();
+        let rebased = Workbook::rebase_checkpoint(
+            &source,
+            &captured,
+            &original.encode_state_as_update(),
+            &published,
+            7062,
+        )
+        .unwrap();
+        let mut indexed = Session::open_collaborative(&published, 7063, now).unwrap();
+        indexed
+            .apply_update_json(&rebased.indexed_state, now)
+            .unwrap();
+        assert!(
+            indexed
+                .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                .unwrap()
+                .contains(r#""input":"20""#)
+        );
+        let mut live = Session::open_collaborative(&published, 7064, now).unwrap();
+        live.apply_update_json(&rebased.state, now).unwrap();
+        assert!(
+            live.cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                .unwrap()
+                .contains(r#""input":"30""#)
+        );
+        let baseline: serde_json::Value =
+            serde_json::from_str(&indexed.checkpoint_projection_json().unwrap()).unwrap();
+        let current: serde_json::Value =
+            serde_json::from_str(&live.checkpoint_projection_json().unwrap()).unwrap();
+        assert_eq!(
+            baseline["sheets"][0]["cells"][0]["id"],
+            current["sheets"][0]["cells"][0]["id"]
+        );
+        assert_eq!(
+            Workbook::open(&live.save().unwrap()).unwrap().model(),
+            original.workbook.model()
+        );
+        live.edit_cell_json(r#"{"sheet":0,"row":1,"col":0,"input":"40"}"#, now)
+            .unwrap();
+        let mut peer = Session::open_collaborative(&published, 7065, now).unwrap();
+        peer.apply_update_json(&live.encode_state_as_update(), now)
+            .unwrap();
+        assert_eq!(
+            peer.checkpoint_projection_json().unwrap(),
+            live.checkpoint_projection_json().unwrap()
+        );
+        let mut edited = Session::open_collaborative(&published, 7066, now).unwrap();
+        edited
+            .edit_cell_json(r#"{"sheet":0,"row":2,"col":0,"input":"keep"}"#, now)
+            .unwrap();
+        let previous = edited.encode_state_as_update();
+        assert!(edited.apply_update_json(&rebased.state, now).is_err());
+        assert_eq!(edited.encode_state_as_update(), previous);
+    }
+
+    #[test]
     fn preserves_display_and_sheet_info_wire_shapes() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let display = session
