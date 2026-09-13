@@ -198,6 +198,7 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        deck::migrate_doc(&staged)?;
         deck::validate_doc(&staged)?;
 
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
@@ -205,6 +206,7 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        deck::migrate_doc(&self.doc)?;
         self.snapshot()
     }
 

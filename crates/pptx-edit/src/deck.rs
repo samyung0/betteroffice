@@ -5,7 +5,7 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{PptxPackage, ShapeNode, Slide};
+use pptx_parse::{MediaPart, PptxPackage, ShapeNode, Slide};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -20,9 +20,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 2.0;
+const SCHEMA_VERSION: f64 = 3.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 2] = [1.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 3] = [1.0, 2.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -30,11 +30,10 @@ const MAX_ADJUSTMENTS: usize = 32;
 const MAX_ADJUSTMENT_INDEX: usize = 32;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
-    let package_json =
-        serde_json::to_vec(package).map_err(|error| EditError::Json(error.to_string()))?;
+    let (package_json, media) = encode_package(package)?;
     let mut txn = doc.transact_mut_with("pptx:bootstrap");
     let meta = txn.get_or_insert_map(META);
-    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(&mut txn, "schemaVersion", 2.0);
     meta.insert(&mut txn, "fingerprint", fingerprint);
     meta.insert(&mut txn, "widthEmu", package.presentation.width_emu as f64);
     meta.insert(
@@ -42,11 +41,8 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
         "heightEmu",
         package.presentation.height_emu as f64,
     );
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
+    // Retire the legacy metadata IDs so state-vector sync sends the v3 overrides.
+    meta.insert(&mut txn, "packageJson", Any::Null);
     let order = txn.get_or_insert_array(SLIDE_ORDER);
     let slides = txn.get_or_insert_map(SLIDES);
     let shapes = txn.get_or_insert_map(SHAPES);
@@ -80,6 +76,13 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
             shape_order.push_back(&mut txn, shape_id.as_str());
         }
     }
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "media", media);
     Ok(())
 }
 
@@ -664,8 +667,7 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
-/// Rewrites a hydrated older document into the current schema and stamps it, so
-/// the next snapshot this session writes is a v2 one.
+/// Rewrites legacy package JSON with binary media, preserving authored roots.
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     let package = {
         let txn = doc.transact();
@@ -675,8 +677,7 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
         }
         package_from_meta(&meta, &txn)?
     };
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    let (package_json, media) = encode_package(&package)?;
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(
@@ -684,6 +685,7 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
+    meta.insert(&mut txn, "media", media);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
@@ -702,7 +704,77 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     let Some(Out::Any(Any::Buffer(bytes))) = meta.get(txn, "packageJson") else {
         return Err(EditError::InvalidState("missing package data".to_owned()));
     };
-    serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
+    let mut package: PptxPackage = serde_json::from_slice(&bytes)
+        .map_err(|error| EditError::InvalidState(error.to_string()))?;
+    if schema_version(meta, txn)? == SCHEMA_VERSION {
+        if !package.media.is_empty() {
+            return Err(EditError::InvalidState("media must be binary".to_owned()));
+        }
+        let Some(Out::Any(Any::Array(media))) = meta.get(txn, "media") else {
+            return Err(EditError::InvalidState("missing binary media".to_owned()));
+        };
+        for entry in media.iter() {
+            let Any::Array(fields) = entry else {
+                return Err(EditError::InvalidState(
+                    "invalid binary media entry".to_owned(),
+                ));
+            };
+            let [
+                Any::String(path),
+                Any::String(content_type),
+                Any::Buffer(bytes),
+            ] = fields.as_ref()
+            else {
+                return Err(EditError::InvalidState(
+                    "invalid binary media entry".to_owned(),
+                ));
+            };
+            package.media.push(MediaPart {
+                part_path: path.to_string(),
+                content_type: content_type.to_string(),
+                bytes: bytes.to_vec(),
+            });
+        }
+    }
+    Ok(package)
+}
+
+fn encode_package(package: &PptxPackage) -> EditResult<(Vec<u8>, Any)> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PackageMetadata<'a> {
+        presentation: &'a pptx_parse::Presentation,
+        slides: &'a [Slide],
+        layouts: &'a [pptx_parse::SlideLayout],
+        masters: &'a [pptx_parse::SlideMaster],
+        themes: &'a [pptx_parse::ThemePart],
+        charts: &'a [pptx_parse::ChartPart],
+        media: &'a [MediaPart],
+        relationships: &'a BTreeMap<String, Vec<pptx_parse::Relationship>>,
+    }
+    let json = serde_json::to_vec(&PackageMetadata {
+        presentation: &package.presentation,
+        slides: &package.slides,
+        layouts: &package.layouts,
+        masters: &package.masters,
+        themes: &package.themes,
+        charts: &package.charts,
+        media: &[],
+        relationships: &package.relationships,
+    })
+    .map_err(|error| EditError::Json(error.to_string()))?;
+    let media = package
+        .media
+        .iter()
+        .map(|part| {
+            Any::Array(Arc::from([
+                Any::from(part.part_path.as_str()),
+                Any::from(part.content_type.as_str()),
+                Any::Buffer(Arc::from(part.bytes.as_slice())),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    Ok((json, Any::Array(Arc::from(media))))
 }
 
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
