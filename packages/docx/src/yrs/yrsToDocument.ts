@@ -1314,14 +1314,18 @@ function paragraphFromStory(
     });
   }
 
+  const sourceBinding = asObject(properties.sourceBinding);
   const paragraph: Paragraph = {
     type: 'paragraph',
-    paraId: paraId || undefined,
-    textId: baseParagraph?.textId,
+    paraId: sourceBinding ? asString(sourceBinding.paraId) || undefined : paraId || undefined,
+    textId: sourceBinding ? asString(sourceBinding.textId) || undefined : baseParagraph?.textId,
     formatting: paragraphAttrsToFormatting(attrs),
     content,
   };
-  if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
+  if (
+    sourceBinding ? sourceBinding.renderedPageBreakBefore : baseParagraph?.renderedPageBreakBefore
+  )
+    paragraph.renderedPageBreakBefore = true;
 
   const pPrIns = trackedInfo(properties.pPrIns, true);
   const pPrDel = trackedInfo(properties.pPrDel, true);
@@ -1715,7 +1719,8 @@ class SaveContext {
   constructor(
     private readonly session: YrsSession,
     base: Document,
-    private readonly onEmbed?: YrsToDocumentOptions['onEmbed']
+    private readonly onEmbed?: YrsToDocumentOptions['onEmbed'],
+    private readonly onParagraph?: YrsToDocumentOptions['onParagraph']
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
@@ -1792,11 +1797,19 @@ class SaveContext {
         blocks.push(
           paragraphFromStory(
             savedParaId,
-            segment.properties,
+            asObject(segment.properties.sourceBinding)?.ownerParaId === segment.paraId
+              ? segment.properties
+              : { ...segment.properties, sourceBinding: undefined },
             items,
             paragraphCommentBoundaries(storyOffset),
             this.baseParagraphs.get(segment.paraId)
           )
+        );
+        this.onParagraph?.(
+          storyId,
+          storyOffset,
+          blocks[blocks.length - 1] as Paragraph,
+          segment.paraId
         );
         items = [];
         paragraphIndex += 1;
@@ -1828,7 +1841,11 @@ class SaveContext {
         blocks.push(projectedEmbed);
       } else if (segment.embedKind === 'opaque') {
         const blob = asObject(segment.payload.blob);
-        if (blob?.type === 'pageBreak') {
+        const sourceBlock = asObject(segment.payload.sourceBlock);
+        if (sourceBlock?.type === 'blockSdt') {
+          projectedEmbed = sourceBlock as unknown as BlockContent;
+          blocks.push(projectedEmbed);
+        } else if (blob?.type === 'pageBreak') {
           projectedEmbed = pageBreakParagraph();
           blocks.push(projectedEmbed);
         } else {
@@ -1903,6 +1920,8 @@ export interface YrsToDocumentOptions {
   onStory?: (storyId: string) => void;
   /** Current serializer-facing content for a native embed at a UTF-16 offset. */
   onEmbed?: (storyId: string, offset: number, content: ParagraphContent | BlockContent) => void;
+  /** Projected paragraph and the native pilcrow offset that owns it. */
+  onParagraph?: (storyId: string, offset: number, paragraph: Paragraph, logicalId: string) => void;
 }
 
 export function yrsToDocument(
@@ -1910,7 +1929,7 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const context = new SaveContext(session, base, options.onEmbed);
+  const context = new SaveContext(session, base, options.onEmbed, options.onParagraph);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent =
