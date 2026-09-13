@@ -16,6 +16,24 @@ pub struct PptxDocument {
     update_observer: Option<UpdateObserver>,
 }
 
+#[wasm_bindgen]
+pub struct PptxCheckpointRebase {
+    state: Vec<u8>,
+    indexed_state: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl PptxCheckpointRebase {
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> Vec<u8> {
+        self.state.clone()
+    }
+    #[wasm_bindgen(getter, js_name = indexedState)]
+    pub fn indexed_state(&self) -> Vec<u8> {
+        self.indexed_state.clone()
+    }
+}
+
 struct UpdateObserver {
     pending: Arc<Mutex<VecDeque<UpdateEvent>>>,
     _subscription: Subscription,
@@ -155,6 +173,28 @@ struct HistoryResult {
 
 #[wasm_bindgen]
 impl PptxDocument {
+    #[wasm_bindgen(js_name = rebaseCheckpoint)]
+    pub fn rebase_checkpoint(
+        old_source: &[u8],
+        captured_state: &[u8],
+        latest_state: &[u8],
+        new_source: &[u8],
+        client_id: f64,
+    ) -> Result<PptxCheckpointRebase, JsValue> {
+        let result = DeckSession::rebase_checkpoint(
+            old_source,
+            captured_state,
+            latest_state,
+            new_source,
+            parse_client_id(client_id)?,
+        )
+        .map_err(js_error)?;
+        Ok(PptxCheckpointRebase {
+            state: result.state,
+            indexed_state: result.indexed_state,
+        })
+    }
+
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;

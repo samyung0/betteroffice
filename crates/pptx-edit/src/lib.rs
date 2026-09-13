@@ -16,11 +16,13 @@ use yrs::{
 
 mod deck;
 mod model;
+mod rebase;
 mod save;
 mod story;
 mod undo;
 
 pub use model::*;
+pub use rebase::CheckpointRebase;
 pub use undo::DeckUndoManager;
 
 #[cfg(feature = "wasm")]
@@ -133,9 +135,7 @@ impl DeckSession {
         })
     }
 
-    /// Like [`Self::open_from_update`], but re-attaches the source file the
-    /// update was seeded from, so the session can save. The bytes must hash to
-    /// the fingerprint recorded in the update.
+    /// Attaches the fingerprinted base and any saved source-part overlay so the session can save.
     pub fn open_from_update_with_source(
         update: &[u8],
         source: &[u8],
@@ -149,8 +149,7 @@ impl DeckSession {
                 "source bytes do not match the fingerprint recorded in the update".to_owned(),
             ));
         }
-        let package =
-            pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
+        let package = rebase::source_package(&session.doc, source)?;
         Ok(Self {
             package: Arc::new(package),
             ..session

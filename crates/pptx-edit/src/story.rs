@@ -129,6 +129,28 @@ pub(crate) fn seed_plain_story(
     story
 }
 
+pub(crate) fn seed_snapshot_story(
+    stories: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    snapshot: &StorySnapshot,
+) {
+    let story = stories.insert(txn, snapshot.id.as_str(), TextPrelim::new(""));
+    for paragraph in &snapshot.paragraphs {
+        for run in &paragraph.runs {
+            let index = story.len(txn);
+            insert_styled_text(&story, txn, index, &run.text, &run.style);
+        }
+        append_pilcrow(
+            &story,
+            txn,
+            &paragraph.id,
+            paragraph.alignment.as_deref(),
+            paragraph.level,
+            paragraph.bullet_json.as_deref(),
+        );
+    }
+}
+
 fn append_pilcrow(
     story: &TextRef,
     txn: &mut TransactionMut<'_>,

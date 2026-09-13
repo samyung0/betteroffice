@@ -21,8 +21,10 @@ use crate::{
 };
 
 const SCHEMA_VERSION: f64 = 3.0;
+pub(crate) const SOURCE_OVERLAY_SCHEMA_VERSION: f64 = 4.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 3] = [1.0, 2.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 4] =
+    [1.0, 2.0, SCHEMA_VERSION, SOURCE_OVERLAY_SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -83,6 +85,106 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "media", media);
+    Ok(())
+}
+
+pub(crate) fn seed_snapshot(doc: &Doc, snapshot: &DeckSnapshot) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with("pptx:rebase");
+    let meta = txn.get_or_insert_map(META);
+    meta.insert(&mut txn, "widthEmu", snapshot.width_emu as f64);
+    meta.insert(&mut txn, "heightEmu", snapshot.height_emu as f64);
+    let order = txn.get_or_insert_array(SLIDE_ORDER);
+    let length = order.len(&txn);
+    order.remove_range(&mut txn, 0, length);
+    let slides = txn.get_or_insert_map(SLIDES);
+    let shapes = txn.get_or_insert_map(SHAPES);
+    let stories = txn.get_or_insert_map(STORIES);
+    slides.clear(&mut txn);
+    shapes.clear(&mut txn);
+    stories.clear(&mut txn);
+    for slide in &snapshot.slides {
+        order.push_back(&mut txn, slide.id.as_str());
+        let map = slides.insert(&mut txn, slide.id.as_str(), MapPrelim::default());
+        map.insert(&mut txn, "id", slide.id.as_str());
+        for (key, value) in [
+            ("sourcePartPath", &slide.source_part_path),
+            ("layoutPartPath", &slide.layout_part_path),
+            ("name", &slide.name),
+        ] {
+            if let Some(value) = value {
+                map.insert(&mut txn, key, value.as_str());
+            }
+        }
+        let shape_order = map.insert(&mut txn, "shapes", ArrayPrelim::default());
+        for shape in &slide.shapes {
+            seed_snapshot_shape(&shapes, &stories, &mut txn, shape)?;
+            shape_order.push_back(&mut txn, shape.id.as_str());
+        }
+    }
+    Ok(())
+}
+
+fn seed_snapshot_shape(
+    shapes: &MapRef,
+    stories: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    shape: &ShapeSnapshot,
+) -> EditResult<()> {
+    let map = shapes.insert(txn, shape.id.as_str(), MapPrelim::default());
+    for (key, value) in [
+        ("id", shape.id.as_str()),
+        ("name", shape.name.as_str()),
+        ("geometry", shape.geometry.as_str()),
+        (
+            "kind",
+            match shape.kind {
+                ShapeKind::Shape => "shape",
+                ShapeKind::Picture => "picture",
+                ShapeKind::GraphicFrame => "graphicFrame",
+                ShapeKind::Group => "group",
+            },
+        ),
+    ] {
+        map.insert(txn, key, value);
+    }
+    for (key, value) in [
+        ("sourceId", shape.source_id as f64),
+        ("x", shape.x as f64),
+        ("y", shape.y as f64),
+        ("width", shape.width as f64),
+        ("height", shape.height as f64),
+        ("rotationDeg", shape.rotation_deg),
+    ] {
+        map.insert(txn, key, value);
+    }
+    map.insert(txn, "flipH", shape.flip_h);
+    map.insert(txn, "flipV", shape.flip_v);
+    if let Some(path) = &shape.media_part_path {
+        map.insert(txn, "mediaPartPath", path.as_str());
+    }
+    insert_json(&map, txn, "placeholderJson", shape.placeholder.as_ref())?;
+    insert_json(&map, txn, "adjustValuesJson", Some(&shape.adjust_values))?;
+    insert_json(&map, txn, "fillJson", shape.fill.as_ref())?;
+    insert_json(&map, txn, "outlineJson", shape.outline.as_ref())?;
+    insert_json(&map, txn, "graphicJson", shape.graphic.as_ref())?;
+    let story_ids = shape
+        .text_stories
+        .iter()
+        .map(|story| story.id.clone())
+        .collect::<Vec<_>>();
+    map.insert(txn, "textStories", string_array(&story_ids));
+    for story in &shape.text_stories {
+        crate::story::seed_snapshot_story(stories, txn, story);
+    }
+    let child_ids = shape
+        .children
+        .iter()
+        .map(|child| child.id.clone())
+        .collect::<Vec<_>>();
+    map.insert(txn, "children", string_array(&child_ids));
+    for child in &shape.children {
+        seed_snapshot_shape(shapes, stories, txn, child)?;
+    }
     Ok(())
 }
 
@@ -631,6 +733,14 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
         validate_schema_version(&meta, &txn)?;
+        if schema_version(&meta, &txn)? == SOURCE_OVERLAY_SCHEMA_VERSION
+            && !matches!(
+                meta.get(&txn, "sourceOverlay"),
+                Some(Out::Any(Any::Array(_)))
+            )
+        {
+            return Err(EditError::InvalidState("missing source overlay".to_owned()));
+        }
         if map_string(&meta, &txn, "fingerprint").is_none() {
             return Err(EditError::InvalidState("missing fingerprint".to_owned()));
         }
@@ -672,7 +782,7 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     let package = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
-        if schema_version(&meta, &txn)? == SCHEMA_VERSION {
+        if schema_version(&meta, &txn)? >= SCHEMA_VERSION {
             return Ok(());
         }
         package_from_meta(&meta, &txn)?
@@ -706,7 +816,7 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     };
     let mut package: PptxPackage = serde_json::from_slice(&bytes)
         .map_err(|error| EditError::InvalidState(error.to_string()))?;
-    if schema_version(meta, txn)? == SCHEMA_VERSION {
+    if schema_version(meta, txn)? >= SCHEMA_VERSION {
         if !package.media.is_empty() {
             return Err(EditError::InvalidState("media must be binary".to_owned()));
         }
@@ -1237,7 +1347,11 @@ mod tests {
         {
             let mut txn = session.doc.transact_mut();
             let meta = required_map(&txn, META).unwrap();
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION + 1.0);
+            meta.insert(
+                &mut txn,
+                "schemaVersion",
+                SOURCE_OVERLAY_SCHEMA_VERSION + 1.0,
+            );
             meta.insert(
                 &mut txn,
                 "packageJson",

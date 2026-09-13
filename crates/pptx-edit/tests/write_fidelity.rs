@@ -621,3 +621,318 @@ fn a_session_opened_from_an_update_alone_refuses_to_save() {
     let mismatched = DeckSession::open_from_update_with_source(&update, b"garbage", 14);
     assert!(mismatched.is_err());
 }
+
+#[test]
+fn rebase_keeps_later_edits_and_maps_only_the_remaining_changes() {
+    let source = fixture(256);
+    let session = DeckSession::open(&source, 11).unwrap();
+    let initial = session.snapshot().unwrap();
+    let first = &initial.slides[0];
+    let second = &initial.slides[1];
+    session.move_slide(&context(), &second.id, 0).unwrap();
+    session
+        .remove_shape(&context(), &first.id, &first.shapes[1].id)
+        .unwrap();
+    let added = session
+        .add_text_box(
+            &context(),
+            &first.id,
+            &pptx_edit::ShapeDraft {
+                name: "Captured new shape".into(),
+                rect: pptx_edit::ShapeRect {
+                    x: 100,
+                    y: 200,
+                    width: 3000,
+                    height: 4000,
+                },
+                text: "Captured".into(),
+                style: TextStyle::default(),
+            },
+        )
+        .unwrap();
+    let captured = session.encode_state_as_update_v1();
+    let published = session.save().unwrap();
+    let zero =
+        DeckSession::rebase_checkpoint(&source, &captured, &captured, &published, 21).unwrap();
+    let zero_current =
+        DeckSession::open_from_update_with_source(&zero.state, &published, 22).unwrap();
+    let zero_indexed = DeckSession::open_from_update(&zero.indexed_state, 23).unwrap();
+    assert_eq!(
+        zero_current.snapshot().unwrap(),
+        zero_indexed.snapshot().unwrap()
+    );
+
+    let snapshot = session.snapshot().unwrap();
+    let added_shape = snapshot
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .find(|shape| shape.id == added.shape_id)
+        .unwrap();
+    session
+        .insert_text(
+            &context(),
+            &added_shape.text_stories[0].id,
+            8,
+            " later",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    session
+        .resize_shape(&context(), &first.id, &added.shape_id, 5000, 6000)
+        .unwrap();
+    session.move_slide(&context(), &first.id, 0).unwrap();
+    session
+        .remove_shape(&context(), &second.id, &second.shapes[0].id)
+        .unwrap();
+    let latest = session.encode_state_as_update_v1();
+    let expected = parts(&session.save().unwrap());
+    let rebased =
+        DeckSession::rebase_checkpoint(&source, &captured, &latest, &published, 21).unwrap();
+    let current =
+        DeckSession::open_from_update_with_source(&rebased.state, &published, 22).unwrap();
+    let baseline = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+    assert_eq!(parts(&current.save().unwrap()), expected);
+    let current_snapshot = current.snapshot().unwrap();
+    let indexed_snapshot = baseline.snapshot().unwrap();
+    let current_shape = current_snapshot
+        .slides
+        .iter()
+        .flat_map(|s| &s.shapes)
+        .find(|s| s.name == "Captured new shape")
+        .unwrap();
+    let indexed_shape = indexed_snapshot
+        .slides
+        .iter()
+        .flat_map(|s| &s.shapes)
+        .find(|s| s.name == "Captured new shape")
+        .unwrap();
+    assert_eq!(current_shape.id, indexed_shape.id);
+    assert_eq!(current_shape.source_id, indexed_shape.source_id);
+    assert_eq!(
+        current_shape.text_stories[0].paragraphs[0].id,
+        indexed_shape.text_stories[0].paragraphs[0].id
+    );
+    assert_eq!(indexed_shape.text_stories[0].plain_text(), "Captured");
+    assert_eq!(current_shape.text_stories[0].plain_text(), "Captured later");
+    assert_eq!(indexed_shape.width, 3000);
+    assert_eq!(current_shape.width, 5000);
+    let removed = indexed_snapshot
+        .slides
+        .iter()
+        .flat_map(|s| &s.shapes)
+        .find(|s| s.name == "Second")
+        .unwrap();
+    assert!(removed.id.starts_with("rebase:removed:"));
+    assert_eq!(indexed_snapshot.slides[1].id, current_snapshot.slides[0].id);
+    current
+        .insert_text(
+            &context(),
+            &current_shape.text_stories[0].id,
+            0,
+            "Again ",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let reopened = DeckSession::open(&current.save().unwrap(), 24).unwrap();
+    assert!(
+        reopened
+            .snapshot()
+            .unwrap()
+            .slides
+            .iter()
+            .flat_map(|s| &s.shapes)
+            .any(|s| s
+                .text_stories
+                .iter()
+                .any(|story| story.plain_text() == "Again Captured later"))
+    );
+    assert!(DeckSession::rebase_checkpoint(&source, &captured, &latest, &source, 21).is_err());
+    let next_capture = current.encode_state_as_update_v1();
+    let next_source = current.save().unwrap();
+    let next =
+        DeckSession::rebase_checkpoint(&published, &next_capture, &next_capture, &next_source, 31)
+            .unwrap();
+    let next_current =
+        DeckSession::open_from_update_with_source(&next.state, &next_source, 32).unwrap();
+    assert_eq!(parts(&next_current.save().unwrap()), parts(&next_source));
+    let next_indexed = DeckSession::open_from_update(&next.indexed_state, 33).unwrap();
+    assert_eq!(
+        next_current.snapshot().unwrap(),
+        next_indexed.snapshot().unwrap()
+    );
+}
+
+fn media_rebase_fixture() -> (Vec<u8>, Vec<u8>) {
+    let mut entries = parts(&fixture(256));
+    let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="7" name="Unique picture"><a:extLst><a:ext uri="opaque-marker"/></a:extLst></p:cNvPr><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="1000" cy="2000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+    entries.insert(
+        "ppt/slides/slide2.xml".into(),
+        SLIDE2
+            .replace("</p:spTree>", &format!("{picture}</p:spTree>"))
+            .into_bytes(),
+    );
+    entries.insert("ppt/slides/_rels/slide2.xml.rels".into(), SLIDE2_RELS.replace("</Relationships>", r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/unique.png"/></Relationships>"#).into_bytes());
+    entries.insert(
+        "[Content_Types].xml".into(),
+        CONTENT_TYPES
+            .replace(
+                "</Types>",
+                r#"<Default Extension="png" ContentType="image/png"/></Types>"#,
+            )
+            .into_bytes(),
+    );
+    let media = (0..4096).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    entries.insert("ppt/media/unique.png".into(), media.clone());
+    (
+        ooxml_opc::rezip_parts(&entries.into_iter().collect::<Vec<_>>()).unwrap(),
+        media,
+    )
+}
+
+#[test]
+fn rebase_restores_saved_slide_and_picture_with_binary_media_and_opaque_parts() {
+    use yrs::{Any, Map, Out, ReadTxn, Transact};
+    for remove_slide in [true, false] {
+        let (source, media) = media_rebase_fixture();
+        let session = DeckSession::open(&source, 11).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let slide = &snapshot.slides[1];
+        let picture = slide
+            .shapes
+            .iter()
+            .find(|s| s.name == "Unique picture")
+            .unwrap();
+        if remove_slide {
+            session.delete_slide(&context(), &slide.id).unwrap();
+        } else {
+            session
+                .remove_shape(&context(), &slide.id, &picture.id)
+                .unwrap();
+        }
+        session.add_undo_barrier();
+        let captured = session.encode_state_as_update_v1();
+        let published = session.save().unwrap();
+        if remove_slide {
+            assert!(!parts(&published).contains_key("ppt/media/unique.png"));
+        }
+        assert!(session.undo());
+        session
+            .resize_shape(&context(), &slide.id, &picture.id, 7000, 8000)
+            .unwrap();
+        let latest = session.encode_state_as_update_v1();
+        let expected = parts(&session.save().unwrap());
+        let rebased =
+            DeckSession::rebase_checkpoint(&source, &captured, &latest, &published, 21).unwrap();
+        let current =
+            DeckSession::open_from_update_with_source(&rebased.state, &published, 22).unwrap();
+        let actual = parts(&current.save().unwrap());
+        assert_eq!(actual, expected);
+        assert_eq!(actual.get("ppt/media/unique.png"), Some(&media));
+        assert!(part_text(&actual, "ppt/slides/slide2.xml").contains("opaque-marker"));
+        assert_relationships_resolve(&actual);
+        let txn = current.yrs_doc().transact();
+        let meta = txn.get_map("pptx:meta").unwrap();
+        let Some(Out::Any(Any::Array(overlay))) = meta.get(&txn, "sourceOverlay") else {
+            panic!("missing overlay")
+        };
+        let published_parts = parts(&published);
+        for value in overlay.iter() {
+            let Any::Array(fields) = value else {
+                panic!("invalid overlay")
+            };
+            let Any::String(path) = &fields[0] else {
+                panic!("invalid path")
+            };
+            assert_ne!(
+                published_parts.get(path.as_ref()),
+                actual.get(path.as_ref())
+            );
+            if path.as_ref() == "ppt/media/unique.png" {
+                assert!(matches!(&fields[1], Any::Null));
+            }
+        }
+        let indexed = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+        assert!(
+            !indexed
+                .snapshot()
+                .unwrap()
+                .slides
+                .iter()
+                .flat_map(|s| &s.shapes)
+                .any(|s| s.name == "Unique picture")
+        );
+        assert!(
+            current
+                .snapshot()
+                .unwrap()
+                .slides
+                .iter()
+                .flat_map(|s| &s.shapes)
+                .any(|s| s.name == "Unique picture" && s.width == 7000)
+        );
+    }
+}
+
+#[test]
+fn rebase_maps_paragraph_restoration_without_replaying_captured_changes() {
+    let source = fixture(256);
+    let session = DeckSession::open(&source, 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let title = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|s| s.name == "Title")
+        .unwrap();
+    let story = &title.text_stories[0];
+    let first_length = story.paragraphs[0]
+        .runs
+        .iter()
+        .map(|r| r.text.encode_utf16().count() as u32)
+        .sum::<u32>();
+    session
+        .delete_text(&context(), &story.id, 0, first_length)
+        .unwrap();
+    session
+        .delete_paragraph_break(&context(), &story.id, 0)
+        .unwrap();
+    session.add_undo_barrier();
+    let captured = session.encode_state_as_update_v1();
+    let published = session.save().unwrap();
+    assert!(session.undo());
+    let latest = session.encode_state_as_update_v1();
+    let rebased =
+        DeckSession::rebase_checkpoint(&source, &captured, &latest, &published, 21).unwrap();
+    let current =
+        DeckSession::open_from_update_with_source(&rebased.state, &published, 22).unwrap();
+    assert_eq!(parts(&current.save().unwrap()), parts(&source));
+    let baseline = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+    let current_snapshot = current.snapshot().unwrap();
+    let indexed_snapshot = baseline.snapshot().unwrap();
+    let current_story = &current_snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|s| s.name == "Title")
+        .unwrap()
+        .text_stories[0];
+    let indexed_story = &indexed_snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|s| s.name == "Title")
+        .unwrap()
+        .text_stories[0];
+    assert_eq!(indexed_story.paragraphs.len(), 1);
+    assert_eq!(current_story.paragraphs.len(), 2);
+    assert_eq!(
+        indexed_story.paragraphs[0].id,
+        current_story.paragraphs[1].id
+    );
+    assert_ne!(
+        indexed_story.paragraphs[0].id,
+        current_story.paragraphs[0].id
+    );
+    assert!(
+        part_text(&parts(&current.save().unwrap()), "ppt/slides/slide1.xml")
+            .contains("a:hlinkClick")
+    );
+}

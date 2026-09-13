@@ -379,7 +379,7 @@ fn assert_binary_media(update: &[u8], expected: &[pptx_parse::MediaPart]) {
 
 #[test]
 fn unmigratable_schema_versions_stay_rejected() {
-    for version in [0.0, 1.5, 4.0] {
+    for version in [0.0, 1.5, 5.0] {
         assert!(
             matches!(
                 DeckSession::open_from_update(&restamped(V1_UPDATE, Some(version)), 905),

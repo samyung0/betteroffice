@@ -27,8 +27,26 @@ application also migrates if a concurrent legacy migration wins a map conflict.
 Yrs garbage collection removes the replaced JSON payload from subsequently
 encoded states. Migration preserves edited roots and the source fingerprint;
 reopening without source bytes still works, and saving still requires the exact
-original source package. Older engine versions reject schema v3 and must reload
+fingerprinted source package. Older engine versions reject schema v3 and must reload
 with the new engine before they can receive its updates.
+
+`DeckSession::rebase_checkpoint(A, captured, latest, B, client_id)` promotes a
+captured export B while preserving later saved edits. It exports the latest
+state transiently, seeds a fresh graph, and retains only OPC parts differing
+from B as a binary `sourceOverlay`. Changed media entries reference the binary
+`media` payload rather than duplicating it. Reopening with B restores these
+current source templates, including opaque XML and relationships needed by a
+saved Undo. Unchanged parts and full prior source archives are not retained.
+The next rebase replaces the overlay rather than accumulating previous ones.
+
+Rebased states use schema v4, written at new CRDT IDs after the normal v3 seed;
+older engines reject them. Ordinary seeds and v1/v2 migration remain v3. The
+rebase returns `state` plus a transient `indexed_state` whose object identities
+match the new current graph while its content and positions describe B. Project
+that indexed state to the compact retrieval baseline, then discard it. Install
+the returned state with a new collaboration epoch; old updates and Undo history
+must not cross that boundary. WASM exposes the same operation as
+`PptxDocument.rebaseCheckpoint`, returning `state` and `indexedState` getters.
 
 Run `cargo test -p betteroffice-pptx-edit` for schema migration, binary media,
 late/concurrent updates, Undo, and source-preserving export checks.
