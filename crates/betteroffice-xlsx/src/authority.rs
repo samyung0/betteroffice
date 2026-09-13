@@ -830,7 +830,7 @@ impl WorkbookAuthority {
             .map_err(AuthorityError::InvalidState)?;
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
-            effective: after_vector != before_vector
+            effective: after_snapshot != before_snapshot
                 || model != current_model
                 || structure != current_structure,
             model,
@@ -3076,9 +3076,11 @@ fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
     }
 }
 
+/// Capy's contributor map is server-owned metadata, retained outside workbook validation.
 fn require_root_keys<T: ReadTxn>(txn: &T, expected: &[&str]) -> Result<(), String> {
     let actual = txn
         .root_refs()
+        .filter(|(key, _)| *key != "__capy_pending_contributors")
         .map(|(key, _)| key.to_string())
         .collect::<BTreeSet<_>>();
     let expected = expected

@@ -1076,3 +1076,104 @@ fn rebase_overlay_is_sparse_binary_and_immutable_after_bootstrap() {
             .is_err()
     );
 }
+
+#[test]
+fn capy_contributor_metadata_survives_native_live_and_durable_updates() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Any, Doc, Map, ReadTxn, StateVector, Transact, WriteTxn};
+    const ROOT: &str = "__capy_pending_contributors";
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut native = Workbook::open_collaborative(&source, 7041).unwrap();
+    let server = Doc::with_client_id(7042);
+    server
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&native.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let marker = Any::Map(std::sync::Arc::new(std::collections::HashMap::from([
+        ("access".into(), Any::String("write".into())),
+        ("nonce".into(), Any::String("n".into())),
+        ("userId".into(), Any::String("u".into())),
+    ])));
+    {
+        let mut txn = server.transact_mut();
+        txn.get_or_insert_map(ROOT)
+            .insert(&mut txn, "actor", marker.clone());
+    }
+    let live = server
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    native
+        .apply_update_v1(&live, CalculationOptions::default())
+        .unwrap();
+    native
+        .edit_cell(SheetId(0), at("C1"), "kept", CalculationOptions::default())
+        .unwrap();
+    let retained = Doc::new();
+    retained
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&native.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    {
+        let txn = retained.transact();
+        assert_eq!(
+            txn.get_map(ROOT).unwrap().get(&txn, "actor"),
+            Some(yrs::Out::Any(marker))
+        );
+    }
+    server
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&native.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let vector = server.transact().state_vector();
+    {
+        let mut txn = server.transact_mut();
+        txn.get_map(ROOT).unwrap().remove(&mut txn, "actor");
+    }
+    let removal = server.transact().encode_diff_v1(&vector);
+    native
+        .apply_update_v1(&removal, CalculationOptions::default())
+        .unwrap();
+    retained
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&native.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    {
+        let txn = retained.transact();
+        assert!(txn.get_map(ROOT).unwrap().get(&txn, "actor").is_none());
+        assert_eq!(txn.snapshot(), server.transact().snapshot());
+    }
+    let saved = native.encode_state_as_update_v1();
+    let mut restored = reopen_rebased(&source, &saved, 7043);
+    assert_eq!(restored.model(), native.model());
+    let published = restored.save().unwrap();
+    restored
+        .edit_cell(SheetId(0), at("D1"), "newer", CalculationOptions::default())
+        .unwrap();
+    let rebased = Workbook::rebase_checkpoint(
+        &source,
+        &saved,
+        &restored.encode_state_as_update_v1(),
+        &published,
+        7044,
+    )
+    .unwrap();
+    assert_eq!(
+        reopen_rebased(&published, &rebased.state, 7045).model(),
+        restored.model()
+    );
+    let previous = native.encode_state_as_update_v1();
+    {
+        let mut txn = server.transact_mut();
+        txn.get_or_insert_map("__capy_unrelated_root")
+            .insert(&mut txn, "actor", true);
+    }
+    let unrelated = server
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    assert!(
+        native
+            .apply_update_v1(&unrelated, CalculationOptions::default())
+            .is_err()
+    );
+    assert_eq!(native.encode_state_as_update_v1(), previous);
+}
