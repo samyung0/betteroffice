@@ -97,13 +97,16 @@ export class OfficeEditError extends Error {
     super(`${code}: ${message}`);
   }
 }
-interface Entry {
+export interface OfficeBaselineEntry {
+  imageSHA256?: string;
   id: string;
   kind: NetEffect["kind"];
   label: string;
   value: string;
   position: string;
   assetRef?: OfficeObjectRef;
+}
+interface Entry extends OfficeBaselineEntry {
   asset?: OfficeAsset;
 }
 interface Session {
@@ -1027,60 +1030,76 @@ export async function seedOffice(
     session.dispose();
   }
 }
+/** Semantic comparison data only; media is represented by its content hash. */
+export async function officeBaseline(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+): Promise<OfficeBaselineEntry[]> {
+  const session = await open(checkpoint.format, baseBytes, checkpoint);
+  try {
+    return session.entries().map(({ asset, ...entry }) => ({
+      ...entry,
+      value:
+        entry.kind === "visual" ? hash(Buffer.from(entry.value)) : entry.value,
+      ...(asset ? { imageSHA256: asset.sha256 } : {}),
+    }));
+  } finally {
+    session.dispose();
+  }
+}
+
+export function compareBaselines(
+  from: OfficeBaselineEntry[],
+  to: OfficeBaselineEntry[],
+): NetEffect[] {
+  const before = new Map(from.map((entry) => [entry.id, entry]));
+  const after = new Map(to.map((entry) => [entry.id, entry]));
+  const effects: NetEffect[] = [];
+  for (const id of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+    const old = before.get(id),
+      next = after.get(id);
+    if (
+      old &&
+      next &&
+      old.value === next.value &&
+      old.position === next.position
+    )
+      continue;
+    const entry = next ?? old!;
+    const effect: NetEffect = {
+      id,
+      kind: entry.kind,
+      operation: !old
+        ? "add"
+        : !next
+          ? "remove"
+          : old.value === next.value
+            ? "move"
+            : "replace",
+      label: entry.label,
+    };
+    if (entry.kind === "text") {
+      if (old) effect.before = old.value;
+      if (next) effect.after = next.value;
+    }
+    if (next?.assetRef) effect.assetRef = next.assetRef;
+    if (next?.imageSHA256) effect.imageSHA256 = next.imageSHA256;
+    effects.push(effect);
+  }
+  return effects;
+}
+
 export async function compare(
   baseBytes: Uint8Array,
   fromCheckpoint: OfficeCheckpoint,
-  toCheckpoint: OfficeCheckpoint
+  toCheckpoint: OfficeCheckpoint,
 ): Promise<NetEffect[]> {
   if (fromCheckpoint.format !== toCheckpoint.format)
     throw new Error("Cannot compare different Office formats");
-  const from = await open(fromCheckpoint.format, baseBytes, fromCheckpoint);
-  try {
-    const to = await open(toCheckpoint.format, baseBytes, toCheckpoint);
-    try {
-      const before = new Map(from.entries().map((entry) => [entry.id, entry]));
-      const after = new Map(to.entries().map((entry) => [entry.id, entry]));
-      const effects: NetEffect[] = [];
-      for (const id of [
-        ...new Set([...before.keys(), ...after.keys()]),
-      ].sort()) {
-        const old = before.get(id),
-          next = after.get(id);
-        if (
-          old &&
-          next &&
-          old.value === next.value &&
-          old.position === next.position
-        )
-          continue;
-        const entry = next ?? old!;
-        const effect: NetEffect = {
-          id,
-          kind: entry.kind,
-          operation: !old
-            ? "add"
-            : !next
-            ? "remove"
-            : old.value === next.value
-            ? "move"
-            : "replace",
-          label: entry.label,
-        };
-        if (entry.kind === "text") {
-          if (old) effect.before = old.value;
-          if (next) effect.after = next.value;
-        }
-        if (next?.assetRef) effect.assetRef = next.assetRef;
-        if (next?.asset) effect.imageSHA256 = next.asset.sha256;
-        effects.push(effect);
-      }
-      return effects;
-    } finally {
-      to.dispose();
-    }
-  } finally {
-    from.dispose();
-  }
+  return compareBaselines(
+    await officeBaseline(baseBytes, fromCheckpoint),
+    await officeBaseline(baseBytes, toCheckpoint),
+  );
 }
 export async function resolveAsset(
   baseBytes: Uint8Array,

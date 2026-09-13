@@ -4,6 +4,8 @@ import {
   applyOfficeCommands,
   locateOfficeTargets,
   seedOffice,
+  officeBaseline,
+  compareBaselines,
   compare,
   exportOffice,
   inspectOffice,
@@ -811,4 +813,40 @@ test("PPTX and XLSX agent edits count astral characters in UTF-16, and a cleared
   await expect(
     locateOfficeTargets(workbook, withCell, [`missing-sheet:${added.id.slice(added.id.indexOf(":[") + 1)}`])
   ).rejects.toThrow("unavailable_target");
+});
+
+
+test("semantic baselines roundtrip without embedded media and detect edits and reversals", async () => {
+  for (const [format, name] of [
+    ["docx", "betteroffice-demo.docx"],
+    ["xlsx", "sample.xlsx"],
+    ["pptx", "betteroffice-demo.pptx"],
+  ] as const) {
+    const bytes = await fixture(name);
+    const checkpoint = await seedOffice(format, bytes);
+    const baseline = await officeBaseline(bytes, checkpoint);
+    const encoded = JSON.stringify(baseline);
+    expect(encoded).not.toContain('"bytes":');
+    expect(encoded).not.toContain("data:image/");
+    const restored = JSON.parse(encoded) as typeof baseline;
+    expect(compareBaselines(restored, baseline)).toEqual([]);
+    const text = baseline.find((entry) => entry.kind === "text");
+    expect(text).toBeDefined();
+    const edited = baseline.map((entry) =>
+      entry.id === text!.id ? { ...entry, value: "Changed lesson" } : entry,
+    );
+    expect(compareBaselines(restored, edited)).toEqual([
+      {
+        id: text!.id,
+        kind: "text",
+        label: text!.label,
+        operation: "replace",
+        before: text!.value,
+        after: "Changed lesson",
+      },
+    ]);
+    expect(compareBaselines(restored, baseline)).toEqual([]);
+    for (const entry of baseline.filter((entry) => entry.kind === "visual"))
+      expect(entry.value).toMatch(/^[a-f0-9]{64}$/);
+  }
 });

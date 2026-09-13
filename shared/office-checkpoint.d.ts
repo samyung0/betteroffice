@@ -105,3 +105,17 @@ export declare function locateOfficeTargets(
   ids: string[]
 ): Promise<OfficeTarget[]>;
 export declare function runtimeManifest(): Promise<Record<string, string>>;
+
+export interface OfficeBaselineEntry extends OfficeEntry {
+  imageSHA256?: string;
+  kind: NetEffect["kind"];
+  assetRef?: OfficeObjectRef;
+}
+export declare function officeBaseline(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+): Promise<OfficeBaselineEntry[]>;
+export declare function compareBaselines(
+  from: OfficeBaselineEntry[],
+  to: OfficeBaselineEntry[],
+): NetEffect[];
