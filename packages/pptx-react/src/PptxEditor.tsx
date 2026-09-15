@@ -577,14 +577,22 @@ function PptxEditorContent({
     if (!handle || !selection) return;
     try {
       const story = handle.story(selection.storyId);
-      setTextStyle(
-        effectiveStyleFromSelection(
-          story,
-          selection.anchor,
-          selection.focus,
-          initialStyle
-        )
+      const next = effectiveStyleFromSelection(
+        story,
+        selection.anchor,
+        selection.focus,
+        initialStyle
       );
+      if (
+        textStyle.bold !== next.bold ||
+        textStyle.italic !== next.italic ||
+        textStyle.underline !== next.underline ||
+        textStyle.fontSizePt !== next.fontSizePt ||
+        textStyle.color !== next.color ||
+        textStyle.fontFamily !== next.fontFamily
+      ) {
+        setTextStyle(next);
+      }
     } catch (value) {
       reportError(value);
     }
