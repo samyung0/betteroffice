@@ -376,21 +376,16 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
-    /// A supplied source must match the update's exact package fingerprint.
+    /// `source` must match the update's exact package fingerprint.
     #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
     pub fn open_collaborative_from_update(
         update: &[u8],
         client_id: f64,
-        source: Option<Vec<u8>>,
+        source: &[u8],
     ) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
-        let session = match source {
-            Some(source) => DeckSession::open_from_update_with_source(update, &source, client_id),
-            None => Err(crate::EditError::Parse(
-                "opening a deck state requires its source package".to_owned(),
-            )),
-        }
-        .map_err(js_error)?;
+        let session = DeckSession::open_from_update_with_source(update, source, client_id)
+            .map_err(js_error)?;
         Ok(Self {
             session,
             update_observer: None,
