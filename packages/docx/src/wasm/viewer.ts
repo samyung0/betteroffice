@@ -1,8 +1,12 @@
 /** Read-only DOCX engine. Reached only through the viewer entry. */
 
+import type { RustTextEngine } from '../layout/measure/rustMeasureSource';
 import wasmInit, {
   DocxViewDocument,
+  clear_measure_fonts,
   initSync,
+  register_measure_font,
+  register_substitute_measure_font,
 } from './generated/viewer/docx_view_wasm.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
@@ -25,3 +29,10 @@ export function openViewDocument(bytes: Uint8Array): DocxViewDocument {
 }
 
 export type { DocxViewDocument };
+
+/** The viewer module's measurement font store. */
+export const viewTextEngine: RustTextEngine = {
+  registerFont: register_measure_font,
+  registerSubstituteFont: register_substitute_measure_font,
+  clearFonts: clear_measure_fonts,
+};

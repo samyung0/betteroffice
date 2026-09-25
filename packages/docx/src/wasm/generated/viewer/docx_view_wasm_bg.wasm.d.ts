@@ -3,6 +3,9 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_docxviewdocument_free: (a: number, b: number) => void;
 export const docxviewdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const docxviewdocument_fontRequirementsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const docxviewdocument_layout: (a: number, b: number, c: number) => [number, number];
+export const docxviewdocument_layoutRequestJson: (a: number) => [number, number];
 export const docxviewdocument_open: (a: number, b: number) => [number, number, number];
 export const docxviewdocument_version: () => [number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];

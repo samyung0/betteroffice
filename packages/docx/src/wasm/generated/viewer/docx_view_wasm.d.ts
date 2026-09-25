@@ -1,11 +1,28 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Opens in steps so the host registers the fonts the layout needs first:
+ * `open`, `layoutRequestJson`, `fontRequirementsJson`, then `layout`.
+ */
 export class DocxViewDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
     displayListJson(page_gap?: number | null): string;
+    /**
+     * Font families and scripts `request` measures with.
+     */
+    fontRequirementsJson(request: string): string;
+    /**
+     * Lays out `request` (with its `measurement`) and keeps only the display
+     * list, so view mode holds no second document graph.
+     */
+    layout(request: string): void;
+    /**
+     * The region-layout request without `measurement`.
+     */
+    layoutRequestJson(): string;
     static open(bytes: Uint8Array): DocxViewDocument;
     static version(): string;
 }
@@ -155,6 +172,9 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_docxviewdocument_free: (a: number, b: number) => void;
     readonly docxviewdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly docxviewdocument_fontRequirementsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly docxviewdocument_layout: (a: number, b: number, c: number) => [number, number];
+    readonly docxviewdocument_layoutRequestJson: (a: number) => [number, number];
     readonly docxviewdocument_open: (a: number, b: number) => [number, number, number];
     readonly docxviewdocument_version: () => [number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
