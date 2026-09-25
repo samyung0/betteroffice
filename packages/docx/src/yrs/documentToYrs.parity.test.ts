@@ -9,7 +9,6 @@ import { documentToYrs } from './documentToYrs';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
-const EXISTING_ROOM_SEED = resolve(import.meta.dir, '../../../../apps/demo/public/seeds/docx.bin');
 
 function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   expect(left.storyIds()).toEqual(right.storyIds());
@@ -24,7 +23,8 @@ describe('DOCX engine seeding', () => {
   it('produces equivalent story structure and state updates', async () => {
     const bytes = Uint8Array.from(readFileSync(FIXTURE));
     const parsed = await parseDocx(bytes.buffer);
-    const projected = await createYrsSession({ clientId: 47001 });
+    // The byte seeder writes under the fixed seed client 0.
+    const projected = await createYrsSession({ clientId: 0 });
     const engine = await createYrsSession({ clientId: 47001 });
     try {
       documentToYrs(projected, parsed);
@@ -66,22 +66,6 @@ describe('DOCX engine seeding', () => {
     }
   });
 
-  it('preserves committed room story structure and state vector', async () => {
-    const bytes = Uint8Array.from(readFileSync(FIXTURE));
-    const existingRoom = await createYrsSession({ clientId: 47004 });
-    const engine = await createYrsSession({ clientId: 1 });
-    try {
-      existingRoom.loadState(Uint8Array.from(readFileSync(EXISTING_ROOM_SEED)));
-      engine.seedFromDocx(bytes);
-
-      expectEquivalentStories(engine, existingRoom);
-      expect(engine.encodeStateVector()).toEqual(existingRoom.encodeStateVector());
-    } finally {
-      existingRoom.destroy();
-      engine.destroy();
-    }
-  });
-
   it('returns thin host metadata and materializes the canonical package on demand', async () => {
     const bytes = Uint8Array.from(readFileSync(FIXTURE));
     const parsed = await parseDocx(bytes.buffer);
@@ -110,7 +94,7 @@ describe('DOCX engine seeding', () => {
       expect(materialized?.package.headers).toEqual(parsed.package.headers);
       expect(materialized?.package.footers).toEqual(parsed.package.footers);
 
-      existingRoom.loadState(Uint8Array.from(readFileSync(EXISTING_ROOM_SEED)));
+      existingRoom.seedFromDocx(bytes);
       engine.loadState(existingRoom.encodeState());
       expectEquivalentStories(engine, existingRoom);
     } finally {

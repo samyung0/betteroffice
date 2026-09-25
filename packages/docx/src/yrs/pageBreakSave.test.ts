@@ -126,7 +126,8 @@ describe('page break save projection', () => {
       `<w:p><w:r><w:t>HEAD</w:t></w:r>${PAGE_BREAK}<w:r><w:t>TARGET</w:t></w:r></w:p>`
     );
     const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
-    const projected = await createYrsSession({ clientId: 68001 });
+    // The byte seeder writes under the fixed seed client 0.
+    const projected = await createYrsSession({ clientId: 0 });
     const engine = await createYrsSession({ clientId: 68001 });
     try {
       documentToYrs(projected, parsed);

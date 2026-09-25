@@ -3600,7 +3600,30 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
+/// Every seed is written under this client, so a package seeds to the same
+/// bytes and object ids on every engine instance (and costs one byte per id).
+pub const SEED_CLIENT_ID: u64 = 0;
+
+/// Seeds `document` from a parsed package under [`SEED_CLIENT_ID`].
 pub fn seed_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    use yrs::Transact;
+    use yrs::updates::decoder::Decode;
+    let seed = EditingDoc::new(SEED_CLIENT_ID);
+    let fonts = seed_into(&seed, envelope)?;
+    let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())
+        .map_err(|error| error.to_string())?;
+    document
+        .yrs_doc()
+        .transact_mut_with(document.client_id())
+        .apply_update(update)
+        .map_err(|error| error.to_string())?;
+    Ok(fonts)
+}
+
+fn seed_into(
     document: &EditingDoc,
     mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
@@ -4359,6 +4382,33 @@ mod tests {
             engine.set_media(media);
             assert_eq!(image_src(&engine), src);
         }
+    }
+
+    #[test]
+    fn seeds_are_byte_identical_under_the_fixed_seed_client() {
+        use yrs::{ReadTxn, Transact};
+        let seeded = |client_id| {
+            let document = EditingDoc::new(client_id);
+            seed_from_docx(
+                &document,
+                include_bytes!("../../../apps/demo/public/betteroffice-demo.docx"),
+            )
+            .unwrap();
+            document
+        };
+        let (left, right) = (seeded(11), seeded(22));
+        assert_eq!(
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1()
+        );
+        let clients: Vec<u64> = left
+            .yrs_doc()
+            .transact()
+            .state_vector()
+            .iter()
+            .map(|(client, _)| client.get())
+            .collect();
+        assert_eq!(clients, [SEED_CLIENT_ID]);
     }
 
     #[test]
