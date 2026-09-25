@@ -7078,30 +7078,8 @@ fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
 }
 
 #[test]
-fn rebase_restores_deleted_chart_and_image_parts_from_saved_undo() {
-    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
-    let drawing = test_part_text(&parts, "xl/drawings/drawing1.xml").replace("</xdr:wsDr>", r#"<xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="9525" cy="9525"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Image"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rIdImage"/></xdr:blipFill><xdr:spPr/></xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"#);
-    set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
-    let relationships = test_part_text(&parts, "xl/drawings/_rels/drawing1.xml.rels").replace("</Relationships>", r#"<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#);
-    set_test_part(
-        &mut parts,
-        "xl/drawings/_rels/drawing1.xml.rels",
-        relationships.into_bytes(),
-    );
-    parts.push((
-        "xl/media/image1.png".into(),
-        include_bytes!("../../xlsx-raster/tests/golden/clipped.png").to_vec(),
-    ));
-    let content_types = test_part_text(&parts, "[Content_Types].xml").replace(
-        "</Types>",
-        r#"<Default Extension="png" ContentType="image/png"/></Types>"#,
-    );
-    set_test_part(
-        &mut parts,
-        "[Content_Types].xml",
-        content_types.into_bytes(),
-    );
-    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+fn a_rebase_fails_when_the_publication_dropped_a_chart_the_latest_state_shows() {
+    let source = charted_fixture();
     let mut current = Workbook::open_collaborative(&source, 7111).unwrap();
     current
         .apply_ops(
@@ -7127,45 +7105,20 @@ fn rebase_restores_deleted_chart_and_image_parts_from_saved_undo() {
             .any(|(path, _)| path == "xl/charts/chart1.xml")
     );
     current.undo(CalculationOptions::default()).unwrap();
-    let expected = current.save().unwrap();
-    let result = Workbook::rebase_checkpoint(
+    let error = Workbook::rebase_checkpoint(
         &source,
         &captured,
         &current.encode_state_as_update_v1(),
         &published,
         7112,
     )
-    .unwrap();
-    drop(source);
-    let mut reopened = Workbook::open_collaborative(&published, 7113).unwrap();
-    reopened
-        .apply_update_v1(&result.state, CalculationOptions::default())
-        .unwrap();
-    assert_eq!(
-        reopened.model().sheets[0].charts,
-        current.model().sheets[0].charts
+    .expect_err("a chart the publication dropped cannot become an override");
+    assert!(
+        error
+            .to_string()
+            .contains("rebased checkpoint does not reproduce the latest workbook"),
+        "{error}"
     );
-    let actual = ooxml_opc::unzip_parts(&reopened.save().unwrap()).unwrap();
-    let expected = ooxml_opc::unzip_parts(&expected).unwrap();
-    for (path, bytes) in expected.iter().filter(|(path, _)| {
-        path.starts_with("xl/charts/")
-            || path.starts_with("xl/drawings/")
-            || path.starts_with("xl/media/")
-    }) {
-        assert_eq!(
-            actual
-                .iter()
-                .find(|(name, _)| name == path)
-                .map(|(_, value)| value),
-            Some(bytes),
-            "{path}"
-        );
-    }
-    let images = reopened.embedded_images(SheetId(0)).unwrap();
-    let expected_images = current.embedded_images(SheetId(0)).unwrap();
-    assert_eq!(images.len(), 1);
-    assert_eq!(images[0].bytes, expected_images[0].bytes);
-    assert_eq!(images[0].anchor, expected_images[0].anchor);
 }
 
 #[test]

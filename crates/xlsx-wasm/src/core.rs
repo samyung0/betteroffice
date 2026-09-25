@@ -415,20 +415,15 @@ impl Session {
     }
 
     pub fn checkpoint_projection_json(&self) -> Result<String, String> {
-        let sheet_ids = self
-            .workbook
-            .checkpoint_sheet_ids()
-            .map_err(|error| error.to_string())?;
+        let sheet_ids = self.sheet_info()?.sheet_ids;
         let model = self.workbook.model();
         let mut identities = self
             .workbook
-            .checkpoint_cell_identities(model.sheets.iter().enumerate().flat_map(
-                |(index, sheet)| {
-                    sheet
-                        .iter_cells()
-                        .map(move |(at, _)| (SheetId(index as u32), at))
-                },
-            ))
+            .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
+                sheet
+                    .iter_cells()
+                    .map(move |(at, _)| (SheetId(index as u32), at))
+            }))
             .map_err(|error| error.to_string())?
             .into_iter();
         let sheets: Vec<_> = model.sheets.iter().enumerate().map(|(index, sheet)| -> Result<_, String> {
@@ -981,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn recalculated_sessions_restore_rebased_live_and_indexed_checkpoints() {
+    fn recalculated_sessions_restore_rebased_checkpoints_with_their_later_edits() {
         let source = formula_xlsx();
         let now = Some(36526.0);
         let mut original = Session::open_collaborative(&source, 7061, now).unwrap();
@@ -1001,31 +996,18 @@ mod tests {
             7062,
         )
         .unwrap();
-        let mut indexed = Session::open_collaborative(&published, 7063, now).unwrap();
-        indexed
-            .apply_update_json(&rebased.indexed_state, now)
-            .unwrap();
-        assert!(
-            indexed
-                .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
-                .unwrap()
-                .contains(r#""input":"20""#)
-        );
         let mut live = Session::open_collaborative(&published, 7064, now).unwrap();
-        live.apply_update_json(&rebased.state, now).unwrap();
+        live.apply_update_json(&rebased, now).unwrap();
         assert!(
             live.cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
                 .unwrap()
                 .contains(r#""input":"30""#)
         );
-        let baseline: serde_json::Value =
-            serde_json::from_str(&indexed.checkpoint_projection_json().unwrap()).unwrap();
-        let current: serde_json::Value =
-            serde_json::from_str(&live.checkpoint_projection_json().unwrap()).unwrap();
-        assert_eq!(
-            baseline["sheets"][0]["cells"][0]["id"],
-            current["sheets"][0]["cells"][0]["id"]
-        );
+        let effects: serde_json::Value =
+            serde_json::from_str(&live.pending_effects_json().unwrap()).unwrap();
+        assert_eq!(effects.as_array().unwrap().len(), 1);
+        assert_eq!(effects[0]["before"], r#"{"kind":"number","value":20.0}"#);
+        assert_eq!(effects[0]["after"], r#"{"kind":"number","value":30.0}"#);
         assert_eq!(
             Workbook::open(&live.save().unwrap()).unwrap().model(),
             original.workbook.model()
@@ -1039,13 +1021,6 @@ mod tests {
             peer.checkpoint_projection_json().unwrap(),
             live.checkpoint_projection_json().unwrap()
         );
-        let mut edited = Session::open_collaborative(&published, 7066, now).unwrap();
-        edited
-            .edit_cell_json(r#"{"sheet":0,"row":2,"col":0,"input":"keep"}"#, now)
-            .unwrap();
-        let previous = edited.encode_state_as_update();
-        assert!(edited.apply_update_json(&rebased.state, now).is_err());
-        assert_eq!(edited.encode_state_as_update(), previous);
     }
 
     #[test]

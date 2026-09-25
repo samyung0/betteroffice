@@ -280,7 +280,6 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
-    source_sha: Option<String>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -491,7 +490,6 @@ impl Workbook {
                 .collect(),
             model,
             source_package,
-            source_sha: source_sha.map(str::to_owned),
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -549,9 +547,6 @@ impl Workbook {
         };
         validate_collaboration_size(update)?;
         let before = self.model.clone();
-        if self.restore_rebase(update, options)? {
-            return Ok(self.remote_mutation_result(&before, true));
-        }
         if let Some(index) = self
             .pending_remote_updates
             .iter()

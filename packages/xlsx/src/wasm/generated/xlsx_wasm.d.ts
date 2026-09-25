@@ -89,7 +89,10 @@ export class XlsxDocument {
      * a rectangular block of cells for clipboard copy.
      */
     rangeCellsJson(args: string): string;
-    static rebaseCheckpoint(old_source: Uint8Array, captured: Uint8Array, latest: Uint8Array, new_source: Uint8Array, client_id: number): XlsxRebaseResult;
+    /**
+     * The latest state re-expressed as overrides over the published source.
+     */
+    static rebaseCheckpoint(old_source: Uint8Array, captured: Uint8Array, latest: Uint8Array, new_source: Uint8Array, client_id: number): Uint8Array;
     /**
      * redo the last undone transaction; same shape as `undoJson`.
      */
@@ -137,20 +140,11 @@ export class XlsxDocument {
     readonly clientId: number;
 }
 
-export class XlsxRebaseResult {
-    private constructor();
-    free(): void;
-    [Symbol.dispose](): void;
-    readonly indexedState: Uint8Array;
-    readonly state: Uint8Array;
-}
-
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
-    readonly __wbg_xlsxrebaseresult_free: (a: number, b: number) => void;
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -184,7 +178,7 @@ export interface InitOutput {
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+    readonly xlsxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
@@ -199,8 +193,6 @@ export interface InitOutput {
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
-    readonly xlsxrebaseresult_indexedState: (a: number) => [number, number];
-    readonly xlsxrebaseresult_state: (a: number) => [number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

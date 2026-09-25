@@ -96,7 +96,6 @@ pub(crate) enum AuthorityError {
 
 #[derive(Clone)]
 struct WorkbookBase {
-    rebase: Option<crate::workbook::rebase::RebaseData>,
     bootstrap_client_id: u64,
     date_system: DateSystem,
     defined_names: Vec<DefinedName>,
@@ -216,7 +215,6 @@ impl WorkbookBase {
             }
         }
         Ok(Self {
-            rebase: None,
             bootstrap_client_id,
             date_system: model.date_system,
             defined_names: model.defined_names.clone(),
@@ -550,30 +548,15 @@ impl WorkbookAuthority {
         Ok(authority)
     }
 
-    pub(crate) fn attach_rebase(
-        &mut self,
-        data: crate::workbook::rebase::RebaseData,
-    ) -> Result<(), AuthorityError> {
-        data.write(&self.doc);
-        Arc::make_mut(&mut self.base).rebase = Some(data);
-        self.strict_materialize()
-            .map_err(AuthorityError::InvalidState)?;
-        Ok(())
-    }
-    pub(crate) fn expect_rebase(&mut self, data: crate::workbook::rebase::RebaseData) {
-        Arc::make_mut(&mut self.base).rebase = Some(data);
-    }
-    pub(crate) fn has_rebase(&self) -> bool {
-        self.base.rebase.is_some()
-    }
-    pub(crate) fn rebase_alias_projection(&self) -> Option<&[crate::workbook::rebase::SheetAlias]> {
-        self.base.rebase.as_ref().and_then(|data| data.aliases())
-    }
-    pub(crate) fn rebase_aliases(
+    /// Writes `latest`'s projection into this fresh publication of `captured`.
+    pub(crate) fn rebase(
         &self,
+        captured: &Self,
         latest: &Self,
-    ) -> Result<Vec<crate::workbook::rebase::SheetAlias>, AuthorityError> {
-        stable::rebase_aliases(&self.doc, &latest.doc).map_err(AuthorityError::InvalidState)
+        model: &WorkbookModel,
+    ) -> Result<(), AuthorityError> {
+        stable::rebase(&self.doc, &self.base, &captured.doc, &latest.doc, model)
+            .map_err(AuthorityError::InvalidState)
     }
 
     pub(crate) fn pending_effects(
@@ -728,7 +711,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let mut candidate = Self {
+        let candidate = Self {
             doc,
             bootstrap_snapshot: self.bootstrap_snapshot.clone(),
             base: self.base.clone(),
@@ -750,12 +733,7 @@ impl WorkbookAuthority {
         }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
-            Ok(_) => {
-                if let Some(data) = &mut Arc::make_mut(&mut candidate.base).rebase {
-                    data.bind_values(&candidate.doc);
-                }
-                SnapshotAdoption::Replacement(Box::new(candidate))
-            }
+            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
         }
     }
 

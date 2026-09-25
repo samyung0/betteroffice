@@ -22,8 +22,7 @@ import type {
 export type OfficeFormat = "docx" | "xlsx" | "pptx";
 /**
  * Top-level Yjs roots each engine's state may hold, Capy's contributor map
- * included. PPTX and XLSX engines reject any other root; `xlsx:rebase` exists
- * only after a publication rebased later edits.
+ * included. PPTX and XLSX engines reject any other root.
  */
 export const OFFICE_DOCUMENT_ROOTS: Readonly<
   Record<OfficeFormat, readonly string[]>
@@ -36,7 +35,6 @@ export const OFFICE_DOCUMENT_ROOTS: Readonly<
     "xlsx:sheets",
     "xlsx:axis-catalog",
     "xlsx:defined-names",
-    "xlsx:rebase",
     "__capy_pending_contributors",
   ],
   pptx: [
@@ -1186,7 +1184,7 @@ export async function compare(
     await officeBaseline(baseBytes, toCheckpoint),
   );
 }
-/** Rebind both projections to the new package; keep only the compact indexed baseline. */
+/** Rebind both projections to the new package; keep only the compact indexed baseline. XLSX keeps none: its effects come from the overrides. */
 export async function rebaseOffice(
   baseBytes: Uint8Array,
   captured: OfficeCheckpoint,
@@ -1221,6 +1219,26 @@ export async function rebaseOffice(
       );
   }
   await initialize(format);
+  if (format === "xlsx") {
+    const state = XlsxDocument.rebaseCheckpoint(
+      baseBytes,
+      captured.state,
+      latest.state,
+      exportedSource,
+      randomInt(1, 0x1fffffffffff),
+    );
+    const checkpoint = {
+      format,
+      schemaVersion: 1 as const,
+      baseSha256: hash(exportedSource),
+      state,
+    };
+    return {
+      state,
+      baseline: [],
+      effects: await xlsxPendingEffects(exportedSource, checkpoint),
+    };
+  }
   let rebased: { state: Uint8Array; indexedState: Uint8Array };
   if (format === "docx") {
     rebased = await rebaseDocxCheckpoint({
@@ -1230,8 +1248,7 @@ export async function rebaseOffice(
       exportedSource,
     });
   } else {
-    const engine = format === "xlsx" ? XlsxDocument : PptxDocument;
-    const result = engine.rebaseCheckpoint(
+    const result = PptxDocument.rebaseCheckpoint(
       baseBytes,
       captured.state,
       latest.state,

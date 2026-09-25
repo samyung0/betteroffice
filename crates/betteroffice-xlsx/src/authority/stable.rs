@@ -933,19 +933,17 @@ pub(super) fn materialize<T: ReadTxn>(
     txn: &T,
     base: &WorkbookBase,
 ) -> Result<(WorkbookModel, WorkbookStructure), String> {
-    let mut roots = vec![
-        CELL_FORMATS,
-        META,
-        SHEET_ORDER,
-        SHEETS,
-        CATALOG,
-        DEFINED_NAMES,
-    ];
-    if let Some(data) = &base.rebase {
-        roots.push(crate::workbook::rebase::ROOT);
-        data.validate(txn)?;
-    }
-    require_root_keys(txn, &roots)?;
+    require_root_keys(
+        txn,
+        &[
+            CELL_FORMATS,
+            META,
+            SHEET_ORDER,
+            SHEETS,
+            CATALOG,
+            DEFINED_NAMES,
+        ],
+    )?;
     let meta = map(txn, META)?;
     let fingerprint = meta
         .get(txn, BASE_FINGERPRINT)
@@ -2027,90 +2025,312 @@ fn content_cells<T: ReadTxn>(
     Ok(cells)
 }
 
-pub(super) fn rebase_aliases(
-    before: &Doc,
-    latest: &Doc,
-) -> Result<Vec<crate::workbook::rebase::SheetAlias>, String> {
-    use crate::workbook::rebase::{AliasSpan, SheetAlias};
-    let before = context(&before.transact())?;
-    let latest = context(&latest.transact())?;
-    fn spans(old: &Axis, current: Option<&Axis>) -> Vec<AliasSpan> {
-        let mut targets = BTreeMap::<&str, Vec<(u64, u64, u64)>>::new();
-        let mut position = 0;
-        for span in current.into_iter().flat_map(|axis| &axis.spans) {
-            targets.entry(&span.run).or_default().push((
-                span.start,
-                span.start + span.len,
-                position,
-            ));
-            position += span.len;
-        }
-        for spans in targets.values_mut() {
-            spans.sort_by_key(|span| span.0);
-        }
-        let mut result: Vec<AliasSpan> = Vec::new();
-        let mut append = |start: u64, len: u64, target: Option<u64>| {
-            if let Some(last) = result.last_mut() {
-                if last.start + last.len == start
-                    && match (last.target, target) {
-                        (Some(previous), Some(current)) => previous + last.len == current,
-                        (None, None) => true,
-                        _ => false,
-                    }
-                {
-                    last.len += len;
-                    return;
-                }
-            }
-            result.push(AliasSpan { start, len, target });
-        };
-        let mut old_position = 0;
-        for span in &old.spans {
-            let mut cursor = span.start;
-            let end = span.start + span.len;
-            if let Some(targets) = targets.get(span.run.as_str()) {
-                let first = targets.partition_point(|(_, end, _)| *end <= cursor);
-                for &(start, target_end, position) in &targets[first..] {
-                    if start >= end {
-                        break;
-                    }
-                    let low = cursor.max(start);
-                    let high = end.min(target_end);
-                    if low > cursor {
-                        append(old_position + cursor - span.start, low - cursor, None);
-                    }
-                    append(
-                        old_position + low - span.start,
-                        high - low,
-                        Some(position + low - start),
-                    );
-                    cursor = high;
-                }
-            }
-            if cursor < end {
-                append(old_position + cursor - span.start, end - cursor, None);
-            }
-            old_position += span.len;
-        }
-        result
+/// Where each position of `old` sits on `current`, as `(start, len, target)`
+/// runs; `None` where it is gone.
+fn alias_spans(old: &Axis, current: &Axis) -> Vec<(u64, u64, Option<u64>)> {
+    let mut targets = BTreeMap::<&str, Vec<(u64, u64, u64)>>::new();
+    let mut position = 0;
+    for span in &current.spans {
+        targets
+            .entry(&span.run)
+            .or_default()
+            .push((span.start, span.start + span.len, position));
+        position += span.len;
     }
+    for spans in targets.values_mut() {
+        spans.sort_by_key(|span| span.0);
+    }
+    let mut result: Vec<(u64, u64, Option<u64>)> = Vec::new();
+    let mut append = |start: u64, len: u64, target: Option<u64>| {
+        if let Some(last) = result.last_mut()
+            && last.0 + last.1 == start
+            && match (last.2, target) {
+                (Some(previous), Some(current)) => previous + last.1 == current,
+                (None, None) => true,
+                _ => false,
+            }
+        {
+            last.1 += len;
+            return;
+        }
+        result.push((start, len, target));
+    };
+    let mut old_position = 0;
+    for span in &old.spans {
+        let mut cursor = span.start;
+        let end = span.start + span.len;
+        if let Some(targets) = targets.get(span.run.as_str()) {
+            let first = targets.partition_point(|(_, end, _)| *end <= cursor);
+            for &(start, target_end, position) in &targets[first..] {
+                if start >= end {
+                    break;
+                }
+                let low = cursor.max(start);
+                let high = end.min(target_end);
+                if low > cursor {
+                    append(old_position + cursor - span.start, low - cursor, None);
+                }
+                append(
+                    old_position + low - span.start,
+                    high - low,
+                    Some(position + low - start),
+                );
+                cursor = high;
+            }
+        }
+        if cursor < end {
+            append(old_position + cursor - span.start, end - cursor, None);
+        }
+        old_position += span.len;
+    }
+    result
+}
 
-    before
+/// Replays the row or column deletions and insertions between two axes onto a
+/// grid laid out as the first. Positions that insertions push off the end of
+/// the grid need no deletion, and trailing positions no insertion.
+fn align(ops: &mut Vec<Op>, sheet: SheetId, rows: bool, captured: &Axis, latest: &Axis) {
+    let limit = u64::from(if rows { MAX_ROWS } else { MAX_COLS });
+    let spans = alias_spans(captured, latest);
+    for &(start, len, target) in spans.iter().rev() {
+        if target.is_none() && start + len < limit {
+            let (at, count) = (start as u32, len as u32);
+            ops.push(if rows {
+                Op::DeleteRows { sheet, at, count }
+            } else {
+                Op::DeleteCols { sheet, at, count }
+            });
+        }
+    }
+    let mut next = 0;
+    for &(_, len, target) in &spans {
+        let Some(target) = target else {
+            continue;
+        };
+        if target > next {
+            let (at, count) = (next as u32, (target - next) as u32);
+            ops.push(if rows {
+                Op::InsertRows { sheet, at, count }
+            } else {
+                Op::InsertCols { sheet, at, count }
+            });
+        }
+        next = target + len;
+    }
+}
+
+/// Re-expresses `target`, the projection of `latest`, over this freshly seeded
+/// publication of `captured`: sheet, row and column changes made since the
+/// capture replay as structural edits, everything else as overrides.
+pub(super) fn rebase(
+    doc: &Doc,
+    base: &WorkbookBase,
+    captured: &Doc,
+    latest: &Doc,
+    target: &WorkbookModel,
+) -> Result<(), String> {
+    let before = context(&captured.transact())?;
+    let after = context(&latest.transact())?;
+    let mut order = before
         .keys
         .iter()
-        .enumerate()
-        .map(|(index, key)| {
-            let (rows, cols) = before.axes(key)?;
-            let target = latest.index(key);
-            let axes = target.map(|_| latest.axes(key)).transpose()?;
-            Ok(SheetAlias {
-                target: target.map_or_else(
-                    || format!("indexed-deleted-sheet:{index}"),
-                    |index| format!("sheet:{index}"),
-                ),
-                rows: spans(rows, axes.map(|axes| &axes.0)),
-                cols: spans(cols, axes.map(|axes| &axes.1)),
-            })
-        })
-        .collect()
+        .map(|key| Some(key.as_str()))
+        .collect::<Vec<_>>();
+    let mut ops = Vec::new();
+    let mut previous = None;
+    for (index, key) in after.keys.iter().enumerate() {
+        if let Some(position) = order.iter().position(|item| *item == Some(key.as_str())) {
+            previous = Some(position);
+            continue;
+        }
+        let at = previous.map_or(0, |position| position + 1);
+        order.insert(at, None);
+        ops.push(Op::AddSheet {
+            index: at,
+            name: after.names[index].clone(),
+        });
+        previous = Some(at);
+    }
+    for position in (0..order.len()).rev() {
+        if order[position].is_some_and(|key| after.index(key).is_none()) {
+            ops.push(Op::RemoveSheet { index: position });
+        }
+    }
+    for (index, key) in after.keys.iter().enumerate() {
+        let Some(source) = before.index(key) else {
+            continue;
+        };
+        let sheet = SheetId(index as u32);
+        if before.names[source] != after.names[index] {
+            ops.push(Op::RenameSheet {
+                sheet,
+                name: after.names[index].clone(),
+            });
+        }
+        let ((rows, cols), (latest_rows, latest_cols)) = (before.axes(key)?, after.axes(key)?);
+        align(&mut ops, sheet, true, rows, latest_rows);
+        align(&mut ops, sheet, false, cols, latest_cols);
+    }
+    if !ops.is_empty() {
+        apply(doc, base, &ops, SyncOrigin::Agent)?;
+    }
+
+    let projected = materialize(&doc.transact(), base)?.0;
+    let corners = |range: &CellRange| {
+        (
+            range.start.row,
+            range.start.col,
+            range.end.row,
+            range.end.col,
+        )
+    };
+    let sorted = |links: &[Hyperlink]| {
+        let mut links = links.to_vec();
+        links.sort_by_key(|link| corners(&link.range));
+        links
+    };
+    let mut ops = Vec::new();
+    for (index, (sheet, wanted)) in projected.sheets.iter().zip(&target.sheets).enumerate() {
+        let id = SheetId(index as u32);
+        for range in sheet
+            .merges
+            .iter()
+            .filter(|range| !wanted.merges.contains(range))
+        {
+            ops.push(Op::UnmergeCells {
+                sheet: id,
+                range: *range,
+            });
+        }
+        for range in wanted
+            .merges
+            .iter()
+            .filter(|range| !sheet.merges.contains(range))
+        {
+            ops.push(Op::MergeCells {
+                sheet: id,
+                range: *range,
+            });
+        }
+        if sorted(&sheet.hyperlinks) != sorted(&wanted.hyperlinks) {
+            ops.push(Op::SetHyperlinks {
+                sheet: id,
+                hyperlinks: wanted.hyperlinks.clone(),
+            });
+        }
+        if sheet.freeze_pane != wanted.freeze_pane {
+            ops.push(Op::SetFreezePane {
+                sheet: id,
+                pane: wanted.freeze_pane,
+            });
+        }
+        for row in sheet
+            .row_heights
+            .keys()
+            .chain(wanted.row_heights.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            let height = wanted.row_heights.get(row).copied();
+            if sheet.row_heights.get(row).copied() != height {
+                ops.push(Op::SetRowHeight {
+                    sheet: id,
+                    row: *row,
+                    height,
+                });
+            }
+        }
+        for col in sheet
+            .col_widths
+            .keys()
+            .chain(wanted.col_widths.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            let width = wanted.col_widths.get(col).copied();
+            if sheet.col_widths.get(col).copied() != width {
+                ops.push(Op::SetColWidth {
+                    sheet: id,
+                    col: *col,
+                    width,
+                });
+            }
+        }
+        for chart in &wanted.charts {
+            let frame = chart.frame_id();
+            if let Some(existing) = sheet
+                .charts
+                .iter()
+                .find(|item| item.frame_id() == frame && item.anchor != chart.anchor)
+            {
+                ops.push(Op::SetChartAnchor {
+                    sheet: id,
+                    frame,
+                    part: existing.part.clone(),
+                    from: existing.anchor,
+                    to: chart.anchor,
+                });
+            }
+        }
+    }
+    if projected.defined_names != target.defined_names {
+        ops.push(Op::SetDefinedNames {
+            defined_names: target.defined_names.clone(),
+        });
+    }
+    if !ops.is_empty() {
+        apply(doc, base, &ops, SyncOrigin::Agent)?;
+    }
+    write_overrides(doc, base, target)
+}
+
+/// Writes an override for every cell whose content or format differs from `target`.
+fn write_overrides(doc: &Doc, base: &WorkbookBase, target: &WorkbookModel) -> Result<(), String> {
+    let projected = materialize(&doc.transact(), base)?.0;
+    let mut txn = doc.transact_mut_with(SyncOrigin::Agent.as_str());
+    let context = context(&txn)?;
+    let formats = map(&txn, CELL_FORMATS)?;
+    sync_cell_formats(&formats, &mut txn, &target.styles)?;
+    let empty = Cell::default();
+    let (mut current_formats, mut wanted_formats) = (HashMap::new(), HashMap::new());
+    for (index, key) in context.keys.iter().enumerate() {
+        let sheet = &projected.sheets[index];
+        let wanted = target
+            .sheets
+            .get(index)
+            .ok_or("rebased sheet count differs")?;
+        let shared = sheet_map(&txn, key)?;
+        let positions = sheet
+            .iter_cells()
+            .chain(wanted.iter_cells())
+            .map(|(at, _)| (at.row, at.col))
+            .collect::<BTreeSet<_>>();
+        for (row, col) in positions {
+            let at = CellRef::new(row, col);
+            let now = sheet.cell(at).unwrap_or(&empty);
+            let cell = wanted.cell(at).unwrap_or(&empty);
+            let content = match (&now.formula, &cell.formula) {
+                (None, None) => now.value != cell.value,
+                (left, right) => left != right,
+            };
+            let format = current_formats
+                .entry(now.style)
+                .or_insert_with(|| projected.styles.cell_format(now.style))
+                != wanted_formats
+                    .entry(cell.style)
+                    .or_insert_with(|| target.styles.cell_format(cell.style));
+            if content || format {
+                write_cell(
+                    &mut txn,
+                    &shared,
+                    key,
+                    at,
+                    cell,
+                    &context,
+                    &target.styles,
+                    base,
+                    (content, format),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }

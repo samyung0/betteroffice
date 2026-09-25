@@ -2,7 +2,6 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
-export const __wbg_xlsxrebaseresult_free: (a: number, b: number) => void;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -36,7 +35,7 @@ export const xlsxdocument_pendingEffectsJson: (a: number) => [number, number, nu
 export const xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
-export const xlsxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+export const xlsxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
@@ -51,8 +50,6 @@ export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number,
 export const xlsxdocument_startUpdateObservation: (a: number) => [number, number];
 export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_version: () => [number, number];
-export const xlsxrebaseresult_indexedState: (a: number) => [number, number];
-export const xlsxrebaseresult_state: (a: number) => [number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
