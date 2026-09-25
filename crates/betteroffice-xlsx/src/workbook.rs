@@ -405,6 +405,7 @@ impl Workbook {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_source(
         model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
