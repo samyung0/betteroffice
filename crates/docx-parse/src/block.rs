@@ -337,7 +337,7 @@ impl StoryParser<'_, '_> {
             for child in run.child_elements() {
                 match child.local_name() {
                     "drawing" => {
-                        self.enrich_text_box_drawing(paragraph, child, run_index, depth)?
+                        self.enrich_text_box_drawing(paragraph, child, run_index, depth, None)?
                     }
                     "AlternateContent" => {
                         let branch = child
@@ -349,11 +349,20 @@ impl StoryParser<'_, '_> {
                                     .find(|branch| branch.local_name() == "Fallback")
                             });
                         if let Some(branch) = branch {
-                            for drawing in branch
+                            let drawings = branch
                                 .child_elements()
                                 .filter(|child| child.local_name() == "drawing")
-                            {
-                                self.enrich_text_box_drawing(paragraph, drawing, run_index, depth)?;
+                                .collect::<Vec<_>>();
+                            // One text box replays the wrapper, VML fallback included.
+                            let source = (drawings.len() == 1).then(|| child.to_raw_inline_xml());
+                            for drawing in drawings {
+                                self.enrich_text_box_drawing(
+                                    paragraph,
+                                    drawing,
+                                    run_index,
+                                    depth,
+                                    source.clone(),
+                                )?;
                             }
                         }
                     }
@@ -371,6 +380,7 @@ impl StoryParser<'_, '_> {
         drawing: &XmlElement,
         run_index: usize,
         depth: usize,
+        source_xml: Option<String>,
     ) -> Result<(), ParseError> {
         let Some(text_box) = parse_text_box(drawing) else {
             return Ok(());
@@ -430,6 +440,7 @@ impl StoryParser<'_, '_> {
         {
             run.content.push(RunContent::Shape {
                 shape: Box::new(shape),
+                source_xml,
             });
         }
         Ok(())
@@ -855,7 +866,7 @@ mod tests {
             .find_map(|content| match content {
                 ParagraphContent::Inline(InlineNode::Run(run)) => {
                     run.content.iter().find_map(|content| match content {
-                        RunContent::Shape { shape } => Some(shape.as_ref()),
+                        RunContent::Shape { shape, .. } => Some(shape.as_ref()),
                         _ => None,
                     })
                 }
@@ -898,7 +909,7 @@ mod tests {
             .content
             .iter()
             .find_map(|content| match content {
-                RunContent::Shape { shape } => Some(shape.as_ref()),
+                RunContent::Shape { shape, .. } => Some(shape.as_ref()),
                 _ => None,
             })
             .expect("text box shape");

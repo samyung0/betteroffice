@@ -1111,7 +1111,7 @@ fn visit_run_images(
     visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for content in &mut run.content {
-        if let RunContent::Drawing { image } = content {
+        if let RunContent::Drawing { image, .. } = content {
             visit(image)?;
         }
     }
@@ -1772,12 +1772,20 @@ impl<'a> SelectiveParagraphIndex<'a> {
     fn run(&mut self, run: &Run) -> Option<()> {
         for content in &run.content {
             match content {
-                RunContent::Drawing { image } => {
+                RunContent::Drawing {
+                    source_xml: Some(xml),
+                    ..
+                }
+                | RunContent::Shape {
+                    source_xml: Some(xml),
+                    ..
+                } => self.fragment(xml)?,
+                RunContent::Drawing { image, .. } => {
                     if image.id.as_deref().is_none_or(str::is_empty) {
                         self.allocates_ids = true;
                     }
                 }
-                RunContent::Shape { shape } => {
+                RunContent::Shape { shape, .. } => {
                     if shape.id.as_deref().is_none_or(str::is_empty) {
                         self.allocates_ids = true;
                     }

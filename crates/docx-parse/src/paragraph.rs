@@ -1001,7 +1001,20 @@ pub(crate) fn parse_run_composed(
     for item in run.content {
         if matches!(item, RunContent::OpaqueDrawing { .. }) {
             match replacement.next() {
-                Some(Some(parsed)) => content.extend(parsed),
+                Some(Some(mut parsed)) => {
+                    if let (
+                        RunContent::OpaqueDrawing { kind, xml },
+                        [
+                            RunContent::Drawing { source_xml, .. }
+                            | RunContent::Shape { source_xml, .. },
+                        ],
+                    ) = (&item, parsed.as_mut_slice())
+                        && kind != "drawing"
+                    {
+                        *source_xml = Some(xml.clone());
+                    }
+                    content.extend(parsed);
+                }
                 Some(None) => content.push(item),
                 None => {}
             }
@@ -1029,6 +1042,7 @@ fn parse_drawing_owned(
         return Ok(parse_vml_image_content(element, relationships, media)
             .map(|image| RunContent::Drawing {
                 image: Box::new(image),
+                source_xml: None,
             })
             .into_iter()
             .collect());
@@ -1062,6 +1076,7 @@ fn parse_drawing_owned(
                 apply_shape_metadata(&mut shape, element);
                 RunContent::Shape {
                     shape: Box::new(shape),
+                    source_xml: None,
                 }
             })
             .into_iter()
@@ -1074,6 +1089,7 @@ fn parse_drawing_owned(
             apply_shape_metadata(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
+                source_xml: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1082,6 +1098,7 @@ fn parse_drawing_owned(
     Ok(parse_drawing(element, relationships, media)
         .map(|image| RunContent::Drawing {
             image: Box::new(image),
+            source_xml: None,
         })
         .into_iter()
         .collect())

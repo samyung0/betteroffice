@@ -106,11 +106,7 @@ impl EditingDoc {
             }
         }
         for (key, value) in entries {
-            if value == Any::Null {
-                map.remove(&mut txn, &key);
-            } else {
-                map.insert(&mut txn, key, value);
-            }
+            crate::set_embed_entry(&map, &mut txn, key, value);
         }
         Ok(Receipt::default())
     }
@@ -132,11 +128,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let (_, map) = embed_by_id(&txn, embed_id)?;
         for (key, value) in entries {
-            if value == Any::Null {
-                map.remove(&mut txn, &key);
-            } else {
-                map.insert(&mut txn, key, value);
-            }
+            crate::set_embed_entry(&map, &mut txn, key, value);
         }
         Ok(Receipt::default())
     }

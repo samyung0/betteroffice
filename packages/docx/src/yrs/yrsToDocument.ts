@@ -622,6 +622,12 @@ function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
   };
 }
 
+/** The authored XML an unedited picture or shape replays; editing the embed drops it. */
+function sourceXml(payload: Attrs): { sourceXml?: string } {
+  const xml = asString(payload.sourceXml);
+  return xml ? { sourceXml: xml } : {};
+}
+
 function imageRunFromPayload(payload: Attrs): Run {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
@@ -716,7 +722,7 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.effectExtentRight) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
-  return { type: 'run', content: [{ type: 'drawing', image }] };
+  return { type: 'run', content: [{ type: 'drawing', image, ...sourceXml(payload) }] };
 }
 
 /** The seeded shape, carrying the text body and everything else no payload field describes. */
@@ -837,7 +843,7 @@ function shapeRunFromPayload(payload: Attrs): Run {
     transform.flipV = true;
   if (transform.rotation || transform.flipH || transform.flipV) shape.transform = transform;
 
-  return { type: 'run', content: [{ type: 'shape', shape }] };
+  return { type: 'run', content: [{ type: 'shape', shape, ...sourceXml(payload) }] };
 }
 
 function inlineSdtFromPayload(payload: Attrs): InlineSdt {

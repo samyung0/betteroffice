@@ -452,6 +452,11 @@ function imagePayload(image: Image): Attrs {
   }) as Attrs;
 }
 
+/** Carries the authored XML a picture or shape replays on save while unedited. */
+function withSourceXml(payload: Attrs, sourceXml: string | undefined): Attrs {
+  return sourceXml === undefined ? payload : { ...payload, sourceXml };
+}
+
 function shapePayload(shape: Shape): Attrs {
   return { shapeJson: JSON.stringify(shape) };
 }
@@ -633,11 +638,11 @@ function runContentToUnits(
         }),
       ];
     case 'drawing':
-      return [embedUnit('image', imagePayload(content.image))];
+      return [embedUnit('image', withSourceXml(imagePayload(content.image), content.sourceXml))];
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
-      return [embedUnit('shape', shapePayload(content.shape))];
+      return [embedUnit('shape', withSourceXml(shapePayload(content.shape), content.sourceXml))];
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart))];
     case 'opaqueDrawing':

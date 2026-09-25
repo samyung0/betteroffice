@@ -103,10 +103,21 @@ pub enum RunContent {
     SoftHyphen,
     #[serde(rename = "noBreakHyphen")]
     NoBreakHyphen,
+    /// `source_xml`, on a picture or shape read from a `w:pict`, `w:object` or
+    /// `mc:AlternateContent`, is that element as authored; save replays it
+    /// instead of the model, so editors drop it once they change the object.
     #[serde(rename = "drawing")]
-    Drawing { image: Box<crate::image::Image> },
+    Drawing {
+        image: Box<crate::image::Image>,
+        #[serde(rename = "sourceXml", default, skip_serializing_if = "Option::is_none")]
+        source_xml: Option<String>,
+    },
     #[serde(rename = "shape")]
-    Shape { shape: Box<crate::shape::Shape> },
+    Shape {
+        shape: Box<crate::shape::Shape>,
+        #[serde(rename = "sourceXml", default, skip_serializing_if = "Option::is_none")]
+        source_xml: Option<String>,
+    },
     #[serde(rename = "horizontalRule")]
     HorizontalRule {
         rule: Box<crate::vml::HorizontalRule>,

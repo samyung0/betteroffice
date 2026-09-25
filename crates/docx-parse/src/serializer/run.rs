@@ -331,8 +331,19 @@ fn serialize_run_content(
         RunContent::NoBreakHyphen => {
             writer.start_element("w:noBreakHyphen").end_element();
         }
-        RunContent::Drawing { image } => return serialize_drawing_content(image, context),
-        RunContent::Shape { shape } => return serialize_shape_content(shape, context),
+        RunContent::Drawing {
+            source_xml: Some(xml),
+            ..
+        }
+        | RunContent::Shape {
+            source_xml: Some(xml),
+            ..
+        } => {
+            validate_replayed_fragment(xml)?;
+            return Ok(xml.clone());
+        }
+        RunContent::Drawing { image, .. } => return serialize_drawing_content(image, context),
+        RunContent::Shape { shape, .. } => return serialize_shape_content(shape, context),
         RunContent::HorizontalRule { rule } => {
             validate_replayed_fragment(&rule.xml)?;
             return Ok(rule.xml.clone());

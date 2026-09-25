@@ -115,6 +115,8 @@ const COMMENTS: &str = "comments";
 /// Largest yrs update a replica accepts, as in PPTX.
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const PILCROW_KIND: &str = "pilcrow";
+/// Embed payload key holding the authored XML an unedited object replays on save.
+const SOURCE_XML: &str = "sourceXml";
 const KIND_KEY: &str = "_kind";
 const PARA_ID: &str = "paraId";
 const INS: &str = "ins";
@@ -748,6 +750,29 @@ impl EditingDoc {
     fn next_id(&self) -> String {
         let counter = self.id_counter.fetch_add(1, Ordering::Relaxed);
         format!("{}:{counter}", self.client_id)
+    }
+}
+
+/// Writes one embed payload entry; [`Any::Null`] removes it. Changing any
+/// other entry drops [`SOURCE_XML`], so an edited object saves as its model.
+pub(crate) fn set_embed_entry(
+    map: &MapRef,
+    txn: &mut yrs::TransactionMut<'_>,
+    key: String,
+    value: Any,
+) {
+    let changed = match map.get(txn, &key) {
+        Some(Out::Any(current)) => current != value,
+        Some(_) => true,
+        None => value != Any::Null,
+    };
+    if changed && key != SOURCE_XML {
+        map.remove(txn, SOURCE_XML);
+    }
+    if value == Any::Null {
+        map.remove(txn, &key);
+    } else {
+        map.insert(txn, key, value);
     }
 }
 

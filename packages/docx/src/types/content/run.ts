@@ -173,6 +173,8 @@ export interface DrawingContent {
   type: 'drawing';
   /** Image data */
   image: Image;
+  /** The `w:pict`, `w:object` or `mc:AlternateContent` read as this picture, replayed on save while unedited. */
+  sourceXml?: string;
 }
 
 /**
@@ -182,6 +184,8 @@ export interface ShapeContent {
   type: 'shape';
   /** Shape data */
   shape: Shape;
+  /** The `mc:AlternateContent` read as this text box, replayed on save while unedited. */
+  sourceXml?: string;
 }
 
 /**

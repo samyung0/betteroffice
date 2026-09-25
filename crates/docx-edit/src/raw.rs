@@ -413,7 +413,7 @@ fn apply_raw_op_absolute(
         }
         RawOp::SetEmbedAttr { index, key, value } => {
             let embed = embed_at(story, txn, index)?;
-            embed.insert(txn, key, value);
+            crate::set_embed_entry(&embed, txn, key, value);
         }
         RawOp::SetComment {
             id,
@@ -599,7 +599,7 @@ mod tests {
                 }
                 RawOp::SetEmbedAttr { index, key, value } => {
                     let embed = embed_at(&story, txn, index)?;
-                    embed.insert(txn, key, value);
+                    crate::set_embed_entry(&embed, txn, key, value);
                 }
                 RawOp::SetComment {
                     id,

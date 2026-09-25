@@ -430,7 +430,9 @@ fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let xml = saved_part(&parts, "word/document.xml");
 
-    assert_eq!(xml.matches("<w:txbxContent>").count(), 2);
+    // The unedited AlternateContent replays as authored, its VML fallback included.
+    assert_eq!(xml.matches("<w:txbxContent>").count(), 3);
+    assert!(xml.contains("Fallback callout"));
     assert!(xml.contains("Choice callout"));
     assert!(xml.contains("Inline callout"));
     assert_eq!(xml.matches(r#"<wps:cNvSpPr txBox="1"/>"#).count(), 2);

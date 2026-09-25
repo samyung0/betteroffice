@@ -723,6 +723,72 @@ test("DOCX charts and unmodeled VML drawings survive seeding, an edit and repeat
   }
 });
 
+test("DOCX OLE objects and text boxes export their authored XML until edited", async () => {
+  const bytes = new Uint8Array(
+    await readFile(
+      new URL("../poc/fixtures/opaque-objects.docx", import.meta.url)
+    )
+  );
+  const xmlOf = (docx: Uint8Array, part = "word/document.xml") =>
+    new TextDecoder().decode(unzipContainer(docx)[part]);
+  const alternates = (xml: string) =>
+    xml.match(/<mc:AlternateContent>[\s\S]*?<\/mc:AlternateContent>/g) ?? [];
+  const source = xmlOf(bytes);
+  expect(alternates(source)).toHaveLength(2);
+  const seeded = await seedOffice("docx", bytes);
+  const target = (await inspectOffice(bytes, seeded)).find(
+    (entry) => entry.value.length > 20
+  )!;
+  const edit = await applyOfficeCommands(bytes, seeded, [
+    {
+      type: "replace_text",
+      targetId: target.id,
+      expectedText: target.value,
+      text: `${target.value} edited`,
+    },
+  ]);
+  const unedited = await exportOffice(
+    bytes,
+    { ...seeded, state: edit.state },
+    fixed
+  );
+  const xml = xmlOf(unedited);
+  expect(xml.match(/<w:object [\s\S]*?<\/w:object>/g)).toEqual(
+    source.match(/<w:object [\s\S]*?<\/w:object>/g)
+  );
+  expect(xml).toContain('<o:OLEObject Type="Embed"');
+  expect(xmlOf(unedited, "word/_rels/document.xml.rels")).toContain(
+    'Id="rIdOle"'
+  );
+  expect(alternates(xml)).toEqual(alternates(source));
+
+  const session = await createYrsSession({ clientId: 9990 });
+  try {
+    session.openDocx(bytes, false);
+    session.loadState(edit.state);
+    let offset = 0;
+    for (const segment of session.storySegments("body")) {
+      if (segment.kind === "embed" && segment.embedKind === "shape") break;
+      offset += segment.kind === "text" ? segment.text.length : 1;
+    }
+    session.applyRawOps("body", [
+      { op: "setEmbedAttr", index: offset, key: "width", value: 200 },
+    ]);
+    const resized = xmlOf(
+      await exportOffice(
+        bytes,
+        { ...seeded, state: session.encodeState() },
+        fixed
+      )
+    );
+    expect(alternates(resized)).toEqual(alternates(source).slice(1));
+    expect(resized.match(/<wps:txbx>/g)).toHaveLength(2);
+    expect(resized.match(/<w:object /g)).toHaveLength(1);
+  } finally {
+    session.destroy();
+  }
+});
+
 test("agent edits set XLSX cells by sheet name and address and clear them through the inverse", async () => {
   const bytes = await fixture("sample.xlsx");
   const before = await seedOffice("xlsx", bytes);

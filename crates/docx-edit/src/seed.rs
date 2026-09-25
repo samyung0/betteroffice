@@ -1159,6 +1159,14 @@ fn image_payload(image: &Value) -> JsonObject {
     }))
 }
 
+/// Carries the authored XML a picture or shape replays on save while unedited.
+fn with_source_xml(mut payload: JsonObject, content: &Value) -> JsonObject {
+    if let Some(xml) = field(Some(content), "sourceXml").filter(|xml| xml.is_string()) {
+        payload.insert("sourceXml".to_owned(), xml.clone());
+    }
+    payload
+}
+
 fn shape_payload(shape: &Value, source: &BTreeMap<String, String>) -> JsonObject {
     map_from_value(json!({ "shapeJson": source_json(shape, source) }))
 }
@@ -1368,7 +1376,10 @@ fn run_content_to_units(
         }
         "drawing" => vec![embed_unit(
             "image",
-            image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+            with_source_xml(
+                image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
+                content,
+            ),
             hidden_marks(marks),
             None,
             1,
@@ -1382,9 +1393,12 @@ fn run_content_to_units(
         )],
         "shape" => vec![embed_unit(
             "shape",
-            shape_payload(
-                field(Some(content), "shape").unwrap_or(&Value::Null),
-                source,
+            with_source_xml(
+                shape_payload(
+                    field(Some(content), "shape").unwrap_or(&Value::Null),
+                    source,
+                ),
+                content,
             ),
             hidden_marks(marks),
             None,
