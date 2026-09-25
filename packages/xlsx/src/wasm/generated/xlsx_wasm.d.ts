@@ -76,6 +76,10 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     patchRangeStyleJson(args: string): string;
+    /**
+     * Net effects of the edits against the source package, as a JSON array.
+     */
+    pendingEffectsJson(): string;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -176,6 +180,7 @@ export interface InitOutput {
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_pendingEffectsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];

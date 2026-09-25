@@ -289,6 +289,14 @@ impl XlsxDocument {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Net effects of the edits against the source package, as a JSON array.
+    #[wasm_bindgen(js_name = pendingEffectsJson)]
+    pub fn pending_effects_json(&self) -> Result<String, JsValue> {
+        self.session
+            .pending_effects_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {

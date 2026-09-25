@@ -449,6 +449,12 @@ impl Session {
         .map_err(|error| error.to_string())
     }
 
+    pub fn pending_effects_json(&self) -> Result<String, String> {
+        self.workbook
+            .pending_effects_json()
+            .map_err(|error| error.to_string())
+    }
+
     pub fn sheet_info_json(&self) -> Result<String, String> {
         serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
     }

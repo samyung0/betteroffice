@@ -955,6 +955,20 @@ impl Workbook {
         &self.model
     }
 
+    /// Net effects of the edits against the source package as a JSON array of
+    /// `{id, kind, operation, label, before?, after?}`, read off the overrides.
+    pub fn pending_effects_json(&self) -> Result<String> {
+        if !self.is_collaborative() {
+            return Err(Error::NotCollaborative);
+        }
+        let effects = self
+            .authority
+            .pending_effects(&self.model)
+            .map_err(authority_error)?;
+        serde_json::to_string(&effects)
+            .map_err(|error| Error::CollaborativeState(error.to_string()))
+    }
+
     pub fn into_model(self) -> WorkbookModel {
         self.model
     }

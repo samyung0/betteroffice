@@ -1422,3 +1422,91 @@ fn a_hidden_source_sheet_still_validates_its_formulas() {
     );
     assert_eq!(book.encode_state_as_update_v1(), state);
 }
+
+#[test]
+fn pending_effects_come_from_the_overrides() {
+    let options = CalculationOptions::default();
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 3041).unwrap();
+    let effects = |book: &Workbook| {
+        let effects: Vec<serde_json::Value> =
+            serde_json::from_str(&book.pending_effects_json().unwrap()).unwrap();
+        effects
+            .iter()
+            .map(|effect| {
+                let field = |name: &str| effect[name].as_str().unwrap_or_default().to_owned();
+                [
+                    field("kind"),
+                    field("operation"),
+                    field("label"),
+                    field("before"),
+                    field("after"),
+                ]
+                .join("|")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(effects(&book).is_empty());
+    book.edit_cell(SheetId(0), at("A1"), "15", options).unwrap();
+    book.edit_cell(SheetId(0), at("C1"), "new", options)
+        .unwrap();
+    apply(
+        &mut book,
+        Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::new(at("A1"), at("B2")),
+            patch: StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    );
+    apply(
+        &mut book,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+    );
+    apply(
+        &mut book,
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 3,
+            count: 1,
+        },
+    );
+    apply(
+        &mut book,
+        Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "Totals".into(),
+        },
+    );
+    let mut listed = effects(&book);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            r#"text|add|Data!C3||{"kind":"text","value":"new"}"#,
+            "text|add|Data: 2 rows inserted||",
+            r#"text|remove|Data: 1 rows deleted|{"kind":"number","value":20.0}|"#,
+            r#"text|replace|Data!A3|{"kind":"number","value":10.0}|{"kind":"number","value":15.0}"#,
+            "text|replace|Sheet Totals|Summary|Totals",
+            "visual|replace|Data!A3:B3 formatting||",
+        ]
+    );
+    let json: Vec<serde_json::Value> =
+        serde_json::from_str(&book.pending_effects_json().unwrap()).unwrap();
+    assert!(
+        json.iter().any(|effect| effect["id"]
+            == format!("{}", book.cell_identity(SheetId(0), at("A3")).unwrap()))
+    );
+    book.edit_cell(SheetId(0), at("C3"), "", options).unwrap();
+    assert_eq!(effects(&book).len(), 5);
+    for _ in 0..7 {
+        book.undo(options).unwrap();
+    }
+    assert!(effects(&book).is_empty());
+}

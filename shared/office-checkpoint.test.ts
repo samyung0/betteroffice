@@ -10,6 +10,7 @@ import {
   exportOffice,
   inspectOffice,
   resolveAsset,
+  xlsxPendingEffects,
 } from "./office-checkpoint";
 import { createYrsSession } from "../packages/docx/src/yrs";
 import { XlsxDocument } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
@@ -29,11 +30,12 @@ test("XLSX checkpoints restore sparse edits, cancel net effects after undo, and 
       JSON.stringify({ sheet: 0, row: 0, col: 0, input: "checkpoint value" })
     );
     const after = { ...before, state: doc.encodeStateAsUpdate() };
-    expect(
-      (await compare(bytes, before, after)).some((effect) =>
-        effect.after?.includes("checkpoint value")
-      )
-    ).toBe(true);
+    expect(await xlsxPendingEffects(bytes, after)).toEqual([
+      expect.objectContaining({
+        kind: "text",
+        after: '{"kind":"text","value":"checkpoint value"}',
+      }),
+    ]);
     const exported = await exportOffice(bytes, after, fixed);
     expect(await exportOffice(bytes, after, fixed)).toEqual(exported);
     const reopened = XlsxDocument.open(exported);
@@ -46,7 +48,7 @@ test("XLSX checkpoints restore sparse edits, cancel net effects after undo, and 
     }
     doc.undoJson();
     expect(
-      await compare(bytes, before, {
+      await xlsxPendingEffects(bytes, {
         ...before,
         state: doc.encodeStateAsUpdate(),
       })

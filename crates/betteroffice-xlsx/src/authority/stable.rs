@@ -1686,6 +1686,347 @@ pub(super) fn cell_identities(
         .collect()
 }
 
+fn cell_text(cell: Option<&Cell>) -> Result<Option<String>, String> {
+    Ok(match cell {
+        Some(Cell {
+            formula: Some(formula),
+            ..
+        }) => Some(format!("={formula}")),
+        Some(cell) if cell.value != CellValue::Empty => Some(json(&cell.value)?),
+        _ => None,
+    })
+}
+
+fn content_text(content: &Content) -> Result<Option<String>, String> {
+    Ok(match &content.formula {
+        Some(formula) => Some(format!("={}", formula.text)),
+        None if content.value == CellValue::Empty => None,
+        None => Some(json(&content.value)?),
+    })
+}
+
+fn text_effect(
+    id: String,
+    label: String,
+    before: Option<String>,
+    after: Option<String>,
+) -> Option<serde_json::Value> {
+    let operation = match (&before, &after) {
+        (None, None) => return None,
+        _ if before == after => return None,
+        (None, _) => "add",
+        (_, None) => "remove",
+        _ => "replace",
+    };
+    let mut effect =
+        serde_json::json!({"id": id, "kind": "text", "operation": operation, "label": label});
+    if let Some(before) = before {
+        effect["before"] = before.into();
+    }
+    if let Some(after) = after {
+        effect["after"] = after.into();
+    }
+    Some(effect)
+}
+
+fn entries<T: ReadTxn>(map: &MapRef, txn: &T) -> BTreeMap<String, String> {
+    map.iter(txn)
+        .map(|(key, value)| (key.to_owned(), value.to_string(txn)))
+        .collect()
+}
+
+/// What a sheet shows besides cells, links and axes.
+fn layout<T: ReadTxn>(sheet: &MapRef, txn: &T) -> Result<BTreeMap<String, String>, String> {
+    let mut layout = BTreeMap::new();
+    for name in [MERGES, ROW_HEIGHTS, COL_WIDTHS, CHARTS] {
+        for (key, value) in entries(&nested_map(sheet, txn, name)?, txn) {
+            layout.insert(format!("{name}:{key}"), value);
+        }
+    }
+    if let Some(pane) = sheet.get(txn, FREEZE_PANE) {
+        layout.insert(FREEZE_PANE.into(), pane.to_string(txn));
+    }
+    Ok(layout)
+}
+
+/// Row-major cells grouped into rectangles: runs of adjacent columns, stacked
+/// while consecutive rows repeat the same run.
+fn rectangles(cells: impl IntoIterator<Item = (u32, u32)>) -> Vec<CellRange> {
+    let mut runs: Vec<(u32, u32, u32)> = Vec::new();
+    for (row, col) in cells {
+        match runs.last_mut() {
+            Some(run) if run.0 == row && run.2 + 1 == col => run.2 = col,
+            _ => runs.push((row, col, col)),
+        }
+    }
+    let mut ranges: Vec<CellRange> = Vec::new();
+    let mut open = HashMap::<(u32, u32), usize>::new();
+    for (row, left, right) in runs {
+        match open.get(&(left, right)) {
+            Some(&index) if ranges[index].end.row + 1 == row => ranges[index].end.row = row,
+            _ => {
+                open.insert((left, right), ranges.len());
+                ranges.push(CellRange::new(
+                    CellRef::new(row, left),
+                    CellRef::new(row, right),
+                ));
+            }
+        }
+    }
+    ranges
+}
+
+/// Pending effects against the source, read off the overrides: one per changed
+/// cell, formatting range, row or column insert or delete, and one per changed
+/// sheet, layout, hyperlink or defined name. `model` is the current projection.
+pub(super) fn pending_effects(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+) -> Result<Vec<serde_json::Value>, String> {
+    let seed = Doc::new();
+    hydrate_doc(&seed, &base.bootstrap)?;
+    let (txn, seeded) = (doc.transact(), seed.transact());
+    let (context, initial) = (context(&txn)?, context(&seeded)?);
+    let (sheets, seeded_sheets) = (map(&txn, SHEETS)?, map(&seeded, SHEETS)?);
+    let mut effects = Vec::new();
+    for (index, key) in initial.keys.iter().enumerate() {
+        let after = context.index(key).map(|index| context.names[index].clone());
+        let label = format!(
+            "Sheet {}",
+            after.as_deref().unwrap_or(&initial.names[index])
+        );
+        effects.extend(text_effect(
+            key.clone(),
+            label,
+            Some(initial.names[index].clone()),
+            after,
+        ));
+    }
+    for (index, key) in context.keys.iter().enumerate() {
+        let name = &context.names[index];
+        if initial.index(key).is_none() {
+            effects.extend(text_effect(
+                key.clone(),
+                format!("Sheet {name}"),
+                None,
+                Some(name.clone()),
+            ));
+        }
+        let sheet = nested_map(&sheets, &txn, key)?;
+        let original = seeded_sheets
+            .get(&seeded, key)
+            .and_then(|value| value.cast::<MapRef>().ok());
+        let original_layout = original
+            .as_ref()
+            .map(|sheet| layout(sheet, &seeded))
+            .transpose()?
+            .unwrap_or_default();
+        if layout(&sheet, &txn)? != original_layout {
+            effects.push(serde_json::json!({
+                "id": format!("{key}:layout"), "kind": "visual", "operation": "replace",
+                "label": format!("{name} layout"),
+            }));
+        }
+        let links = entries(&nested_map(&sheet, &txn, HYPERLINKS)?, &txn);
+        let original_links = original
+            .as_ref()
+            .map(|sheet| {
+                Ok::<_, String>(entries(&nested_map(sheet, &seeded, HYPERLINKS)?, &seeded))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let link_text = |value: Option<&String>| {
+            value
+                .map(|value| {
+                    serde_json::from_str::<Link>(value)
+                        .map_err(|error| error.to_string())
+                        .and_then(|link| json(&link.value))
+                })
+                .transpose()
+        };
+        for id in links
+            .keys()
+            .chain(original_links.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            effects.extend(text_effect(
+                format!("{key}:link:{id}"),
+                format!("{name}, hyperlink"),
+                link_text(original_links.get(id))?,
+                link_text(links.get(id))?,
+            ));
+        }
+
+        let current = model.sheets.get(index).ok_or("missing projected sheet")?;
+        let source_index = base_sheet_index(key);
+        let formulas = source_index
+            .map(|index| base_bindings(base).map(|bindings| &bindings[index]))
+            .transpose()?;
+        let contents = nested_map(&sheet, &txn, CONTENTS)?;
+        for (cell_key, _) in contents.iter(&txn) {
+            let Some(at) = context.at(key, cell_key)? else {
+                continue;
+            };
+            let source = base_cell(base, key, cell_key)?;
+            let now = current.cell(at);
+            let resolved = match (source.and(formulas), source_at(cell_key)?) {
+                (Some(formulas), Some(point)) => formulas
+                    .get(&point)
+                    .map(|formula| formula.resolve(&context))
+                    .transpose()?,
+                _ => None,
+            };
+            if resolved.is_some()
+                && resolved.as_deref() == now.and_then(|cell| cell.formula.as_deref())
+            {
+                continue;
+            }
+            effects.extend(text_effect(
+                format!("{key}:{cell_key}"),
+                format!("{}!{}", name, at.to_a1()),
+                cell_text(source)?,
+                cell_text(now)?,
+            ));
+        }
+
+        let mut formatted = BTreeMap::new();
+        let mut source_keys = HashMap::new();
+        for (cell_key, value) in nested_map(&sheet, &txn, STYLES)?.iter(&txn) {
+            let Some(at) = context.at(key, cell_key)? else {
+                continue;
+            };
+            let original = match base_cell(base, key, cell_key)?.and_then(|cell| cell.style) {
+                Some(style) => match source_keys.get(&style) {
+                    Some(key) => Some(Clone::clone(key)),
+                    None => {
+                        let key = style_key(&base.styles, style)?;
+                        source_keys.insert(style, key.clone());
+                        Some(key)
+                    }
+                },
+                None => None,
+            };
+            if value.to_string(&txn) != original.unwrap_or_default() {
+                formatted.insert((at.row, at.col), cell_key.to_owned());
+            }
+        }
+        for range in rectangles(formatted.keys().copied()) {
+            effects.push(serde_json::json!({
+                "id": format!("{key}:{}:format", formatted[&(range.start.row, range.start.col)]),
+                "kind": "visual", "operation": "replace",
+                "label": format!("{name}!{} formatting", range.to_a1()),
+            }));
+        }
+
+        let catalog = nested_map(&map(&txn, CATALOG)?, &txn, key)?;
+        let mut deletable = None;
+        for (axis, noun) in [(ROWS, "rows"), (COLS, "columns")] {
+            let changes = nested_map(&catalog, &txn, axis)?;
+            for (id, _) in nested_map(&sheet, &txn, axis)?.iter(&txn) {
+                let change: Change = decode(changes.get(&txn, id).ok_or("missing axis change")?)?;
+                let (label, before) = match change {
+                    Change::Insert { count, .. } => (format!("{count} {noun} inserted"), None),
+                    Change::Delete { spans } => {
+                        if deletable.is_none() {
+                            deletable = Some(content_cells(base, key, &contents, &txn)?);
+                        }
+                        let cells = deletable.as_ref().expect("computed above");
+                        let count = spans.iter().map(|span| span.len).sum::<u64>();
+                        let mut lines = BTreeMap::<&Point, Vec<&str>>::new();
+                        for ((row, col), text) in cells.iter() {
+                            let point = if axis == ROWS { row } else { col };
+                            if spans.iter().any(|span| {
+                                span.run == point.run
+                                    && (span.start..span.start + span.len).contains(&point.offset)
+                            }) {
+                                lines.entry(point).or_default().push(text.as_str());
+                            }
+                        }
+                        let text = lines
+                            .values()
+                            .map(|texts| texts.join("\t"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (format!("{count} {noun} deleted"), Some(text))
+                    }
+                };
+                let mut effect = serde_json::json!({
+                    "id": format!("{key}:{axis}:{id}"), "kind": "text",
+                    "operation": if before.is_some() { "remove" } else { "add" },
+                    "label": format!("{name}: {label}"),
+                });
+                if let Some(before) = before.filter(|text| !text.is_empty()) {
+                    effect["before"] = before.into();
+                }
+                effects.push(effect);
+            }
+        }
+    }
+    let names = entries(&map(&txn, DEFINED_NAMES)?, &txn);
+    let original_names = entries(&map(&seeded, DEFINED_NAMES)?, &seeded);
+    let formula = |value: Option<&String>| {
+        value
+            .map(|value| {
+                serde_json::from_str::<Name>(value)
+                    .map(|name| (name.value.name, name.value.formula))
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    };
+    for id in names
+        .keys()
+        .chain(original_names.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        if id == "$schema" {
+            continue;
+        }
+        let (before, after) = (formula(original_names.get(id))?, formula(names.get(id))?);
+        let label = format!(
+            "Defined name {}",
+            after
+                .as_ref()
+                .or(before.as_ref())
+                .map_or("", |name| &name.0)
+        );
+        effects.extend(text_effect(
+            format!("name:{id}"),
+            label,
+            before.map(|name| name.1),
+            after.map(|name| name.1),
+        ));
+    }
+    effects.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    Ok(effects)
+}
+
+/// Every cell with content by its identity: the source under its overrides.
+fn content_cells<T: ReadTxn>(
+    base: &WorkbookBase,
+    key: &str,
+    contents: &MapRef,
+    txn: &T,
+) -> Result<BTreeMap<(Point, Point), String>, String> {
+    let mut cells = BTreeMap::new();
+    if let Some(sheet) = base_sheet_index(key).and_then(|index| base.sheets.get(index)) {
+        for (at, cell) in sheet.iter_cells() {
+            if let Some(text) = cell_text(Some(cell))? {
+                cells.insert((source_point(at.row), source_point(at.col)), text);
+            }
+        }
+    }
+    for (cell_key, value) in contents.iter(txn) {
+        let identity: (Point, Point) = serde_json::from_str(cell_key)
+            .map_err(|error| format!("invalid stable cell key: {error}"))?;
+        match content_text(&decode(value)?)? {
+            Some(text) => cells.insert(identity, text),
+            None => cells.remove(&identity),
+        };
+    }
+    Ok(cells)
+}
+
 pub(super) fn rebase_aliases(
     before: &Doc,
     latest: &Doc,

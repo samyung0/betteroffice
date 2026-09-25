@@ -146,6 +146,8 @@ interface Session {
   apply(command: OfficeCommand): { id: string; inverse: OfficeCommand };
   locate(id: string): OfficeTarget;
   exportBytes(determinism: ExportDeterminism): Promise<Uint8Array>;
+  /** XLSX only: net effects read off the overrides. */
+  effects?(): NetEffect[];
   dispose(): void;
 }
 const initialized = new Map<OfficeFormat | "opc", Promise<void>>();
@@ -1019,6 +1021,7 @@ async function open(
         },
         exportBytes: async (determinism) =>
           doc.saveBytesAt(Date.parse(determinism.now) / 86_400_000 + 25569),
+        effects: () => JSON.parse(doc.pendingEffectsJson()) as NetEffect[],
         dispose: () => doc.free(),
       };
     } catch (error) {
@@ -1259,6 +1262,21 @@ export async function rebaseOffice(
     baseline,
     effects: compareBaselines(baseline, current),
   };
+}
+
+/** Pending XLSX effects against the base, read off the checkpoint's overrides; XLSX keeps no stored baseline. */
+export async function xlsxPendingEffects(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint
+): Promise<NetEffect[]> {
+  if (checkpoint.format !== "xlsx")
+    throw new TypeError("Expected an XLSX checkpoint");
+  const session = await open("xlsx", baseBytes, checkpoint);
+  try {
+    return session.effects!();
+  } finally {
+    session.dispose();
+  }
 }
 
 export async function resolveAsset(

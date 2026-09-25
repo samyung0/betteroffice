@@ -116,6 +116,8 @@ struct WorkbookBase {
     sheets: Arc<Vec<Sheet>>,
     /// Source formulas bound once per session against the bootstrap topology.
     bindings: Arc<std::sync::OnceLock<Result<stable::BaseBindings, String>>>,
+    /// The seed, which pending effects compare shared records against.
+    bootstrap: Vec<u8>,
 }
 
 impl WorkbookBase {
@@ -243,6 +245,7 @@ impl WorkbookBase {
             tables: model.tables.clone(),
             sheets: Arc::default(),
             bindings: Arc::default(),
+            bootstrap: Vec::new(),
         })
     }
 
@@ -518,6 +521,9 @@ impl WorkbookAuthority {
         let bootstrap_update = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
+        if client_id.is_some() {
+            base.bootstrap.clone_from(&bootstrap_update);
+        }
 
         let doc = match client_id {
             Some(client_id) => Doc::with_client_id(client_id),
@@ -568,6 +574,13 @@ impl WorkbookAuthority {
         latest: &Self,
     ) -> Result<Vec<crate::workbook::rebase::SheetAlias>, AuthorityError> {
         stable::rebase_aliases(&self.doc, &latest.doc).map_err(AuthorityError::InvalidState)
+    }
+
+    pub(crate) fn pending_effects(
+        &self,
+        model: &WorkbookModel,
+    ) -> Result<Vec<serde_json::Value>, AuthorityError> {
+        stable::pending_effects(&self.doc, &self.base, model).map_err(AuthorityError::InvalidState)
     }
 
     pub(crate) fn supports_structure(&self) -> bool {
