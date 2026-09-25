@@ -17,6 +17,11 @@ rewrites.
 - `opaque-objects.docx` (Capy storage probe `gen_files.py`, `opaque_docx`) carries two
   charts, two text boxes as `mc:AlternateContent` with VML fallbacks, a VML `w:pict`
   rectangle and an OLE `w:object`.
+- `lecture.pptx` (Capy `e2e/fixtures/files/rich-content`) carries 20 slides, two masters,
+  22 layouts, 22 media parts, a table, comments and notes.
+- `book-30p.docx`, `images-10.docx` and `deck-50.pptx` come from a full run of the Capy
+  storage probe `gen_files.py` (seeded RNG): a text-only book, ten large pictures, and 50
+  text-heavy slides. The golden seed tests pin their seeds and state sizes.
 
 Regenerate the `feature-rich` fixtures with the scripts in `../scripts`. Preview outputs live
 under `../preview` and are intentionally not part of the fixture contract.
