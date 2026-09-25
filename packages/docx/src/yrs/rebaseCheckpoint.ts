@@ -231,7 +231,7 @@ function rebase(
   // Attach B before binding images so they match B's parsed media.
   session.openDocx(input.exportedSource, false);
   const exported = packageDocument(session);
-  const bindings = new Map<string, Map<string, string>>();
+  const bindings = new Map<string, ReturnType<typeof imageBindings>>();
   for (const story of reachable) {
     const owner = storyOwner(story, base);
     let images = bindings.get(owner);
