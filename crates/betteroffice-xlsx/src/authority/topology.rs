@@ -300,13 +300,14 @@ impl Axis {
     }
 
     pub fn index(&self, point: &Point) -> Option<u32> {
+        self.index_in(&point.run, point.offset)
+    }
+
+    pub fn index_in(&self, run: &str, offset: u64) -> Option<u32> {
         let mut index = 0;
         for span in &self.spans {
-            if span.run == point.run
-                && point.offset >= span.start
-                && point.offset < span.start + span.len
-            {
-                return u32::try_from(index + point.offset - span.start).ok();
+            if span.run == run && offset >= span.start && offset < span.start + span.len {
+                return u32::try_from(index + offset - span.start).ok();
             }
             index += span.len;
         }

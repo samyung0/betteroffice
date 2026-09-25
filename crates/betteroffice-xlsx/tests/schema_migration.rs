@@ -1,5 +1,5 @@
 //! Legacy positional snapshots cannot establish the exact source and stable
-//! topology identity required by schema 7. New live sessions reject them.
+//! topology identity the stable schema requires. New live sessions reject them.
 use betteroffice_xlsx::{CalculationOptions, CellRef, SheetId, Workbook};
 
 const SAMPLE: &[u8] = include_bytes!("../../../apps/demo/public/sample.xlsx");

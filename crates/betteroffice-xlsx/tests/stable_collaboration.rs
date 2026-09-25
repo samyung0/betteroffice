@@ -1317,3 +1317,108 @@ fn a_batch_sets_a_cell_to_a_style_an_earlier_op_of_the_batch_interned() {
         assert_ne!(format("D1"), format("A1"));
     }
 }
+
+fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, MapRef, ReadTxn, Transact};
+    let doc = Doc::new();
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&book.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    let sheet = txn
+        .get_map("xlsx:sheets")
+        .unwrap()
+        .get(&txn, sheet)
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    let contents = sheet
+        .get(&txn, "contents")
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    let mut entries = contents
+        .iter(&txn)
+        .map(|(key, value)| (key.to_owned(), value.to_string(&txn)))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+#[test]
+fn source_cells_are_overridden_cleared_reverted_and_undone() {
+    let options = CalculationOptions::default();
+    let mut book = peer(3001);
+    assert!(overrides(&book, "sheet:0").is_empty());
+    book.edit_cell(SheetId(0), at("A1"), "", options).unwrap();
+    assert!(book.model().sheets[0].cell(at("A1")).is_none());
+    assert_eq!(
+        overrides(&book, "sheet:0"),
+        [(
+            r#"[{"run":"base","offset":0},{"run":"base","offset":0}]"#.to_owned(),
+            r#"{"value":{"kind":"empty"},"formula":null}"#.to_owned()
+        )]
+    );
+    book.edit_cell(SheetId(0), at("A1"), "10", options).unwrap();
+    assert!(
+        overrides(&book, "sheet:0").is_empty(),
+        "the source value reverts"
+    );
+    book.edit_cell(SheetId(0), at("A2"), "25", options).unwrap();
+    assert_eq!(overrides(&book, "sheet:0").len(), 1);
+    book.undo(options).unwrap();
+    assert!(overrides(&book, "sheet:0").is_empty());
+    assert_eq!(
+        book.model().sheets[0].cell(at("A2")).unwrap().value,
+        CellValue::Number { value: 20.0 }
+    );
+    let mut fresh = peer(3002);
+    fresh
+        .apply_update_v1(&book.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(fresh.model(), book.model());
+}
+
+#[test]
+fn a_concurrent_clear_and_set_of_a_source_cell_resolve_by_client_order() {
+    let options = CalculationOptions::default();
+    for (clearing, setting) in [(3011, 3012), (3022, 3021)] {
+        let mut clear = peer(clearing);
+        let mut set = peer(setting);
+        clear.edit_cell(SheetId(0), at("A1"), "", options).unwrap();
+        set.edit_cell(SheetId(0), at("A1"), "set", options).unwrap();
+        sync(&mut clear, &mut set);
+        let expected = (setting > clearing).then(|| CellValue::Text {
+            value: "set".into(),
+        });
+        assert_eq!(
+            clear.model().sheets[0]
+                .cell(at("A1"))
+                .map(|cell| cell.value.clone()),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_hidden_source_sheet_still_validates_its_formulas() {
+    let mut model = base();
+    model.sheets[1].set_cell(
+        at("B1"),
+        Cell {
+            formula: Some("SUM(Values[Value])".into()),
+            ..Cell::default()
+        },
+    );
+    let mut book = Workbook::from_model_collaborative(model, 3031).unwrap();
+    let state = book.encode_state_as_update_v1();
+    assert!(
+        book.apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default()
+        )
+        .is_err()
+    );
+    assert_eq!(book.encode_state_as_update_v1(), state);
+}

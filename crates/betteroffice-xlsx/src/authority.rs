@@ -41,7 +41,7 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -112,9 +112,10 @@ struct WorkbookBase {
     styles: Stylesheet,
     /// table parts; read-only reference data, not shared state.
     tables: Vec<Table>,
-    /// Schema 7 only: each source sheet's array formulas with the contents
-    /// their anchors were seeded with.
-    array_anchors: Vec<Vec<stable::ArrayAnchor>>,
+    /// The parsed source cells that unedited cells project from.
+    sheets: Arc<Vec<Sheet>>,
+    /// Source formulas bound once per session against the bootstrap topology.
+    bindings: Arc<std::sync::OnceLock<Result<stable::BaseBindings, String>>>,
 }
 
 impl WorkbookBase {
@@ -240,7 +241,8 @@ impl WorkbookBase {
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
             tables: model.tables.clone(),
-            array_anchors: Vec::new(),
+            sheets: Arc::default(),
+            bindings: Arc::default(),
         })
     }
 
@@ -506,15 +508,12 @@ impl WorkbookAuthority {
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
         if client_id.is_some() {
+            base.sheets = Arc::new(model.sheets.clone());
             seed(&bootstrap, &base, model, &keys)
         } else {
             seed_legacy(&bootstrap, &base, model, &keys)
         }
         .map_err(AuthorityError::InvalidState)?;
-        if client_id.is_some() {
-            base.array_anchors = stable::seeded_array_anchors(&bootstrap, model)
-                .map_err(AuthorityError::InvalidState)?;
-        }
         let bootstrap_snapshot = bootstrap.transact().snapshot();
         let bootstrap_update = bootstrap
             .transact()
@@ -3661,7 +3660,7 @@ fn fingerprint_model_with_schema(
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
         6 => b"betteroffice-xlsx-yrs-v6".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v7".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v8".as_slice(),
     };
     hasher.update(domain);
     let base = if include_defined_names {
@@ -4304,7 +4303,7 @@ mod legacy_tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 8; supported versions are 3 through 7"
+            "unsupported schema version 9; supported versions are 3 through 8"
         );
     }
 

@@ -2839,7 +2839,7 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
 /// the collaboration document carries cells, not the rectangle a `t="array"`
 /// formula fills, so each projection re-adopts the anchors it still holds.
 impl Workbook {
-    /// Schema 7 projects array formulas through its row and column identities.
+    /// Stable sessions project array formulas through their row and column identities.
     fn retain_array_formulas(&self, projected: &mut WorkbookModel) {
         if !self.authority.supports_structure() {
             retain_array_formulas(&self.model, projected);

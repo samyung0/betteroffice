@@ -4,22 +4,11 @@ use serde::{Deserialize, Serialize};
 use xlsx_model::{AnchorCell, CellRange, CellRef};
 use xlsx_ops::ReferenceAddress;
 
-pub(super) const VERSION: i64 = 7;
+pub(super) const VERSION: i64 = 8;
 pub(super) const CATALOG: &str = "xlsx:axis-catalog";
 pub(super) const DEFINED_NAMES: &str = "xlsx:defined-names";
 const ROWS: &str = "rows";
 const COLS: &str = "cols";
-
-/// A source array formula and the contents its anchor was seeded with. The
-/// array keeps its `t="array"` range only while the anchor still holds that
-/// seeded item; otherwise it saves as a single-cell formula. Deliberate
-/// stopgap, revisit in F3 (lazy-cell overrides).
-#[derive(Clone)]
-pub(super) struct ArrayAnchor {
-    at: CellRef,
-    range: CellRange,
-    content: String,
-}
 
 fn source_point(offset: u32) -> Point {
     Point {
@@ -77,31 +66,96 @@ fn source_col_styles(styles: &[ColStyle], cols: &Axis) -> Vec<ColStyle> {
     mapped
 }
 
-pub(super) fn seeded_array_anchors(
-    doc: &Doc,
-    model: &WorkbookModel,
-) -> Result<Vec<Vec<ArrayAnchor>>, String> {
-    let txn = doc.transact();
-    model
-        .sheets
+/// The identity key of a source cell.
+fn source_key(row: u32, col: u32) -> Result<String, String> {
+    json(&(source_point(row), source_point(col)))
+}
+
+/// The source cell an identity key names, when both points are source points.
+fn source_at(key: &str) -> Result<Option<(u32, u32)>, String> {
+    let (row, col): (Point, Point) =
+        serde_json::from_str(key).map_err(|error| format!("invalid stable cell key: {error}"))?;
+    let offset = |point: &Point, limit: u32| {
+        (point.run == "base" && point.offset < u64::from(limit)).then_some(point.offset as u32)
+    };
+    Ok(offset(&row, MAX_ROWS).zip(offset(&col, MAX_COLS)))
+}
+
+/// Source formulas bound against the topology every replica bootstraps with.
+/// Binding is pure, so each replica recomputes it instead of storing it.
+pub(super) struct BaseBindings(Vec<SheetBindings>);
+type SheetBindings = HashMap<(u32, u32), Formula>;
+
+fn initial_context(base: &WorkbookBase) -> Result<Context, String> {
+    let keys = (0..base.sheets.len())
+        .map(|index| format!("sheet:{index}"))
+        .collect::<Vec<_>>();
+    let resolved = resolve_names(
+        &keys
+            .iter()
+            .cloned()
+            .zip(base.sheets.iter().map(|sheet| sheet.name.clone()))
+            .collect(),
+    );
+    let (changes, active) = (BTreeMap::new(), BTreeSet::new());
+    let axes = keys
         .iter()
-        .enumerate()
-        .map(|(index, sheet)| {
-            let contents =
-                nested_map(&sheet_map(&txn, &format!("sheet:{index}"))?, &txn, CONTENTS)?;
-            sheet
-                .array_formulas()
-                .map(|(at, range)| {
-                    let key = json(&(source_point(at.row), source_point(at.col)))?;
-                    let content = contents
-                        .get(&txn, &key)
-                        .and_then(|value| value.cast::<String>().ok())
-                        .ok_or("array formula anchor was not seeded")?;
-                    Ok(ArrayAnchor { at, range, content })
-                })
-                .collect()
+        .map(|key| {
+            Ok((
+                key.clone(),
+                (
+                    Axis::project(MAX_ROWS, &changes, &active)?,
+                    Axis::project(MAX_COLS, &changes, &active)?,
+                ),
+            ))
         })
-        .collect()
+        .collect::<Result<_, String>>()?;
+    Ok(Context {
+        names: keys.iter().map(|key| resolved[key].clone()).collect(),
+        keys,
+        axes,
+    })
+}
+
+fn base_bindings(base: &WorkbookBase) -> Result<&[SheetBindings], String> {
+    base.bindings
+        .get_or_init(|| {
+            let context = initial_context(base)?;
+            base.sheets
+                .iter()
+                .enumerate()
+                .map(|(index, sheet)| {
+                    let key = format!("sheet:{index}");
+                    sheet
+                        .iter_cells()
+                        .filter_map(|(at, cell)| Some((at, cell.formula.as_ref()?)))
+                        .map(|(at, formula)| {
+                            Ok((
+                                (at.row, at.col),
+                                Formula::bind(formula, Some(&key), &context)?,
+                            ))
+                        })
+                        .collect()
+                })
+                .collect::<Result<_, String>>()
+                .map(BaseBindings)
+        })
+        .as_ref()
+        .map(|bindings| bindings.0.as_slice())
+        .map_err(Clone::clone)
+}
+
+/// The parsed source cell an identity names, if it names one.
+fn base_cell<'a>(
+    base: &'a WorkbookBase,
+    key: &str,
+    cell_key: &str,
+) -> Result<Option<&'a Cell>, String> {
+    let sheet = base_sheet_index(key).and_then(|index| base.sheets.get(index));
+    Ok(match (sheet, source_at(cell_key)?) {
+        (Some(sheet), Some((row, col))) => sheet.cell(CellRef::new(row, col)),
+        _ => None,
+    })
 }
 
 #[derive(Clone)]
@@ -548,39 +602,7 @@ fn context<T: ReadTxn>(txn: &T) -> Result<Context, String> {
             Ok((key.clone(), name))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?;
-    let mut reserved = originals
-        .values()
-        .map(|name| name.to_lowercase())
-        .collect::<BTreeSet<_>>();
-    let mut assigned = BTreeSet::new();
-    let mut resolved = BTreeMap::new();
-    for (key, original) in &originals {
-        let mut name = original.clone();
-        if !assigned.insert(original.to_lowercase()) {
-            let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
-            let mut attempt = 0;
-            loop {
-                let suffix = if attempt == 0 {
-                    format!(" ({})", &digest[..8])
-                } else {
-                    format!(" ({}-{attempt})", &digest[..8])
-                };
-                name = format!(
-                    "{}{}",
-                    original
-                        .chars()
-                        .take(31usize.saturating_sub(suffix.len()))
-                        .collect::<String>(),
-                    suffix
-                );
-                if reserved.insert(name.to_lowercase()) {
-                    break;
-                }
-                attempt += 1;
-            }
-        }
-        resolved.insert(key.clone(), name);
-    }
+    let resolved = resolve_names(&originals);
     let mut names = Vec::new();
     let mut axes = BTreeMap::new();
     for key in &keys {
@@ -607,6 +629,44 @@ fn context<T: ReadTxn>(txn: &T) -> Result<Context, String> {
         }
     }
     Ok(Context { keys, names, axes })
+}
+
+/// Duplicate sheet names receive stable digest suffixes.
+fn resolve_names(originals: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut reserved = originals
+        .values()
+        .map(|name| name.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut assigned = BTreeSet::new();
+    let mut resolved = BTreeMap::new();
+    for (key, original) in originals {
+        let mut name = original.clone();
+        if !assigned.insert(original.to_lowercase()) {
+            let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+            let mut attempt = 0;
+            loop {
+                let suffix = if attempt == 0 {
+                    format!(" ({})", &digest[..8])
+                } else {
+                    format!(" ({}-{attempt})", &digest[..8])
+                };
+                name = format!(
+                    "{}{}",
+                    original
+                        .chars()
+                        .take(31usize.saturating_sub(suffix.len()))
+                        .collect::<String>(),
+                    suffix
+                );
+                if reserved.insert(name.to_lowercase()) {
+                    break;
+                }
+                attempt += 1;
+            }
+        }
+        resolved.insert(key.clone(), name);
+    }
+    resolved
 }
 fn blank_sheet(txn: &mut TransactionMut<'_>, key: &str, name: &str) -> Result<MapRef, String> {
     let sheets = txn.get_or_insert_map(SHEETS);
@@ -659,6 +719,10 @@ fn chart_bind(value: &SheetChart, key: &str, context: &Context) -> Result<Chart,
         to,
     })
 }
+/// Entries override the source cell at their identity: an empty value or a `""`
+/// style clears it, and writing the source's own plain value or style removes
+/// the override. Formula cells keep theirs.
+#[allow(clippy::too_many_arguments)]
 fn write_cell(
     txn: &mut TransactionMut<'_>,
     sheet: &MapRef,
@@ -667,13 +731,22 @@ fn write_cell(
     cell: &Cell,
     context: &Context,
     styles: &Stylesheet,
-    content: bool,
-    format: bool,
+    base: &WorkbookBase,
+    (content, format): (bool, bool),
 ) -> Result<(), String> {
     let cell_key = context.key(key, at)?;
+    let source = base_cell(base, key, &cell_key)?;
     if content {
         let contents = nested_map(sheet, txn, CONTENTS)?;
-        if cell.formula.is_none() && matches!(cell.value, CellValue::Empty) {
+        let reverts = match source
+            .filter(|source| source.formula.is_some() || source.value != CellValue::Empty)
+        {
+            None => cell.formula.is_none() && cell.value == CellValue::Empty,
+            Some(source) => {
+                source.formula.is_none() && cell.formula.is_none() && source.value == cell.value
+            }
+        };
+        if reverts {
             contents.remove(txn, &cell_key);
         } else {
             set_json(
@@ -693,13 +766,18 @@ fn write_cell(
     }
     if format {
         let formats = nested_map(sheet, txn, STYLES)?;
-        match cell.style {
-            Some(style) => {
-                formats.try_update(txn, cell_key, style_key(styles, style)?);
-            }
-            None => {
-                formats.remove(txn, &cell_key);
-            }
+        let desired = cell
+            .style
+            .map(|style| style_key(styles, style))
+            .transpose()?;
+        let original = source
+            .and_then(|source| source.style)
+            .map(|style| style_key(&base.styles, style))
+            .transpose()?;
+        if desired == original {
+            formats.remove(txn, &cell_key);
+        } else {
+            formats.try_update(txn, cell_key, desired.unwrap_or_default());
         }
     }
     Ok(())
@@ -751,19 +829,6 @@ pub(super) fn seed(
     let context = context(&txn)?;
     for (key, value) in keys.iter().zip(&model.sheets) {
         let sheet = sheet_map(&txn, key)?;
-        for (at, cell) in value.iter_cells() {
-            write_cell(
-                &mut txn,
-                &sheet,
-                key,
-                at,
-                cell,
-                &context,
-                &model.styles,
-                true,
-                true,
-            )?;
-        }
         let (rows, cols) = context.axes(key)?;
         let heights = nested_map(&sheet, &txn, ROW_HEIGHTS)?;
         for (row, value) in &value.row_heights {
@@ -996,11 +1061,21 @@ pub(super) fn materialize<T: ReadTxn>(
             &[FREEZE_PANE],
             "stable sheet",
         )?;
-        for (cell, value) in nested_map(&sheet, txn, CONTENTS)?.iter(txn) {
+        let contents = nested_map(&sheet, txn, CONTENTS)?;
+        for (cell, value) in contents.iter(txn) {
             context.at(key, cell)?;
             let content: Content = decode(value)?;
             if let Some(formula) = content.formula {
                 formula.resolve(&context)?;
+            }
+        }
+        // A hidden source sheet's unedited formulas must still resolve; the
+        // projection resolves those of the sheets in order.
+        if let Some(index) = source_index.filter(|_| context.index(key).is_none()) {
+            for (&(row, col), formula) in &base_bindings(base)?[index] {
+                if contents.get(txn, &source_key(row, col)?).is_none() {
+                    formula.resolve(&context)?;
+                }
             }
         }
         for (_, value) in nested_map(&sheet, txn, MERGES)?.iter(txn) {
@@ -1022,41 +1097,54 @@ pub(super) fn materialize<T: ReadTxn>(
     for (index, key) in context.keys.iter().enumerate() {
         let source = sheet_map(txn, key)?;
         let mut sheet = Sheet::new(context.names[index].clone());
-        let source_index = key
-            .strip_prefix("sheet:")
-            .and_then(|index| index.parse::<usize>().ok());
-        for (cell_key, value) in nested_map(&source, txn, CONTENTS)?.iter(txn) {
-            let content: Content = decode(value)?;
-            let Some(at) = context.at(key, cell_key)? else {
-                continue;
-            };
-            let formula = content
-                .formula
-                .map(|formula| formula.resolve(&context))
-                .transpose()?;
-            sheet.set_cell(
-                at,
-                Cell {
-                    value: content.value,
-                    formula,
-                    style: None,
-                },
-            );
-        }
-        for (cell_key, value) in nested_map(&source, txn, STYLES)?.iter(txn) {
-            let style = value
-                .cast::<String>()
-                .map_err(|_| "invalid cell style key")?;
-            let style = *style_indices.get(&style).ok_or("unknown cell style")?;
-            let Some(at) = context.at(key, cell_key)? else {
-                continue;
-            };
-            let mut cell = sheet.cell(at).cloned().unwrap_or_default();
-            cell.style = style;
-            sheet.set_cell(at, cell);
-        }
+        let source_index = base_sheet_index(key);
+        let contents = nested_map(&source, txn, CONTENTS)?;
+        let formats = nested_map(&source, txn, STYLES)?;
         let (rows, cols) = context.axes(key)?;
         if let Some(source_index) = source_index {
+            let overridden = |map: &MapRef| {
+                map.keys(txn)
+                    .filter_map(|key| source_at(key).transpose())
+                    .collect::<Result<HashSet<_>, String>>()
+            };
+            let (content_overrides, format_overrides) =
+                (overridden(&contents)?, overridden(&formats)?);
+            let formulas = &base_bindings(base)?[source_index];
+            let mut source_styles = HashMap::new();
+            for (at, cell) in base.sheets[source_index].iter_cells() {
+                let (Some(row), Some(col)) = (
+                    rows.index_in("base", at.row.into()),
+                    cols.index_in("base", at.col.into()),
+                ) else {
+                    continue;
+                };
+                let mut out = Cell::default();
+                if !content_overrides.contains(&(at.row, at.col)) {
+                    out.value = cell.value.clone();
+                    if cell.formula.is_some() {
+                        let formula = formulas
+                            .get(&(at.row, at.col))
+                            .ok_or("missing source formula binding")?;
+                        out.formula = Some(formula.resolve(&context)?);
+                    }
+                }
+                if let Some(style) = cell
+                    .style
+                    .filter(|_| !format_overrides.contains(&(at.row, at.col)))
+                {
+                    out.style = match source_styles.get(&style) {
+                        Some(mapped) => *mapped,
+                        None => {
+                            let mapped = *style_indices
+                                .get(&style_key(&base.styles, style)?)
+                                .ok_or("unknown source cell style")?;
+                            source_styles.insert(style, mapped);
+                            mapped
+                        }
+                    };
+                }
+                sheet.set_cell(CellRef::new(row, col), out);
+            }
             sheet.format = base.formats.get(source_index).copied().unwrap_or_default();
             sheet.col_styles = source_col_styles(
                 base.col_styles
@@ -1065,24 +1153,49 @@ pub(super) fn materialize<T: ReadTxn>(
                     .unwrap_or_default(),
                 cols,
             );
-            let contents = nested_map(&source, txn, CONTENTS)?;
-            for anchor in base.array_anchors.get(source_index).into_iter().flatten() {
-                let seeded = json(&(source_point(anchor.at.row), source_point(anchor.at.col)))?;
-                if contents
-                    .get(txn, &seeded)
-                    .and_then(|value| value.cast::<String>().ok())
-                    .as_deref()
-                    != Some(anchor.content.as_str())
-                {
+            // Deliberate stopgap (record 2026-09-25): an array formula keeps its
+            // range only while its anchor has no content override; otherwise it
+            // saves as a single-cell formula.
+            for (at, range) in base.sheets[source_index].array_formulas() {
+                if content_overrides.contains(&(at.row, at.col)) {
                     continue;
                 }
-                if let (Some(at), Some(range)) = (
-                    context.at(key, &seeded)?,
-                    source_range(anchor.range, rows, cols),
+                if let (Some(row), Some(col), Some(range)) = (
+                    rows.index_in("base", at.row.into()),
+                    cols.index_in("base", at.col.into()),
+                    source_range(range, rows, cols),
                 ) {
-                    sheet.set_array_formula(at, range);
+                    sheet.set_array_formula(CellRef::new(row, col), range);
                 }
             }
+        }
+        for (cell_key, value) in contents.iter(txn) {
+            let content: Content = decode(value)?;
+            let Some(at) = context.at(key, cell_key)? else {
+                continue;
+            };
+            let mut cell = sheet.cell(at).cloned().unwrap_or_default();
+            cell.value = content.value;
+            cell.formula = content
+                .formula
+                .map(|formula| formula.resolve(&context))
+                .transpose()?;
+            sheet.set_cell(at, cell);
+        }
+        for (cell_key, value) in formats.iter(txn) {
+            let style = value
+                .cast::<String>()
+                .map_err(|_| "invalid cell style key")?;
+            let style = match style.as_str() {
+                "" => None,
+                style => *style_indices.get(style).ok_or("unknown cell style")?,
+            };
+            let Some(at) = context.at(key, cell_key)? else {
+                continue;
+            };
+            let mut cell = sheet.cell(at).cloned().unwrap_or_default();
+            cell.style = style;
+            sheet.set_cell(at, cell);
         }
         for (name, axis, values) in [
             (ROW_HEIGHTS, rows, &mut sheet.row_heights),
@@ -1383,8 +1496,8 @@ pub(super) fn apply(
                             &cell.clone().into(),
                             &context,
                             &after.styles,
-                            content,
-                            format,
+                            base,
+                            (content, format),
                         )?;
                     }
                     Op::PatchRangeStyle { range, .. }
@@ -1402,8 +1515,8 @@ pub(super) fn apply(
                                     &cell,
                                     &context,
                                     &after.styles,
-                                    false,
-                                    true,
+                                    base,
+                                    (false, true),
                                 )?;
                             }
                         }
