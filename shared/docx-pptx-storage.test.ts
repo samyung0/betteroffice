@@ -11,7 +11,7 @@ import {
   type OfficeCheckpoint,
 } from "./office-checkpoint";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
-import { unzipContainer } from "../packages/docx/src/wasm/opc";
+import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-06T00:00:00.000Z" };
 const fixture = async (name: string) =>
@@ -182,4 +182,43 @@ test("a DOCX image reference to a missing part fails the baseline and the export
   } finally {
     doc.destroy();
   }
+});
+
+test("Word-like DOCX runs merge on export and keep per-character formatting and tracked changes", async () => {
+  const run = (text: string, rsid: string, properties = "") =>
+    `<w:r w:rsidR="${rsid}">${properties && `<w:rPr>${properties}</w:rPr>`}` +
+    `<w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const tracked =
+    '<w:i/><w:rPrChange w:id="7" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:rPr/></w:rPrChange>';
+  const parts = unzipContainer(await fixture("feature-rich.docx"));
+  parts["word/document.xml"] = new TextEncoder().encode(
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      `<w:p>${run("Split ", "00A1")}${run("by ", "00B2")}${run("bold", "00C3", "<w:b/>")}${run(" rsids", "00D4")}</w:p>` +
+      `<w:p>${run("Tracked ", "00A1")}${run("change", "00B2", tracked)}${run(" kept", "00C3")}</w:p>` +
+      "</w:body></w:document>"
+  );
+  const bytes = rezipContainer(parts);
+  const seed = await seedOffice("docx", bytes);
+  const doc = await openState(bytes, seed.state);
+  try {
+    const [merged, kept] = doc.paragraphs("body");
+    expect(merged.properties._originalRunBoundaries).toBeUndefined();
+    expect(kept.properties._originalRunBoundaries).toHaveLength(3);
+  } finally {
+    doc.destroy();
+  }
+  const xml = new TextDecoder().decode(
+    unzipContainer(await exportOffice(bytes, seed, fixed))["word/document.xml"]
+  );
+  const runs = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(([paragraph]) =>
+    [...paragraph.matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)].map(([, body]) => ({
+      text: [...body.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(([, text]) => text).join(""),
+      properties: /<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(body)?.[1] ?? "",
+    }))
+  );
+  expect(runs[0].map((item) => item.text)).toEqual(["Split by ", "bold", " rsids"]);
+  expect(runs[0].map((item) => item.properties.includes("<w:b/>"))).toEqual([false, true, false]);
+  expect(runs[1].map((item) => item.text)).toEqual(["Tracked ", "change", " kept"]);
+  expect(runs[1].map((item) => item.properties.includes("<w:rPrChange"))).toEqual([false, true, false]);
+  expect(runs[1][1].properties).toContain("<w:i/>");
 });

@@ -1836,8 +1836,10 @@ fn run_boundary(
     }
     let note_marks = note_ref_mark_types(run);
     let breaks = flow_break_offsets(run, source);
+    let text = units_text(units);
+    let empty = text.is_empty();
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(units_text(units)));
+    boundary.insert("text".to_owned(), Value::String(text));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
     }
@@ -1847,7 +1849,10 @@ fn run_boundary(
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
     }
-    if let Some(formatting) = field(Some(run), "formatting") {
+    // Only a run without text restores from cached formatting; others use live marks.
+    if let Some(formatting) = field(Some(run), "formatting")
+        && empty
+    {
         boundary.insert("formatting".to_owned(), formatting.clone());
     }
     if let Some(changes) = field(Some(run), "propertyChanges") {
@@ -2268,6 +2273,15 @@ fn paragraph_units(
         }
         unit_counts.push(units.len() - start);
     }
+    // The cache is kept only for what merging equal-formatted runs would lose.
+    let boundaries = boundaries.filter(|boundaries| {
+        boundaries.iter().any(|boundary| {
+            boundary.get("propertyChanges").is_some()
+                || boundary.get("noteMarks").is_some()
+                || boundary.get("breaks").is_some()
+                || boundary.get("text").and_then(Value::as_str) == Some("")
+        })
+    });
     let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
     (units, para_attrs_to_ppr(attrs))
 }
@@ -4010,24 +4024,31 @@ mod tests {
     }
 
     #[test]
-    fn raw_inline_nodes_leave_run_boundaries_intact() {
-        let (_, properties) = paragraph_units(
-            &json!({"content":[
-                {"type":"run","content":[{"type":"text","text":"A"}]},
-                {"type":"rawXml","xml":"<x:mark/>"},
-                {"type":"run","content":[{"type":"text","text":"B"}]}
-            ]}),
-            &StyleResolver::new(None),
-            None,
-            &BTreeMap::new(),
-        );
+    fn run_boundaries_are_kept_only_for_what_merging_would_lose() {
+        let boundaries = |content: Value| {
+            paragraph_units(
+                &json!({ "content": content }),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            )
+            .1
+            .get("_originalRunBoundaries")
+            .cloned()
+        };
+        let plain =
+            json!({"type":"run","formatting":{"bold":true},"content":[{"type":"text","text":"A"}]});
         assert_eq!(
-            properties["_originalRunBoundaries"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
+            boundaries(json!([plain, {"type":"rawXml","xml":"<x:mark/>"}, plain])),
+            None
         );
+        let tracked = json!({"type":"run","propertyChanges":[{"id":1}],"content":[{"type":"text","text":"B"}]});
+        let empty = json!({"type":"run","formatting":{"bold":true},"content":[]});
+        let kept = boundaries(json!([plain, tracked])).unwrap();
+        assert_eq!(kept[0], json!({"text":"A","marksKey":"bold:{}"}));
+        assert_eq!(kept[1]["propertyChanges"], json!([{"id":1}]));
+        let kept = boundaries(json!([plain, empty])).unwrap();
+        assert_eq!(kept[1], json!({"text":"","formatting":{"bold":true}}));
     }
 
     #[test]
@@ -4522,7 +4543,7 @@ mod tests {
         let (units, ppr) = paragraph_units(
             &json!({"content": [
                 {"type": "commentRangeStart", "id": 7},
-                {"type": "run", "formatting": {"bold": true}, "content": [
+                {"type": "run", "formatting": {"bold": true}, "propertyChanges": [{"id": 3}], "content": [
                     {"type": "text", "text": "A"},
                     {"type": "tab"},
                     {"type": "softHyphen"}
