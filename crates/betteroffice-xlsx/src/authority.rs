@@ -559,6 +559,10 @@ impl WorkbookAuthority {
             .map_err(AuthorityError::InvalidState)
     }
 
+    pub(crate) fn source_axes(&self) -> Result<Vec<Option<xlsx_parse::SheetAxes>>, AuthorityError> {
+        stable::source_axes(&self.doc).map_err(AuthorityError::InvalidState)
+    }
+
     pub(crate) fn pending_effects(
         &self,
         model: &WorkbookModel,

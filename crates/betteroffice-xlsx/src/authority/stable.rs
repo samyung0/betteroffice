@@ -1670,6 +1670,36 @@ pub(super) fn cell_identity(doc: &Doc, sheet: SheetId, at: CellRef) -> Result<St
     Ok(format!("{key}:{}", context.key(key, at)?))
 }
 
+/// Where each sheet's source rows and columns sit now; `None` for added sheets.
+pub(super) fn source_axes(doc: &Doc) -> Result<Vec<Option<xlsx_parse::SheetAxes>>, String> {
+    let context = context(&doc.transact())?;
+    let map = |axis: &Axis, limit: u32| {
+        let mut current = 0;
+        xlsx_parse::AxisMap::from_runs(
+            limit,
+            axis.spans.iter().filter_map(|span| {
+                let at = current;
+                current += span.len;
+                (span.run == "base" && span.start < u64::from(limit)).then(|| {
+                    let len = span.len.min(u64::from(limit) - span.start);
+                    (span.start as u32, len as u32, at as u32)
+                })
+            }),
+        )
+    };
+    context
+        .keys
+        .iter()
+        .map(|key| {
+            let (rows, cols) = context.axes(key)?;
+            Ok(base_sheet_index(key).map(|_| xlsx_parse::SheetAxes {
+                rows: map(rows, MAX_ROWS),
+                cols: map(cols, MAX_COLS),
+            }))
+        })
+        .collect()
+}
+
 pub(super) fn cell_identities(
     doc: &Doc,
     cells: impl IntoIterator<Item = (SheetId, CellRef)>,

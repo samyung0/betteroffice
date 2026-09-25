@@ -708,6 +708,60 @@ fn row_insert_carries_preserved_markup_to_shifted_rows() {
     Workbook::open(&workbook.save().unwrap()).unwrap();
 }
 
+#[test]
+fn a_collaborative_row_insert_carries_preserved_markup_and_shared_strings() {
+    let options = CalculationOptions::default();
+    let original = markup_round_trip_fixture();
+    let mut peer = Workbook::open_collaborative(&original, 7201).unwrap();
+    peer.apply_ops(
+        vec![Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        }],
+        options,
+    )
+    .unwrap();
+    let mut workbook = Workbook::open_collaborative(&original, 7202).unwrap();
+    workbook
+        .apply_update_v1(&peer.encode_state_as_update_v1(), options)
+        .unwrap();
+    let sheet = saved_sheet_text(&workbook);
+    assert!(
+        sheet.contains(r#"<row r="2" spans="1:3" s="1" customFormat="1""#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<c r="A2" cm="1" vm="2"><v>1</v></c>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<row r="3" hidden="1" outlineLevel="1"><c r="A3"><v>4</v></c><extLst><ext uri="{row}"/></extLst></row>"#
+        ),
+        "{sheet}"
+    );
+
+    let source = include_bytes!("../../../apps/demo/public/sample.xlsx");
+    let mut workbook = Workbook::open_collaborative(source, 7203).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    let sheet = saved_sheet_text(&workbook);
+    assert!(
+        sheet.contains(r#"<row r="1"><c r="A1" t="s"><v>1</v></c>"#),
+        "{sheet}"
+    );
+    assert!(!sheet.contains("inlineStr"), "{sheet}");
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
 }

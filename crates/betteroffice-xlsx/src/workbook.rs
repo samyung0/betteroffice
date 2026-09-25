@@ -464,14 +464,7 @@ impl Workbook {
                 shared_string_cells: (0..model.sheets.len())
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
-                // Deliberate stopgap, revisit in F3: schema 7 sessions skip
-                // upstream's preserved row, column and cell markup on save
-                // (their row and column edits do not move these maps) until the
-                // lazy-cell overlay maps it through the live axes.
-                axes: vec![
-                    (!authority.supports_structure()).then(xlsx_parse::SheetAxes::default);
-                    model.sheets.len()
-                ],
+                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
@@ -892,12 +885,22 @@ impl Workbook {
         };
         match &self.source_package {
             Some(package) => {
+                let live;
+                let (axes, shared_string_cells) = if self.is_collaborative() {
+                    live = self.source_layout(package)?;
+                    (live.0.as_slice(), live.1.as_slice())
+                } else {
+                    (
+                        self.preserved.axes.as_slice(),
+                        self.preserved.shared_string_cells.as_slice(),
+                    )
+                };
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
-                    &self.preserved.shared_string_cells,
-                    &self.preserved.axes,
+                    shared_string_cells,
+                    axes,
                     xlsx_parse::SaveEdits {
                         changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
@@ -911,6 +914,35 @@ impl Workbook {
                 active_sheet,
             )?),
         }
+    }
+
+    /// Each source sheet's live row and column axes with the shared-string
+    /// entries its cells were authored against, moved along them.
+    fn source_layout(
+        &self,
+        package: &xlsx_parse::PreservedPackage,
+    ) -> Result<(
+        Vec<Option<xlsx_parse::SheetAxes>>,
+        Vec<xlsx_parse::SharedStringCells>,
+    )> {
+        let axes = self.authority.source_axes().map_err(authority_error)?;
+        let cells = self
+            .preserved
+            .origins
+            .iter()
+            .zip(&axes)
+            .map(|(origin, axes)| match (origin, axes) {
+                (Some(origin), Some(axes)) => package
+                    .source_shared_string_cells(*origin)
+                    .into_iter()
+                    .filter_map(|((row, col), index)| {
+                        Some(((axes.rows.current(row)?, axes.cols.current(col)?), index))
+                    })
+                    .collect(),
+                _ => xlsx_parse::SharedStringCells::new(),
+            })
+            .collect();
+        Ok((axes, cells))
     }
 
     pub fn embedded_images(&self, sheet: SheetId) -> Result<Vec<xlsx_parse::EmbeddedImage>> {
