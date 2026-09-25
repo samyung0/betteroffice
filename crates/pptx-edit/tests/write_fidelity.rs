@@ -1516,6 +1516,30 @@ fn a_state_reopens_only_with_its_fingerprinted_source() {
 }
 
 #[test]
+fn a_rebased_indexed_state_keeps_comments_on_their_remapped_slides() {
+    let source = commented_fixture(CommentFlavor::Modern);
+    let session = DeckSession::open(&source, 11).unwrap();
+    let captured = session.encode_state_as_update_v1();
+    let published = session.save().unwrap();
+    let slides = session.snapshot().unwrap().slides;
+    session.move_slide(&context(), &slides[1].id, 0).unwrap();
+    let latest = session.encode_state_as_update_v1();
+    let rebased =
+        DeckSession::rebase_checkpoint(&source, &captured, &latest, &published, 21).unwrap();
+    let current = DeckSession::open_from_update_with_source(&rebased.state, &published, 22)
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let indexed = DeckSession::open_from_update_with_source(&rebased.indexed_state, &published, 23)
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(current.comments.len(), 2);
+    assert_eq!(indexed.comments, current.comments);
+    assert_eq!(indexed.comment_flavor, CommentFlavor::Modern);
+}
+
+#[test]
 fn rebase_keeps_later_edits_and_maps_only_the_remaining_changes() {
     let source = fixture(256);
     let session = DeckSession::open(&source, 11).unwrap();

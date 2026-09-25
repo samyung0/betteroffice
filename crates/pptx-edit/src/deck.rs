@@ -131,6 +131,36 @@ pub(crate) fn seed_snapshot(doc: &Doc, snapshot: &DeckSnapshot) -> EditResult<()
             shape_order.push_back(&mut txn, shape.id.as_str());
         }
     }
+    meta.insert(
+        &mut txn,
+        "commentFlavor",
+        flavor_key(snapshot.comment_flavor),
+    );
+    let comments = txn.get_or_insert_map(crate::COMMENTS);
+    comments.clear(&mut txn);
+    for comment in &snapshot.comments {
+        let entry = comments.insert(&mut txn, comment.id.as_str(), MapPrelim::default());
+        for (key, value) in [
+            ("id", &comment.id),
+            ("slideId", &comment.slide_id),
+            ("author", &comment.author),
+            ("initials", &comment.initials),
+            ("text", &comment.text),
+        ] {
+            entry.insert(&mut txn, key, value.as_str());
+        }
+        for (key, value) in [
+            ("created", &comment.created),
+            ("parentId", &comment.parent_id),
+        ] {
+            if let Some(value) = value {
+                entry.insert(&mut txn, key, value.as_str());
+            }
+        }
+        entry.insert(&mut txn, "x", comment.x_emu as f64);
+        entry.insert(&mut txn, "y", comment.y_emu as f64);
+        entry.insert(&mut txn, "resolved", comment.resolved);
+    }
     Ok(())
 }
 

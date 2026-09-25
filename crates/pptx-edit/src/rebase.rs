@@ -239,5 +239,8 @@ fn remap_baseline(
         slide.id = mapped(&slide.id)?;
         shapes(&mut slide.shapes, &reverse, current, &mapped)?;
     }
+    for comment in &mut snapshot.comments {
+        comment.slide_id = mapped(&comment.slide_id)?;
+    }
     Ok(())
 }
