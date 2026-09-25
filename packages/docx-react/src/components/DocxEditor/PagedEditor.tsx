@@ -429,6 +429,8 @@ export interface PagedEditorRef {
 
 const SIDEBAR_ANCHOR_EMIT_MS = 150;
 const SIDEBAR_ANCHOR_STALE_MS = 400;
+const NO_SIDEBAR_COMMENT_IDS: readonly (string | number)[] = [];
+
 const EMPTY_TRACKED_CHANGES_RESULT: TrackedChangesResult = {
   entries: [],
   commentToRevision: new Map(),
@@ -473,7 +475,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onHyperlinkClick,
       onContextMenu,
       onAnchorPositionsChange,
-      sidebarCommentIds = [],
+      sidebarCommentIds = NO_SIDEBAR_COMMENT_IDS,
       onYrsTrackedChangesChange,
       onTotalPagesChange,
       onLayoutComputed,
