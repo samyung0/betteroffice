@@ -640,6 +640,8 @@ function runContentToUnits(
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart))];
+    case 'opaqueDrawing':
+      return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml })];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks, commentId)];
     case 'endnoteRef':

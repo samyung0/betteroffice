@@ -971,18 +971,28 @@ pub(crate) fn parse_run_composed(
     mut drawing: Option<&mut DrawingContext<'_>>,
 ) -> Result<Run, ParseError> {
     let mut run = parse_run(element, theme, styles, doc_defaults).run;
+    // `None` keeps the run's opaque drawing: a `w:pict`, `w:object` or
+    // `mc:AlternateContent` the model cannot carry is replayed verbatim.
     let mut replacements = Vec::new();
     for child in element.child_elements() {
         match child.local_name() {
-            "drawing" | "pict" | "object" => replacements.push(parse_drawing_owned(
+            "drawing" => replacements.push(Some(parse_drawing_owned(
                 child,
                 relationships,
                 budget,
                 drawing.as_deref_mut(),
-            )?),
-            "AlternateContent" if contains_drawing_owned_content(child) => replacements.push(
-                parse_alternate_content(child, relationships, budget, drawing.as_deref_mut())?,
-            ),
+            )?)),
+            "pict" | "object" => {
+                let parsed =
+                    parse_drawing_owned(child, relationships, budget, drawing.as_deref_mut())?;
+                replacements.push((!parsed.is_empty()).then_some(parsed));
+            }
+            "AlternateContent" if contains_drawing_owned_content(child) => {
+                let parsed =
+                    parse_alternate_content(child, relationships, budget, drawing.as_deref_mut())?;
+                // Text boxes enter the paragraph through block enrichment instead.
+                replacements.push((!parsed.is_empty() || holds_text_box(child)).then_some(parsed));
+            }
             _ => {}
         }
     }
@@ -990,7 +1000,11 @@ pub(crate) fn parse_run_composed(
     let mut content = Vec::new();
     for item in run.content {
         if matches!(item, RunContent::OpaqueDrawing { .. }) {
-            content.extend(replacement.next().unwrap_or_default());
+            match replacement.next() {
+                Some(Some(parsed)) => content.extend(parsed),
+                Some(None) => content.push(item),
+                None => {}
+            }
         } else {
             content.push(item);
         }
@@ -1108,6 +1122,24 @@ fn contains_drawing_owned_content(element: &XmlElement) -> bool {
         matches!(child.local_name(), "drawing" | "pict" | "object")
             || contains_drawing_owned_content(child)
     })
+}
+
+/// The branch block enrichment reads (`Choice`, else `Fallback`) holds a text box.
+fn holds_text_box(alternate: &XmlElement) -> bool {
+    alternate
+        .child_elements()
+        .find(|branch| branch.local_name() == "Choice")
+        .or_else(|| {
+            alternate
+                .child_elements()
+                .find(|branch| branch.local_name() == "Fallback")
+        })
+        .is_some_and(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| child.local_name() == "drawing")
+                .any(|drawing| crate::text_box::parse_text_box(drawing).is_some())
+        })
 }
 
 fn apply_shape_metadata(shape: &mut Shape, drawing: &XmlElement) {
@@ -1700,5 +1732,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn keeps_drawings_the_model_cannot_carry_as_raw_xml() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w" xmlns:v="v" xmlns:o="o" xmlns:mc="mc" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps">
+              <w:r><w:pict><v:rect id="r1"><v:textbox><w:txbxContent><w:p><w:r><w:t>Callout</w:t></w:r></w:p></w:txbxContent></v:textbox></v:rect></w:pict></w:r>
+              <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor><wp:extent cx="10" cy="10"/><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape/></w:pict></mc:Fallback></mc:AlternateContent></w:r>
+            </w:p>"#,
+        );
+        let opaque = paragraph
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| &run.content)
+            .filter_map(|item| match item {
+                RunContent::OpaqueDrawing { kind, xml } => Some((kind.as_str(), xml.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // The text box enters through block enrichment, so only the VML rect stays raw.
+        assert_eq!(opaque.len(), 1);
+        assert_eq!(opaque[0].0, "pict");
+        assert!(opaque[0].1.contains("<v:rect") && opaque[0].1.contains("Callout"));
     }
 }

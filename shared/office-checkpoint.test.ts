@@ -680,6 +680,49 @@ test("agent replace_text rewrites only the changed DOCX span and refuses tracked
   ).rejects.toThrow("unavailable_target");
 });
 
+test("DOCX charts and unmodeled VML drawings survive seeding, an edit and repeated export", async () => {
+  const xmlOf = (bytes: Uint8Array, part = "word/document.xml") =>
+    new TextDecoder().decode(unzipContainer(bytes)[part]);
+  const charts = (xml: string) =>
+    [...xml.matchAll(/<c:chart [^>]*r:id="([^"]+)"/g)].map(([, id]) => id);
+  const vml = (xml: string) =>
+    xml.match(/<w:pict><v:rect [\s\S]*?<\/w:pict>/g) ?? [];
+  for (const name of ["exchange-plan.docx", "opaque-objects.docx"]) {
+    const source = new Uint8Array(
+      await readFile(new URL(`../poc/fixtures/${name}`, import.meta.url))
+    );
+    expect(charts(xmlOf(source))).toHaveLength(2);
+    let bytes = source;
+    for (const round of [1, 2]) {
+      const seeded = await seedOffice("docx", bytes);
+      const target = (await inspectOffice(bytes, seeded)).find(
+        (entry) => entry.value.length > 20
+      )!;
+      const edit = await applyOfficeCommands(bytes, seeded, [
+        {
+          type: "replace_text",
+          targetId: target.id,
+          expectedText: target.value,
+          text: `${target.value} (round ${round})`,
+        },
+      ]);
+      bytes = await exportOffice(
+        bytes,
+        { ...seeded, state: edit.state },
+        fixed
+      );
+      const xml = xmlOf(bytes);
+      expect(xml).toContain(`(round ${round})`);
+      expect(charts(xml)).toEqual(charts(xmlOf(source)));
+      for (const id of charts(xml))
+        expect(xmlOf(bytes, "word/_rels/document.xml.rels")).toContain(
+          `Id="${id}"`
+        );
+      expect(vml(xml)).toEqual(vml(xmlOf(source)));
+    }
+  }
+});
+
 test("agent edits set XLSX cells by sheet name and address and clear them through the inverse", async () => {
   const bytes = await fixture("sample.xlsx");
   const before = await seedOffice("xlsx", bytes);

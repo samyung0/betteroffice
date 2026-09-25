@@ -745,6 +745,19 @@ function chartRunFromPayload(payload: Attrs): Run | null {
   }
 }
 
+function opaqueDrawingRun(payload: Attrs): Run {
+  return {
+    type: 'run',
+    content: [
+      {
+        type: 'opaqueDrawing',
+        kind: asString(payload.kind) ?? '',
+        xml: asString(payload.xml) ?? '',
+      },
+    ],
+  };
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
@@ -924,6 +937,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
       return shapeRunFromPayload(item.payload);
     case 'chart':
       return chartRunFromPayload(item.payload);
+    case 'opaqueDrawing':
+      return opaqueDrawingRun(item.payload);
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
@@ -958,6 +973,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
     run = shapeRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
+  else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
+    run = opaqueDrawingRun(item.payload);
   else if (item.kind === 'text') {
     const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
     run = {

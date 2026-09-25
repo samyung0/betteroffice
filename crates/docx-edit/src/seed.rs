@@ -1400,6 +1400,16 @@ fn run_content_to_units(
             None,
             1,
         )],
+        "opaqueDrawing" => vec![embed_unit(
+            "opaqueDrawing",
+            map_from_value(json!({
+                "kind": field(Some(content), "kind"),
+                "xml": field(Some(content), "xml"),
+            })),
+            hidden_marks(marks),
+            None,
+            1,
+        )],
         "footnoteRef" => field(Some(content), "id")
             .map(|id| note_ref_unit(id, "footnote", marks, comment_id))
             .into_iter()

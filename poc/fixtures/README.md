@@ -12,5 +12,11 @@ rewrites.
 - `feature-rich.pptx` covers multiple slides, styled text boxes, shapes, theme
   colors, Unicode, and a native chart.
 
-Regenerate the fixtures with the scripts in `../scripts`. Preview outputs live
+- `exchange-plan.docx` (Capy `e2e/fixtures/files/rich-content`) carries two native
+  charts with embedded workbooks.
+- `opaque-objects.docx` (Capy storage probe `gen_files.py`, `opaque_docx`) carries two
+  charts, two text boxes as `mc:AlternateContent` with VML fallbacks, a VML `w:pict`
+  rectangle and an OLE `w:object`.
+
+Regenerate the `feature-rich` fixtures with the scripts in `../scripts`. Preview outputs live
 under `../preview` and are intentionally not part of the fixture contract.

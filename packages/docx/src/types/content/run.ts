@@ -194,6 +194,17 @@ export interface ChartContent {
 }
 
 /**
+ * A `w:pict`, `w:object`, `mc:AlternateContent` or unread chart drawing the
+ * model cannot carry, replayed verbatim on save.
+ */
+export interface OpaqueDrawingContent {
+  type: 'opaqueDrawing';
+  /** Source element: `drawing`, `pict`, `object` or `alternateContent`. */
+  kind: string;
+  xml: string;
+}
+
+/**
  * All possible run content types
  */
 export type RunContent =
@@ -212,7 +223,8 @@ export type RunContent =
   | NoBreakHyphenContent
   | DrawingContent
   | ShapeContent
-  | ChartContent;
+  | ChartContent
+  | OpaqueDrawingContent;
 
 /**
  * A run (`w:r`) — a contiguous span of inline content sharing one set of

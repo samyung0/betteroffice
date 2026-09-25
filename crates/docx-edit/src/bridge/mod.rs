@@ -715,6 +715,15 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
                 }
+                // Raw OOXML the model cannot draw: it holds its place and paints nothing.
+                Out::YMap(opaque)
+                    if shared_map_string(&opaque, txn, "_kind").as_deref()
+                        == Some("opaqueDrawing") =>
+                {
+                    story_index += 1;
+                    paragraph_pm_units += 1;
+                    at_block_boundary = false;
+                }
                 Out::YMap(chart)
                     if shared_map_string(&chart, txn, "_kind").as_deref() == Some("chart") =>
                 {
