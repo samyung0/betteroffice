@@ -47,9 +47,9 @@ export class PptxDocument {
     moveSlideJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
     /**
-     * A supplied source must match the update's exact package fingerprint.
+     * `source` must match the update's exact package fingerprint.
      */
-    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source: Uint8Array): PptxDocument;
     previewProposalJson(args: string): string;
     proposeJson(args: string): string;
     static rebaseCheckpoint(old_source: Uint8Array, captured_state: Uint8Array, latest_state: Uint8Array, new_source: Uint8Array, client_id: number): PptxCheckpointRebase;

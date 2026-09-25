@@ -63,6 +63,7 @@ export const editsession_load_json: (a: number, b: number, c: number) => [number
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_materialize_docx: (a: number) => [number, number, number, number];
 export const editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_media_json: (a: number) => [number, number, number, number];
 export const editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_new: (a: number) => [number, number, number];
@@ -94,6 +95,7 @@ export const editsession_set_content_control_value: (a: number, b: number, c: nu
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const editsession_set_media_json: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];

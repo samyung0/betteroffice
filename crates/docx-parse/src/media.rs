@@ -11,6 +11,10 @@ use crate::relationships::RelationshipMap;
 
 pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
 
+/// An edited image's `src` names a media part of the source package as
+/// `media:<part>` instead of carrying its bytes.
+pub const MEDIA_REF_PREFIX: &str = "media:";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaFile {

@@ -462,6 +462,12 @@ export class EditSession {
      */
     measure_paragraph_json(input: string): string;
     /**
+     * The media [`EditSession::open_docx`] attached, as JSON
+     * `{partPath: displayDataUrl}`, for a replica that renders without the
+     * source (the resident worker).
+     */
+    media_json(): string;
+    /**
      * Merges the rectangle the [`TableRange`] `range_json` covers into its
      * top-left cell, whose story survives; the other cells' stories are
      * deleted. Always a plain local edit. Errors when the range covers fewer
@@ -689,6 +695,11 @@ export class EditSession {
      * has that id.
      */
     set_image_geometry(embed_id: string, geometry_json: string): void;
+    /**
+     * Attaches [`EditSession::media_json`] output so `media:<part>` image
+     * sources resolve without the source package.
+     */
+    set_media_json(media_json: string): void;
     /**
      * Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
      * searching every story. Unlike
@@ -1046,6 +1057,7 @@ export interface InitOutput {
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_media_json: (a: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
@@ -1077,6 +1089,7 @@ export interface InitOutput {
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_set_media_json: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];

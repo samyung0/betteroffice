@@ -89,7 +89,8 @@ for (const seeder of ['native', 'projected']) {
     try {
       if (seeder === 'native') session.seedFromDocx(bytes);
       else documentToYrs(session, parsed);
-      expect(session.paragraphs('body')[0]!.properties._originalRunBoundaries).toHaveLength(2);
+      // Equal runs merge; the raw node splits them again at its offset.
+      expect(session.paragraphs('body')[0]!.properties._originalRunBoundaries).toBeUndefined();
       expect(strictRawParts(await repackDocx(yrsToDocument(session, parsed)))).toEqual(direct);
       const last = session.paragraphs('body').at(-1)!;
       session.insertText({ story: 'body', paraId: last.paraId, offset: 0 }, 'Edited ');

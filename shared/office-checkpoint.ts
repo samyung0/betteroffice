@@ -265,10 +265,24 @@ function authoredText(value: unknown): string {
       return "";
   }
 }
+/** A seeded source image names its package part (`media:<part>`); an inserted one carries its bytes. */
+function docxImageAsset(
+  src: unknown,
+  media: ReadonlyMap<string, { dataUrl?: string }> | undefined
+): OfficeAsset | undefined {
+  if (typeof src !== "string" || !src.startsWith("media:"))
+    return assetFromDataUrl(src);
+  const part = src.slice("media:".length);
+  const dataUrl = media?.get(part)?.dataUrl;
+  if (!dataUrl)
+    throw new Error(`DOCX image part ${part} is absent from the source package`);
+  return assetFromDataUrl(dataUrl);
+}
 function docxEntries(
   session: YrsSession,
   stories: ReadonlySet<string>,
-  embeds: ReadonlyMap<string, unknown>
+  embeds: ReadonlyMap<string, unknown>,
+  media: ReadonlyMap<string, { dataUrl?: string }> | undefined
 ): Entry[] {
   const entries: Entry[] = [];
   for (const storyId of stories) {
@@ -319,7 +333,7 @@ function docxEntries(
         paragraphIndex++;
       } else if (segment.embedKind === "image" && !segment.attributes.del) {
         const id = `${storyId}:image:${stableId}`;
-        const asset = assetFromDataUrl(segment.payload.src);
+        const asset = docxImageAsset(segment.payload.src, media);
         const assetRef: OfficeObjectRef = {
           format: "docx",
           kind: "image",
@@ -850,7 +864,7 @@ async function open(
         state: () => session.encodeState(),
         entries: () => {
           project();
-          return docxEntries(session, stories, embeds);
+          return docxEntries(session, stories, embeds, base.package.media);
         },
         editable: () => {
           project();

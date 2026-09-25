@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -1836,8 +1836,10 @@ fn run_boundary(
     }
     let note_marks = note_ref_mark_types(run);
     let breaks = flow_break_offsets(run, source);
+    let text = units_text(units);
+    let empty = text.is_empty();
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(units_text(units)));
+    boundary.insert("text".to_owned(), Value::String(text));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
     }
@@ -1847,7 +1849,10 @@ fn run_boundary(
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
     }
-    if let Some(formatting) = field(Some(run), "formatting") {
+    // Only a run without text restores from cached formatting; others use live marks.
+    if let Some(formatting) = field(Some(run), "formatting")
+        && empty
+    {
         boundary.insert("formatting".to_owned(), formatting.clone());
     }
     if let Some(changes) = field(Some(run), "propertyChanges") {
@@ -2268,6 +2273,15 @@ fn paragraph_units(
         }
         unit_counts.push(units.len() - start);
     }
+    // The cache is kept only for what merging equal-formatted runs would lose.
+    let boundaries = boundaries.filter(|boundaries| {
+        boundaries.iter().any(|boundary| {
+            boundary.get("propertyChanges").is_some()
+                || boundary.get("noteMarks").is_some()
+                || boundary.get("breaks").is_some()
+                || boundary.get("text").and_then(Value::as_str) == Some("")
+        })
+    });
     let attrs = paragraph_attrs(paragraph, styles, &units, &unit_counts, boundaries);
     (units, para_attrs_to_ppr(attrs))
 }
@@ -3502,12 +3516,51 @@ fn units_to_raw_ops(
     Ok(ops)
 }
 
-fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+/// Image embeds name a media part of the fingerprinted source as `media:<part>`
+/// instead of carrying its bytes; lowering and the baseline resolve the part.
+pub use docx_parse::media::MEDIA_REF_PREFIX;
+
+/// Display data URL of every media part (a TIFF shows as PNG), by part path.
+pub fn package_media(envelope: &docx_parse::S9WireEnvelope) -> HashMap<String, String> {
+    envelope
+        .document
+        .package
+        .media_entries
+        .iter()
+        .map(|(_, file)| (file.path.clone(), file.data_url.clone()))
+        .collect()
+}
+
+/// Points source images at their media part. Parts with equal bytes share a
+/// display URL; the first in package order wins, and the serializer keeps an
+/// image's relationship to any part with the same bytes.
+fn reference_media(units: &mut [InlineUnit], media: &HashMap<&str, &str>) {
+    for unit in units {
+        if let UnitContent::Embed { kind, payload } = &mut unit.content
+            && kind == "image"
+            && let Some(path) = payload
+                .get("src")
+                .and_then(Value::as_str)
+                .and_then(|src| media.get(src).copied())
+        {
+            payload.insert(
+                "src".to_owned(),
+                Value::String(format!("{MEDIA_REF_PREFIX}{path}")),
+            );
+        }
+    }
+}
+
+fn seed_plan(
+    plan: StoryPlan,
+    media: &HashMap<&str, &str>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
-        units,
+        mut units,
         comment_coverage,
     } = plan;
+    reference_media(&mut units, media);
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
     if !comment_coverage.is_empty() {
@@ -3547,11 +3600,42 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
+/// Every seed is written under this client, so a package seeds to the same
+/// bytes and object ids on every engine instance (and costs one byte per id).
+pub const SEED_CLIENT_ID: u64 = 0;
+
+/// Seeds `document` from a parsed package under [`SEED_CLIENT_ID`].
 pub fn seed_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    use yrs::Transact;
+    use yrs::updates::decoder::Decode;
+    let seed = EditingDoc::new(SEED_CLIENT_ID);
+    let fonts = seed_parsed_docx_in_place(&seed, envelope)?;
+    let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())
+        .map_err(|error| error.to_string())?;
+    document
+        .yrs_doc()
+        .transact_mut_with(document.client_id())
+        .apply_update(update)
+        .map_err(|error| error.to_string())?;
+    Ok(fonts)
+}
+
+/// Seeds under `document`'s own client, for a view that never stores its
+/// state; keeps update decoding out of the viewer build.
+pub fn seed_parsed_docx_in_place(
     document: &EditingDoc,
     mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
-    envelope.document.package.media_entries.clear();
+    let media = std::mem::take(&mut envelope.document.package.media_entries);
+    let mut media_parts = HashMap::new();
+    for (_, file) in &media {
+        media_parts
+            .entry(file.data_url.as_str())
+            .or_insert(file.path.as_str());
+    }
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3675,7 +3759,7 @@ pub fn seed_parsed_docx(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan)?;
+        let (story_id, ops, fonts) = seed_plan(plan, &media_parts)?;
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -3725,7 +3809,7 @@ mod tests {
             .plans
             .into_iter()
             .map(|plan| {
-                let (story_id, ops, _) = seed_plan(plan).unwrap();
+                let (story_id, ops, _) = seed_plan(plan, &HashMap::new()).unwrap();
                 (story_id, ops)
             })
             .collect();
@@ -3965,24 +4049,31 @@ mod tests {
     }
 
     #[test]
-    fn raw_inline_nodes_leave_run_boundaries_intact() {
-        let (_, properties) = paragraph_units(
-            &json!({"content":[
-                {"type":"run","content":[{"type":"text","text":"A"}]},
-                {"type":"rawXml","xml":"<x:mark/>"},
-                {"type":"run","content":[{"type":"text","text":"B"}]}
-            ]}),
-            &StyleResolver::new(None),
-            None,
-            &BTreeMap::new(),
-        );
+    fn run_boundaries_are_kept_only_for_what_merging_would_lose() {
+        let boundaries = |content: Value| {
+            paragraph_units(
+                &json!({ "content": content }),
+                &StyleResolver::new(None),
+                None,
+                &BTreeMap::new(),
+            )
+            .1
+            .get("_originalRunBoundaries")
+            .cloned()
+        };
+        let plain =
+            json!({"type":"run","formatting":{"bold":true},"content":[{"type":"text","text":"A"}]});
         assert_eq!(
-            properties["_originalRunBoundaries"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
+            boundaries(json!([plain, {"type":"rawXml","xml":"<x:mark/>"}, plain])),
+            None
         );
+        let tracked = json!({"type":"run","propertyChanges":[{"id":1}],"content":[{"type":"text","text":"B"}]});
+        let empty = json!({"type":"run","formatting":{"bold":true},"content":[]});
+        let kept = boundaries(json!([plain, tracked])).unwrap();
+        assert_eq!(kept[0], json!({"text":"A","marksKey":"bold:{}"}));
+        assert_eq!(kept[1]["propertyChanges"], json!([{"id":1}]));
+        let kept = boundaries(json!([plain, empty])).unwrap();
+        assert_eq!(kept[1], json!({"text":"","formatting":{"bold":true}}));
     }
 
     #[test]
@@ -4226,7 +4317,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolved_images_and_fonts_survive_media_projection() {
+    fn source_images_reference_their_part_and_resolve_at_lowering() {
         let src = "data:image/png;base64,AQID";
         for with_field in [false, true] {
             let mut envelope = parse_docx_for_edit(include_bytes!(
@@ -4262,34 +4353,64 @@ mod tests {
                     data_url: src.to_owned(),
                 }),
             )];
-            let mut without_media = envelope.clone();
-            without_media.document.package.media_entries.clear();
-            let with_media_doc = EditingDoc::new(7);
-            let without_media_doc = EditingDoc::new(7);
-            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
-            assert_eq!(
-                fonts,
-                seed_parsed_docx(&without_media_doc, without_media).unwrap()
-            );
+            let media = package_media(&envelope);
+            let engine = crate::EngineSession::new(7);
+            let fonts = seed_parsed_docx(engine.doc(), envelope).unwrap();
             assert!(fonts.iter().any(|font| font == "Image Caption"));
-            assert_eq!(
-                with_media_doc.encode_state_as_update_v1(),
-                without_media_doc.encode_state_as_update_v1()
-            );
-            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
-                &with_media_doc,
-                "body",
-                &crate::bridge::RenderEnv::default(),
+            let state = engine.doc().encode_state_as_update_v1();
+            let contains =
+                |needle: &[u8]| state.windows(needle.len()).any(|window| window == needle);
+            assert!(contains(b"media:word/media/image.png") && !contains(b"AQID"));
+            let image_src = |engine: &crate::EngineSession| {
+                engine
+                    .with_lowered_story("body", &crate::bridge::RenderEnv::default(), |blocks| {
+                        let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0]
+                        else {
+                            panic!("image paragraph must remain a paragraph");
+                        };
+                        paragraph.runs.iter().find_map(|run| match run {
+                            docx_layout::types::Run::Image(image) => {
+                                assert_eq!((image.width, image.height), (96.0, 48.0));
+                                Some(image.src.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap()
+                    .unwrap()
+            };
+            // Without the package the reference stays unresolved and paints nothing.
+            assert_eq!(image_src(&engine), "media:word/media/image.png");
+            engine.set_media(media);
+            assert_eq!(image_src(&engine), src);
+        }
+    }
+
+    #[test]
+    fn seeds_are_byte_identical_under_the_fixed_seed_client() {
+        use yrs::{ReadTxn, Transact};
+        let seeded = |client_id| {
+            let document = EditingDoc::new(client_id);
+            seed_from_docx(
+                &document,
+                include_bytes!("../../../apps/demo/public/betteroffice-demo.docx"),
             )
             .unwrap();
-            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
-                panic!("image paragraph must remain a paragraph");
-            };
-            assert!(paragraph.runs.iter().any(|run| {
-                matches!(run, docx_layout::types::Run::Image(image)
-                    if image.src == src && image.width == 96.0 && image.height == 48.0)
-            }));
-        }
+            document
+        };
+        let (left, right) = (seeded(11), seeded(22));
+        assert_eq!(
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1()
+        );
+        let clients: Vec<u64> = left
+            .yrs_doc()
+            .transact()
+            .state_vector()
+            .iter()
+            .map(|(client, _)| client.get())
+            .collect();
+        assert_eq!(clients, [SEED_CLIENT_ID]);
     }
 
     #[test]
@@ -4474,7 +4595,7 @@ mod tests {
         let (units, ppr) = paragraph_units(
             &json!({"content": [
                 {"type": "commentRangeStart", "id": 7},
-                {"type": "run", "formatting": {"bold": true}, "content": [
+                {"type": "run", "formatting": {"bold": true}, "propertyChanges": [{"id": 3}], "content": [
                     {"type": "text", "text": "A"},
                     {"type": "tab"},
                     {"type": "softHyphen"}

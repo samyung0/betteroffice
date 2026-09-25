@@ -26,7 +26,7 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
-    ParagraphExtent, Run,
+    ParagraphBlock, ParagraphExtent, Run,
 };
 use serde::Serialize;
 use yrs::Subscription;
@@ -514,6 +514,46 @@ pub struct EngineSession {
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
     display: RefCell<DisplayState>,
+    /// Source package media, part path to display data URL. Lowering swaps
+    /// `media:<part>` image sources for these; an unknown part stays
+    /// unresolved and paints nothing.
+    media: RefCell<HashMap<String, String>>,
+}
+
+/// Resolves `media:<part>` image sources in lowered blocks.
+fn resolve_media_refs(blocks: &mut [LayoutBlock], media: &HashMap<String, String>) {
+    fn resolve(src: &mut String, media: &HashMap<String, String>) {
+        if let Some(url) = src
+            .strip_prefix(crate::seed::MEDIA_REF_PREFIX)
+            .and_then(|part| media.get(part))
+        {
+            src.clone_from(url);
+        }
+    }
+    fn paragraph(block: &mut ParagraphBlock, media: &HashMap<String, String>) {
+        for run in &mut block.runs {
+            if let Run::Image(image) = run {
+                resolve(&mut image.src, media);
+            }
+        }
+    }
+    for block in blocks {
+        match block {
+            LayoutBlock::Paragraph(block) => paragraph(block, media),
+            LayoutBlock::Image(block) => resolve(&mut block.src, media),
+            LayoutBlock::Table(table) => {
+                for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                    resolve_media_refs(&mut cell.blocks, media);
+                }
+            }
+            LayoutBlock::TextBox(text_box) => {
+                for block in &mut text_box.content {
+                    paragraph(block, media);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -852,7 +892,20 @@ impl EngineSession {
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
+            media: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Attaches the source package's media (part path to display data URL)
+    /// that `media:<part>` image sources resolve against.
+    pub fn set_media(&self, media: HashMap<String, String>) {
+        *self.media.borrow_mut() = media;
+        self.render.borrow_mut().stories.clear();
+    }
+
+    /// The attached source package media.
+    pub fn media(&self) -> std::cell::Ref<'_, HashMap<String, String>> {
+        self.media.borrow()
     }
 
     /// Editing document.
@@ -890,7 +943,8 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        let mut blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        resolve_media_refs(&mut blocks, &self.media.borrow());
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(

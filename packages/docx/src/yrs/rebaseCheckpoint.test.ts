@@ -151,7 +151,7 @@ it('binds an image added at capture to B without allocating duplicate bytes on s
     const segment = current.storySegments('body')[0];
     expect(segment).toMatchObject({
       kind: 'embed',
-      payload: { width: 33, src: image.src, rId: expect.any(String) },
+      payload: { width: 33, src: 'media:word/media/image1.png', rId: expect.any(String) },
     });
     const output = await save(current, b);
     const repeated = await save(current, output);
@@ -249,7 +249,7 @@ function tiff(): Uint8Array {
   return bytes;
 }
 
-it('binds a re-inserted TIFF image to its source part by the displayed form', async () => {
+it('binds a re-inserted TIFF image reference to its source part', async () => {
   const seed = await createYrsSession();
   const session = await createYrsSession();
   let current: YrsSession | undefined;
@@ -271,7 +271,7 @@ it('binds a re-inserted TIFF image to its source part by the displayed form', as
     session.openDocx(a, true);
     const original = session.storySegments('body')[0];
     if (original.kind !== 'embed') throw new Error('missing image');
-    expect(original.payload.src).toStartWith('data:image/png;base64,');
+    expect(original.payload.src).toBe('media:word/media/image1.tiff');
     session.applyRawOps('body', [{ op: 'delete', index: 0, len: 1 }]);
     const captured = session.encodeState();
     const b = await save(session, a);

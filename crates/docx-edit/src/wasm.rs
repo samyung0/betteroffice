@@ -1017,6 +1017,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 impl EditSession {
     fn open_docx_inner(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
         let envelope = crate::seed::parse_docx_for_edit(bytes).map_err(js_err)?;
+        self.engine.set_media(crate::seed::package_media(&envelope));
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
             crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?
@@ -1658,6 +1659,21 @@ impl EditSession {
     /// readable DOCX.
     pub fn open_docx(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
         self.open_docx_inner(bytes, seed_stories)
+    }
+
+    /// The media [`EditSession::open_docx`] attached, as JSON
+    /// `{partPath: displayDataUrl}`, for a replica that renders without the
+    /// source (the resident worker).
+    pub fn media_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&*self.engine.media()).map_err(js_err)
+    }
+
+    /// Attaches [`EditSession::media_json`] output so `media:<part>` image
+    /// sources resolve without the source package.
+    pub fn set_media_json(&self, media_json: &str) -> Result<(), JsValue> {
+        self.engine
+            .set_media(serde_json::from_str(media_json).map_err(js_err)?);
+        Ok(())
     }
 
     /// Re-parses the DOCX bytes retained by the last

@@ -111,29 +111,36 @@ function storyOwner(story: string, base: Document): string {
   throw new Error(`DOCX rebase cannot resolve story owner ${story}`);
 }
 
-/** Keys are the parsed media's display base64, which seeded image sources carry (TIFF shows as PNG). */
+/** Keys are the parsed media's display base64, which inserted image sources carry (TIFF shows as PNG). */
 function imageBindings(
   parts: Parts,
   owner: string,
   media: Map<string, MediaFile> | undefined
-): Map<string, string> {
+): Map<string, { id: string; path: string }> {
   const slash = owner.lastIndexOf('/');
   const relsPath = `${owner.slice(0, slash + 1)}_rels/${owner.slice(slash + 1)}.rels`;
   const bytes = parts[relsPath];
-  const result = new Map<string, string>();
+  const result = new Map<string, { id: string; path: string }>();
   if (!bytes) return result;
   for (const [id, relationship] of parseRelationshipsXmlWithRust(decoder.decode(bytes), relsPath)) {
     if (!relationship.type.endsWith('/image') || relationship.targetMode === 'External') continue;
     const path = targetPath(owner, relationship.target);
     if (!parts[path]) throw new Error(`DOCX rebase image target missing for ${relsPath}:${id}`);
     const src = media?.get(path)?.dataUrl;
-    if (src) result.set(src.slice(src.indexOf(',') + 1), id);
+    if (src) result.set(src.slice(src.indexOf(',') + 1), { id, path });
   }
   return result;
 }
 
+/** An image's bytes as base64, whether it references a package part or carries a data URL. */
+function imageBase64(src: string, media: Map<string, MediaFile> | undefined): string {
+  const url = src.startsWith('media:') ? (media?.get(src.slice('media:'.length))?.dataUrl ?? src) : src;
+  return url.startsWith('data:') ? url.slice(url.indexOf(',') + 1) : url;
+}
+
 function authored(document: Document): string {
   const pkg = document.package;
+  const media = pkg.media;
   return JSON.stringify(
     {
       content: pkg.document.content,
@@ -160,6 +167,8 @@ function authored(document: Document): string {
     (key, value: unknown) => {
       // Root namespace bindings are package metadata the writer normalizes.
       if (key === 'rId' || key === 'verbatimXml' || key === 'customRootBindings') return undefined;
+      // The rebase turns inserted images into references to their exported part.
+      if (key === 'src' && typeof value === 'string') return imageBase64(value, media);
       if (value && typeof value === 'object' && !Array.isArray(value))
         return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
       return value;
@@ -222,7 +231,7 @@ function rebase(
   // Attach B before binding images so they match B's parsed media.
   session.openDocx(input.exportedSource, false);
   const exported = packageDocument(session);
-  const bindings = new Map<string, Map<string, string>>();
+  const bindings = new Map<string, ReturnType<typeof imageBindings>>();
   for (const story of reachable) {
     const owner = storyOwner(story, base);
     let images = bindings.get(owner);
@@ -237,16 +246,21 @@ function rebase(
           throw new Error(`DOCX rebase cannot carry opaque content at ${story}:${offset}`);
         if (segment.embedKind === 'image') {
           const src = segment.payload.src;
-          if (typeof src !== 'string' || !/^data:[^,]*;base64,/.test(src))
+          if (typeof src !== 'string' || !/^(media:|data:[^,]*;base64,)/.test(src))
             throw new Error(`DOCX rebase requires image bytes at ${story}:${offset}`);
-          const id = images.get(src.slice(src.indexOf(',') + 1));
-          if (id)
+          // Source images reference parts the export keeps; an inserted one becomes a reference.
+          const binding = src.startsWith('data:')
+            ? images.get(src.slice(src.indexOf(',') + 1))
+            : undefined;
+          if (binding) {
+            push(story, { op: 'setEmbedAttr', index: offset, key: 'rId', value: binding.id });
             push(story, {
               op: 'setEmbedAttr',
               index: offset,
-              key: 'rId',
-              value: id,
+              key: 'src',
+              value: `media:${binding.path}`,
             });
+          }
         }
       }
       offset += segment.kind === 'text' ? segment.text.length : 1;

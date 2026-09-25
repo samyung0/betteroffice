@@ -859,12 +859,14 @@ function runBoundary(
   const marks = noteRefMarkTypes(run);
   const breaks = flowBreakOffsets(run);
   const key = keys[0];
+  const text = unitsText(units);
   return {
-    text: unitsText(units),
+    text,
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
-    ...(run.formatting ? { formatting: run.formatting } : {}),
+    // Only a run without text restores from cached formatting; others use live marks.
+    ...(run.formatting && text === '' ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
   };
 }
@@ -1108,6 +1110,17 @@ function paragraphUnits(
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
+  // The cache is kept only for what merging equal-formatted runs would lose.
+  if (
+    !boundaries?.some(
+      (boundary) =>
+        boundary.propertyChanges !== undefined ||
+        boundary.noteMarks !== undefined ||
+        boundary.breaks !== undefined ||
+        boundary.text === ''
+    )
+  )
+    boundaries = undefined;
   const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
   return { units, ppr: paraAttrsToPpr(attrs) };
 }

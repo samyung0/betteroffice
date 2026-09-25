@@ -34,7 +34,10 @@ export type ResidentEngineSession = Pick<
   | 'selection'
   | 'setSelection'
   | 'yrsBlocksForStory'
->;
+> & {
+  /** Attaches the main replica's source package media. */
+  setMedia(mediaJson: string): void;
+};
 
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
   await preloadEditWasm();
@@ -100,6 +103,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
       return { frame, profile };
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    setMedia: (mediaJson) => session.set_media_json(mediaJson),
     loadState: (update) => session.load(update),
     applyUpdate: (update) =>
       JSON.parse(

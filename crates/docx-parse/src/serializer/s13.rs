@@ -988,6 +988,19 @@ fn process_image_part<'a>(
         .ok_or_else(|| save_error("invalid image relationships path"))?;
     for blocks in stories {
         visit_new_images(blocks, &mut |image| {
+            if let Some(part) = image
+                .src
+                .as_deref()
+                .and_then(|source| source.strip_prefix(crate::media::MEDIA_REF_PREFIX))
+            {
+                return bind_media_reference(
+                    package,
+                    &mut relationships,
+                    owner,
+                    part,
+                    &mut image.relationship_id,
+                );
+            }
             let Some(source) = image
                 .src
                 .as_deref()
@@ -1036,6 +1049,49 @@ fn process_image_part<'a>(
     if let Some(updated) = relationships.serialize() {
         package.set_text(relationships_path, updated);
     }
+    Ok(())
+}
+
+/// A `media:<part>` image keeps its relationship while that targets the part
+/// (or a part with the same bytes). One moved to another story part gets that
+/// part's relationship to the existing media part, added when missing; no
+/// bytes are written.
+fn bind_media_reference(
+    package: &Package<'_>,
+    relationships: &mut RelationshipsIndex,
+    owner: &str,
+    part: &str,
+    relationship_id: &mut String,
+) -> Result<(), ParseError> {
+    let bytes = package
+        .bytes(part)
+        .ok_or_else(|| save_error(format!("image references missing package part {part}")))?;
+    if let Some(position) = relationships.existing_position(relationship_id) {
+        let entry = *relationships.entry(position);
+        if relationships.attr(&entry.target_mode) != Some("External")
+            && let Some(target) = relationships.target(&entry)
+        {
+            let path = resolve_relative_path(owner, target)?;
+            if path == part || package.bytes(&path) == Some(bytes) {
+                return Ok(());
+            }
+        }
+    }
+    let directory = owner
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    let target = part
+        .strip_prefix(directory)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map_or_else(|| format!("/{part}"), str::to_owned);
+    *relationship_id = match relationships.id_for_target(&target) {
+        Some(id) => id,
+        None => {
+            let id = relationships.next_id();
+            relationships.push_new(id.clone(), relationship_types::IMAGE, target, None);
+            id
+        }
+    };
     Ok(())
 }
 
@@ -2382,6 +2438,75 @@ mod tests {
                 .contains("Id=\"rIdHeader\"")
         );
     }
+    #[test]
+    fn media_references_keep_or_rebind_relationships_without_new_parts() {
+        let mut parts = part_map(&base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        ));
+        parts.insert(
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdKeep" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/keep.bin"/></Relationships>"#.to_vec(),
+        );
+        let original =
+            ooxml_opc::rezip_parts(&parts.into_iter().collect::<Vec<_>>()).expect("package");
+        let reference = |part: &str| {
+            let mut paragraph = image_paragraph(&format!("media:{part}"));
+            paragraph["content"][0]["content"][0]["image"]["rId"] = json!("rIdKeep");
+            paragraph
+        };
+        let request = |part: &str| -> S13SaveRequest {
+            serde_json::from_value(json!({
+                "determinism": determinism(),
+                "document": { "content": [reference(part)] },
+                "headerEntries": [["rIdHeader", {
+                    "type": "header",
+                    "hdrFtrType": "default",
+                    "content": [reference(part)]
+                }]],
+                "relationshipEntries": [["rIdHeader", {
+                    "id": "rIdHeader",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }]],
+                "options": { "updateModifiedDate": false }
+            }))
+            .expect("request")
+        };
+        let saved = part_map(&write_docx_s13(request("word/media/keep.bin"), &original).unwrap());
+        assert!(
+            !saved
+                .keys()
+                .any(|path| path.starts_with("word/media/image"))
+        );
+        let rels = |path: &str| String::from_utf8_lossy(&saved[path]).into_owned();
+        assert_eq!(
+            rels("word/_rels/document.xml.rels")
+                .matches("<Relationship ")
+                .count(),
+            2
+        );
+        let header_rels = rels("word/_rels/header1.xml.rels");
+        let moved = XmlTagIter::new(&header_rels, "Relationship")
+            .find(|tag| xml_attribute(tag, "Target") == Some("media/keep.bin"))
+            .and_then(|tag| xml_attribute(tag, "Id"))
+            .expect("the header binds the moved image to the existing part")
+            .to_owned();
+        assert!(
+            String::from_utf8_lossy(&saved["word/document.xml"]).contains("r:embed=\"rIdKeep\"")
+        );
+        assert!(
+            String::from_utf8_lossy(&saved["word/header1.xml"])
+                .contains(&format!("r:embed=\"{moved}\""))
+        );
+
+        let error = write_docx_s13(request("word/media/missing.png"), &original).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing package part word/media/missing.png")
+        );
+    }
+
     #[test]
     fn inserted_image_with_temporary_relationship_is_written() {
         let original = base_package(
