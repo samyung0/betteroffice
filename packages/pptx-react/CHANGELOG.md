@@ -1,5 +1,45 @@
 # @betteroffice/pptx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- 2eb2c55: Expose host save interception, awaited input flushing, and pointer position queries. Add manual undo capture, explicit boundaries, and undoable comment repositioning.
+- 3d77b4f: Add host-controlled viewing mode, initial slide selection, and imperative slide and text navigation APIs.
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. Unsupported MIME types and images over 8 MiB are rejected before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+
+### Patch Changes
+
+- Updated dependencies [80341ac]
+- Updated dependencies [6963a67]
+- Updated dependencies [3fb2bf7]
+- Updated dependencies [c02a145]
+- Updated dependencies [030505a]
+- Updated dependencies [8e8f97a]
+- Updated dependencies [030505a]
+- Updated dependencies [9e2c648]
+- Updated dependencies [3e0c311]
+- Updated dependencies [2eb2c55]
+- Updated dependencies [911a294]
+- Updated dependencies [030505a]
+- Updated dependencies [6963a67]
+- Updated dependencies [58f9bfb]
+- Updated dependencies [60c79dd]
+- Updated dependencies [7f158c7]
+- Updated dependencies [911a294]
+- Updated dependencies [6963a67]
+- Updated dependencies [27bf1fc]
+- Updated dependencies [e0d12f3]
+- Updated dependencies [18e1f32]
+- Updated dependencies [c5f1467]
+- Updated dependencies [ab3d722]
+- Updated dependencies [030505a]
+- Updated dependencies [af6292e]
+- Updated dependencies [1f84618]
+  - @betteroffice/pptx@0.2.0
+  - @betteroffice/pptx-i18n@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

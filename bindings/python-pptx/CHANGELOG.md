@@ -1,5 +1,25 @@
 # @betteroffice/python-pptx
 
+## 0.2.0
+
+### Minor Changes
+
+- 67e0ae4: Release the accumulated DOCX, PPTX, and XLSX engine improvements in the Python bindings as minor updates.
+
+### Patch Changes
+
+- 6963a67: Honour `a:normAutofit` the way PowerPoint renders it: the stored `fontScale` is applied verbatim and `lnSpcReduction` is subtracted from percentage line spacing — including the implicit single-spaced default — so shrink-to-fit bodies keep PowerPoint's font size and line pitch instead of being re-fitted at render time.
+- 3fb2bf7: Number `a:buAutoNum` paragraphs as one list when they repeat the same `startAt`: PowerPoint writes a list's start on every one of its paragraphs, so a four-item list marked `startAt="4"` now draws 4, 5, 6, 7 and one marked `startAt="1"` draws a), b), c). A paragraph that declares a different start still opens a new list.
+- 6963a67: Open `spcBef` and `spcAft` percentages over a single line rather than the bare text size, the base PowerPoint measures them against, so the stock Office master's 20% gap sits where PowerPoint puts it between bulleted paragraphs.
+- 58f9bfb: Render arc, cube, leftBrace, rightBrace, wedgeRectCallout, ribbon2, swooshArrow, and circularArrow with their PowerPoint geometry. Preserve separate fills, shaded faces, and open outlines; complete cloud callout details and folded-corner shading, use circular rounded-rectangle corners, and honor stroke joins in browser and native rendering.
+
+  Expose `geometryFallback: true` when unsupported geometry is replaced by a rectangle, including picture fills and masks.
+
+- 7f158c7: Support `a:rPr/@cap`, so a run that asks for all caps or small caps is drawn that way. `all` uppercases the run for drawing and `small` also draws the lowercase stretches at Word's 0.8× small-cap size; `none` turns off an inherited setting. The value cascades from a slide master's and layout's `a:defRPr` the way the other run properties do, and the uppercasing itself is now shared with DOCX rather than reimplemented. Casing is a display property: the stored run text keeps the author's casing, so the editor's story, the caret offsets it reports and the saved package are all unchanged — an untouched deck still saves byte-identically. Measured against the PPTArena corpus tail, where `cap="all"` reaches titles in `pptarena-051`, `pptarena-052`, `pptarena-054` and body runs in `pptarena-034`.
+- 6963a67: Measure a single-spaced PowerPoint line as 1.2 em of the line's largest font, the pitch PowerPoint 16.113 uses for every face, so percentage line spacing no longer inherits the substituted face's own ascent, descent and line gap and multi-line bodies stop drifting away from PowerPoint down the shape. Super- and subscript ink still pushes the line box out past that pitch.
+- 27bf1fc: Resolve `tx1`/`bg1`/`tx2`/`bg2` scheme colours through the slide's colour map: the master's `p:clrMap` and any `p:clrMapOvr/a:overrideClrMapping` on its layout or the slide itself now decide which `a:clrScheme` slot each name reaches, so dark-master decks paint their backgrounds, shape fills and text the way PowerPoint does. One shared resolver feeds the render, snapshot and save projections, so they cannot disagree about a slot.
+- c5f1467: Draw the shape a Wingdings, Wingdings 2, Wingdings 3 or Webdings `a:buChar` addresses. Those faces reach their glyphs by font position, through a private-use cmap at `U+F0xx` or the raw byte, so the character a deck stores for one of them names a slot rather than the character to draw. Each slot now resolves to the nearest Unicode character the bundled faces cover — circles, squares, hollow boxes, diamonds, and the solid triangles and arrowheads — with a plain bullet standing in for a slot that has no covered equivalent. The shapes come from the faces' own glyph names and the sizes from matching each glyph's ink width against the candidates', confirmed against PowerPoint's own render of the corpus decks. An `a:buChar` under a text face, or one that is already a real Unicode character, is drawn exactly as authored.
+
 ## 0.1.0
 
 ### Minor Changes
