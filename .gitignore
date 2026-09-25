@@ -6,8 +6,12 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 *.so
+*.pyd
 .next/
 .source/
+.oq/
+.oq-collection.json
+.cargo-target/
 .open-next/
 .wrangler/
 .dev.vars
@@ -17,6 +21,8 @@ packages/xlsx/src/wasm/generated/**/*.wasm
 packages/xlsx/src/wasm/generated/**/*.js
 packages/pptx/src/wasm/generated/**/*.wasm
 packages/pptx/src/wasm/generated/**/*.js
+packages/vsdx/src/wasm/generated/*.wasm
+packages/vsdx/src/wasm/generated/*.js
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store
@@ -28,3 +34,13 @@ screenshots/
 
 shared/office-checkpoint.mjs
 shared/office-runtime/
+~$*
+crates/docx-edit/tests/fixtures/anchored-header.docx
+crates/docx-edit/tests/fixtures/anchored-header.*.png
+crates/docx-edit/tests/fixtures/alternate-main-part.docx
+crates/docx-edit/tests/fixtures/alternate-main-part.*.png
+
+# ad-hoc local gate scripts and their logs
+/g*.log
+/gate.sh
+/gate2.sh

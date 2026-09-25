@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -15,6 +16,7 @@ import {
   GlyphCache,
   loadGlyphOutlineProvider,
   type DisplayList,
+  type DisplayPage,
   type GlyphOutlineProvider,
   type ImageResolver,
   type RetainedFrame,
@@ -27,6 +29,7 @@ import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
+import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
@@ -116,7 +119,48 @@ function nextPageWindow(
   return { start, end };
 }
 
-/** Replays display-list pages to canvas with accessibility mirrors. */
+/**
+ * One page's surface: canvas + a11y mirror + optional interactive overlay.
+ * Memoized so a keystroke's snapshot commit re-renders only the pages whose
+ * `DisplayPage` identity actually changed — the owned frame-delta path keeps
+ * untouched pages' identity stable across keystrokes.
+ */
+const CanvasPageSurface = memo(function CanvasPageSurface({
+  page,
+  pageKey,
+  zoom,
+  interactive,
+  deferChrome,
+  registerCanvas,
+}: {
+  page: DisplayPage;
+  pageKey: string;
+  zoom: number;
+  interactive: boolean;
+  deferChrome: boolean;
+  registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
+}) {
+  return (
+    <div className="canvas-page" style={{ position: 'relative' }}>
+      <canvas
+        ref={(el) => registerCanvas(pageKey, el)}
+        data-page-index={page.pageIndex}
+        style={{
+          display: 'block',
+          width: page.width * zoom,
+          height: page.height * zoom,
+          background: '#ffffff',
+          boxShadow: '0 1px 3px var(--doc-shadow)',
+        }}
+      />
+      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      {interactive ? (
+        <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
+      ) : null}
+    </div>
+  );
+});
+
 export function CanvasPagesView({
   displayList,
   frame,
@@ -159,8 +203,12 @@ export function CanvasPagesView({
   onWorkerPresentationChange?: (active: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
+  const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
+    if (el) canvasesRef.current.set(pageKey, el);
+    else canvasesRef.current.delete(pageKey);
+  }, []);
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
-  const presentedCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
+  const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
@@ -188,13 +236,6 @@ export function CanvasPagesView({
     },
     [publishWorkerPresentation]
   );
-  const rasterEnvironmentRef = useRef<{
-    dpr: number;
-    zoom: number;
-    glyphCacheReady: boolean;
-    resolveImage?: ImageResolver;
-  } | null>(null);
-
   // ===========================================================================
   // Page windowing: only pages near the viewport hold rastered bitmaps. Every
   // page keeps its canvas element (stable keys and CSS-sized boxes, so scroll
@@ -221,6 +262,7 @@ export function CanvasPagesView({
   }, []);
   const windowingEnabled = pageWindowAllowed && displayList.pages.length > PAGE_WINDOW_MIN_PAGES;
   const [pageWindow, setPageWindow] = useState<PageWindowRange | null>(null);
+  const windowMeasuredRef = useRef(false);
   // Column-space page tops/bottoms from display-list geometry alone (no DOM
   // reads): padding, then each page height at the current zoom plus the gap.
   const pageOffsets = useMemo(() => {
@@ -236,6 +278,7 @@ export function CanvasPagesView({
   }, [displayList, zoom]);
   useLayoutEffect(() => {
     if (!windowingEnabled) {
+      windowMeasuredRef.current = false;
       setPageWindow(null);
       return;
     }
@@ -281,12 +324,15 @@ export function CanvasPagesView({
           break;
         }
       }
+      windowMeasuredRef.current = true;
       setPageWindow((previous) => nextPageWindow(previous, first, last, tops.length));
     };
     const schedule = (): void => {
       if (rafId === null) rafId = requestAnimationFrame(recompute);
     };
-    recompute();
+    // The first measurement must land before paint; later re-measures coalesce.
+    if (windowMeasuredRef.current) schedule();
+    else recompute();
     scrollTarget.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
     return () => {
@@ -303,6 +349,10 @@ export function CanvasPagesView({
   const effectiveWindow: PageWindowRange | null = windowingEnabled ? pageWindow : null;
   const pageInWindow = (index: number): boolean =>
     effectiveWindow === null || (index >= effectiveWindow.start && index <= effectiveWindow.end);
+  const chromeInWindow = (index: number): boolean =>
+    effectiveWindow === null
+      ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
+      : pageInWindow(index);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
@@ -405,21 +455,9 @@ export function CanvasPagesView({
       return;
     }
     const glyphCache = glyphCacheRef.current ?? undefined;
-    const previousEnvironment = rasterEnvironmentRef.current;
-    const rasterEnvironmentChanged =
-      !previousEnvironment ||
-      previousEnvironment.dpr !== dpr ||
-      previousEnvironment.zoom !== zoom ||
-      previousEnvironment.glyphCacheReady !== glyphCacheReady ||
-      previousEnvironment.resolveImage !== resolveImage;
-    rasterEnvironmentRef.current = { dpr, zoom, glyphCacheReady, resolveImage };
-    const preparations: Array<
-      Promise<{
-        canvas: HTMLCanvasElement;
-        buffer: HTMLCanvasElement;
-        page: DisplayList['pages'][number];
-      }>
-    > = [];
+    replayState.updateFrame(frame);
+    const environment = { dpr, zoom, glyphCache, resolveImage };
+    const preparations: CanvasReplayPreparation[] = [];
     for (const [i, page] of displayList.pages.entries()) {
       const retainedPage = frame?.pages[i];
       const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
@@ -433,44 +471,43 @@ export function CanvasPagesView({
         if (canvas.width !== 0 || canvas.height !== 0) {
           canvas.width = 0;
           canvas.height = 0;
-          presentedCanvasesRef.current.delete(canvas);
+          replayState.release(canvas);
         }
         continue;
       }
       // A remounted canvas (surface-mode flip) has no pixels regardless of
       // the retained frame's damage set — always paint it.
-      const damaged =
-        !frame ||
-        !retainedPage ||
-        rasterEnvironmentChanged ||
-        !presentedCanvasesRef.current.has(canvas) ||
-        frame.damagedPageIds.has(retainedPage.pageId);
-      if (!damaged) continue;
+      const presentation = replayState.prepare(canvas, retainedPage?.pageId, environment);
+      if (!presentation) continue;
       // Raster off-DOM first. The connected canvas keeps its previous pixels
       // until every damaged page has finished all async image/glyph work.
       const buffer = document.createElement('canvas');
-      preparations.push(
-        rasterizeDisplayPageToBackBuffer(
+      preparations.push({
+        buffer,
+        ready: rasterizeDisplayPageToBackBuffer(
           buffer,
           page,
           { resolveImage, glyphCache },
           dpr,
           zoom
-        ).then(() => ({ canvas, buffer, page }))
-      );
+        ),
+        present() {
+          presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
+          replayState.didPresent(presentation);
+        },
+      });
     }
-    const present = (prepared: Awaited<(typeof preparations)[number]>[]) => {
-      if (replayGeneration !== replayGenerationRef.current) return;
-      for (const { canvas, buffer, page } of prepared) {
-        presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
-        presentedCanvasesRef.current.add(canvas);
-      }
-    };
-    void Promise.all(preparations).then(present, (error) => {
+    void presentCanvasReplay(
+      preparations,
+      () => replayGeneration === replayGenerationRef.current
+    ).catch((error) => {
       if (replayGeneration === replayGenerationRef.current) {
-        console.error('[CanvasRenderer] Atomic canvas replay failed', error);
+        console.error('[CanvasRenderer] Canvas replay failed', error);
       }
     });
+    return () => {
+      replayGenerationRef.current += 1;
+    };
     // glyphCacheReady is a redraw trigger (the cache itself is read via ref);
     // zoom re-runs the raster so the enlarged canvas paints at full resolution;
     // windowStart/windowEnd re-run it so pages entering the window paint and
@@ -516,29 +553,20 @@ export function CanvasPagesView({
           const retainedPage = frame?.pages[i];
           const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
+          // per-page wrapper so the mirror positions 1:1 over its canvas.
+          // Every page keeps its full DOM (canvas element, a11y mirror, SDT
+          // overlay) — the page window releases only bitmap backing stores,
+          // so the accessible document and page geometry never shrink.
           return (
-            // per-page wrapper so the mirror positions 1:1 over its canvas.
-            // Every page keeps its full DOM (canvas element, a11y mirror, SDT
-            // overlay) — the page window releases only bitmap backing stores,
-            // so the accessible document and page geometry never shrink.
-            <div key={surfaceKey} className="canvas-page" style={{ position: 'relative' }}>
-              <canvas
-                ref={(el) => {
-                  if (el) canvasesRef.current.set(pageKey, el);
-                  else canvasesRef.current.delete(pageKey);
-                }}
-                data-page-index={page.pageIndex}
-                style={{
-                  display: 'block',
-                  width: page.width * zoom,
-                  height: page.height * zoom,
-                  background: '#ffffff',
-                  boxShadow: '0 1px 3px var(--doc-shadow)',
-                }}
-              />
-              <CanvasPageMirror page={page} zoom={zoom} />
-              {interactive ? <CanvasInteractiveOverlay page={page} zoom={zoom} /> : null}
-            </div>
+            <CanvasPageSurface
+              key={surfaceKey}
+              page={page}
+              pageKey={pageKey}
+              zoom={zoom}
+              interactive={interactive}
+              deferChrome={!chromeInWindow(i)}
+              registerCanvas={registerCanvas}
+            />
           );
         })}
       </div>

@@ -13,7 +13,7 @@ use yrs::{
 use crate::model::validate_xml_text;
 use crate::{
     CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
-    ParagraphSnapshot, STORIES, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle,
+    ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
     TextStylePatch,
 };
 
@@ -38,6 +38,8 @@ const UNDERLINE_TYPES: [&str; 18] = [
     "wavyDbl",
 ];
 
+const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thaiDist"];
+
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
 pub(crate) fn validate_style_values(
@@ -45,6 +47,8 @@ pub(crate) fn validate_style_values(
     underline: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
+    spacing_pt: Option<f64>,
+    baseline_pct: Option<f64>,
 ) -> EditResult<()> {
     if let Some(font_family) = font_family {
         validate_xml_text(font_family)?;
@@ -69,6 +73,32 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "font size {size}pt is outside the 1-4000pt range"
+        )));
+    }
+    if let Some(spacing) = spacing_pt
+        && (!spacing.is_finite() || !(-4_000.0..=4_000.0).contains(&spacing))
+    {
+        return Err(EditError::InvalidText(format!(
+            "letter spacing {spacing}pt is outside the -4000-4000pt range"
+        )));
+    }
+    if let Some(baseline) = baseline_pct
+        && (!baseline.is_finite()
+            || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&(baseline * 1000.0)))
+    {
+        return Err(EditError::InvalidText(
+            "baseline exceeds the signed percentage range".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
+    if let Some(alignment) = alignment
+        && !ALIGNMENTS.contains(&alignment)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized paragraph alignment {alignment:?}"
         )));
     }
     Ok(())
@@ -226,6 +256,8 @@ impl DeckSession {
             style.underline.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
+            style.spacing_pt,
+            style.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -283,6 +315,8 @@ impl DeckSession {
             patch.underline.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
+            patch.spacing_pt,
+            patch.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -295,6 +329,40 @@ impl DeckSession {
                 segment_end - segment_start,
                 attrs_from_patch(patch),
             );
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
+    /// Sets `a:pPr@algn` on every paragraph the range touches; `None` clears
+    /// the value so the placeholder cascade applies again.
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> EditResult<TextReceipt> {
+        validate_alignment(alignment)?;
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        let pilcrows = selected_pilcrows(&story, &txn, start, end);
+        for pilcrow in pilcrows {
+            match alignment {
+                Some(alignment) => {
+                    pilcrow.insert(&mut txn, "alignment", alignment);
+                }
+                None => {
+                    pilcrow.remove(&mut txn, "alignment");
+                }
+            }
         }
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
@@ -407,6 +475,84 @@ pub(crate) fn validate_story<T: ReadTxn>(
     Ok(())
 }
 
+/// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_story(
+    story_id: &str,
+    body: &TextBody,
+    theme: Option<&Theme>,
+) -> EditResult<StorySnapshot> {
+    let mut paragraphs = Vec::with_capacity(body.paragraphs.len().max(1));
+    let mut length = 1_u32;
+    if body.paragraphs.is_empty() {
+        paragraphs.push(ParagraphSnapshot {
+            id: format!("para:{story_id}:0"),
+            alignment: None,
+            level: 0,
+            bullet_json: None,
+            runs: Vec::new(),
+        });
+    } else {
+        length = 0;
+        for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
+            let mut runs: Vec<TextRunSnapshot> = Vec::new();
+            let mut last_attrs: Option<TextStyle> = None;
+            for run in &paragraph.runs {
+                if run.text.is_empty() {
+                    continue;
+                }
+                let style = style_from_run_properties(&run.properties, theme);
+                // yrs' format-gap cleanup deletes every marker between two
+                // identically styled runs, so their text items squash into a
+                // single run in the snapshot.
+                if last_attrs.as_ref() == Some(&style) {
+                    if let Some(last) = runs.last_mut() {
+                        last.text.push_str(&run.text);
+                    }
+                } else {
+                    runs.push(TextRunSnapshot {
+                        text: run.text.clone(),
+                        style: baseline_style(style.clone()),
+                    });
+                }
+                last_attrs = Some(style);
+                length += run.text.encode_utf16().count() as u32;
+            }
+            length += 1;
+            let bullet_json = paragraph
+                .properties
+                .bullet
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            paragraphs.push(ParagraphSnapshot {
+                id: format!("para:{story_id}:{paragraph_index}"),
+                alignment: paragraph.properties.alignment.clone(),
+                level: paragraph.properties.level,
+                bullet_json,
+                runs,
+            });
+        }
+    }
+    Ok(StorySnapshot {
+        id: story_id.to_owned(),
+        length,
+        paragraphs,
+    })
+}
+
+/// Attribute reads drop non-finite numbers, so the snapshot applies the same
+/// normalization the seeded `Any::Number` attributes go through.
+fn baseline_style(style: TextStyle) -> TextStyle {
+    TextStyle {
+        font_size_pt: style.font_size_pt.filter(|value| value.is_finite()),
+        spacing_pt: style.spacing_pt.filter(|value| value.is_finite()),
+        baseline_pct: style.baseline_pct.filter(|value| value.is_finite()),
+        ..style
+    }
+}
+
 pub(crate) fn snapshot_story<T: ReadTxn>(
     story: &TextRef,
     txn: &T,
@@ -476,6 +622,28 @@ fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     Ok(())
 }
 
+/// The pilcrow of every paragraph the range touches. A collapsed caret picks
+/// the paragraph it sits in; a range stopping at a paragraph start does not.
+fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
+    let start = start.min(story.len(txn).saturating_sub(1));
+    let mut pilcrows = Vec::new();
+    let mut paragraph_start = 0;
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let item_length = out_len(&diff.insert);
+        if let Out::YMap(map) = diff.insert {
+            let touches = start <= offset
+                && (end > paragraph_start || (start == end && start >= paragraph_start));
+            if touches {
+                pilcrows.push(map);
+            }
+            paragraph_start = offset + item_length;
+        }
+        offset += item_length;
+    }
+    pilcrows
+}
+
 fn paragraph_text_segments<T: ReadTxn>(
     story: &TextRef,
     txn: &T,
@@ -537,7 +705,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 6] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -565,6 +733,21 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 6] {
                 .map(Any::from)
                 .unwrap_or(Any::Null),
         ),
+        (
+            "spacing",
+            style.spacing_pt.map(Any::Number).unwrap_or(Any::Null),
+        ),
+        (
+            "baseline",
+            style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
+        ),
+        (
+            "caps",
+            style
+                .caps
+                .map(|caps| Any::from(caps.as_attribute()))
+                .unwrap_or(Any::Null),
+        ),
     ]
 }
 
@@ -584,6 +767,8 @@ fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
         "underline",
         patch.underline.as_deref().map(Any::from),
     );
+    insert_option(&mut attrs, "spacing", patch.spacing_pt.map(Any::Number));
+    insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
     attrs
 }
 
@@ -601,6 +786,9 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        spacing_pt: properties.spacing_pt,
+        baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
@@ -612,6 +800,12 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
+        spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
+        baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
+        caps: attrs
+            .and_then(|attrs| any_string(attrs.get("caps")))
+            .as_deref()
+            .and_then(TextCaps::from_attribute),
     }
 }
 

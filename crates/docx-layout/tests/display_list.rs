@@ -1006,6 +1006,142 @@ fn vmerge_continuation_slice_is_flagged_and_unselectable() {
     );
 }
 
+#[test]
+fn continued_cells_paint_below_repeated_headers() {
+    let paragraph = |id: u64, texts: &[&str]| {
+        serde_json::json!({
+            "kind": "paragraph", "id": id, "pmStart": id, "pmEnd": id + 80,
+            "runs": texts.iter().enumerate().map(|(i, text)| serde_json::json!({
+                "kind": "text", "text": text, "pmStart": id + i as u64 * 20
+            })).collect::<Vec<_>>()
+        })
+    };
+    let paragraph_measure = |texts: &[&str]| {
+        serde_json::json!({
+            "kind": "paragraph", "totalHeight": texts.len() * 24,
+            "lines": texts.iter().enumerate().map(|(i, text)| serde_json::json!({
+                "headRun": i, "headChar": 0, "tailRun": i, "tailChar": text.len(),
+                "width": 80, "ascent": 12, "descent": 4, "lineHeight": 24
+            })).collect::<Vec<_>>()
+        })
+    };
+    let cell = |id, texts: &[&str]| serde_json::json!({ "blocks": [paragraph(id, texts)] });
+    let cell_measure = |texts: &[&str]| serde_json::json!({ "blocks": [paragraph_measure(texts)] });
+    let continued = [
+        "consumed-one",
+        "consumed-two",
+        "continued-one",
+        "continued-two",
+    ];
+    for split_row in [false, true] {
+        for repeat_headers in [false, true] {
+            let mut spanning_cell = cell(700, &continued);
+            spanning_cell["rowSpan"] = serde_json::json!(if split_row { 1 } else { 2 });
+            spanning_cell["background"] = serde_json::json!("#ffee99");
+            spanning_cell["borders"] = serde_json::json!({
+                "left": { "width": 1, "color": "#000000" },
+                "right": { "width": 1, "color": "#000000" }
+            });
+            let header_count = if repeat_headers { 2 } else { 0 };
+            let body_top = 50.0 + header_count as f64 * 24.0;
+            let mut input = serde_json::json!({
+                "measured": [{
+                    "block": { "kind": "table", "id": 7, "rows": [
+                        { "isHeader": true, "cells": [cell(100, &["header-one"])] },
+                        { "isHeader": true, "cells": [cell(200, &["header-two"])] },
+                        { "cells": [spanning_cell, cell(800, &["first-body"])] },
+                        { "cells": [cell(900, &["next-body"])] }
+                    ] },
+                    "measure": { "kind": "table", "columnWidths": [100, 100],
+                        "totalHeight": if split_row { 192 } else { 144 }, "rows": [
+                            { "height": 24, "cells": [cell_measure(&["header-one"])] },
+                            { "height": 24, "cells": [cell_measure(&["header-two"])] },
+                            { "height": if split_row { 96 } else { 48 }, "cells": [
+                                cell_measure(&continued), cell_measure(&["first-body"])
+                            ] },
+                            { "height": 48, "cells": [cell_measure(&["next-body"])] }
+                        ] }
+                }],
+                "options": {},
+                "layout": { "pages": [
+                    { "size": { "w": 400, "h": 200 }, "margins": {}, "fragments": [
+                        { "kind": "table", "blockId": 7, "x": 50, "y": 50,
+                          "width": 200, "height": 96, "rowStart": 0, "rowEnd": 3,
+                          "carriedToNext": true }
+                    ] },
+                    { "size": { "w": 400, "h": 200 }, "margins": {}, "fragments": [
+                        { "kind": "table", "blockId": 7, "x": 50, "y": 50,
+                          "width": 200, "height": 48 + header_count * 24,
+                          "rowStart": if split_row { 2 } else { 3 },
+                          "rowEnd": if split_row { 3 } else { 4 },
+                          "clipTop": if split_row { 48 } else { 0 },
+                          "headerRowCount": header_count, "carriedFromPrev": true }
+                    ] }
+                ] }
+            });
+            if split_row {
+                input["layout"]["pages"][0]["fragments"][0]["clipBottom"] = serde_json::json!(48);
+            }
+            let json = build_display_list_json(&input.to_string()).expect("builds");
+            let dl: DisplayList = serde_json::from_str(&json).unwrap();
+            let texts = |page: usize| {
+                dl.pages[page]
+                    .primitives
+                    .iter()
+                    .filter_map(|p| match p {
+                        Primitive::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let first = texts(0);
+            for text in [
+                "header-one",
+                "header-two",
+                "consumed-one",
+                "consumed-two",
+                "first-body",
+            ] {
+                assert!(first.contains(&text), "first-page text missing: {text}");
+            }
+            let next = texts(1);
+            assert!(!next.contains(&"consumed-one"));
+            assert!(!next.contains(&"consumed-two"));
+            for text in ["continued-one", "continued-two"] {
+                assert!(next.contains(&text), "continued text missing: {text}");
+            }
+            if !split_row {
+                assert!(next.contains(&"next-body"));
+            }
+            for text in ["header-one", "header-two"] {
+                assert_eq!(next.contains(&text), repeat_headers);
+            }
+            let mut continued_primitives = 0;
+            for primitive in &dl.pages[1].primitives {
+                let Some(attrs) = doc_attrs(primitive) else {
+                    continue;
+                };
+                let Some(cell) = &attrs.cell else { continue };
+                let clip = attrs.clip_group.as_ref().unwrap().clip.as_ref().unwrap();
+                let top = clip.y.as_ref().unwrap().as_f64().unwrap();
+                if cell.row >= 2 {
+                    assert!(
+                        top >= body_top,
+                        "body cell paints into repeated header: {primitive:?}"
+                    );
+                } else {
+                    assert!(top < body_top, "repeated header was clipped away");
+                }
+                if cell.row == 2 && cell.col == 0 {
+                    continued_primitives += 1;
+                    assert_eq!(cell.continuation, (!split_row).then_some(true));
+                }
+            }
+            assert!(continued_primitives > 0);
+        }
+    }
+}
+
 /// Cell floats preserve cell-relative geometry and paint order.
 #[test]
 fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
@@ -1061,15 +1197,13 @@ fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
     };
     let nf = |n: &serde_json::Number| n.as_f64().unwrap();
 
-    // cell content box origin: cx(50) + padLeft(7) = 57 x, cy(50) + padTop(1) = 51 y
-    // front float is flush-right: x = contentX + (contentWidth 186 - width 40) = 203
     let front = image("rIdFront");
     assert!(
         (nf(&front.x) - 203.0).abs() < 0.001,
         "front x {:?}",
         front.x
     );
-    assert!((nf(&front.y) - 51.0).abs() < 0.001, "front y {:?}", front.y);
+    assert!((nf(&front.y) - 50.0).abs() < 0.001, "front y {:?}", front.y);
     assert!((nf(&front.w) - 40.0).abs() < 0.001);
     assert!((nf(&front.h) - 30.0).abs() < 0.001);
     assert_eq!(front.alt_text.as_deref(), Some("front logo"));
@@ -1091,7 +1225,7 @@ fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
         behind.x
     );
     assert!(
-        (nf(&behind.y) - 51.0).abs() < 0.001,
+        (nf(&behind.y) - 50.0).abs() < 0.001,
         "behind y {:?}",
         behind.y
     );
@@ -1592,7 +1726,7 @@ fn structural_revisions_emit_pinned_primitives() {
                 text: Some("¶".to_string()),
                 fill: Some("#2e7d32".to_string()),
                 x: 62.0,
-                y: 66.0,
+                y: 62.0,
                 w: 8.0,
                 h: 0.0,
             },
@@ -1874,38 +2008,169 @@ fn table_cell_content_insets_border_and_honors_valign() {
 
     // left cell: cx 50 + left-border 1 + padLeft 7 = 58. vAlign bottom:
     // avail = 60 - 1 - 1 = 58, content 20 → offset 38; content top =
-    // 50 + padTop 1 + 38 = 89; baseline = 89 + half-leading 2 + ascent 12 = 103.
+    // 50 + padTop 1 + 38 = 89; baseline = 89 + ascent 12 = 101.
     assert!(
         (sig.1 - 58.0).abs() < 0.01,
         "sig x {} (want 58: cx+border+pad)",
         sig.1
     );
     assert!(
-        (sig.3 - 103.0).abs() < 0.01,
-        "sig baseline {} (want 103: bottom vAlign)",
+        (sig.3 - 101.0).abs() < 0.01,
+        "sig baseline {} (want 101: bottom vAlign)",
         sig.3
     );
 
     // right cell: cx 150 + no border + padLeft 7 = 157; top-anchored →
-    // content top 50 + 1 = 51; baseline = 51 + 2 + 12 = 65.
+    // content top 50 + 1 = 51; baseline = 51 + 12 = 63.
     assert!(
         (date.1 - 157.0).abs() < 0.01,
         "date x {} (want 157: no left border)",
         date.1
     );
     assert!(
-        (date.3 - 65.0).abs() < 0.01,
-        "date baseline {} (want 65: top-anchored)",
+        (date.3 - 63.0).abs() < 0.01,
+        "date baseline {} (want 63: top-anchored)",
         date.3
     );
+}
+
+#[test]
+fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
+    use serde_json::json;
+
+    for (floating, expected_x) in [
+        (json!({ "horzAnchor": "margin", "tblpX": 28.0 }), 85.0),
+        (json!({ "horzAnchor": "text", "tblpX": 20.0 }), 77.0),
+        (json!({ "tblpX": 0.0 }), 57.0),
+        (json!({ "horzAnchor": "text", "tblpX": -5.0 }), 52.0),
+        (json!({ "tblpXSpec": "left", "tblpX": 30.0 }), 57.0),
+        (json!({ "tblpXSpec": "center", "tblpX": 30.0 }), 110.0),
+        (json!({ "tblpXSpec": "right" }), 163.0),
+        (json!({ "horzAnchor": "page", "tblpXSpec": "center" }), 67.0),
+        (json!({ "tblpXSpec": "inside" }), 67.0),
+        (json!({ "tblpXSpec": "outside" }), 67.0),
+        (serde_json::Value::Null, 67.0),
+    ] {
+        let nested_measure = json!({ "kind": "table", "columnWidths": [80.0], "totalHeight": 40.0,
+            "rows": [{ "height": 40.0, "cells": [{ "width": 80.0, "height": 20.0,
+                "blocks": [{ "kind": "paragraph", "totalHeight": 20.0,
+                    "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                        "width": 24.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }]
+                }]
+            }] }]
+        });
+        let input = json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 7, "rows": [{ "cells": [{
+                    "padding": { "left": 7.0, "right": 7.0 },
+                    "blocks": [{ "kind": "table", "id": 8, "indent": 10.0,
+                        "floating": floating, "rows": [{ "cells": [{
+                            "padding": { "left": 0.0, "right": 0.0 },
+                            "blocks": [{ "kind": "paragraph", "id": 80,
+                                "runs": [{ "kind": "text", "text": "logo" }] }]
+                        }] }]
+                    }]
+                }] }] },
+                "measure": { "kind": "table", "columnWidths": [200.0], "totalHeight": 60.0,
+                    "rows": [{ "height": 60.0, "cells": [{ "width": 200.0, "height": 40.0,
+                        "blocks": [nested_measure]
+                    }] }]
+                }
+            }],
+            "options": {},
+            "layout": { "pages": [{ "size": { "w": 400.0, "h": 200.0 }, "margins": {},
+                "fragments": [{ "kind": "table", "blockId": 7, "x": 50.0, "y": 50.0,
+                    "width": 200.0, "height": 60.0, "rowStart": 0, "rowEnd": 1 }]
+            }] }
+        });
+
+        let dl = build_dl(&input.to_string());
+        let text = text_prims(&dl.pages[0].primitives);
+        let logo = text.iter().find(|primitive| primitive.0 == "logo").unwrap();
+        assert!(
+            (logo.1 - expected_x).abs() < 0.01,
+            "logo x {} != {expected_x}",
+            logo.1
+        );
+    }
+}
+
+#[test]
+fn carried_table_borders_preserve_cell_content_across_slices() {
+    use serde_json::json;
+
+    for (alignment, first_baseline) in [("top", 12.0), ("center", 40.0), ("bottom", 68.0)] {
+        let paragraphs: Vec<_> = (0..4)
+            .map(|index| {
+                json!({ "kind": "paragraph", "id": 70 + index,
+                    "runs": [{ "kind": "text", "text": index.to_string() }] })
+            })
+            .collect();
+        let paragraph_measure = json!({ "kind": "paragraph", "totalHeight": 20.0,
+            "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+                "width": 8.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] });
+        let mut input = json!({
+            "measured": [{
+                "block": { "kind": "table", "id": 7, "rows": [
+                    { "id": 0, "cells": [{ "id": 0, "blocks": [] }] },
+                    { "id": 1, "cells": [{ "id": 1, "verticalAlign": alignment,
+                        "borders": { "top": { "style": "single", "width": 8.0 },
+                            "bottom": { "style": "single", "width": 4.0 } },
+                        "blocks": paragraphs }] }
+                ] },
+                "measure": { "kind": "table", "columnWidths": [100.0],
+                    "totalWidth": 100.0, "totalHeight": 230.0, "rows": [
+                        { "height": 90.0, "cells": [{ "width": 100.0, "height": 0.0, "blocks": [] }] },
+                        { "height": 140.0, "cells": [{ "width": 100.0, "height": 80.0,
+                            "blocks": vec![paragraph_measure; 4] }] }
+                    ] }
+            }],
+            "options": { "pageSize": { "w": 200.0, "h": 100.0 },
+                "margins": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 } }
+        });
+        input["layout"] = serde_json::from_str(
+            &docx_layout::layout_to_canonical_json(&input.to_string()).unwrap(),
+        )
+        .unwrap();
+        let dl = build_dl(&input.to_string());
+        assert_eq!(dl.pages.len(), 3, "{alignment}");
+        assert_eq!(input["layout"]["pages"][1]["fragments"][0]["rowStart"], 1);
+        assert!(dl.pages[1].primitives.iter().any(|primitive| {
+            matches!(primitive, Primitive::Line(line)
+                if line.attrs.cell.as_ref().is_some_and(|cell| cell.owns_top_border == Some(true)))
+        }));
+        let mut seen = Vec::new();
+        for (page_index, page) in dl.pages.iter().enumerate().skip(1) {
+            let fragment = &input["layout"]["pages"][page_index]["fragments"][0];
+            let clipped = fragment["clipTop"].as_f64().unwrap_or(0.0);
+            let height = fragment["height"].as_f64().unwrap();
+            for (text, _, _, baseline, _) in text_prims(&page.primitives) {
+                let index = text.parse::<usize>().unwrap();
+                assert_eq!(
+                    baseline + clipped,
+                    first_baseline + index as f64 * 20.0,
+                    "{alignment}, page {page_index}, line {index}"
+                );
+                if baseline - 12.0 >= height || baseline + 8.0 <= 0.0 {
+                    continue;
+                }
+                assert!(
+                    baseline >= 12.0 && baseline + 8.0 <= height,
+                    "{alignment}, line {index} crosses the fragment clip"
+                );
+                seen.push(index);
+            }
+        }
+        assert_eq!(seen, vec![0, 1, 2, 3], "{alignment}");
+    }
 }
 
 /// Cell paragraphs use max-collapsed inter-paragraph spacing.
 #[test]
 fn cell_paragraphs_stack_with_collapsed_spacing() {
     // a: after 10; b: before 25 (wins over prev after 10) + after 30; c: before
-    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4 → leading 2,
-    // baseline = lineTop + 14). content top = cy 50 + padTop 1 = 51.
+    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4, the rest
+    // leading below → baseline = lineTop + 12). content top = cy 50 + padTop 1 = 51.
     let para = |id: u64, ch: &str, before: f64, after: f64, pm: i64| {
         serde_json::json!({
             "kind": "paragraph", "id": id, "pmStart": pm, "pmEnd": pm + 3,
@@ -1950,25 +2215,25 @@ fn cell_paragraphs_stack_with_collapsed_spacing() {
             .3
     };
 
-    // a: top 0 → baseline 51 + 14 = 65.
+    // a: top 0 → baseline 51 + 12 = 63.
     assert!(
-        (base("a") - 65.0).abs() < 0.01,
-        "a baseline {} (want 65)",
+        (base("a") - 63.0).abs() < 0.01,
+        "a baseline {} (want 63)",
         base("a")
     );
     // b: gap max(after 10, before 25) = 25 → top 20 + 25 = 45 → baseline
-    // 51 + 45 + 14 = 110 (before wins the collapse).
+    // 51 + 45 + 12 = 108 (before wins the collapse).
     assert!(
-        (base("b") - 110.0).abs() < 0.01,
-        "b baseline {} (want 110)",
+        (base("b") - 108.0).abs() < 0.01,
+        "b baseline {} (want 108)",
         base("b")
     );
     // c: gap max(after 30, before 5) = 30 → top 45 + 20 + 30 = 95 → baseline
-    // 51 + 95 + 14 = 160 (after wins). The old line-height-only stack put it at
-    // 51 + 40 + 14 = 105, one after-spacing block too high.
+    // 51 + 95 + 12 = 158 (after wins). The old line-height-only stack put it at
+    // 51 + 40 + 12 = 103, one after-spacing block too high.
     assert!(
-        (base("c") - 160.0).abs() < 0.01,
-        "c baseline {} (want 160)",
+        (base("c") - 158.0).abs() < 0.01,
+        "c baseline {} (want 158)",
         base("c")
     );
 }
@@ -2071,6 +2336,181 @@ fn centered_hf_field_line_recenters_per_page() {
         "page 10 field width {}",
         field_w(9, "10")
     );
+}
+
+/// PAGE paints the section label; NUMPAGES paints the document total.
+#[test]
+fn page_fields_paint_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 },
+                { "kind": "field", "fieldType": "NUMPAGES", "fallback": "1", "pmStart": 7 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+              "width": 20.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, Some("5")), (2, Some("6")), (3, None), (4, Some("9"))]
+        .iter()
+        .map(|(number, label)| {
+            let mut page = serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            });
+            if let Some(label) = label {
+                page["pageLabel"] = serde_json::json!(label);
+            }
+            page
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 15.0] },
+            { "pmStart": 7, "fallbackWidth": 10.0, "perPage": [14.0, 14.0, 14.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    let expected = ["5", "6", "3", "9"];
+    let page_widths = [11.0, 12.0, 13.0, 15.0];
+
+    for (page_idx, want) in expected.iter().enumerate() {
+        assert_eq!(
+            dl.pages[page_idx].page_label.as_deref(),
+            if page_idx == 2 { None } else { Some(*want) },
+        );
+        let mut body_prims = text_prims(&dl.pages[page_idx].primitives);
+        body_prims.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            body_prims.len(),
+            2,
+            "page {page_idx} body paints PAGE and NUMPAGES: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body PAGE paints label {want}: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[1].0, "4",
+            "page {page_idx} body NUMPAGES paints total 4: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let mut footer_texts = text_prims(&footer.primitives);
+        footer_texts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            footer_texts.len(),
+            2,
+            "page {page_idx} footer paints PAGE and NUMPAGES: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer PAGE paints {want}: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[0].2 - page_widths[page_idx]).abs() < 0.01,
+            "page {page_idx} reserved width {} (want {})",
+            footer_texts[0].2,
+            page_widths[page_idx]
+        );
+        assert_eq!(
+            footer_texts[1].0, "4",
+            "page {page_idx} footer NUMPAGES paints total 4: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[1].2 - 14.0).abs() < 0.01,
+            "page {page_idx} footer NUMPAGES width {} (want 14)",
+            footer_texts[1].2
+        );
+    }
+}
+
+/// A `w:fmt="lowerRoman"` section paints roman labels across its pages.
+#[test]
+fn page_fields_paint_roman_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+              "width": 10.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, "i", 0), (2, "ii", 0), (3, "iii", 1), (4, "iv", 1)]
+        .iter()
+        .map(|(number, label, section)| {
+            serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "pageLabel": label,
+                "sectionIndex": section,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            })
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    for (page_idx, want) in ["i", "ii", "iii", "iv"].iter().enumerate() {
+        assert_eq!(dl.pages[page_idx].page_label.as_deref(), Some(*want));
+        let body_prims = text_prims(&dl.pages[page_idx].primitives);
+        assert_eq!(
+            body_prims.len(),
+            1,
+            "page {page_idx} body paints one PAGE field: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body paints {want}: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let footer_texts = text_prims(&footer.primitives);
+        assert_eq!(
+            footer_texts.len(),
+            1,
+            "page {page_idx} footer paints one PAGE field: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer paints {want}: {footer_texts:?}"
+        );
+    }
 }
 
 /// a paragraph's stable `paraId` is stamped on every primitive it emits (the
@@ -2308,8 +2748,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
     );
 
     // inner paragraphs at content origin: x = 100 + border 2 + padLeft 7 = 109;
-    // first para top = 50 + 2 + 4 = 56 → baseline 56 + half-leading 4 + ascent 12
-    // = 72; second para stacks by totalHeight 24 → baseline 96.
+    // first para top = 50 + 2 + 4 = 56 → baseline 56 + ascent 12 = 68; second
+    // para stacks by totalHeight 24 → baseline 92.
     let t = text_prims(prims);
     let alpha = t.iter().find(|x| x.0 == "Alpha").expect("Alpha inner text");
     let bravo = t.iter().find(|x| x.0 == "Bravo").expect("Bravo inner text");
@@ -2319,8 +2759,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         alpha.1
     );
     assert!(
-        (alpha.3 - 72.0).abs() < 0.01,
-        "Alpha baseline {} (want 72)",
+        (alpha.3 - 68.0).abs() < 0.01,
+        "Alpha baseline {} (want 68)",
         alpha.3
     );
     assert!(
@@ -2329,8 +2769,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         bravo.1
     );
     assert!(
-        (bravo.3 - 96.0).abs() < 0.01,
-        "Bravo baseline {} (want 96)",
+        (bravo.3 - 92.0).abs() < 0.01,
+        "Bravo baseline {} (want 92)",
         bravo.3
     );
 
@@ -2614,4 +3054,56 @@ fn modern_text_effects_thread_to_text_primitives() {
         })
         .expect("text primitive");
     assert_eq!(text.attrs.modern_effects.as_ref(), Some(&effects));
+}
+
+/// Word hangs an `auto` line's first baseline off the box top: raising the
+/// multiple grows the box downward and leaves the baseline put. Measured on
+/// Word 16.113, Arial 72pt, 1-inch top margin — 139.552pt under w:line 240,
+/// 276, 288, 360 and 480 alike (spread 0.045pt), against the model's
+/// 72 + (1854 + 67) / 2048 x 72 = 139.535pt, inside the 0.25pt device grid.
+#[test]
+fn auto_spacing_keeps_the_first_baseline_at_the_top_of_a_taller_box() {
+    const WORD_BASELINE_PT: f64 = 139.552;
+    const ASCENT: f64 = 1921.0 / 2048.0 * 72.0;
+    const DESCENT: f64 = 434.0 / 2048.0 * 72.0;
+    const SINGLE: f64 = ASCENT + DESCENT;
+
+    for multiple in [1.0_f64, 1.15, 1.2, 1.5, 2.0] {
+        let height = SINGLE * multiple;
+        let input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 7,
+                    "runs": [{ "kind": "text", "text": "Hxdpq", "pmStart": 1, "pmEnd": 6 }] },
+                "measure": { "kind": "paragraph", "totalHeight": height, "lines": [
+                    { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                      "width": 200.0, "ascent": ASCENT, "descent": DESCENT,
+                      "lineHeight": height }
+                ] }
+            }],
+            "options": {},
+            "layout": { "pages": [{ "size": { "w": 612.0, "h": 792.0 }, "margins": {},
+                "fragments": [
+                    { "kind": "paragraph", "blockId": 1, "x": 72.0, "y": 72.0,
+                      "width": 468.0, "height": height, "fromLine": 0, "toLine": 1,
+                      "pmStart": 1, "pmEnd": 7 }
+                ] }] }
+        })
+        .to_string();
+
+        let dl = build_dl(&input);
+        let baseline = text_prims(&dl.pages[0].primitives)
+            .first()
+            .expect("one text primitive")
+            .3;
+        assert!(
+            (baseline - (72.0 + ASCENT)).abs() < 0.01,
+            "multiple {multiple}: baseline {baseline} (want {})",
+            72.0 + ASCENT
+        );
+        assert!(
+            (baseline - WORD_BASELINE_PT).abs() <= 0.25,
+            "multiple {multiple}: baseline {baseline} is off Word's {WORD_BASELINE_PT} \
+             by more than its 0.25pt device grid"
+        );
+    }
 }

@@ -38,6 +38,10 @@ export class EditSession {
      */
     add_comment(ranges_json: string, author: string, date: string, body_json: string): string;
     /**
+     * Closes the current undo capture without adding an empty step.
+     */
+    add_undo_boundary(): void;
+    /**
      * Deletes one character at this session's collapsed selection and returns
      * the resulting binary `FrameDelta`. `direction` is `"backward"` or
      * `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
@@ -331,6 +335,10 @@ export class EditSession {
      */
     format_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, delta_json: string): void;
     /**
+     * Stories changed by the latest undo or redo, sorted.
+     */
+    history_stories(): string[];
+    /**
      * Inserts a column left (`after = false`) or right (`after = true`) of
      * the cell `at_json` ([`CellLoc`]) names. Always a plain local edit.
      */
@@ -392,16 +400,17 @@ export class EditSession {
      */
     layout_document_with_regions_json(input: string): string;
     /**
+     * Same full region pass as [`Self::layout_document_with_regions_json`],
+     * but the reply carries only `{ layout, headersFooters?, notesConverged }`
+     * — the measured arena stays retained wasm-side and is fetched on demand
+     * via [`Self::retained_kernel_inputs_json`].
+     */
+    layout_document_with_regions_retained_json(input: string): string;
+    /**
      * Region-layout input JSON in, the font families and sizes that input
      * needs as JSON out, so the host can register fonts before laying out.
      */
     layout_font_requirements_json(input: string): string;
-    /**
-     * Where a comment's sticky anchors currently sit:
-     * `[{"story","start","end"}, …]`, one entry per anchored range, in
-     * story-global UTF-16 units. Errors on an unknown comment id and when an
-     * anchor no longer resolves.
-     */
     list_comments(): string;
     /**
      * Every pending tracked change across all stories, in deterministic
@@ -517,15 +526,18 @@ export class EditSession {
      */
     redo(): boolean;
     /**
-     * Current local redo stack size. Zero before a story starts tracking.
-     */
-    redo_depth(): number;
-    /**
      * Registers raw sfnt bytes in this session's resident measurement store
      * and returns the font id that measurement and display inputs reference.
      * Errors on bytes the font parser rejects.
      */
     register_measure_font(bytes: Uint8Array): number;
+    /**
+     * Registers a measurement view of `base` carrying the vertical metrics
+     * and advance pitch Word measures `requested_family` with — for a face
+     * this host had to substitute. Returns `base` for a family whose metrics
+     * are unknown.
+     */
+    register_substitute_measure_font(base: number, requested_family: string): number;
     /**
      * Rejects tracked changes — the inverse of
      * [`EditSession::accept_change`]: pending insertions roll back, pending
@@ -549,6 +561,12 @@ export class EditSession {
      * geometry for it. `frameEpoch` identifies the frame the rect belongs to.
      */
     resident_caret_snapshot_json(): string;
+    /**
+     * Where a comment's sticky anchors currently sit:
+     * `[{"story","start","end"}, …]`, one entry per anchored range, in
+     * story-global UTF-16 units. Errors on an unknown comment id and when an
+     * anchor no longer resolves.
+     */
     resolve_comment(comment_id: string): string;
     /**
      * Resolves another peer's encoded selection against this replica's
@@ -563,9 +581,19 @@ export class EditSession {
      */
     resolve_sticky_position(story: string, position: Uint8Array): string;
     /**
+     * Retained `{ measured, options }` for the main-thread display-list
+     * fallback after a retained-only region layout.
+     */
+    retained_kernel_inputs_json(): string;
+    search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
+    /**
      * [`EditSession::open_docx`] with seeding always on.
      */
     seed_from_docx(bytes: Uint8Array): string;
+    /**
+     * Selects a story, closing capture unless manual grouping is selected.
+     */
+    select_story(story: string): void;
     /**
      * This peer's current selection as `{"anchor":{"story","paraId","offset"},
      * "head":{…}}`, or `"null"` before [`EditSession::set_selection`] is
@@ -701,6 +729,10 @@ export class EditSession {
      */
     set_table_width(table_json: string, width_twips: number): string;
     /**
+     * Changes grouping policy while retaining undo and redo history.
+     */
+    set_undo_capture_mode(mode: string): void;
+    /**
      * Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
      * committed transaction. `update` is v1-encoded — feed it straight to
      * [`EditSession::apply_update`] on a peer — and is copied out of wasm
@@ -752,6 +784,7 @@ export class EditSession {
      * as one. Errors on an unknown story.
      */
     story_len(story: string): number;
+    story_object_ids(story: string): string;
     /**
      * The story as an ordered run of formatted segments — the same view
      * lowering reads:
@@ -765,7 +798,6 @@ export class EditSession {
      * `attributes` holds the segment's run marks together with any `ins`/`del`
      * tracked-change stamps. Errors on an unknown story.
      */
-    story_object_ids(story: string): string;
     story_segments(story: string): string;
     /**
      * Applies one run mark over `[start, end)`. `mark_json`:
@@ -779,38 +811,29 @@ export class EditSession {
      */
     toggle_mark(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, mark_json: string): void;
     /**
-     * Starts local undo tracking for a structural table edit in `story`.
-     * Besides the parent story, which owns the table embed, this widens the
-     * scope to the stories root so undo and redo also remove and restore the
-     * cell stories the edit created or destroyed. Tracked separately from
-     * [`EditSession::track_undo`] on the same story, so switching between
-     * them starts a fresh history. Errors on an unknown story.
+     * Starts local-origin undo tracking across every story. Call this after
+     * import or seeding but before the first edit, so the initial document is
+     * not an undo step; later calls keep the history.
      */
-    track_table_undo(story: string): void;
+    track_undo(): void;
     /**
-     * Starts local-origin undo tracking for one story, replacing any scope
-     * already tracked (and its history). Call this after import or seeding but
-     * before the first edit, so the initial document is not an undo step.
-     * Re-tracking the same story is a no-op that preserves the history.
-     * Errors on an unknown story.
-     */
-    track_undo(story: string): void;
-    /**
-     * Reverts the latest local-origin transaction and reports whether
-     * anything was reverted. Remote and system transactions are excluded by
-     * the manager's tracked-origin policy; `false` before a story is tracked.
+     * Reverts the latest local-origin step and reports whether anything was
+     * reverted. Remote and system transactions are excluded by the manager's
+     * tracked-origin policy; `false` before tracking starts.
      */
     undo(): boolean;
     /**
-     * Current local undo stack size. Zero before a story starts tracking.
+     * Current undo grouping policy.
      */
-    undo_depth(): number;
+    undo_capture_mode(): string;
     /**
      * Lowers one story to a `LayoutBlock[]` JSON array — the block, run and
      * table vocabulary the layout engine consumes. `env_json` supplies the
      * document-level values lowering cannot read off the story:
      * `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
-     * "pageContentHeight":number|null,"numericIds":{yrsId: number}}`, all
+     * "pageContentHeight":number|null,"numericIds":{yrsId: number},
+     * "tocStyleIds":[styleId],"showHiddenText":bool,
+     * "defaultParagraphStyleId":string}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an
      * embed lowering does not support.
@@ -936,6 +959,16 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `requested_family` with, and return its id;
+ * returns `base` unchanged for a family with no known metrics. Hosts call
+ * this for a face they substituted, and put the result at the head of that
+ * family's chain. Pagination, the display list and glyph outlines all read
+ * this one store, so a widened view measures and paints at one pitch.
+ */
+export function register_substitute_measure_font(base: number, requested_family: string): number;
+
+/**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
  * update to a stored display list so an incremental rebuild re-parses only
  * its changed pages. `Err` closes the handle first, so the caller's fallback
@@ -954,6 +987,7 @@ export interface InitOutput {
     readonly __wbg_editsession_free: (a: number, b: number) => void;
     readonly editsession_accept_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_add_comment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_add_undo_boundary: (a: number) => void;
     readonly editsession_apply_delete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_delete_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_input: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -993,6 +1027,7 @@ export interface InitOutput {
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+    readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
@@ -1003,6 +1038,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
@@ -1018,15 +1054,18 @@ export interface InitOutput {
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
-    readonly editsession_redo_depth: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
+    readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+    readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1042,6 +1081,7 @@ export interface InitOutput {
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
@@ -1052,10 +1092,9 @@ export interface InitOutput {
     readonly editsession_story_object_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
-    readonly editsession_track_table_undo: (a: number, b: number, c: number) => [number, number];
-    readonly editsession_track_undo: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
-    readonly editsession_undo_depth: (a: number) => number;
+    readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
@@ -1071,12 +1110,13 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
-    readonly clear_measure_fonts: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

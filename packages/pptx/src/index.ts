@@ -1,5 +1,10 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
+export { presentationImageBlob } from './render/image';
+export { StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { slideToPng } from './render/png';
+export type { SlideToPngOptions } from './render/png';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type {
   CollaborationUser,
@@ -25,30 +30,47 @@ export {
   initWasm,
   inspectPresentation,
   isWasmAvailable,
+  isProposalsAvailable,
   openPresentation,
   wasmVersion,
 } from './wasm/loader';
 export type {
   OpenPresentationOptions,
   PresentationHandle,
+  UndoCaptureMode,
   WasmInitInput,
 } from './wasm/loader';
 export type {
+  BlipEffect,
   CaretStop,
   ColorValue,
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
+  EditProfile,
   GeometryPathCommand,
+  HistoryProfile,
   HistoryResult,
   HitTestResult,
+  ImageEffect,
+  ImageCrop,
   ImagePrimitive,
+  LayoutProfile,
   Paint,
+  ParagraphAlignment,
   ParagraphSnapshot,
+  PictureDraft,
   PlaceholderPrimitive,
   PositionedGlyph,
   PositionedTextLine,
   PositionedTextRun,
   PresetShapeDraft,
+  Profiled,
+  ProfiledLayout,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   PrimitiveTransform,
   ShapeAdjustReceipt,
   ShapeDraft,
@@ -62,12 +84,14 @@ export type {
   ShapeSnapshot,
   ShapeStroke,
   ShapeStrokeReceipt,
+  ShapeZOrderReceipt,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,
   SlideSnapshot,
   StorySnapshot,
   Stroke,
+  StrokeEnd,
   TextBoxPrimitive,
   TextReceipt,
   TextRunSnapshot,

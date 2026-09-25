@@ -149,7 +149,8 @@ pub use s8::{
 };
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
-    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_with_limits,
+    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits,
+    parse_docx_s9_wire_with_limits,
 };
 pub use scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, UnderlineValue, parse_color_value,
@@ -165,6 +166,7 @@ pub use serializer::{
     S11SerializeRequest, S11SerializeResponse, S12SerializeRequest, S12SerializeResponse,
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, SerializerDeterminism, canonical_xml_events,
     serialize_s10_wire, serialize_s11_wire, serialize_s12_wire, write_docx_s13,
+    write_docx_s13_parts,
 };
 pub use settings::{
     CompatibilityFlags, DocumentSettings, RevisionView, ThemeFontLanguage, parse_settings,
@@ -323,6 +325,13 @@ pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<V
     let request =
         serde_json::from_str(request_json).map_err(|error| js_error(error.to_string()))?;
     write_docx_s13(request, original_docx).map_err(js_error)
+}
+
+/// Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+#[cfg(all(feature = "wasm", feature = "tiff"))]
+#[wasm_bindgen(js_name = decodeTiffPng)]
+pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+    ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
 }
 
 #[cfg(feature = "wasm")]

@@ -124,6 +124,11 @@ except StaleProposalError as stale:
     wb.accept_proposal(proposal.id, force=True)
 ```
 
+A changed formula dependency can also make acceptance stale. In that case,
+read `proposals()` again to review the refreshed preview before accepting.
+Pending proposals remain local to this workbook session; ordinary peer edits
+preserve them and acceptance still checks their targets.
+
 An unknown proposal ID raises `KeyError`; `reject_proposal` returns `False`
 instead when there is nothing left to reject.
 
@@ -220,9 +225,9 @@ converting them needs the workbook's date system, which is not exposed yet, and
 stringifying them would write text that only looks like a date. Pass the Excel
 serial number as a float if you need a date today.
 
-Strings are interpreted the way Excel interprets typed input: a leading `=` is a
-formula, `TRUE`/`FALSE` become booleans, and numeric text becomes a number.
-Prefix with an apostrophe to force text.
+General cells interpret strings like Excel: a leading `=` is a formula,
+`TRUE`/`FALSE` become booleans, and numeric text becomes a number. Text (`@`)
+cells preserve input as text. Prefix with an apostrophe to force text in any format.
 
 ```python
 sheet["A1"] = "'=1+1"   # the text "=1+1"
@@ -253,10 +258,12 @@ regenerating the package from the modeled features, and sheets you did not
 touch are copied through byte for byte. The stylesheet is left alone unless
 styles actually change.
 
-A sheet you *do* edit is reserialized from the model, so unmodeled row, column,
-and cell markup on that one sheet is lost, and its autofilter, data-validation,
-conditional-formatting, table, and sparkline ranges stay at their source
-coordinates. Collaborative sessions compare only the modeled workbook, so two
+A sheet you *do* edit keeps its unmodeled row, column, and cell markup: only the
+cells, rows, and columns the edit actually changed are rewritten; a sheet whose rows
+or cells lack `r` attributes or arrive out of order, or that was replayed from
+collaboration updates, is reserialized from the model instead. Its autofilter,
+data-validation, conditional-formatting, table, and sparkline ranges stay at
+their source coordinates. Collaborative sessions compare only the modeled workbook, so two
 peers holding the same cells but different macros or custom XML still accept
 each other as the same base.
 

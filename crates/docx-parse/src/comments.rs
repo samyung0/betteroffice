@@ -2,6 +2,7 @@
 //! comment-range integrity.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ pub fn parse_comments(
     root: &XmlElement,
     extensible_xml: Option<&[u8]>,
     extended_xml: Option<&[u8]>,
+    ids_xml: Option<&[u8]>,
     parser: &mut StoryParser<'_, '_>,
 ) -> Result<Vec<Comment>, ParseError> {
     if root.local_name() != "comments" {
@@ -61,6 +63,7 @@ pub fn parse_comments(
         parse_comments_extensible(extensible_xml, "word/commentsExtensible.xml", parser.budget)?;
     let extended =
         parse_comments_extended(extended_xml, "word/commentsExtended.xml", parser.budget)?;
+    let durable_by_para_id = parse_comments_ids(ids_xml, "word/commentsIds.xml", parser.budget)?;
     let mut comments = Vec::new();
     let mut palette_by_author = IndexMap::<String, usize>::new();
     let mut last_para_ids = Vec::new();
@@ -93,7 +96,7 @@ pub fn parse_comments(
         let content = block_content
             .iter()
             .filter_map(|block| match block {
-                BlockContent::Paragraph(paragraph) => Some(paragraph.clone()),
+                BlockContent::Paragraph(paragraph) => Some(paragraph.as_ref().clone()),
                 _ => None,
             })
             .collect();
@@ -118,7 +121,8 @@ pub fn parse_comments(
             .entry(author.clone())
             .or_insert(next_palette);
         let durable_id = attribute_any(child, &[("w16cid", "durableId"), ("w16cex", "durableId")])
-            .map(|value| truncate_utf16_scalars(&value, 255));
+            .map(|value| truncate_utf16_scalars(&value, 255))
+            .or_else(|| durable_by_para_id.get(&last_para_id).cloned());
         let author_id = attribute_any(child, &[("w16du", "personId"), ("w16cid", "personId")])
             .map(|value| truncate_utf16_scalars(&value, 255));
         comments.push(Comment {
@@ -192,6 +196,39 @@ fn parse_comments_extensible(
     Ok(dates)
 }
 
+/// `commentsIds.xml` binds a durable identity to each comment's last
+/// paragraph; a save must reuse it or the package never reaches a fixed point.
+fn parse_comments_ids(
+    xml: Option<&[u8]>,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<IndexMap<String, String>, ParseError> {
+    let Some(xml) = xml else {
+        return Ok(IndexMap::new());
+    };
+    let document = parse_xml(xml, part, budget)?;
+    let Some(root) = document.root() else {
+        return Ok(IndexMap::new());
+    };
+    let mut durable_by_para_id = IndexMap::new();
+    for child in root.child_elements() {
+        if child.local_name() != "commentId" {
+            continue;
+        }
+        let (Some(para_id), Some(durable_id)) = (
+            child.attribute(Some("w16cid"), "paraId"),
+            child.attribute(Some("w16cid"), "durableId"),
+        ) else {
+            continue;
+        };
+        durable_by_para_id.insert(
+            para_id.to_ascii_uppercase(),
+            truncate_utf16_scalars(durable_id, 255),
+        );
+    }
+    Ok(durable_by_para_id)
+}
+
 fn parse_comments_extended(
     xml: Option<&[u8]>,
     part: &str,
@@ -263,20 +300,34 @@ pub fn remove_orphan_comment_ranges(blocks: &mut [BlockContent], comment_ids: &[
 fn prune_blocks(blocks: &mut [BlockContent], comment_ids: &HashSet<u64>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => paragraph.content.retain(|content| {
-                let ParagraphContent::CommentRange(marker) = content else {
-                    return true;
-                };
-                comment_ids.contains(&number_key(marker.id))
-            }),
+            BlockContent::Paragraph(paragraph) => {
+                if !paragraph.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        ParagraphContent::CommentRange(marker)
+                            if !comment_ids.contains(&number_key(marker.id))
+                    )
+                }) {
+                    continue;
+                }
+                Arc::make_mut(paragraph).content.retain(|content| {
+                    let ParagraphContent::CommentRange(marker) = content else {
+                        return true;
+                    };
+                    comment_ids.contains(&number_key(marker.id))
+                })
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         prune_blocks(&mut cell.content, comment_ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => prune_blocks(&mut sdt.content, comment_ids),
+            BlockContent::BlockSdt(sdt) => {
+                prune_blocks(&mut Arc::make_mut(sdt).content, comment_ids)
+            }
+            BlockContent::RawXml(_) => {}
         }
     }
 }
@@ -319,6 +370,7 @@ mod tests {
             document.root().unwrap(),
             extensible.map(str::as_bytes),
             extended.map(str::as_bytes),
+            None,
             &mut parser,
         )
         .unwrap()
@@ -436,7 +488,7 @@ mod tests {
             part: "word/comments.xml",
         };
         assert_eq!(
-            parse_comments(document.root().unwrap(), None, None, &mut parser),
+            parse_comments(document.root().unwrap(), None, None, None, &mut parser),
             Err(ParseError::ResourceLimit {
                 kind: "comments",
                 part: "word/comments.xml".to_owned(),

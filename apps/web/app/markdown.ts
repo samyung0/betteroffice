@@ -1,5 +1,6 @@
 import {
   CAPABILITIES,
+  BENCHMARKS,
   COLLABORATION,
   DEMO,
   DOCS,
@@ -12,6 +13,7 @@ import {
   PACKAGES_SECTION,
   PEERS,
   REPO,
+  RELEASES,
   SITE,
   SUITE,
 } from "./content";
@@ -19,13 +21,13 @@ import {
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
 function named(items: { name: string; desc: string }[]): string {
-  return items.map((item) => `- **${item.name}** — ${item.desc}`).join("\n");
+  return items.map((item) => `- **${item.name}.** ${item.desc}`).join("\n");
 }
 
 export function homepageMarkdown(): string {
   const editors = EDITORS.map(
     (editor) =>
-      `- **${editor.name}** (\`.${editor.format}\`) — ${editor.desc} [Demo](${DEMO}/${editor.format})`,
+      `- **${editor.name}** (\`.${editor.format}\`, ${editor.status}) — ${editor.desc} [Demo](${DEMO}/${editor.format})`,
   ).join("\n");
 
   const packages = PACKAGES.map(
@@ -64,16 +66,24 @@ One install line per ecosystem:
 
 ${ecosystems}
 
+[Package guide](${DOCS}/docs/packages) · [Release notes](${RELEASES})
+
 ## ${FOUNDATION.heading}
 
 ${FOUNDATION.prose}
 
 ${named(CAPABILITIES)}
 
+[Try it out](${DEMO}), or [explore the docs](${DOCS}) for setup, APIs, and format support.
+
+See how published releases and source builds compare with Microsoft Office in our [visual fidelity results](${BENCHMARKS}).
+
 ## ${COLLABORATION.heading}
 
 ${COLLABORATION.prose}
 
 ${named(PEERS)}
+
+[Collaboration guide](${DOCS}/docs/collaboration)
 `;
 }

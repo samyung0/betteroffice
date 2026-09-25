@@ -40,6 +40,7 @@ struct StoryPlan {
 }
 
 struct ProjectedCell {
+    paragraph_formatting: Option<Value>,
     attrs: JsonObject,
     content: Vec<Value>,
 }
@@ -66,6 +67,16 @@ struct LoweringContext {
     theme: Option<Value>,
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
+    compatibility_mode: u8,
+}
+
+fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
+    field(field(package, "settings"), "compatibilityFlags")
+        .and_then(|flags| field(Some(flags), "compatibilityMode"))
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && (0.0..=255.0).contains(value))
+        .map(|value| value as u8)
+        .unwrap_or(12)
 }
 
 enum OrderedValue {
@@ -163,6 +174,7 @@ struct StyleResolver {
     default_paragraph: Option<String>,
     default_table: Option<String>,
     default_character: Option<String>,
+    table_paragraph_formatting: Option<Value>,
 }
 
 fn object(value: Option<&Value>) -> Option<&Map<String, Value>> {
@@ -579,6 +591,20 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
         return target.cloned();
     };
     let mut result = object(target).cloned().unwrap_or_default();
+    if let Some(value) = source
+        .get("indentFirstLine")
+        .filter(|value| !value.is_null())
+    {
+        result.insert("indentFirstLine".to_owned(), value.clone());
+        match source.get("hangingIndent").filter(|value| !value.is_null()) {
+            Some(hanging) => {
+                result.insert("hangingIndent".to_owned(), hanging.clone());
+            }
+            None => {
+                result.remove("hangingIndent");
+            }
+        }
+    }
     for (key, value) in source {
         if key == "runProperties" {
             if let Some(merged) = merge_text_formatting(result.get(key), Some(value)) {
@@ -589,6 +615,8 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
                 key.clone(),
                 merge_plain(result.get(key), Some(value)).unwrap_or_else(|| value.clone()),
             );
+        } else if matches!(key.as_str(), "indentFirstLine" | "hangingIndent") {
+            continue;
         } else {
             result.insert(key.clone(), value.clone());
         }
@@ -646,7 +674,10 @@ impl StyleResolver {
     }
 
     fn resolve_paragraph_style(&self, style_id: Option<&str>) -> (Option<Value>, Option<Value>) {
-        let mut paragraph = field(self.doc_defaults.as_ref(), "pPr").cloned();
+        let mut paragraph = merge_paragraph_formatting(
+            field(self.doc_defaults.as_ref(), "pPr"),
+            self.table_paragraph_formatting.as_ref(),
+        );
         let mut run = field(self.doc_defaults.as_ref(), "rPr").cloned();
         let style = style_id
             .and_then(|id| self.style(id))
@@ -663,11 +694,14 @@ impl StyleResolver {
             }
         }
         if style_id.is_none() && style.is_none() && self.doc_defaults.is_none() {
-            paragraph = Some(json!({
-                "spaceAfter": 160,
-                "lineSpacing": 259,
-                "lineSpacingRule": "auto"
-            }));
+            paragraph = merge_paragraph_formatting(
+                Some(&json!({
+                    "spaceAfter": 160,
+                    "lineSpacing": 259,
+                    "lineSpacingRule": "auto"
+                })),
+                self.table_paragraph_formatting.as_ref(),
+            );
         }
         (paragraph, run)
     }
@@ -817,6 +851,11 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             marks.push(mark(name, vec![]));
         }
     }
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+    // becomes a mark, mirroring documentToYrs.
+    if formatting.get("snapToGrid") == Some(&Value::Bool(false)) {
+        marks.push(mark("snapToGrid", vec![]));
+    }
     if ["spacing", "position", "scale", "kerning"]
         .iter()
         .any(|key| formatting.contains_key(*key))
@@ -884,6 +923,8 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
+        } else if mark.name == "snapToGrid" {
+            attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -971,12 +1012,32 @@ fn embed_unit(
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
-    let run_style = styles.run_style_own(
-        formatting.and_then(|formatting| string(field(Some(formatting), "styleId"))),
-    );
+    let style_id = string(field(formatting, "styleId"));
+    let run_style = styles.run_style_own(style_id);
     let inherited = merge_text_formatting(style_formatting, run_style.as_ref());
     let merged = merge_text_formatting(inherited.as_ref(), formatting);
-    formatting_to_marks(merged.as_ref())
+    let mut marks = formatting_to_marks(merged.as_ref());
+    let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
+        || style_id
+            .and_then(|id| styles.style(id))
+            .and_then(|style| string(field(Some(style), "name")))
+            .is_some_and(is_hyperlink_style_name);
+    if hyperlink_style {
+        for (property, name) in [("color", "textColor"), ("underline", "underline")] {
+            if field(formatting, property).is_none()
+                && field(run_style.as_ref(), property).is_some()
+                && let Some(mark) = marks.iter_mut().find(|mark| mark.name == name)
+            {
+                mark.attrs
+                    .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
+            }
+        }
+    }
+    marks
+}
+
+fn is_hyperlink_style_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Hyperlink") || name.eq_ignore_ascii_case("FollowedHyperlink")
 }
 
 fn emu_to_pixels(value: f64) -> f64 {
@@ -1067,7 +1128,8 @@ fn image_payload(image: &Value) -> JsonObject {
         "distRight": number(field(wrap, "distR")).map(emu_to_pixels),
         "position": position.map(|_| json!({
             "horizontal": axis(horizontal),
-            "vertical": axis(vertical)
+            "vertical": axis(vertical),
+            "relativeHeight": nullish(field(position, "relativeHeight"))
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
@@ -1078,6 +1140,7 @@ fn image_payload(image: &Value) -> JsonObject {
         "cropRight": nullish(field(field(Some(image), "crop"), "right")),
         "cropBottom": nullish(field(field(Some(image), "crop"), "bottom")),
         "cropLeft": nullish(field(field(Some(image), "crop"), "left")),
+        "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
             .filter(|value| *value != 0.0)
@@ -1111,6 +1174,11 @@ fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject
         "rId": nullish(field(Some(chart), "rId")),
         "path": nullish(field(Some(chart), "path"))
     }))
+}
+
+pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
+    let instruction = instruction.trim();
+    !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn field_payload(
@@ -1221,6 +1289,13 @@ fn note_ref_unit(
     )
 }
 
+fn hidden_marks(marks: &[Mark]) -> &[Mark] {
+    marks
+        .iter()
+        .find(|mark| mark.name == "hidden")
+        .map_or(&[], std::slice::from_ref)
+}
+
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
@@ -1294,8 +1369,15 @@ fn run_content_to_units(
         "drawing" => vec![embed_unit(
             "image",
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
-            &[],
+            hidden_marks(marks),
             None,
+            1,
+        )],
+        "horizontalRule" => vec![embed_unit(
+            "horizontalRule",
+            map_from_value(json!({"rule": field(Some(content), "rule")})),
+            marks,
+            comment_id,
             1,
         )],
         "shape" => vec![embed_unit(
@@ -1304,7 +1386,7 @@ fn run_content_to_units(
                 field(Some(content), "shape").unwrap_or(&Value::Null),
                 source,
             ),
-            &[],
+            hidden_marks(marks),
             None,
             1,
         )],
@@ -1314,7 +1396,7 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
-            &[],
+            hidden_marks(marks),
             None,
             1,
         )],
@@ -1391,6 +1473,83 @@ fn hyperlink_to_units(
             _ => {}
         }
     }
+    units
+}
+
+fn field_to_units(
+    value: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    projection_id: usize,
+) -> Vec<InlineUnit> {
+    let result = array(field(field(Some(value), "structuredResult"), "inline"));
+    let code = array(field(field(Some(value), "structuredCode"), "inline"));
+    let projected_children: Vec<_> = code
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (-(index as isize) - 1, child))
+        .chain(
+            result
+                .iter()
+                .enumerate()
+                .map(|(index, child)| (index as isize, child)),
+        )
+        .collect();
+    if numeric_field_instruction(string(field(Some(value), "instruction")).unwrap_or_default())
+        || string(field(Some(value), "type")) != Some("complexField")
+        || !projected_children.iter().any(|(_, child)| {
+            matches!(
+                string(field(Some(child), "type")),
+                Some("hyperlink" | "simpleField")
+            )
+        })
+    {
+        let (payload, marks) = field_payload(value, style_formatting, source);
+        return vec![embed_unit("field", payload, &marks, None, 1)];
+    }
+    let mut units = Vec::new();
+    let mut children = Vec::new();
+    for (index, child) in projected_children {
+        let mut projected = match string(field(Some(child), "type")) {
+            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("simpleField") => {
+                let (payload, marks) = field_payload(child, style_formatting, source);
+                vec![embed_unit("field", payload, &marks, None, 1)]
+            }
+            _ => continue,
+        };
+        let items: Vec<Value> = projected.iter().map(|unit| match &unit.content {
+            UnitContent::Text(text) => json!({"kind":"text", "text":text, "attributes":unit.attrs}),
+            UnitContent::Embed {kind, payload} => json!({"kind":"embed", "embedKind":kind, "payload":payload, "attributes":unit.attrs}),
+        }).collect();
+        children.push(json!({"index":index, "items":items}));
+        for unit in &mut projected {
+            unit.attrs.insert(
+                "fieldResult".to_owned(),
+                json!({"id":projection_id, "index":index}),
+            );
+        }
+        units.extend(projected);
+    }
+    let mut visible = value.clone();
+    visible["fieldResult"] = Value::Array(
+        result
+            .iter()
+            .filter(|child| string(field(Some(child), "type")) == Some("run"))
+            .cloned()
+            .collect(),
+    );
+    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    payload.insert(
+        "fieldData".to_owned(),
+        Value::String(source_json(value, source)),
+    );
+    payload.insert(
+        "resultProjection".to_owned(),
+        json!({"id":projection_id, "children":children}),
+    );
+    units.push(embed_unit("field", payload, &marks, None, 1));
     units
 }
 
@@ -1585,13 +1744,59 @@ fn note_ref_mark_types(run: &Value) -> Vec<Value> {
         .collect()
 }
 
+fn units_text(units: &[InlineUnit]) -> String {
+    units
+        .iter()
+        .map(|unit| match &unit.content {
+            UnitContent::Text(text) => text.clone(),
+            UnitContent::Embed { payload, .. } => payload
+                .get("footnoteRefId")
+                .or_else(|| payload.get("endnoteRefId"))
+                .map(js_string)
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// `w:br w:type="page"|"column"`, which the story carries as a block embed
+/// beside the paragraph instead of as an inline unit.
+fn flow_break_type(content: &Value) -> Option<&'static str> {
+    if string(field(Some(content), "type")) != Some("break") {
+        return None;
+    }
+    match string(field(Some(content), "breakType")) {
+        Some("page") => Some("page"),
+        Some("column") => Some("column"),
+        _ => None,
+    }
+}
+
+/// Where a run's flow breaks sit in its text. They occupy no story unit, so
+/// the save projection rebuilds them from these offsets.
+fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Value> {
+    let contents = array(field(Some(run), "content"));
+    if !contents.iter().any(|item| flow_break_type(item).is_some()) {
+        return Vec::new();
+    }
+    let mut breaks = Vec::new();
+    let mut offset = 0usize;
+    for content in contents {
+        if let Some(kind) = flow_break_type(content) {
+            breaks.push(json!({ "offset": offset, "type": kind }));
+            continue;
+        }
+        offset += units_text(&run_content_to_units(content, &[], None, source))
+            .encode_utf16()
+            .count();
+    }
+    breaks
+}
+
 fn run_boundary(
     run: &Value,
-    style_formatting: Option<&Value>,
-    styles: &StyleResolver,
+    units: &[InlineUnit],
     source: &BTreeMap<String, String>,
 ) -> Option<Value> {
-    let units = run_to_units(run, style_formatting, styles, None, &[], source);
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -1605,22 +1810,15 @@ fn run_boundary(
     {
         return None;
     }
-    let text = units
-        .iter()
-        .map(|unit| match &unit.content {
-            UnitContent::Text(text) => text.clone(),
-            UnitContent::Embed { payload, .. } => payload
-                .get("footnoteRefId")
-                .or_else(|| payload.get("endnoteRefId"))
-                .map(js_string)
-                .unwrap_or_default(),
-        })
-        .collect::<String>();
     let note_marks = note_ref_mark_types(run);
+    let breaks = flow_break_offsets(run, source);
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(text));
+    boundary.insert("text".to_owned(), Value::String(units_text(units)));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
+    }
+    if !breaks.is_empty() {
+        boundary.insert("breaks".to_owned(), Value::Array(breaks));
     }
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
@@ -1651,6 +1849,18 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
+    let direct_value = field(formatting, "indentFirstLine");
+    let direct_nonzero = direct_value.filter(|value| number(Some(value)) != Some(0.0));
+    let list_value = field(list, "indentFirstLine");
+    let (selected_first, selected_hanging) = if let Some(value) = direct_nonzero {
+        (Some(value), field(formatting, "hangingIndent"))
+    } else if let Some(value) = list_value {
+        (Some(value), field(list, "hangingIndent"))
+    } else if let Some(value) = direct_value {
+        (Some(value), field(formatting, "hangingIndent"))
+    } else {
+        (None, None)
+    };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
         "textId": nullish(field(Some(paragraph), "textId")),
@@ -1663,6 +1873,9 @@ fn paragraph_attrs(
         "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
         "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
         "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
+        "listMarkerBold": nullish(field(list, "markerBold")),
+        "listMarkerItalic": nullish(field(list, "markerItalic")),
+        "listMarkerColor": nullish(field(list, "markerColor")),
         "listMarkerSuffix": string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
         "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
         "listAbstractNumId": nullish(field(list, "abstractNumId")),
@@ -1676,9 +1889,12 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
             "borders",
             "shading",
@@ -1688,6 +1904,9 @@ fn paragraph_attrs(
             "keepLines",
             "widowControl",
             "contextualSpacing",
+            "snapToGrid",
+            "autoSpaceDE",
+            "autoSpaceDN",
             "outlineLevel",
             "bidi",
         ] {
@@ -1710,26 +1929,36 @@ fn paragraph_attrs(
             && field(style_ppr_ref, "numPr").is_some()
             && number(field(field(style_ppr_ref, "numPr"), "numId")) != Some(0.0);
         attrs.insert(
-            "indentFirstLine".to_owned(),
-            field(formatting, "indentFirstLine")
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "indentFirstLine"))
-                        .flatten()
-                })
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(list, "indentLeft"))
+                .or_else(|| field(style_ppr_ref, "indentLeft"))
                 .cloned()
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
+            "indentFirstLine".to_owned(),
+            if selected_first.is_some() {
+                selected_first
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "indentFirstLine")
+            }
+            .cloned()
+            .unwrap_or(Value::Null),
+        );
+        attrs.insert(
             "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "hangingIndent"))
-                        .flatten()
-                })
-                .cloned()
-                .unwrap_or(Value::Bool(false)),
+            if selected_first.is_some() {
+                selected_hanging
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "hangingIndent")
+            }
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
         );
         let default_character = styles
             .default_style("character")
@@ -1757,11 +1986,13 @@ fn paragraph_attrs(
             "alignment",
             "spaceBefore",
             "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
-            "indentFirstLine",
             "borders",
             "shading",
             "tabs",
@@ -1769,6 +2000,9 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
+            "autoSpaceDE",
+            "autoSpaceDN",
             "outlineLevel",
             "bidi",
         ] {
@@ -1785,10 +2019,19 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
-            "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(list, "indentLeft"))
                 .cloned()
-                .unwrap_or(Value::Bool(false)),
+                .unwrap_or(Value::Null),
+        );
+        attrs.insert(
+            "indentFirstLine".to_owned(),
+            selected_first.cloned().unwrap_or(Value::Null),
+        );
+        attrs.insert(
+            "hangingIndent".to_owned(),
+            selected_hanging.cloned().unwrap_or(Value::Bool(false)),
         );
         attrs.insert(
             "defaultTextFormatting".to_owned(),
@@ -1812,7 +2055,7 @@ fn paragraph_attrs(
         attrs.insert("renderedPageBreakBefore".to_owned(), Value::Bool(true));
     }
     if paragraph_starts_with_page_break(paragraph) {
-        attrs.insert("pageBreakBefore".to_owned(), Value::Bool(true));
+        attrs.insert("pageBreakBeforeRun".to_owned(), Value::Bool(true));
     }
     for (source, target) in [("pPrIns", "pPrIns"), ("pPrDel", "pPrDel")] {
         if let Some(info) = field(Some(paragraph), source) {
@@ -1935,20 +2178,22 @@ fn paragraph_units(
                 }
             }
             "run" => {
-                let boundary = run_boundary(content, style_formatting.as_ref(), styles, source);
-                if let (Some(boundaries), Some(boundary)) = (&mut boundaries, boundary) {
-                    boundaries.push(boundary);
-                } else {
-                    boundaries = None;
-                }
-                units.extend(run_to_units(
+                let run_units = run_to_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
                     comment_id,
                     &[],
                     source,
-                ));
+                );
+                if let Some(run_boundaries) = &mut boundaries {
+                    if let Some(boundary) = run_boundary(content, &run_units, source) {
+                        run_boundaries.push(boundary);
+                    } else {
+                        boundaries = None;
+                    }
+                }
+                units.extend(run_units);
             }
             "hyperlink" => {
                 boundaries = None;
@@ -1962,8 +2207,13 @@ fn paragraph_units(
             }
             "simpleField" | "complexField" => {
                 boundaries = None;
-                let (payload, marks) = field_payload(content, style_formatting.as_ref(), source);
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.extend(field_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    source,
+                    unit_counts.len(),
+                ));
             }
             "inlineSdt" => {
                 boundaries = None;
@@ -1989,7 +2239,7 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], None, 1));
             }
-            "bookmarkStart" | "bookmarkEnd" => {}
+            "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
         unit_counts.push(units.len() - start);
@@ -2001,9 +2251,18 @@ fn paragraph_units(
 fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
     for content in array(field(Some(run), "content")) {
         if string(field(Some(content), "type")) == Some("break")
-            && string(field(Some(content), "breakType")) == Some("page")
+            && matches!(
+                string(field(Some(content), "breakType")),
+                Some("page" | "column")
+            )
         {
-            tokens.push("pageBreak");
+            tokens.push(
+                if string(field(Some(content), "breakType")) == Some("column") {
+                    "columnBreak"
+                } else {
+                    "pageBreak"
+                },
+            );
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -2056,25 +2315,40 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<&'static str>) {
 fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    tokens.first() == Some(&"pageBreak")
+    tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
 }
 
-fn paragraph_has_non_leading_page_break(paragraph: &Value) -> bool {
+fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    let mut leading = false;
+    if !tokens.contains(&"visible") {
+        let split = tokens
+            .iter()
+            .rposition(|token| *token == "columnBreak")
+            .map_or(0, |index| index + 1);
+        return (tokens[..split].to_vec(), tokens[split..].to_vec());
+    }
+    let mut leading = None;
+    let mut trailing = Vec::new();
     let mut visible = false;
     for token in tokens {
-        if token == "pageBreak" {
-            if visible || leading {
-                return true;
+        if matches!(token, "pageBreak" | "columnBreak") {
+            if visible || leading.is_some() {
+                trailing.push(token);
+            } else {
+                leading = Some(token);
             }
-            leading = true;
         } else {
             visible = true;
         }
     }
-    false
+    (
+        leading
+            .filter(|kind| *kind == "columnBreak")
+            .into_iter()
+            .collect(),
+        trailing,
+    )
 }
 
 fn modifier(value: &str) -> f64 {
@@ -2371,6 +2645,7 @@ fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
     }
     let content = array(field(Some(cell), "content"));
     ProjectedCell {
+        paragraph_formatting: None,
         attrs,
         content: if content.is_empty() {
             vec![json!({ "type": "paragraph", "content": [] })]
@@ -2380,14 +2655,125 @@ fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
     }
 }
 
+struct TableStyleContext<'a> {
+    column_count: usize,
+    style: Option<&'a Value>,
+    borders: Option<&'a Value>,
+    margins: Option<&'a Value>,
+    theme: Option<&'a Value>,
+}
+
+fn table_column_count(table: &Value) -> usize {
+    array(field(Some(table), "rows"))
+        .iter()
+        .map(|row| {
+            let row_formatting = field(Some(row), "formatting");
+            let omitted = number(field(row_formatting, "gridBefore")).unwrap_or(0.0) as usize
+                + number(field(row_formatting, "gridAfter")).unwrap_or(0.0) as usize;
+            omitted
+                + array(field(Some(row), "cells"))
+                    .iter()
+                    .map(|cell| {
+                        number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
+                            as usize
+                    })
+                    .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(array(field(Some(table), "columnWidths")).len())
+}
+
+fn table_cell_paragraph_formatting(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+) -> Option<Value> {
+    let mut result = field(style, "pPr").cloned();
+    let parts = array(field(style, "tblStylePr"));
+    if !parts.iter().any(|part| field(Some(part), "pPr").is_some()) {
+        return result;
+    }
+    let formatting = field(Some(table), "formatting");
+    let style_formatting = field(style, "tblPr");
+    let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
+    let mask = string(field(look, "value"))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
+    let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
+    let first_row = flag("firstRow", 0x20);
+    let last_row = flag("lastRow", 0x40);
+    let first_column = flag("firstColumn", 0x80);
+    let last_column = flag("lastColumn", 0x100);
+    let rows = array(field(Some(table), "rows"));
+    let grid_before = number(field(
+        field(rows.get(row_index), "formatting"),
+        "gridBefore",
+    ))
+    .unwrap_or(0.0) as usize;
+    let start_column = start_column + grid_before;
+    let end_column = end_column + grid_before;
+    let at_first_row = first_row && row_index == 0;
+    let at_last_row = last_row && row_index + 1 == rows.len();
+    let at_first_column = first_column && start_column == 0;
+    let at_last_column = last_column && end_column == columns;
+    let band_size = |key| {
+        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(1.0)
+    };
+    let row_band_size = band_size("styleRowBandSize");
+    let column_band_size = band_size("styleColBandSize");
+    let mut regions = Vec::new();
+    if !flag("noHBand", 0x200) && !at_first_row && !at_last_row && row_band_size > 0.0 {
+        let band =
+            (row_index.saturating_sub(usize::from(first_row)) as f64 / row_band_size).floor();
+        regions.push(if band % 2.0 == 0.0 {
+            "band1Horz"
+        } else {
+            "band2Horz"
+        });
+    }
+    if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
+        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
+            / column_band_size)
+            .floor();
+        regions.push(if band % 2.0 == 0.0 {
+            "band1Vert"
+        } else {
+            "band2Vert"
+        });
+    }
+    for (region, active) in [
+        ("firstCol", at_first_column),
+        ("lastCol", at_last_column),
+        ("firstRow", at_first_row),
+        ("lastRow", at_last_row),
+        ("nwCell", at_first_row && at_first_column),
+        ("neCell", at_first_row && at_last_column),
+        ("swCell", at_last_row && at_first_column),
+        ("seCell", at_last_row && at_last_column),
+    ] {
+        if active {
+            regions.push(region);
+        }
+    }
+    for region in regions {
+        let conditional = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some(region));
+        result = merge_paragraph_formatting(result.as_ref(), field(conditional, "pPr"));
+    }
+    result
+}
+
 fn project_row(
     row: &Value,
     table: &Value,
     row_index: usize,
     row_spans: &BTreeMap<(usize, usize), (usize, bool)>,
-    table_borders: Option<&Value>,
-    default_margins: Option<&Value>,
-    theme: Option<&Value>,
+    style_context: &TableStyleContext<'_>,
 ) -> ProjectedRow {
     let formatting = field(Some(row), "formatting");
     let mut attrs = map_from_value(json!({
@@ -2454,7 +2840,7 @@ fn project_row(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
-        cells.push(project_cell(
+        let mut projected = project_cell(
             cell,
             CellOptions {
                 is_header: row_index == 0
@@ -2468,12 +2854,21 @@ fn project_row(
                 last_row: row_index + 1 == rows.len(),
                 first_column: start_column == 0,
                 last_column: column == total_columns,
-                table_borders,
-                default_margins,
-                theme,
+                table_borders: style_context.borders,
+                default_margins: style_context.margins,
+                theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
-        ));
+        );
+        projected.paragraph_formatting = table_cell_paragraph_formatting(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+        );
+        cells.push(projected);
     }
     if cells.is_empty() {
         let synthetic = if total_columns > 1 {
@@ -2488,7 +2883,7 @@ fn project_row(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
-        cells.push(project_cell(
+        let mut projected = project_cell(
             &synthetic,
             CellOptions {
                 is_header: row_index == 0
@@ -2502,12 +2897,21 @@ fn project_row(
                 last_row: row_index + 1 == rows.len(),
                 first_column: true,
                 last_column: true,
-                table_borders,
-                default_margins,
-                theme,
+                table_borders: style_context.borders,
+                default_margins: style_context.margins,
+                theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
-        ));
+        );
+        projected.paragraph_formatting = table_cell_paragraph_formatting(
+            table,
+            style_context.style,
+            row_index,
+            0,
+            total_columns,
+            style_context.column_count,
+        );
+        cells.push(projected);
     }
     ProjectedRow {
         attrs: structural_attrs(attrs, &[]),
@@ -2515,7 +2919,12 @@ fn project_row(
     }
 }
 
-fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -> ProjectedTable {
+fn project_table(
+    table: &Value,
+    styles: &StyleResolver,
+    theme: Option<&Value>,
+    compatibility_mode: u8,
+) -> ProjectedTable {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -2590,6 +2999,11 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         "cellMargins": default_margins,
         "look": nullish(field(formatting, "look")),
         "bidi": truthy(field(formatting, "bidi")).then_some(true),
+        "compatibilityMode": if compatibility_mode == 12 {
+            Value::Null
+        } else {
+            json!(compatibility_mode as f64)
+        },
         "_originalFormatting": Value::Object(original_formatting)
     }));
     if !array(field(Some(table), "propertyChanges")).is_empty() {
@@ -2599,6 +3013,7 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         );
     }
     let row_spans = calculate_row_spans(table);
+    let column_count = table_column_count(table);
     let rows = array(field(Some(table), "rows"))
         .iter()
         .enumerate()
@@ -2608,9 +3023,13 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
                 table,
                 row_index,
                 &row_spans,
-                borders,
-                default_margins.as_ref(),
-                theme,
+                &TableStyleContext {
+                    column_count,
+                    style: table_style.or(default_style),
+                    borders,
+                    margins: default_margins.as_ref(),
+                    theme,
+                },
             )
         })
         .collect();
@@ -2619,6 +3038,106 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
 
 fn table_cell_story_id(parent: &str, table: usize, row: usize, cell: usize) -> String {
     format!("{parent}:t{table}:r{row}c{cell}")
+}
+
+/// Hands each block of a story the identity `visit_story` seeds it with.
+#[derive(Clone, Copy, Default)]
+struct BlockCursor {
+    paragraph: usize,
+    table: usize,
+    sdt: usize,
+}
+
+impl BlockCursor {
+    fn take(&mut self, story_id: &str, block: &Value) -> Option<String> {
+        match string(field(Some(block), "type")).unwrap_or_default() {
+            "rawXml" => None,
+            "paragraph" => {
+                let id = string(field(Some(block), "paraId"))
+                    .filter(|value| !value.is_empty())
+                    .map_or_else(|| format!("{story_id}:p{}", self.paragraph), str::to_owned);
+                self.paragraph += 1;
+                Some(id)
+            }
+            "table" => {
+                let id = format!("{story_id}:t{}", self.table);
+                self.table += 1;
+                Some(id)
+            }
+            _ => {
+                let id = format!("{story_id}:sdt{}", self.sdt);
+                self.sdt += 1;
+                Some(id)
+            }
+        }
+    }
+}
+
+/// How many story blocks a suppressed field's cached result duplicates.
+fn cached_result_block_count(data: &Value) -> Option<usize> {
+    let blocks = array(field(field(Some(data), "structuredResult"), "blocks"));
+    blocks
+        .last()
+        .is_some_and(|block| {
+            string(field(Some(block), "type")) == Some("paragraph")
+                && array(field(Some(block), "content")).is_empty()
+        })
+        .then(|| blocks.len())
+}
+
+/// Binds each suppressed field to the story blocks its cached result duplicates.
+fn bind_field_result_blocks(
+    units: &mut [InlineUnit],
+    story_id: &str,
+    blocks: &[Value],
+    owner: usize,
+    after_owner: BlockCursor,
+    table_ids: &mut BTreeMap<usize, String>,
+) {
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &mut unit.content else {
+            continue;
+        };
+        // `instruction` is the key the render side suppresses on.
+        if kind.as_str() != "field"
+            || !numeric_field_instruction(
+                payload
+                    .get("instruction")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        {
+            continue;
+        }
+        let Some(count) = payload
+            .get("fieldData")
+            .and_then(Value::as_str)
+            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+            .as_ref()
+            .and_then(cached_result_block_count)
+        else {
+            continue;
+        };
+        let Some(duplicated) = blocks.get(owner + 1..owner + 1 + count) else {
+            continue;
+        };
+        let mut cursor = after_owner;
+        let mut ids = Vec::with_capacity(duplicated.len());
+        for (offset, block) in duplicated.iter().enumerate() {
+            let is_table = string(field(Some(block), "type")) == Some("table");
+            let Some(id) = cursor.take(story_id, block) else {
+                continue;
+            };
+            if is_table {
+                table_ids.insert(owner + 1 + offset, id.clone());
+            }
+            ids.push(Value::String(id));
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        payload.insert("fieldResultBlocks".to_owned(), Value::Array(ids));
+    }
 }
 
 fn add_comment_coverage(plan: &mut StoryPlan) {
@@ -2665,50 +3184,71 @@ fn visit_story(
         units: Vec::new(),
         comment_coverage: Vec::new(),
     });
+    let empty_story;
     let blocks = if source_blocks.is_empty() {
-        vec![json!({ "type": "paragraph", "content": [] })]
+        empty_story = [json!({ "type": "paragraph", "content": [] })];
+        &empty_story[..]
     } else {
-        source_blocks.to_vec()
+        source_blocks
     };
-    let mut table_index = 0usize;
-    let mut sdt_index = 0usize;
-    let mut paragraph_index = 0usize;
+    let mut cursor = BlockCursor::default();
+    let mut result_table_ids = BTreeMap::new();
     let mut last_kind = None;
-    for block in blocks {
-        match string(field(Some(&block), "type")).unwrap_or_default() {
+    for (block_index, block) in blocks.iter().enumerate() {
+        let position = cursor;
+        let Some(block_id) = cursor.take(&story_id, block) else {
+            continue;
+        };
+        match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
-                let (units, mut ppr) =
-                    paragraph_units(&block, &context.styles, None, &context.source_json);
-                let fallback = format!("{story_id}:p{paragraph_index}");
-                ppr.insert(
-                    "paraId".to_owned(),
-                    Value::String(
-                        string(field(Some(&block), "paraId"))
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or(&fallback)
-                            .to_owned(),
-                    ),
+                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
+                if options.include_page_breaks {
+                    for kind in leading_breaks {
+                        context.plans[plan_index].units.push(embed_unit(
+                            kind,
+                            JsonObject::new(),
+                            &[],
+                            None,
+                            1,
+                        ));
+                    }
+                }
+                let (mut units, mut ppr) =
+                    paragraph_units(block, &context.styles, None, &context.source_json);
+                ppr.insert("paraId".to_owned(), Value::String(block_id));
+                bind_field_result_blocks(
+                    &mut units,
+                    &story_id,
+                    blocks,
+                    block_index,
+                    cursor,
+                    &mut result_table_ids,
                 );
                 context.plans[plan_index].units.extend(units);
                 context.plans[plan_index]
                     .units
                     .push(embed_unit("pilcrow", ppr, &[], None, 1));
-                paragraph_index += 1;
-                if options.include_page_breaks && paragraph_has_non_leading_page_break(&block) {
-                    context.plans[plan_index].units.push(embed_unit(
-                        "pageBreak",
-                        JsonObject::new(),
-                        &[],
-                        None,
-                        1,
-                    ));
+                if options.include_page_breaks {
+                    for kind in trailing_breaks {
+                        context.plans[plan_index].units.push(embed_unit(
+                            kind,
+                            JsonObject::new(),
+                            &[],
+                            None,
+                            1,
+                        ));
+                    }
                 }
                 last_kind = Some("paragraph");
             }
             "table" => {
-                let current_table = table_index;
-                table_index += 1;
-                let table = project_table(&block, &context.styles, context.theme.as_ref());
+                let current_table = position.table;
+                let table = project_table(
+                    block,
+                    &context.styles,
+                    context.theme.as_ref(),
+                    context.compatibility_mode,
+                );
                 let rows: Vec<Value> = table
                     .rows
                     .iter()
@@ -2740,19 +3280,21 @@ fn visit_story(
                     .into_iter()
                     .map(drop_nulls)
                     .collect::<Vec<_>>();
-                context.plans[plan_index].units.push(embed_unit(
-                    "table",
-                    map_from_value(json!({
-                        "tblPr": value_from_map(&tbl_pr),
-                        "grid": grid,
-                        "rows": rows
-                    })),
-                    &[],
-                    None,
-                    1,
-                ));
+                let mut payload = map_from_value(json!({
+                    "tblPr": value_from_map(&tbl_pr),
+                    "grid": grid,
+                    "rows": rows
+                }));
+                if let Some(id) = result_table_ids.remove(&block_index) {
+                    payload.insert("blockId".to_owned(), Value::String(id));
+                }
+                context.plans[plan_index]
+                    .units
+                    .push(embed_unit("table", payload, &[], None, 1));
+                let previous_table_formatting = context.styles.table_paragraph_formatting.take();
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
+                        context.styles.table_paragraph_formatting = cell.paragraph_formatting;
                         visit_story(
                             context,
                             table_cell_story_id(&story_id, current_table, row_index, cell_index),
@@ -2765,14 +3307,13 @@ fn visit_story(
                         );
                     }
                 }
+                context.styles.table_paragraph_formatting = previous_table_formatting;
                 last_kind = Some("table");
             }
             _ => {
-                let current_sdt = sdt_index;
-                sdt_index += 1;
-                let child_story = format!("{story_id}:sdt{current_sdt}");
+                let child_story = block_id;
                 let mut properties = sdt_properties_attrs(
-                    field(Some(&block), "properties").unwrap_or(&Value::Null),
+                    field(Some(block), "properties").unwrap_or(&Value::Null),
                     &context.source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
@@ -2786,7 +3327,7 @@ fn visit_story(
                 visit_story(
                     context,
                     child_story,
-                    array(field(Some(&block), "content")),
+                    array(field(Some(block), "content")),
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
@@ -2802,7 +3343,7 @@ fn visit_story(
             "pilcrow",
             map_from_value(json!({
                 "hangingIndent": false,
-                "paraId": format!("{story_id}:p{paragraph_index}")
+                "paraId": format!("{story_id}:p{}", cursor.paragraph)
             })),
             &[],
             None,
@@ -2984,8 +3525,9 @@ pub(crate) fn referenced_fonts(
 
 pub fn seed_parsed_docx(
     document: &EditingDoc,
-    envelope: docx_parse::S9WireEnvelope,
+    mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
+    envelope.document.package.media_entries.clear();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3004,11 +3546,13 @@ pub fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
         theme: field(Some(package), "theme").cloned(),
         source_json: Arc::new(source_json),
         plans: Vec::new(),
+        compatibility_mode,
     };
     visit_story(
         &mut context,
@@ -3125,7 +3669,604 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    fn seed_body(blocks: &[Value]) -> EditingDoc {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+            compatibility_mode: 12,
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            blocks,
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: false,
+                seed_comments: false,
+            },
+        );
+        let document = EditingDoc::new(74101);
+        document
+            .create_empty_stories(
+                &context
+                    .plans
+                    .iter()
+                    .map(|plan| plan.story_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let batches = context
+            .plans
+            .into_iter()
+            .map(|plan| {
+                let (story_id, ops, _) = seed_plan(plan).unwrap();
+                (story_id, ops)
+            })
+            .collect();
+        document
+            .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+            .unwrap();
+        document
+    }
+
+    fn rendered(document: &EditingDoc) -> (usize, String) {
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            document,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&blocks).unwrap();
+        (blocks.len(), json)
+    }
+
+    fn run(text: &str) -> Value {
+        json!({"type":"run","content":[{"type":"text","text":text}]})
+    }
+
+    fn block_field(instruction: &str, blocks: &[Value]) -> Value {
+        json!({
+            "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
+            "fieldCode":[], "fieldResult":[run("Cached first")],
+            "structuredResult":{
+                "inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],
+                "blocks":blocks
+            }
+        })
+    }
+
+    #[test]
+    fn numeric_fields_hide_cached_paragraphs_without_changing_the_story() {
+        // `w14:paraId` is optional and plenty of real documents carry none, so
+        // the binding cannot key on it.
+        for (instruction, para_ids) in [("0", true), ("TOC", true), ("0", false), ("TOC", false)] {
+            let id = |name: &str| if para_ids { json!(name) } else { json!(null) };
+            let cached =
+                json!({"type":"paragraph","paraId":id("cached"),"content":[run("Cached second") ]});
+            let end = json!({"type":"paragraph","paraId":id("end"),"content":[]});
+            let field = block_field(instruction, &[cached.clone(), end.clone()]);
+            let document = seed_body(&[
+                json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
+                cached,
+                end,
+                json!({"type":"paragraph","paraId":id("after"),"content":[run("After")]}),
+            ]);
+            let before = crate::story_checksum(&document, "body").unwrap();
+            let (count, output) = rendered(&document);
+            let label = format!("{instruction} paraIds={para_ids}");
+            assert_eq!(count, if instruction == "0" { 2 } else { 4 }, "{label}");
+            assert_eq!(output.contains("Cached"), instruction != "0", "{label}");
+            assert!(output.contains("After"), "{label}");
+            assert_eq!(
+                before,
+                crate::story_checksum(&document, "body").unwrap(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_fields_hide_non_paragraph_cached_blocks() {
+        for instruction in ["0", "TOC"] {
+            let cell = json!({"type":"tableCell","content":[
+                json!({"type":"paragraph","content":[run("Cached cell")]})
+            ]});
+            let table = json!({"type":"table","rows":[{"type":"tableRow","cells":[cell]}]});
+            let sdt = json!({"type":"blockSdt","properties":{},"content":[
+                json!({"type":"paragraph","content":[run("Cached sdt")]})
+            ]});
+            let end = json!({"type":"paragraph","content":[]});
+            let field = block_field(instruction, &[table.clone(), sdt.clone(), end.clone()]);
+            let document = seed_body(&[
+                json!({"type":"paragraph","content":[field]}),
+                table,
+                sdt,
+                end,
+                json!({"type":"paragraph","content":[run("After")]}),
+            ]);
+            let before = crate::story_checksum(&document, "body").unwrap();
+            let (count, output) = rendered(&document);
+            assert_eq!(
+                count,
+                if instruction == "0" { 2 } else { 5 },
+                "{instruction}"
+            );
+            assert_eq!(
+                output.contains("Cached"),
+                instruction != "0",
+                "{instruction}"
+            );
+            assert!(output.contains("After"), "{instruction}");
+            assert_eq!(
+                before,
+                crate::story_checksum(&document, "body").unwrap(),
+                "{instruction}"
+            );
+        }
+    }
+
+    #[test]
+    fn splitting_a_cached_paragraph_shows_the_authored_half_only() {
+        let cached = json!({"type":"paragraph","content":[run("Cached second")]});
+        let end = json!({"type":"paragraph","content":[]});
+        let document = seed_body(&[
+            json!({"type":"paragraph","content":[block_field("0", &[cached.clone(), end.clone()])]}),
+            cached,
+            end,
+            json!({"type":"paragraph","content":[run("After")]}),
+        ]);
+        assert_eq!(rendered(&document).0, 2);
+        // The field embed, the owner's pilcrow, then the cached text: pressing
+        // Enter at the end of the cached paragraph and typing into the new one.
+        let cached_pilcrow = 2 + "Cached second".encode_utf16().count() as u32;
+        let ctx = EditCtx::local("Ada".to_owned(), "2026-01-01T00:00:00Z".to_owned());
+        document
+            .split_paragraph(&ctx, crate::Position::new("body", cached_pilcrow), None)
+            .unwrap();
+        document
+            .insert_text(
+                &ctx,
+                crate::Position::new("body", cached_pilcrow + 1),
+                "Authored",
+                crate::FormatPolicy::Plain,
+            )
+            .unwrap();
+        let (count, output) = rendered(&document);
+        assert_eq!(count, 3);
+        assert!(output.contains("Authored"));
+        assert!(output.contains("After"));
+        assert!(!output.contains("Cached"));
+    }
+
+    #[test]
+    fn numeric_field_detection_preserves_formulas_and_named_fields() {
+        assert!(numeric_field_instruction(" 123 "));
+        for instruction in ["", "= 0", "QUOTE 0", "PAGE", "CustomField", "123abc"] {
+            assert!(!numeric_field_instruction(instruction));
+        }
+    }
+
+    #[test]
+    fn complex_field_results_keep_hyperlink_units_and_style() {
+        let link = json!({"type":"hyperlink","anchor":"_Toc1","children":[{"type":"run","formatting":{"styleId":"Hyperlink"},"content":[{"type":"text","text":"Heading"}]}]});
+        let value = json!({"type":"complexField","fieldType":"TOC","instruction":"TOC", "fieldCode":[], "fieldResult":link["children"], "structuredResult":{"inline":[link, {"type":"simpleField","fieldType":"PAGE","instruction":" PAGE ","content":[{"type":"run","content":[{"type":"text","text":"1"}]}]}]}});
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
+        ));
+        let (units, _) =
+            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new());
+        assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
+        assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
+        assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
+        let UnitContent::Embed {
+            payload: nested, ..
+        } = &units[1].content
+        else {
+            panic!("missing nested field")
+        };
+        assert_eq!(nested["fieldType"], json!("PAGE"));
+        let UnitContent::Embed { payload, .. } = &units[2].content else {
+            panic!("missing field")
+        };
+        assert_eq!(payload["displayText"], json!(""));
+        assert!(
+            payload["fieldData"]
+                .as_str()
+                .unwrap()
+                .contains("structuredResult")
+        );
+    }
+
+    #[test]
+    fn comprehensive_native_layout_accepts_authored_page_number_start() {
+        let bytes = include_bytes!(
+            "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+        );
+        let parsed =
+            docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default()).unwrap();
+        let package = parsed.document.package;
+        let mut sections: Vec<Value> = package
+            .document
+            .sections
+            .unwrap()
+            .into_iter()
+            .map(|section| json!({"properties":section.properties}))
+            .collect();
+        assert!(
+            sections.iter().any(
+                |section| section["properties"]["pageNumbering"]["start"].as_f64() == Some(1.0)
+            )
+        );
+        sections.push(json!({"properties":package.document.final_section_properties}));
+        let request = json!({"bodyStory":"body", "options":{"pageGap":24}, "regions":{"sections":sections, "settings":package.settings}, "renderEnv":{}}).to_string();
+        let engine = crate::EngineSession::new(74003);
+        seed_from_docx(engine.doc(), bytes).unwrap();
+        engine.layout_font_requirements_json(&request).unwrap();
+        let layout: Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        assert!(!layout["layout"]["pages"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn raw_blocks_seed_no_content_control_or_child_story() {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+            compatibility_mode: 12,
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            &[
+                json!({"type":"paragraph","content":[]}),
+                json!({"type":"rawXml","xml":"<x:block/>"}),
+                json!({"type":"paragraph","content":[]}),
+            ],
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: true,
+                seed_comments: true,
+            },
+        );
+        assert_eq!(context.plans.len(), 1);
+        assert_eq!(context.plans[0].units.len(), 2);
+        assert!(context.plans[0].units.iter().all(
+            |unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow")
+        ));
+    }
+
+    #[test]
+    fn raw_inline_nodes_leave_run_boundaries_intact() {
+        let (_, properties) = paragraph_units(
+            &json!({"content":[
+                {"type":"run","content":[{"type":"text","text":"A"}]},
+                {"type":"rawXml","xml":"<x:mark/>"},
+                {"type":"run","content":[{"type":"text","text":"B"}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            properties["_originalRunBoundaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn numbering_indents_precede_styles_and_ignore_zero_first_line() {
+        let style_data = json!({"styles":[{"styleId":"List","type":"paragraph","pPr":{"indentLeft":720,"indentFirstLine":180,"hangingIndent":false}}]});
+        for styles in [
+            StyleResolver::new(Some(&style_data)),
+            StyleResolver::new(None),
+        ] {
+            for direct in [
+                json!({}),
+                json!({"indentFirstLine":0}),
+                json!({"indentFirstLine":0,"hangingIndent":true}),
+            ] {
+                let mut formatting = direct;
+                formatting["styleId"] = json!("List");
+                let properties = paragraph_attrs(
+                    &json!({"formatting":formatting,"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                    &styles,
+                    &[],
+                    &[],
+                    None,
+                );
+                assert_eq!(properties["indentLeft"], json!(1440));
+                assert_eq!(properties["indentFirstLine"], json!(-360));
+                assert_eq!(properties["hangingIndent"], json!(true));
+            }
+            let properties = paragraph_attrs(
+                &json!({"formatting":{"styleId":"List","indentLeft":0,"indentFirstLine":240,"hangingIndent":false},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                &styles,
+                &[],
+                &[],
+                None,
+            );
+            assert_eq!(properties["indentLeft"], json!(0));
+            assert_eq!(properties["indentFirstLine"], json!(240));
+            assert_eq!(properties["hangingIndent"], json!(false));
+        }
+    }
+
+    #[test]
+    fn first_line_value_and_kind_share_one_source() {
+        let hanging_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":-730,"hangingIndent":true}}]}),
+        ));
+        let first_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":720}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":720},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160));
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":720,"indentFirstLine":0},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":1425},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(1425));
+        assert_eq!(properties["indentFirstLine"], json!(-730));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":-720,"hangingIndent":true},"content":[]}),
+            &first_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":720},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"indentLeft":1440,"indentFirstLine":300},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(300));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":0},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":-720,"hangingIndent":true},"listRendering":{"indentLeft":2145},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2145));
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn derived_first_line_without_flag_clears_base_hanging() {
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":200}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(200));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":0}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":200}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":-360,"hangingIndent":true}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn indent_kind_pairs_merge_atomically_including_zero() {
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentFirstLine":200});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let derived = json!({"indentFirstLine":0});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(0));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":200});
+        let derived = json!({"hangingIndent":true});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentLeft":720});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(-730));
+        assert_eq!(merged["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn parsed_indent_xml_seeds_matching_attrs() {
+        fn ppr(xml: &str) -> Value {
+            let limits = docx_parse::xml::ParseLimits::default();
+            let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+            let root = docx_parse::xml::parse_xml(xml.as_bytes(), "formatting.xml", &mut budget)
+                .unwrap()
+                .root()
+                .unwrap()
+                .clone();
+            serde_json::to_value(docx_parse::parse_paragraph_properties(Some(&root), None).unwrap())
+                .unwrap()
+        }
+        let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
+        assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
+        assert_eq!(style_ppr["hangingIndent"], json!(true));
+        let direct_ppr = ppr(r#"<w:pPr><w:ind w:left="2160" w:firstLine="720"/></w:pPr>"#);
+        assert_eq!(direct_ppr["indentFirstLine"], json!(720.0));
+        assert!(direct_ppr.get("hangingIndent").is_none());
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":style_ppr}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting": direct_ppr, "content": []}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160.0));
+        assert_eq!(properties["indentFirstLine"], json!(720.0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+    }
+
+    #[test]
+    fn numbering_level_marker_format_preserves_explicit_off() {
+        let styles = StyleResolver::new(None);
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"marker":"1.","numFmt":"decimal","markerBold":false,"markerItalic":false,"markerColor":{"rgb":"000000"},"markerFontFamily":"Times New Roman","markerFontSize":12.0},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["listMarker"], json!("1."));
+        assert_eq!(properties["listMarkerBold"], json!(false));
+        assert_eq!(properties["listMarkerItalic"], json!(false));
+        assert_eq!(properties["listMarkerColor"], json!({"rgb":"000000"}));
+        assert_eq!(properties["listMarkerFontFamily"], json!("Times New Roman"));
+        assert_eq!(properties["listMarkerFontSize"], json!(12.0));
+    }
+
     use super::*;
+
+    #[test]
+    fn resolved_images_and_fonts_survive_media_projection() {
+        let src = "data:image/png;base64,AQID";
+        for with_field in [false, true] {
+            let mut envelope = parse_docx_for_edit(include_bytes!(
+                "../../../apps/demo/public/betteroffice-demo.docx"
+            ))
+            .unwrap();
+            let mut content = vec![json!({
+                "type": "run",
+                "formatting": {"fontFamily": {"ascii": "Image Caption"}},
+                "content": [{"type": "drawing", "image": {
+                    "type": "image", "rId": "rIdImage", "src": src,
+                    "size": {"width": 914400, "height": 457200},
+                    "wrap": {"type": "inline"}
+                }}]
+            })];
+            if with_field {
+                content.push(json!({
+                    "type": "simpleField", "instruction": " PAGE ", "fieldType": "PAGE",
+                    "content": [{"type": "run", "content": [{"type": "text", "text": "1"}]}]
+                }));
+            }
+            envelope.document.package.document.content = serde_json::from_value(json!([{
+                "type": "paragraph", "paraId": "image", "content": content
+            }]))
+            .unwrap();
+            envelope.document.package.media_entries = vec![(
+                "word/media/image.png".to_owned(),
+                Arc::new(docx_parse::media::MediaFile {
+                    path: "word/media/image.png".to_owned(),
+                    filename: Some("image.png".to_owned()),
+                    mime_type: "image/png".to_owned(),
+                    base64: "AQID".to_owned(),
+                    data_url: src.to_owned(),
+                }),
+            )];
+            let mut without_media = envelope.clone();
+            without_media.document.package.media_entries.clear();
+            let with_media_doc = EditingDoc::new(7);
+            let without_media_doc = EditingDoc::new(7);
+            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
+            assert_eq!(
+                fonts,
+                seed_parsed_docx(&without_media_doc, without_media).unwrap()
+            );
+            assert!(fonts.iter().any(|font| font == "Image Caption"));
+            assert_eq!(
+                with_media_doc.encode_state_as_update_v1(),
+                without_media_doc.encode_state_as_update_v1()
+            );
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &with_media_doc,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("image paragraph must remain a paragraph");
+            };
+            assert!(paragraph.runs.iter().any(|run| {
+                matches!(run, docx_layout::types::Run::Image(image)
+                    if image.src == src && image.width == 96.0 && image.height == 48.0)
+            }));
+        }
+    }
 
     #[test]
     fn source_json_preserves_wire_order_with_js_number_formatting() {
@@ -3164,6 +4305,54 @@ mod tests {
         )
         .get("widowControl")
         .cloned()
+    }
+
+    fn snap_grid_styles() -> Value {
+        json!({
+            "docDefaults": { "pPr": {} },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "snapToGrid": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "snapToGrid": true } }
+            ]
+        })
+    }
+
+    fn seeded_snap_to_grid(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("snapToGrid")
+        .cloned()
+    }
+
+    #[test]
+    fn snap_to_grid_is_seeded_from_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&snap_grid_styles()));
+
+        assert_eq!(seeded_snap_to_grid(&styles, json!({})), Some(Value::Null));
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body", "snapToGrid": true })),
+            Some(Value::Bool(true)),
+            "a direct on overrides a style that opts out"
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote", "snapToGrid": false })),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
     }
 
     #[test]
@@ -3209,14 +4398,83 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
-            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            assert!(units.is_empty());
+            let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
             );
             assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn flow_breaks_land_in_the_run_boundary_at_their_text_offset() {
+        let styles = StyleResolver::new(None);
+        let wrapping = json!({
+            "type": "run",
+            "content": [
+                { "type": "text", "text": "AB" },
+                { "type": "break", "breakType": "page" },
+                { "type": "break", "breakType": "textWrapping" },
+            ],
+        });
+        let units = run_to_units(&wrapping, None, &styles, None, &[], &BTreeMap::new());
+        // A wrapping break is an inline unit, so the run keeps no boundary.
+        assert!(run_boundary(&wrapping, &units, &BTreeMap::new()).is_none());
+
+        let run = json!({
+            "type": "run",
+            "content": [
+                { "type": "text", "text": "AB" },
+                { "type": "break", "breakType": "page" },
+                { "type": "text", "text": "C" },
+                { "type": "break", "breakType": "column" },
+            ],
+        });
+        let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+        let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+        assert_eq!(boundary.get("text"), Some(&json!("ABC")));
+        assert_eq!(
+            boundary.get("breaks"),
+            Some(&json!([
+                { "offset": 2, "type": "page" },
+                { "offset": 3, "type": "column" },
+            ]))
+        );
+    }
+
+    #[test]
+    fn reused_run_units_keep_comments_out_of_saved_boundaries() {
+        let (units, ppr) = paragraph_units(
+            &json!({"content": [
+                {"type": "commentRangeStart", "id": 7},
+                {"type": "run", "formatting": {"bold": true}, "content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "tab"},
+                    {"type": "softHyphen"}
+                ]},
+                {"type": "commentRangeEnd", "id": 7},
+                {"type": "run", "content": [{"type": "footnoteRef", "id": 12}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 4);
+        assert!(
+            units[..3]
+                .iter()
+                .all(|unit| unit.comment_id.as_deref() == Some("7"))
+        );
+        assert!(units[3].comment_id.is_none());
+        assert_eq!(units[3].pm_size, 1);
+        let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
+        assert_eq!(boundaries[0]["marksKey"], "bold:{}");
+        assert_eq!(boundaries[1]["text"], "12");
     }
 
     #[test]

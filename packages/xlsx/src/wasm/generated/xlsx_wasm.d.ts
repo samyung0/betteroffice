@@ -18,6 +18,7 @@ export class XlsxDocument {
      * apply a raw op list as one user transaction; returns `SheetInfo` json.
      */
     applyOpsJson(transaction_json: string): string;
+    applyOpsProfiledJson(transaction_json: string): string;
     applyUpdateJson(update: Uint8Array): string;
     calculationStatusJson(): string;
     captureFormatJson(args: string): string;
@@ -39,6 +40,7 @@ export class XlsxDocument {
      * serialized `DisplayList` for a serialized `Viewport`.
      */
     displayListJson(viewport_json: string): string;
+    displayListProfiledJson(viewport_json: string): string;
     /**
      * Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
      */
@@ -47,6 +49,7 @@ export class XlsxDocument {
      * enter one cell edit; returns updated `SheetInfo` json.
      */
     editCellJson(args: string): string;
+    editCellProfiledJson(args: string): string;
     /**
      * enter a batch of cell edits as one undo step; returns `SheetInfo` json.
      */
@@ -73,6 +76,7 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     patchRangeStyleJson(args: string): string;
+    printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
      */
@@ -103,6 +107,7 @@ export class XlsxDocument {
      */
     saveBytes(): Uint8Array;
     saveBytesAt(now_serial: number): Uint8Array;
+    searchTextJson(args: string): string;
     selectionFormattingJson(args: string): string;
     /**
      * switch the active sheet by index.
@@ -145,6 +150,7 @@ export interface InitOutput {
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_applyOpsProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -155,8 +161,10 @@ export interface InitOutput {
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_drainUpdateEvent: (a: number) => [number, number, number, number];
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
@@ -168,6 +176,7 @@ export interface InitOutput {
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
@@ -177,6 +186,7 @@ export interface InitOutput {
     readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytesAt: (a: number, b: number) => [number, number, number, number];
+    readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];

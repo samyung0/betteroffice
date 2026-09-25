@@ -8,8 +8,10 @@
 //!
 //! Each block is processed in a fixed order: record a checkpoint if placement
 //! stands at a pristine page start; force a page when the block carries
-//! `w:pageBreakBefore`; at the head of a keep-with-next group, force a page when
-//! the group would otherwise straddle the boundary; then dispatch to the placer.
+//! `w:pageBreakBefore` or opens with a hard `w:br w:type="page"` run, either
+//! carrying the paragraph's space-before onto the new page; at the head of a
+//! keep-with-next group, force a page when the group would otherwise straddle
+//! the boundary; then dispatch to the placer.
 //! A section break reads the *next* section's configuration and break type,
 //! falling back to the current break's when the plan has no successor. Column
 //! balancing runs over the range up to the next section break, both at the start
@@ -32,8 +34,11 @@
 
 use crate::LayoutError;
 use crate::hooks;
+use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::page_flow::{PageFlowGeometry, Paginator};
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::paragraph_spacing::{
+    apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
+};
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
@@ -191,71 +196,6 @@ fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
         || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
-/// Suppresses spacing between adjacent same-style contextual paragraphs.
-fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
-    let (LayoutBlock::Paragraph(c), LayoutBlock::Paragraph(n)) = (curr, next) else {
-        return;
-    };
-    let same_style = c
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.style_id.as_deref())
-        .unwrap_or("")
-        == n.attrs
-            .as_ref()
-            .and_then(|attrs| attrs.style_id.as_deref())
-            .unwrap_or("");
-    if !same_style {
-        return;
-    }
-    if let Some(ca) = &mut c.attrs
-        && ca.contextual_spacing.unwrap_or(false)
-        && let Some(spacing) = &mut ca.spacing
-    {
-        spacing.after = Some(0.0);
-    }
-    if let Some(na) = &mut n.attrs
-        && na.contextual_spacing.unwrap_or(false)
-        && let Some(spacing) = &mut na.spacing
-    {
-        spacing.before = Some(0.0);
-    }
-}
-
-/// Applies contextual spacing recursively through table cells.
-fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
-    for i in 0..blocks.len().saturating_sub(1) {
-        let (head, tail) = blocks.split_at_mut(i + 1);
-        contextual_spacing_pair(&mut head[i], &mut tail[0]);
-    }
-    for block in blocks.iter_mut() {
-        if let LayoutBlock::Table(table) = block {
-            for row in &mut table.rows {
-                for cell in &mut row.cells {
-                    apply_contextual_spacing_blocks(&mut cell.blocks);
-                }
-            }
-        }
-    }
-}
-
-/// Applies contextual spacing across measured blocks.
-fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
-    for i in 0..measured.len().saturating_sub(1) {
-        let (head, tail) = measured.split_at_mut(i + 1);
-        contextual_spacing_pair(&mut head[i].block, &mut tail[0].block);
-    }
-    for mb in measured.iter_mut() {
-        if let LayoutBlock::Table(table) = &mut mb.block {
-            for row in &mut table.rows {
-                for cell in &mut row.cells {
-                    apply_contextual_spacing_blocks(&mut cell.blocks);
-                }
-            }
-        }
-    }
-}
-
 /// Converts measured blocks into positioned pages, discarding checkpoints.
 pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
     Ok(layout_document_checkpointed(input)?.layout)
@@ -299,12 +239,13 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     // group height must see contextual-spacing suppression (§17.3.1.9)
     apply_contextual_spacing_measured(measured);
 
-    let plan = prescan(
+    let mut plan = prescan(
         measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
 
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
@@ -317,6 +258,9 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(Some(restart)) = plan.section_page_restarts.first() {
+        paginator.restart_page_numbering(restart.start);
+    }
 
     let placement = place(
         measured,
@@ -357,7 +301,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 /// dependency shapes (floats, notes, structural edits) before entering here.
 pub fn layout_document_incremental(
     input: &mut Input,
-    previous_layout: &Layout,
+    previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
     previous_fingerprints: &[u64],
     next_fingerprints: &[u64],
@@ -391,19 +335,19 @@ pub fn layout_document_incremental(
         columns: options.columns.clone(),
     };
     apply_contextual_spacing_measured(&mut input.measured);
-    let plan = prescan(
+    let mut plan = prescan(
         &input.measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
     let resume = previous_checkpoints
         .iter()
         .rev()
         .find(|checkpoint| checkpoint.block_index <= dirty_index)
         .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
-    let prefix_pages = previous_layout.pages[..resume.page_index].to_vec();
     let prefix_checkpoints: Vec<_> = previous_checkpoints
         .iter()
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
@@ -415,13 +359,15 @@ pub fn layout_document_incremental(
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_index(resume.section_index);
+    // move retained pages out; restored on failure so the caller's stays valid
+    let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {
         previous_checkpoints,
         previous_fingerprints,
         next_fingerprints,
         dirty_index,
     };
-    let placement = place(
+    let placement = match place(
         &input.measured,
         &plan,
         &mut paginator,
@@ -430,7 +376,13 @@ pub fn layout_document_incremental(
         resume.section_index,
         resume.page_index,
         Some(&convergence),
-    )?;
+    ) {
+        Ok(placement) => placement,
+        Err(error) => {
+            previous_layout.pages = previous_pages;
+            return Err(error);
+        }
+    };
 
     let rebuilt_page_end = placement
         .converged
@@ -438,7 +390,7 @@ pub fn layout_document_incremental(
         .map_or(resume.page_index + paginator.pages.len(), |(next, _)| {
             next.page_index
         });
-    let mut pages = prefix_pages;
+    let mut pages: Vec<_> = previous_pages.drain(..resume.page_index).collect();
     pages.append(&mut paginator.pages);
     let mut checkpoints = prefix_checkpoints;
     checkpoints.extend(placement.checkpoints);
@@ -446,8 +398,8 @@ pub fn layout_document_incremental(
     if let Some((next_checkpoint, previous_checkpoint)) = placement.converged {
         debug_assert_eq!(pages.len(), next_checkpoint.page_index);
         let reused_page_start = pages.len();
-        pages.extend_from_slice(&previous_layout.pages[previous_checkpoint.page_index..]);
-        refresh_reused_paragraph_pages(&mut pages[reused_page_start..], &input.measured);
+        pages.extend(previous_pages.drain(previous_checkpoint.page_index - resume.page_index..));
+        refresh_reused_pages(&mut pages[reused_page_start..], &input.measured);
         let page_shift =
             next_checkpoint.page_index as isize - previous_checkpoint.page_index as isize;
         checkpoints.extend(
@@ -559,9 +511,10 @@ fn place(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
-        // pageBreakBefore forces a fresh page before the block is placed
-        if hooks::breaks_before_block(&mb.block)? {
-            paginator.force_page_break();
+        // pageBreakBefore, or a hard page-break run, forces a fresh page and
+        // keeps the paragraph's space-before net of the previous space-after
+        if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
+            paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh page when the
@@ -581,7 +534,7 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_page_break();
+                paginator.force_authored_page_break(false);
             }
         }
 
@@ -646,7 +599,7 @@ fn place(
             }
 
             LayoutBlock::PageBreak(_) => {
-                paginator.force_page_break();
+                paginator.force_authored_page_break(false);
             }
 
             LayoutBlock::ColumnBreak(_) => {
@@ -657,14 +610,41 @@ fn place(
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
                 let next_type = break_type_after_section(plan, section_idx);
+                let restart = plan
+                    .section_page_restarts
+                    .get(section_idx + 1)
+                    .copied()
+                    .flatten();
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
+                let restart_starts_page = restart.is_some()
+                    && crate::section_breaks::restart_starts_page(
+                        paginator,
+                        &next_section_config,
+                        next_type,
+                    );
+                let next_type = match (next_type, restart) {
+                    (Some(SectionBreakType::OddPage | SectionBreakType::EvenPage), _) => next_type,
+                    (_, Some(restart)) if restart.align_parity && restart_starts_page => {
+                        Some(if paginator.physical_parity_is_odd(restart.start) {
+                            SectionBreakType::OddPage
+                        } else {
+                            SectionBreakType::EvenPage
+                        })
+                    }
+                    _ => next_type,
+                };
                 let opened_column_region =
                     hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
                 paginator.set_section_index(section_idx + 1);
+                if let Some(restart) = restart
+                    && restart_starts_page
+                {
+                    paginator.restart_page_numbering(restart.start);
+                }
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
                 if opened_column_region
@@ -741,38 +721,76 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
 }
 
 /// Retained suffix pages keep their geometry but absolute document positions move
-/// after an earlier edit. Refresh paragraph fragment ranges and resolved run
-/// slices from the new measured arena before the display list consumes them.
-fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
-    let paragraphs: std::collections::HashMap<_, _> = measured
+/// after an earlier edit. Refresh fragment ranges and resolved run slices from
+/// the new measured arena before the display list consumes them.
+fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
+    let blocks: std::collections::HashMap<_, _> = measured
         .iter()
-        .filter_map(|measured| match (&measured.block, &measured.measure) {
-            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(extent)) => {
-                Some((block_id_key(&block.id), (block, extent)))
-            }
-            _ => None,
+        .filter_map(|measured| {
+            measured
+                .block
+                .block_id()
+                .map(|id| (block_id_key(id), measured))
         })
         .collect();
     for page in pages {
         for fragment in &mut page.fragments {
-            let Fragment::Paragraph(fragment) = fragment else {
+            let key = match fragment {
+                Fragment::Paragraph(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Table(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Image(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Shape(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Chart(fragment) => block_id_key(&fragment.block_id),
+                Fragment::TextBox(fragment) => block_id_key(&fragment.block_id),
+            };
+            let Some(measured) = blocks.get(&key) else {
                 continue;
             };
-            let Some((block, extent)) = paragraphs.get(&block_id_key(&fragment.block_id)) else {
-                continue;
-            };
-            (fragment.pm_start, fragment.pm_end) = get_paragraph_fragment_pm_range(
-                block,
-                extent,
-                fragment.from_line,
-                fragment.to_line,
-            );
-            fragment.resolved_lines = Some(build_resolved_lines(
-                block,
-                extent,
-                fragment.from_line,
-                fragment.to_line,
-            ));
+            match (fragment, &measured.block, &measured.measure) {
+                (
+                    Fragment::Paragraph(fragment),
+                    LayoutBlock::Paragraph(block),
+                    BlockExtent::Paragraph(extent),
+                ) => {
+                    (fragment.pm_start, fragment.pm_end) = get_paragraph_fragment_pm_range(
+                        block,
+                        extent,
+                        fragment.from_line,
+                        fragment.to_line,
+                    );
+                    fragment.resolved_lines = Some(build_resolved_lines(
+                        block,
+                        extent,
+                        fragment.from_line,
+                        fragment.to_line,
+                    ));
+                }
+                (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                (Fragment::Image(fragment), LayoutBlock::Image(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                (Fragment::Shape(fragment), LayoutBlock::Shape(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                    fragment.doc_start = block.doc_start;
+                    fragment.doc_end = block.doc_end;
+                }
+                (Fragment::Chart(fragment), LayoutBlock::Chart(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                    fragment.doc_start = block.doc_start;
+                    fragment.doc_end = block.doc_end;
+                }
+                (Fragment::TextBox(fragment), LayoutBlock::TextBox(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -811,9 +829,9 @@ fn build_resolved_lines(
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
-/// here. Widow and orphan control applies to paragraphs of at least four lines
-/// that do not turn `w:widowControl` off: a lone opening line moves the
-/// paragraph on when two lines would fit there, and a lone trailing line is
+/// here. Widow and orphan control keeps two- and three-line paragraphs together
+/// unless they turn `w:widowControl` off. For longer paragraphs, a lone opening
+/// line moves the paragraph on when two lines would fit there, and a lone trailing line is
 /// avoided by pushing one more line down, provided the fragment keeps more than
 /// two.
 ///
@@ -843,7 +861,7 @@ fn layout_paragraph(
         let fragment = Fragment::Paragraph(ParagraphFragment {
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
-            y: pen_y + space_before,
+            y: pen_y + paginator.leading_spacing(space_before),
             width: paginator.get_content_width(),
             height: 0.0,
             from_line: 0,
@@ -864,24 +882,17 @@ fn layout_paragraph(
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
     });
-    let widow_control = lines.len() >= 4
-        && block
-            .attrs
-            .as_ref()
-            .and_then(|attrs| attrs.widow_control)
-            .unwrap_or(true);
+    let widow_control = paragraph_widow_control(block, measure);
 
-    if block
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.keep_lines)
-        .unwrap_or(false)
-    {
+    if paragraph_is_unbreakable(block, measure) {
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
         let capacity = state.content_limit - state.content_top;
-        let required = space_before.max(state.deferred_spacing) + paragraph_height;
-        if required <= capacity && required > paginator.get_available_height() {
+        let required = paginator
+            .leading_spacing(space_before)
+            .max(state.deferred_spacing)
+            + paragraph_height;
+        if paragraph_height <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
     }
@@ -895,7 +906,9 @@ fn layout_paragraph(
 
         // Reserve leading space before fitting the first fragment.
         let reserved_before = if current_line_index == 0 {
-            space_before.max(deferred_spacing)
+            paginator
+                .leading_spacing(space_before)
+                .max(deferred_spacing)
         } else {
             0.0
         };
@@ -928,7 +941,7 @@ fn layout_paragraph(
                     sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
                 });
                 if reserved_before + first_two_height <= capacity {
-                    paginator.force_column_break();
+                    paginator.advance_for_overflow();
                     continue;
                 }
             }
@@ -1018,12 +1031,42 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
-/// Places a DrawingML shape by consuming its measured bbox in normal flow.
+/// Places anchored shapes at page coordinates.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
+    if block.position.is_some() {
+        let (x, y) = resolve_object_position(
+            block.position.as_ref(),
+            measure.width,
+            measure.height,
+            paginator,
+        );
+        let state_idx = paginator.get_current();
+        let column_x = paginator.get_column_x(paginator.state(state_idx).column_index);
+        paginator.push_fragment_direct(Fragment::Shape(ShapeFragment {
+            block_id: block.id.clone(),
+            wrap_offset_x: Some(x - column_x),
+            x,
+            y,
+            width: measure.width,
+            height: measure.height,
+            pm_start: block.pm_start,
+            pm_end: block.pm_end,
+            doc_start: block.doc_start,
+            doc_end: block.doc_end,
+            is_anchored: Some(true),
+            z_index: Some(if block.behind_doc.unwrap_or(false) {
+                -1.0
+            } else {
+                block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64
+            }),
+        }));
+        return;
+    }
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Shape(ShapeFragment {
         block_id: block.id.clone(),
+        wrap_offset_x: None,
         x: paginator.get_column_x(column_index),
         y: 0.0,
         width: measure.width,
@@ -1075,69 +1118,23 @@ fn resolve_object_position(
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
     let column_x = paginator.get_column_x(state.column_index);
-    if let Some(position) = position
-        && position.use_simple_pos.unwrap_or(false)
-        && let Some(simple) = position
-            .simple_pos
-            .as_ref()
-            .and_then(|value| value.as_object())
-    {
-        let x = simple
-            .get("x")
-            .and_then(|value| value.as_f64())
-            .filter(|value| value.is_finite())
-            .unwrap_or(column_x);
-        let y = simple
-            .get("y")
-            .and_then(|value| value.as_f64())
-            .filter(|value| value.is_finite())
-            .unwrap_or(state.pen_y);
-        return (x, y);
-    }
-
-    let coordinate = |spec: Option<&crate::types::AxisPosition>, horizontal: bool| {
-        let relative_to = spec
-            .and_then(|axis| axis.relative_to.as_deref())
-            .unwrap_or(if horizontal { "column" } else { "paragraph" });
-        let odd = page.number % 2 == 1;
-        let (start, end) = if horizontal {
-            match relative_to {
-                "page" => (0.0, page.size.w),
-                "margin" => (page.margins.left, page.size.w - page.margins.right),
-                "leftMargin" => (0.0, page.margins.left),
-                "rightMargin" => (page.size.w - page.margins.right, page.size.w),
-                "insideMargin" if odd => (0.0, page.margins.left),
-                "insideMargin" => (page.size.w - page.margins.right, page.size.w),
-                "outsideMargin" if odd => (page.size.w - page.margins.right, page.size.w),
-                "outsideMargin" => (0.0, page.margins.left),
-                _ => (column_x, column_x + paginator.column_width()),
-            }
-        } else {
-            match relative_to {
-                "page" => (0.0, page.size.h),
-                "margin" => (page.margins.top, page.size.h - page.margins.bottom),
-                "topMargin" => (0.0, page.margins.top),
-                "bottomMargin" => (page.size.h - page.margins.bottom, page.size.h),
-                _ => (state.pen_y, state.content_limit),
-            }
-        };
-        let extent = if horizontal { width } else { height };
-        if let Some(offset) = spec
-            .and_then(|axis| axis.pos_offset)
-            .filter(|value| value.is_finite())
-        {
-            return start + offset;
-        }
-        match spec.and_then(|axis| axis.align.as_deref()) {
-            Some("center") => start + (end - start - extent) / 2.0,
-            Some("right" | "bottom" | "outside") => end - extent,
-            Some("inside") if !odd => end - extent,
-            _ => start,
-        }
-    };
-    (
-        coordinate(position.and_then(|value| value.horizontal.as_ref()), true),
-        coordinate(position.and_then(|value| value.vertical.as_ref()), false),
+    crate::anchor::resolve_position(
+        position,
+        width,
+        height,
+        &crate::anchor::AnchorFrame {
+            page_width: page.size.w,
+            page_height: page.size.h,
+            margin_left: page.margins.left,
+            margin_right: page.margins.right,
+            margin_top: page.margins.top,
+            margin_bottom: page.margins.bottom,
+            flow_x: column_x,
+            flow_y: state.pen_y,
+            flow_width: paginator.column_width(),
+            flow_height: state.content_limit - state.pen_y,
+            odd_page: page.number % 2 == 1,
+        },
     )
 }
 
@@ -1310,6 +1307,198 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn a_standalone_break_paragraph_suppresses_leading_spacing_but_a_column_break_preserves_it() {
+        let mut value = input(vec![
+            paragraph(1, 1, 10.0, json!({})),
+            json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}}),
+            paragraph(2, 1, 10.0, json!({"spacing":{"before":20}})),
+            json!({"block":{"kind":"columnBreak","id":"column"},"measure":{"kind":"columnBreak"}}),
+            paragraph(3, 1, 10.0, json!({"spacing":{"before":20}})),
+        ]);
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 3);
+        let Fragment::Paragraph(after_page) = &result.pages[1].fragments[0] else {
+            panic!()
+        };
+        let Fragment::Paragraph(after_column) = &result.pages[2].fragments[0] else {
+            panic!()
+        };
+        assert_eq!(after_page.y, 10.0);
+        assert_eq!(after_column.y, 30.0);
+        let recorded = layout_document_checkpointed(&mut value).unwrap();
+        let checkpoint = recorded
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.page_index == 1)
+            .unwrap();
+        assert!(checkpoint.flow.leading_spacing_spent.is_infinite());
+    }
+
+    /// Measured against Word 16.113 (oxi-ja-policies-01 pages 40 and 45, and
+    /// hand-authored probes): a paragraph that breaks the page itself, by
+    /// `w:br w:type="page"` or by `w:pageBreakBefore`, keeps its space-before
+    /// on the new page, however full the previous page was.
+    #[test]
+    fn a_paragraph_that_breaks_its_own_page_keeps_leading_spacing() {
+        for attrs in [
+            json!({"spacing":{"before":20},"pageBreakBeforeRun":true}),
+            json!({"spacing":{"before":20},"pageBreakBefore":true}),
+        ] {
+            for filler in [1, 5, 9] {
+                let mut measured = vec![paragraph(0, filler, 10.0, json!({}))];
+                measured.push(paragraph(1, 1, 10.0, attrs.clone()));
+                let mut value = input(measured);
+                let result = layout_document(&mut value).unwrap();
+                assert_eq!(result.pages.len(), 2, "filler {filler}");
+                let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                    panic!()
+                };
+                assert_eq!(after_break.y, 30.0, "filler {filler}");
+                let recorded = layout_document_checkpointed(&mut value).unwrap();
+                let checkpoint = recorded
+                    .checkpoints
+                    .iter()
+                    .find(|checkpoint| checkpoint.page_index == 1)
+                    .unwrap();
+                assert_eq!(
+                    checkpoint.flow.leading_spacing_spent, 0.0,
+                    "filler {filler}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_automatic_page_break_discards_leading_spacing() {
+        for attrs in [
+            json!({"spacing":{"before":20}}),
+            json!({"spacing":{"before":20},"keepNext":true}),
+            json!({"spacing":{"before":20},"keepLines":true}),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 85.0, json!({"spacing":{"after":30}})),
+                paragraph(2, 1, 20.0, attrs),
+                paragraph(3, 1, 20.0, json!({})),
+            ]);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(heading) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            let Fragment::Paragraph(body) = &result.pages[1].fragments[1] else {
+                panic!()
+            };
+            assert_eq!(heading.y, 10.0);
+            assert_eq!(body.y, 30.0);
+        }
+    }
+
+    /// Measured against Word 16.113 (hand-authored probes, prev space-after
+    /// 0/12/24/36pt against 6/24/48pt space-before): the collapsed gap is
+    /// spent from the bottom up, so an authored break carries only
+    /// `max(0, before - after)` onto the new page.
+    #[test]
+    fn an_authored_break_spends_the_previous_space_after() {
+        for (after, before, expected) in [
+            (0.0, 24.0, 34.0),
+            (12.0, 24.0, 22.0),
+            (24.0, 24.0, 10.0),
+            (36.0, 24.0, 10.0),
+            (36.0, 48.0, 22.0),
+        ] {
+            for attrs in [
+                json!({"spacing":{"before":before},"pageBreakBefore":true}),
+                json!({"spacing":{"before":before},"pageBreakBeforeRun":true}),
+            ] {
+                let mut value = input(vec![
+                    paragraph(1, 1, 10.0, json!({"spacing":{"after":after}})),
+                    paragraph(2, 1, 10.0, attrs),
+                ]);
+                let result = layout_document(&mut value).unwrap();
+                assert_eq!(result.pages.len(), 2, "after {after} before {before}");
+                let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                    panic!()
+                };
+                assert_eq!(after_break.y, expected, "after {after} before {before}");
+            }
+        }
+    }
+
+    /// Measured against Word 16.113: `w:contextualSpacing` between same-style
+    /// neighbours zeroes the space-before before pagination, so an authored
+    /// break has nothing to carry; a different previous style leaves it whole.
+    #[test]
+    fn contextual_spacing_leaves_an_authored_break_nothing_to_carry() {
+        let target = json!({
+            "styleId": "List", "effectiveStyleId": "List", "contextualSpacing": true,
+            "spacing": {"before": 20}, "pageBreakBefore": true
+        });
+        for (previous, expected) in [
+            (
+                json!({"styleId": "List", "effectiveStyleId": "List", "contextualSpacing": true}),
+                10.0,
+            ),
+            (json!({"styleId": "Body", "effectiveStyleId": "Body"}), 30.0),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 10.0, previous),
+                paragraph(2, 1, 10.0, target.clone()),
+            ]);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            assert_eq!(after_break.y, expected);
+        }
+    }
+
+    #[test]
+    fn anchored_shape_does_not_advance_body_flow() {
+        for (anchored, wrap, overlay) in [
+            (false, "none", false),
+            (true, "none", true),
+            (true, "square", true),
+            (true, "tight", true),
+            (true, "through", true),
+            (true, "topAndBottom", true),
+        ] {
+            let mut shape = json!({
+                "kind": "shape", "id": "shape", "shapeType": "rect",
+                "width": 50, "height": 40, "geometryPath": [], "children": [],
+                "wrapType": wrap
+            });
+            if anchored {
+                shape["position"] = json!({
+                    "horizontal": {"relativeTo": "page", "posOffset": 100},
+                    "vertical": {"relativeTo": "page", "posOffset": 10}
+                });
+            }
+            let mut input: Input = serde_json::from_value(json!({
+                "measured": [
+                    {"block": shape, "measure": {"kind": "shape", "width": 50, "height": 40}},
+                    {"block": {"kind": "image", "id": "body", "src": "", "width": 20, "height": 20},
+                     "measure": {"kind": "image", "width": 20, "height": 20}}
+                ],
+                "options": {"pageSize": {"w": 300, "h": 200}, "margins": {"left": 20, "right": 20, "top": 20, "bottom": 20}}
+            })).unwrap();
+            let layout = layout_document(&mut input).unwrap();
+            assert_eq!(layout.pages.len(), 1);
+            let Fragment::Shape(shape) = &layout.pages[0].fragments[0] else {
+                panic!("shape expected")
+            };
+            let Fragment::Image(body) = &layout.pages[0].fragments[1] else {
+                panic!("image expected")
+            };
+            assert_eq!(body.y, if overlay { 20.0 } else { 60.0 });
+            assert_eq!(
+                (shape.x, shape.y),
+                if overlay { (100.0, 10.0) } else { (20.0, 20.0) }
+            );
+        }
+    }
+
+    #[test]
     fn incremental_layout_stops_at_converged_page_start() {
         let measured: Vec<_> = (0..15)
             .map(|id| paragraph(id, 1, 20.0, json!({})))
@@ -1322,9 +1511,10 @@ mod pagination_rule_tests {
         let previous_fingerprints = vec![1_u64; measured.len()];
         let mut next_fingerprints = previous_fingerprints.clone();
         next_fingerprints[0] = 2;
+        let mut previous_layout = previous.layout;
         let incremental = layout_document_incremental(
             &mut incremental_input,
-            &previous.layout,
+            &mut previous_layout,
             &previous.checkpoints,
             &previous_fingerprints,
             &next_fingerprints,
@@ -1461,6 +1651,67 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn widow_control_keeps_short_paragraphs_together() {
+        for (lines, preceding_height) in [(2, 70.0), (3, 50.0), (3, 70.0)] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), vec![(1, 0, lines)]);
+        }
+    }
+
+    #[test]
+    fn short_paragraphs_still_split_when_widow_control_is_disabled() {
+        for (lines, preceding_height, split) in [(2, 70.0, 1), (3, 50.0, 2), (3, 70.0, 1)] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({ "widowControl": false })),
+            ]);
+            assert_eq!(
+                paragraph_slices(&result, 2.0),
+                vec![(0, 0, split), (1, split, lines)]
+            );
+        }
+    }
+
+    #[test]
+    fn widow_control_preserves_short_paragraphs_that_fit_exactly() {
+        for lines in [2, 3] {
+            let result = layout(vec![
+                paragraph(1, 1, 100.0 - lines as f64 * 20.0, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, lines)]);
+        }
+    }
+
+    #[test]
+    fn widow_control_discards_boundary_spacing_when_moving_short_paragraphs() {
+        let result = layout(vec![
+            paragraph(1, 1, 30.0, json!({ "spacing": { "after": 60 } })),
+            paragraph(2, 3, 20.0, json!({ "spacing": { "before": 50 } })),
+        ]);
+        assert_eq!(paragraph_slices(&result, 2.0), vec![(1, 0, 3)]);
+        let Fragment::Paragraph(fragment) = &result.pages[1].fragments[0] else {
+            panic!()
+        };
+        assert_eq!(fragment.y, 10.0);
+    }
+
+    #[test]
+    fn oversized_short_paragraphs_still_terminate_with_every_line_visible() {
+        for (lines, height, expected) in [
+            (2, 60.0, vec![(0, 0, 1), (1, 1, 2)]),
+            (3, 60.0, vec![(0, 0, 1), (1, 1, 2), (2, 2, 3)]),
+            (3, 40.0, vec![(0, 0, 2), (1, 2, 3)]),
+        ] {
+            let result = layout(vec![paragraph(1, lines, height, json!({}))]);
+            assert_eq!(paragraph_slices(&result, 1.0), expected);
+        }
+    }
+
+    #[test]
     fn authored_widow_control_off_splits_where_the_default_moves_the_paragraph_on() {
         let default = layout(vec![
             paragraph(1, 1, 70.0, json!({})),
@@ -1489,7 +1740,7 @@ mod pagination_rule_tests {
         ]);
 
         assert_eq!(default.pages.len(), 3);
-        assert_eq!(paragraph_slices(&default, 3.0), vec![(1, 0, 1), (2, 1, 2)]);
+        assert_eq!(paragraph_slices(&default, 3.0), vec![(2, 0, 2)]);
         assert_eq!(disabled.pages.len(), 2);
         assert_eq!(paragraph_slices(&disabled, 3.0), vec![(1, 0, 2)]);
     }

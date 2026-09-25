@@ -8,11 +8,6 @@ core's Rust/WebAssembly engine; pages are painted onto canvas.
 
 <!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
 
-> **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
-> components, collaboration — are settling and unlikely to change shape. Smaller
-> APIs may still move between releases; breaking changes are always listed in
-> the changelog.
-
 ```bash
 bun add @betteroffice/docx-react @betteroffice/docx react react-dom
 ```
@@ -63,9 +58,12 @@ Without `onSave`, File > Save downloads the edited bytes.
 
 Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
 `author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`,
-`showRuler`, `showZoomControl`, `i18n`, `measurementFontProvider`. The `ref`
+`showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
 exposes the full editor API (selection, formatting, find/replace, comments,
 revisions).
+
+Vanished (hidden) text stays out of the layout by default; pass
+`showHiddenText` to reveal it with normal wrapping.
 
 ## What works today
 
@@ -79,10 +77,20 @@ revisions).
 - Real-time collaboration with people or agents; the document is a CRDT
 - Live collaborator cursors and selections, shown in each peer's color
 
-For Word-accurate metrics install `@betteroffice/fonts` and hand it to the
-engine once at module scope — `configureDefaultFonts({ fonts })`, re-exported
-here — or pass your own provider through the `measurementFontProvider` prop.
-Without either, measurement falls back to the browser.
+For font metrics closer to Word, configure `@betteroffice/fonts` once at
+module scope, or pass a provider through `measurementFontProvider`. The CDN
+entry loads Latin and Japanese coverage fonts without bundling font binaries:
+
+```ts
+import { configureDefaultFonts } from '@betteroffice/docx-react';
+
+configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
+```
+
+For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
+`configureDefaultFonts({ fonts })`. Without a provider, pagination uses
+approximate fallback metrics. CJK coverage fonts are substitutes and can differ
+from Word's fonts; see [font configuration](../fonts/README.md).
 
 ## Collaboration
 
@@ -111,6 +119,36 @@ import { CollaborationProvider } from '@betteroffice/docx/collaboration';
 />;
 ```
 
+## Host saves and pending input
+
+`onSaveRequest` owns File > Save and Cmd/Ctrl+S before serialization. Its awaited
+callback can perform locks, revision checks, and persistence. Returning `true`
+continues the built-in export/download; returning `false` or nothing suppresses it.
+Overlapping UI save requests share one workflow. Errors reach `onError`.
+
+`DocxEditorRef.flushPendingInput()` and `PagedEditorRef.flushPendingInput()` wait
+until input accepted before the call and its selection are authoritative in Yrs.
+They wait for active IME composition to end, and reject on input failure, unmount,
+or document replacement. A failed input queue remains failed until a new session
+is loaded. The promise does not wait for browser painting.
+
+```tsx
+<DocxEditor
+  ref={editorRef}
+  onSaveRequest={async () => {
+    await validateRevision();
+    await editorRef.current!.flushPendingInput();
+    const bytes = await editorRef.current!.save();
+    if (bytes) await persistDocument(bytes);
+  }}
+/>
+```
+
+`save()` flushes input and exports directly, so calling it inside `onSaveRequest`
+does not invoke that callback again. `onSave(buffer)` remains the notification
+after export. Before direct session reads or mutations, await `flushPendingInput()`;
+after a mutation, use `syncYrsInputState(true)` to refresh the editor.
+
 ## Framework notes
 
 Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
@@ -119,4 +157,5 @@ component does not attach in production builds). The editor is browser-only
 (canvas, wasm, workers); under Next.js load it with `next/dynamic` and
 `ssr: false`.
 
-Docs: https://betteroffice.dev · Apache-2.0.
+[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
+[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx-react/CHANGELOG.md) · Apache-2.0.

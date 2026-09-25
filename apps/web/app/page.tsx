@@ -5,6 +5,7 @@ import { HeroField } from "./components/HeroField";
 import { FadeIn, Reveal } from "./components/motion";
 import {
   CAPABILITIES,
+  BENCHMARKS,
   COLLABORATION,
   CRATES,
   DEMO,
@@ -20,7 +21,9 @@ import {
   PEERS,
   PYPI,
   REPO,
+  RELEASES,
   SITE,
+  SITE_DESCRIPTION,
   SUITE,
 } from "./content";
 
@@ -49,9 +52,6 @@ const ecoLabel =
 const demoLink =
   "ml-auto inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[0.6875rem] text-ink no-underline transition-colors hover:border-dim hover:text-fg";
 
-
-
-
 const JSON_LD = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -60,8 +60,7 @@ const JSON_LD = {
   image: `${SITE}/logo.svg`,
   applicationCategory: "BusinessApplication",
   operatingSystem: "Web",
-  description:
-    "The open-source office suite by the OpenOOXML project. DOCX, XLSX and PPTX editors and viewers for React and JavaScript with real-time collaboration, on native OOXML engines written in Rust.",
+  description: SITE_DESCRIPTION,
   offers: {
     "@type": "Offer",
     price: "0",
@@ -141,17 +140,17 @@ export default function Home() {
                   {editor.name}
                   <span
                     className={`inline-flex shrink-0 items-center gap-1.5 font-mono text-[0.625rem] uppercase tracking-[0.12em] whitespace-nowrap ${
-                      editor.live ? "text-acc" : "text-dim"
+                      editor.status === "available" ? "text-acc" : "text-dim"
                     }`}
                   >
                     <span
                       className={`size-1.5 rounded-full ${
-                        editor.live
+                        editor.status === "available"
                           ? "bg-acc shadow-[0_0_8px_rgba(5,150,105,0.45)]"
                           : "bg-faint"
                       }`}
                     />
-                    {editor.live ? "available" : "coming"}
+                    {editor.status}
                   </span>
                 </span>
                 <span className="text-[0.8125rem] text-ink">{editor.desc}</span>
@@ -181,6 +180,11 @@ export default function Home() {
             {PACKAGES_SECTION.heading}
           </h2>
           <p className={`${secP} mb-6`}>{PACKAGES_SECTION.prose}</p>
+          <p className="mb-6 text-[0.8125rem] text-ink">
+            See the <a href={`${DOCS}/docs/packages`} className={bodyLink}>package guide</a> for
+            supported runtimes and fonts, and <a href={RELEASES} className={bodyLink}>release notes</a> for
+            version-specific changes.
+          </p>
         </Reveal>
         <Reveal delay={0.1}>
           <div className={`${grid} mb-6`}>
@@ -198,12 +202,10 @@ export default function Home() {
                     npm <ArrowUpRight size={11} strokeWidth={2} />
                   </a>
                   <a
-                    href={REPO}
-                    target="_blank"
-                    rel="noopener"
+                    href={`${DOCS}/docs/javascript`}
                     className={cardLink}
                   >
-                    github <ArrowUpRight size={11} strokeWidth={2} />
+                    guide <ArrowUpRight size={11} strokeWidth={2} />
                   </a>
                 </span>
               </article>
@@ -241,20 +243,7 @@ export default function Home() {
           <h2 id="foundation" className={secH2}>
             {FOUNDATION.heading}
           </h2>
-          <p className={secP}>
-            BetterOffice is built by{" "}
-            <a
-              href={OPENOOXML}
-              target="_blank"
-              rel="noopener"
-              className={bodyLink}
-            >
-              OpenOOXML
-            </a>
-            , the open-source project writing native OOXML engines in Rust —
-            parsing, layout, editing and rendering, from the file format up.
-            Owning the whole stack is what makes the output Word-faithful.
-          </p>
+          <p className={secP}>{FOUNDATION.prose}</p>
         </Reveal>
         <Reveal delay={0.1}>
           <ul className={`${grid} mt-8 list-none`}>
@@ -267,6 +256,14 @@ export default function Home() {
               </li>
             ))}
           </ul>
+          <p className="mt-6 text-[0.8125rem] text-ink">
+            <a href={DEMO} className={bodyLink}>Try it out</a>, or{" "}
+            <a href={DOCS} className={bodyLink}>explore the docs</a> for setup, APIs, and format support.
+          </p>
+          <p className="mt-3 text-[0.8125rem] text-ink">
+            See how published releases and source builds compare with Microsoft Office in our{" "}
+            <a href={BENCHMARKS} className={bodyLink}>visual fidelity results</a>.
+          </p>
         </Reveal>
       </section>
 
@@ -279,6 +276,9 @@ export default function Home() {
             {COLLABORATION.heading}
           </h2>
           <p className={`${secP} mb-6`}>{COLLABORATION.prose}</p>
+          <p className="mb-6 text-[0.8125rem] text-ink">
+            <a href={`${DOCS}/docs/collaboration`} className={bodyLink}>Collaboration guide</a>
+          </p>
         </Reveal>
         <Reveal delay={0.1}>
           <ul className={`${grid} list-none`}>

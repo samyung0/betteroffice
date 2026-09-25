@@ -3,15 +3,38 @@
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
 use xlsx_model::{
-    Cell, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, SheetId,
-    Workbook,
+    Cell, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
+    SheetId, Workbook,
 };
 
-use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
-use crate::{
-    ParseError, SaveEdits, SharedStringCells, parse_workbook, parse_workbook_with_package,
-    serialize_workbook,
+use crate::write::{
+    serialize_workbook_with_package, serialize_workbook_with_package_and_origins,
+    serialize_workbook_with_package_and_origins_after_edits,
 };
+use crate::{
+    ParseError, SaveEdits, SharedStringCells, SheetAxes, serialize_workbook,
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
+};
+
+/// Materializes entries a borrowed-entry save returns, so a fixture stays
+/// usable after the parse; production callers hand ownership to
+/// `crate::parse_workbook_with_package` instead.
+fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> {
+    parts
+        .iter()
+        .map(|(path, bytes)| (path.clone(), bytes.as_ref().to_vec()))
+        .collect()
+}
+
+fn parse_workbook_with_package(
+    parts: &[(String, impl AsRef<[u8]>)],
+) -> Result<crate::ParsedWorkbook, ParseError> {
+    crate::parse_workbook_with_owned_package(owned_parts(parts))
+}
+
+fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, ParseError> {
+    crate::parse_workbook(&owned_parts(parts))
+}
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
@@ -52,6 +75,91 @@ fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String
 fn cell_at(wb: &Workbook, a1: &str) -> Cell {
     let addr = CellRef::parse_a1(a1).unwrap();
     wb.sheets[0].cell(addr).cloned().unwrap_or_default()
+}
+
+/// One sheet plus a table part reached through the worksheet relationships.
+fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package("<sheetData/>", &[], false);
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_string(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/tables/table1.xml".to_string(),
+        table.as_bytes().to_vec(),
+    ));
+    parts
+}
+
+#[test]
+fn reads_a_table_part_through_the_worksheet_relationships() {
+    let table = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12" totalsRowCount="1"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Extra_x000a_Cost"/><tableColumn id="3" name="_x005F_x0041_"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+
+    assert_eq!(wb.tables.len(), 1);
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.name, "Sales");
+    assert_eq!(parsed.sheet, SheetId(0));
+    assert_eq!(parsed.range.to_a1(), "B2:D12");
+    assert_eq!(parsed.header_rows, 1);
+    assert_eq!(parsed.totals_rows, 1);
+    assert_eq!(parsed.columns, ["Region", "Extra\nCost", "_x0041_"]);
+    assert_eq!(parsed.data_rows(), Some((2, 10)));
+    assert_eq!(parsed.header_range(), Some((1, 1)));
+    assert_eq!(parsed.totals_range(), Some((11, 11)));
+    assert_eq!(
+        wb.table("sALES").map(|table| table.name.as_str()),
+        Some("Sales")
+    );
+}
+
+#[test]
+fn a_table_part_without_a_usable_ref_or_name_is_skipped() {
+    for table in [
+        r#"<table id="1" displayName="Sales"><tableColumns/></table>"#,
+        r#"<table id="1" displayName="Sales" ref="not-a-range"><tableColumns/></table>"#,
+        r#"<table id="1" ref="A1:B2"><tableColumns/></table>"#,
+    ] {
+        let wb = parse_workbook(&package_with_table(table)).unwrap();
+        assert!(wb.tables.is_empty(), "{table}");
+    }
+}
+
+#[test]
+fn table_bands_are_clamped_to_the_rows_the_ref_spans() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:A2" headerRowCount="9" totalsRowCount="9"><tableColumns><tableColumn id="1" name="Only"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.header_rows, 2);
+    assert_eq!(parsed.totals_rows, 0);
+    assert_eq!(parsed.data_rows(), None);
+}
+
+#[test]
+fn a_table_column_flood_is_refused() {
+    let columns: String = (0..=crate::MAX_TABLE_COLUMNS)
+        .map(|index| format!(r#"<tableColumn id="{index}" name="c{index}"/>"#))
+        .collect();
+    let table = format!(
+        r#"<table id="1" displayName="Sales" ref="A1:B2"><tableColumns>{columns}</tableColumns></table>"#
+    );
+    assert!(matches!(
+        parse_workbook(&package_with_table(&table)),
+        Err(ParseError::Malformed(_))
+    ));
+}
+
+#[test]
+fn a_table_survives_the_round_trip_untouched() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:B3"><tableColumns><tableColumn id="1" name="Region"/><tableColumn id="2" name="Amount"/></tableColumns></table>"#;
+    let parts = package_with_table(table);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    let table_part = saved
+        .iter()
+        .find(|(path, _)| path == "xl/tables/table1.xml")
+        .expect("table part is preserved");
+    assert_eq!(table_part.1.as_slice(), table.as_bytes());
 }
 
 #[test]
@@ -101,6 +209,212 @@ fn parses_shared_string_number_formula_bool_error() {
 }
 
 #[test]
+fn parses_absolute_and_relative_concatenation() {
+    for formula in [
+        r#"$B$6&"A"&$B$4&"B"&$D$2"#,
+        r#"B6&"A"&B4&"B"&D2"#,
+        r#"$B6&"A"&B$4&"B"&D2"#,
+    ] {
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="str"><f>{}</f><v/></c></row></sheetData>"#,
+            formula.replace('&', "&amp;")
+        );
+        let wb = parse_workbook(&package(&body, &[], false)).unwrap();
+        assert_eq!(cell_at(&wb, "A1").formula.as_deref(), Some(formula));
+    }
+}
+
+#[test]
+fn expands_shared_formulas_and_preserves_source_until_edited() {
+    let mut parts = package("", &[], false);
+    let source = include_bytes!("../tests/fixtures/shared-formulas.xml");
+    parts[2].1 = source.to_vec();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&parsed.workbook, address).formula.as_deref(),
+            Some(r#"$B$6&"A"&$B$4&"B"&$D$2"#)
+        );
+    }
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&unchanged, "xl/worksheets/sheet1.xml"), source);
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let reopened = parse_workbook(&saved).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&reopened, address).formula,
+            cell_at(&edited, address).formula
+        );
+    }
+}
+
+#[test]
+fn package_save_borrows_unchanged_parts() {
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts: Vec<(String, Vec<u8>)> = vec![
+        ("xl/workbook.xml".into(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".into(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet2.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+    ];
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let origins = vec![Some(0), Some(1)];
+    let shared = vec![
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &parsed.workbook,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits::default(),
+    )
+    .unwrap();
+    assert!(
+        saved
+            .iter()
+            .all(|(_, bytes)| matches!(bytes, std::borrow::Cow::Borrowed(_)))
+    );
+
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &edited,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    let mut borrowed = 0;
+    for (path, bytes) in &saved {
+        if path == "xl/worksheets/sheet1.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Owned(_)), "{path}");
+        }
+        if path == "xl/worksheets/sheet2.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)), "{path}");
+        }
+        if matches!(bytes, std::borrow::Cow::Borrowed(_)) {
+            borrowed += 1;
+        }
+    }
+    assert!(borrowed > 0, "unchanged parts must stay borrowed");
+}
+
+#[test]
+fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
+    let body = r#"<sheetData>
+        <row r="1"><c r="A1"><f t="shared" si="7">999</f><v>10</v></c></row>
+        <row r="2"><c r="A2"><f>99</f><v>99</v></c><c r="B2"><f t="shared" si="7" ref="A1:C3">A1+$A1+A$1+$A$1</f><v>20</v></c></row>
+        <row r="3"><c r="A3"><v>55</v></c><c r="C3"><f t="shared" si="7"/><v>30</v></c></row>
+    </sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(
+        cell_at(&wb, "A1").formula.as_deref(),
+        Some("#REF!+#REF!+#REF!+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "A1").value, CellValue::Number { value: 10.0 });
+    assert_eq!(
+        cell_at(&wb, "C3").formula.as_deref(),
+        Some("B2+$A2+B$1+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "C3").value, CellValue::Number { value: 30.0 });
+    assert_eq!(cell_at(&wb, "A2").formula.as_deref(), Some("99"));
+    assert_eq!(cell_at(&wb, "A3").formula, None);
+    assert_eq!(wb.sheets[0].iter_cells().count(), 5);
+}
+
+#[test]
+fn shared_formula_indices_are_scoped_to_each_worksheet() {
+    let first = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:B1">C1</f></c><c r="B1"><f t="shared" si="0"/></c></row></sheetData>"#;
+    let second = first.replace(">C1</f>", ">$C$9</f>");
+    let wb = parse_workbook(&two_sheet_package(first, &second)).unwrap();
+    let address = CellRef::parse_a1("B1").unwrap();
+    assert_eq!(
+        wb.sheets[0].cell(address).unwrap().formula.as_deref(),
+        Some("D1")
+    );
+    assert_eq!(
+        wb.sheets[1].cell(address).unwrap().formula.as_deref(),
+        Some("$C$9")
+    );
+}
+
+#[test]
+fn shared_formula_ranges_do_not_allocate_implicit_cells() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:XFD1048576">1</f></c></row></sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(wb.sheets[0].iter_cells().count(), 1);
+}
+
+#[test]
+fn malformed_shared_groups_fail_instead_of_losing_formulas() {
+    for cells in [
+        r#"<c r="A1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="-1" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="4294967296" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="B1:B2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2">1</f></c><c r="B1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:B1">1</f></c><c r="B1"><f t="shared" si="0" ref="A1:B1">2</f></c>"#,
+    ] {
+        let body = format!("<sheetData><row r=\"1\">{cells}</row></sheetData>");
+        assert!(
+            matches!(
+                parse_workbook(&package(&body, &[], false)),
+                Err(ParseError::Malformed(_))
+            ),
+            "{cells}"
+        );
+    }
+}
+
+#[test]
+fn reads_a_valueless_inline_string_cell_as_blank() {
+    let body = r#"<sheetData><row r="1"><c r="A1" s="2" t="inlineStr"/><c r="B1" t="inlineStr"><is><t></t></is></c></row></sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(cell_at(&wb, "A1").value, CellValue::Empty);
+    assert_eq!(cell_at(&wb, "A1").style, Some(2));
+    assert_eq!(
+        cell_at(&wb, "B1").value,
+        CellValue::Text {
+            value: String::new()
+        }
+    );
+}
+
+#[test]
 fn parses_inline_string() {
     let body = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>inline &lt;here&gt;</t></is></c></row></sheetData>"#;
     let wb = parse_workbook(&package(body, &[], false)).unwrap();
@@ -131,6 +445,65 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+}
+
+/// a negative `<col>` width is unrenderable, so the model narrows it to zero
+/// while the authored attribute survives a save untouched.
+#[test]
+fn negative_column_width_narrows_to_zero_and_saves_verbatim() {
+    let body = r#"<cols><col min="1" max="1" width="-0.42" customWidth="1"/><col min="2" max="2" width="12.5" customWidth="1"/></cols><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let source = parts[2].1.clone();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(sheet.col_widths.get(&0), Some(&0.0));
+    assert_eq!(sheet.col_widths.get(&1), Some(&12.5));
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&saved, "xl/worksheets/sheet1.xml"), source);
+}
+
+#[test]
+fn a_column_style_run_survives_without_a_width() {
+    let body = r#"
+        <cols>
+            <col min="1" max="16384" style="7"/>
+            <col min="2" max="3" width="12.5" style="9" customWidth="1"/>
+        </cols>
+        <sheetData/>
+    "#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    let sheet = &wb.sheets[0];
+    assert_eq!(
+        sheet.col_styles,
+        vec![
+            ColStyle {
+                first: 0,
+                last: 16383,
+                xf: 7
+            },
+            ColStyle {
+                first: 1,
+                last: 2,
+                xf: 9
+            },
+        ]
+    );
+    assert_eq!(sheet.col_style(0), Some(7));
+    assert_eq!(sheet.col_style(2), Some(9));
+    assert_eq!(sheet.col_widths.get(&0), None);
+    assert_eq!(sheet.col_widths.get(&1), Some(&12.5));
+}
+
+#[test]
+fn a_worksheet_past_the_column_style_cap_is_refused() {
+    let runs: String = (1..=crate::MAX_COL_STYLES + 1)
+        .map(|i| format!(r#"<col min="{i}" max="{i}" style="1"/>"#))
+        .collect();
+    let body = format!("<cols>{runs}</cols><sheetData/>");
+    assert!(matches!(
+        parse_workbook(&package(&body, &[], false)),
+        Err(ParseError::TooManyColumnStyles)
+    ));
 }
 
 #[test]
@@ -513,6 +886,192 @@ const STYLED: &str = r#"
 "#;
 
 #[test]
+fn indexed_palettes_round_trip_and_preserve_other_color_metadata() {
+    let palette = r#"<colors><indexedColors><rgbColor rgb="00000000"/><rgbColor rgb="FF5E88B1"/><rgbColor rgb="FF99CC00"/></indexedColors><mruColors><color rgb="FF123456"/></mruColors></colors>"#;
+    let source = package_styled("<sheetData/>", Some(palette), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    assert_eq!(
+        parsed.workbook.styles.indexed_colors,
+        ["#000000", "#5e88b1", "#99cc00"]
+    );
+    assert_eq!(
+        parsed
+            .workbook
+            .styles
+            .resolve_color(&Color::Indexed(1))
+            .as_deref(),
+        Some("#5e88b1")
+    );
+    let fresh = parse_workbook(&serialize_workbook(&parsed.workbook).unwrap()).unwrap();
+    assert_eq!(fresh.styles, parsed.workbook.styles);
+
+    let mut edited = parsed.workbook.clone();
+    edited.styles.fonts.push(xlsx_model::Font::default());
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(styles).contains(palette));
+
+    edited.styles.indexed_colors[1] = "#abcdef".into();
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(
+        String::from_utf8_lossy(styles)
+            .contains(r#"<mruColors><color rgb="FF123456"/></mruColors>"#)
+    );
+    assert_eq!(parse_workbook(&saved).unwrap().styles, edited.styles);
+
+    edited.styles.indexed_colors.clear();
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(!String::from_utf8_lossy(styles).contains("indexedColors"));
+    assert!(String::from_utf8_lossy(styles).contains("mruColors"));
+    assert!(
+        parse_workbook(&saved)
+            .unwrap()
+            .styles
+            .indexed_colors
+            .is_empty()
+    );
+}
+
+#[test]
+fn indexed_palette_missing_colors_preserve_slots_through_saves() {
+    let palette = r#"<colors><indexedColors><rgbColor/><rgbColor rgb="FF5E88B1"/><rgbColor/></indexedColors><mruColors><color rgb="FF123456"/></mruColors></colors>"#;
+    let source = package_styled("<sheetData/>", Some(palette), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut edited = parsed.workbook.clone();
+    assert_eq!(edited.styles.indexed_colors, ["", "#5e88b1", ""]);
+    for index in [0, 2] {
+        assert_eq!(
+            edited.styles.resolve_color(&Color::Indexed(index)),
+            Color::Indexed(index).resolve(&edited.styles.theme)
+        );
+    }
+    assert_eq!(
+        edited.styles.resolve_color(&Color::Indexed(1)).as_deref(),
+        Some("#5e88b1")
+    );
+    assert_eq!(
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+        source
+    );
+    edited.styles.fonts.push(xlsx_model::Font::default());
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(styles).contains(palette));
+    edited.styles.indexed_colors[1] = "#abcdef".into();
+    for saved in [
+        serialize_workbook(&edited).unwrap(),
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+    ] {
+        assert_eq!(parse_workbook(&saved).unwrap().styles, edited.styles);
+        let styles = &saved
+            .iter()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap()
+            .1;
+        assert!(String::from_utf8_lossy(styles).contains(
+            r#"<indexedColors><rgbColor/><rgbColor rgb="FFABCDEF"/><rgbColor/></indexedColors>"#
+        ));
+    }
+}
+
+#[test]
+fn indexed_palette_saves_reject_invalid_model_colors() {
+    let source = package_styled("<sheetData/>", Some(STYLED), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    for value in [
+        "#GGGGGG",
+        "#12345",
+        "#1234567",
+        "#FF123456",
+        "##123456",
+        "😀1234",
+        " ",
+        "#123456 ",
+    ] {
+        let mut edited = parsed.workbook.clone();
+        edited.styles.indexed_colors = vec![String::new(), value.into()];
+        for result in [
+            serialize_workbook(&edited),
+            serialize_workbook_with_package(&edited, &parsed.package),
+        ] {
+            assert!(
+                matches!(result, Err(ParseError::Malformed(ref message)) if message.contains("indexed palette color at index 1")),
+                "accepted invalid palette color: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_palette_saves_normalize_hex_case_and_optional_prefix() {
+    let palette = r#"<colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors>"#;
+    let parsed =
+        parse_workbook_with_package(&package_styled("<sheetData/>", Some(palette), None)).unwrap();
+    let mut edited = parsed.workbook.clone();
+    edited.styles.indexed_colors = vec!["#aBcDeF".into(), "fedCBA".into()];
+    for saved in [
+        serialize_workbook(&edited).unwrap(),
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+    ] {
+        assert_eq!(
+            parse_workbook(&saved).unwrap().styles.indexed_colors,
+            ["#abcdef", "#fedcba"]
+        );
+        let styles = &saved
+            .iter()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap()
+            .1;
+        assert!(String::from_utf8_lossy(styles).contains(
+            r#"<indexedColors><rgbColor rgb="FFABCDEF"/><rgbColor rgb="FFFEDCBA"/></indexedColors>"#
+        ));
+    }
+}
+
+#[test]
+fn indexed_palettes_are_scoped_bounded_and_reject_invalid_entries() {
+    let ignored = r#"<extLst><ext><colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors></ext></extLst>"#;
+    assert!(
+        parse_workbook(&package_styled("<sheetData/>", Some(ignored), None))
+            .unwrap()
+            .styles
+            .indexed_colors
+            .is_empty()
+    );
+    for value in ["", "FFGGGGGG", "GG123456", "😀1234"] {
+        let styles =
+            format!(r#"<colors><indexedColors><rgbColor rgb="{value}"/></indexedColors></colors>"#);
+        assert!(parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)).is_err());
+    }
+    let styles = format!(
+        "<colors><indexedColors>{}</indexedColors></colors>",
+        r#"<rgbColor rgb="FF123456"/>"#.repeat(crate::MAX_STYLE_ENTRIES + 1)
+    );
+    assert!(matches!(
+        parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)),
+        Err(ParseError::TooManyStyles)
+    ));
+}
+
+#[test]
 fn parses_full_styled_workbook() {
     let body = r#"<sheetData><row r="1"><c r="A1" s="1"><v>3.5</v></c></row></sheetData>"#;
     let wb = parse_workbook(&package_styled(body, Some(STYLED), None)).unwrap();
@@ -561,9 +1120,43 @@ fn parses_full_styled_workbook() {
     assert_eq!(align.v, Some(VAlign::Center));
     assert!(align.wrap_text);
 
-    assert!(ss.font_for(0).is_none());
-    assert!(ss.fill_for(0).is_none());
+    assert_eq!(ss.font_for(0).unwrap().name.as_deref(), Some("Calibri"));
+    assert_eq!(ss.fill_for(0), Some(&Fill::None));
     assert_eq!(ss.format_code_for(0), FormatCode::Builtin(0));
+}
+
+#[test]
+fn an_xf_without_apply_flags_still_carries_its_indexed_facets() {
+    let styles = r#"
+        <fonts count="2">
+            <font><sz val="11"/><name val="Calibri"/></font>
+            <font><sz val="30"/><name val="Comic Sans MS"/></font>
+        </fonts>
+        <fills count="2">
+            <fill><patternFill patternType="none"/></fill>
+            <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+        </fills>
+        <cellXfs count="3">
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyAlignment="1"/>
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="0" applyFill="0"/>
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="false"/>
+        </cellXfs>
+    "#;
+    let wb = parse_workbook(&package_styled("<sheetData/>", Some(styles), None)).unwrap();
+    let ss = &wb.styles;
+
+    assert_eq!(ss.font_for(0).unwrap().size_pt, Some(30.0));
+    assert_eq!(
+        ss.fill_for(0),
+        Some(&Fill::Solid(Color::Rgb("#ff0000".into())))
+    );
+    assert!(ss.font_for(1).is_none());
+    assert!(ss.fill_for(1).is_none());
+    assert!(ss.font_for(2).is_none());
+    assert_eq!(
+        ss.fill_for(2),
+        Some(&Fill::Solid(Color::Rgb("#ff0000".into())))
+    );
 }
 
 #[test]
@@ -925,13 +1518,14 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
-fn part_bytes(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()
         .find(|(name, _)| name == path)
         .unwrap_or_else(|| panic!("missing {path}"))
         .1
-        .clone()
+        .as_ref()
+        .to_vec()
 }
 
 /// The parser models a subset of row, column and cell markup. An edit to one
@@ -993,6 +1587,187 @@ fn keeps_worksheet_bytes_across_a_rename() {
             .unwrap()
             .contains(r#"name="Renamed""#)
     );
+}
+
+const MARKUP_COLS: &str = concat!(
+    r#"<cols>"#,
+    r#"<col min="1" max="2" width="12" customWidth="1" style="3" outlineLevel="1" bestFit="1" x:custom="keep"/>"#,
+    r#"<col min="3" max="3" width="9" hidden="1"/>"#,
+    r#"</cols>"#,
+);
+const MARKUP_ROW_1: &str = concat!(
+    r#"<row r="1" spans="1:4" s="2" customFormat="1" ht="20" customHeight="1" thickTop="1" thickBot="1" ph="1" x14ac:dyDescent="0.25">"#,
+    r#"<c r="A1" s="1" cm="1" vm="2"><f t="array" ref="A1">ROW()</f><v>1</v></c>"#,
+    r#"<c r="B1" t="inlineStr" ph="1"><is><r><rPr><b/></rPr><t>Rich</t></r><r><t xml:space="preserve"> text</t></r><rPh sb="0" eb="4"><t>Furigana</t></rPh></is></c>"#,
+    r#"<c r="D1" x:pin="1"><v>4</v><extLst><ext uri="{cell}"><x:marker/></ext></extLst></c>"#,
+    r#"</row>"#,
+);
+const MARKUP_ROW_2: &str = concat!(
+    r#"<row r="2" hidden="1" outlineLevel="2" collapsed="1">"#,
+    r#"<c r="A2"><f t="shared" si="0" ref="A2:A3">2*2</f><v>4</v></c>"#,
+    r#"<c r="B2" t="s"><v>0</v></c>"#,
+    r#"<extLst><ext uri="{row}"><x:rowMarker/></ext></extLst>"#,
+    r#"</row>"#,
+);
+const MARKUP_ROW_3: &str =
+    r#"<row r="3"><c r="A3"><f t="shared" si="0"/><v>4</v></c><c r="D3" s="4"/></row>"#;
+const MARKUP_SHEETDATA_EXT: &str = r#"<extLst><ext uri="{sheetData}"><x:marker/></ext></extLst>"#;
+
+/// Two sheets whose first carries every row, column and cell attribute and
+/// child the model does not represent.
+fn markup_package() -> Vec<(String, Vec<u8>)> {
+    let root = concat!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" "#,
+        r#"xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" "#,
+        r#"xmlns:x="urn:fixture-extension">"#,
+    );
+    let first = format!(
+        "{root}{MARKUP_COLS}<sheetData>{MARKUP_ROW_1}{MARKUP_ROW_2}{MARKUP_ROW_3}{MARKUP_SHEETDATA_EXT}</sheetData></worksheet>"
+    );
+    let mut parts = two_sheet_package("", r#"<sheetData><row r="1" hidden="1"/></sheetData>"#);
+    parts[2].1 = first.into_bytes();
+    parts.push((
+        "xl/sharedStrings.xml".to_owned(),
+        br#"<sst><si><t>Total</t></si></sst>"#.to_vec(),
+    ));
+    parts
+}
+
+fn set_number(workbook: &mut Workbook, sheet: usize, address: &str, value: f64) {
+    workbook.sheets[sheet].set_cell(
+        CellRef::parse_a1(address).unwrap(),
+        Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        },
+    );
+}
+
+fn sheet_text<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> String {
+    String::from_utf8(part_bytes(parts, path)).unwrap()
+}
+
+/// An edit to one cell rewrites that cell; every other row, column and cell
+/// keeps the markup the model does not represent, byte for byte.
+#[test]
+fn edited_sheet_keeps_unmodeled_row_column_and_cell_markup() {
+    let parts = markup_package();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "D2", 7.0);
+    workbook.sheets[0].row_heights.insert(2, 30.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains(MARKUP_COLS), "{sheet}");
+    assert!(sheet.contains(MARKUP_ROW_1), "{sheet}");
+    assert!(sheet.contains(MARKUP_SHEETDATA_EXT), "{sheet}");
+    let row_2 = MARKUP_ROW_2.replace(
+        r#"<c r="B2" t="s"><v>0</v></c>"#,
+        r#"<c r="B2" t="s"><v>0</v></c><c r="D2"><v>7</v></c>"#,
+    );
+    assert!(sheet.contains(&row_2), "{sheet}");
+    let row_3 = MARKUP_ROW_3.replace(r#"<row r="3">"#, r#"<row r="3" ht="30" customHeight="1">"#);
+    assert!(sheet.contains(&row_3), "{sheet}");
+    assert_eq!(
+        part_bytes(&saved, "xl/worksheets/sheet2.xml"),
+        part_bytes(&parts, "xl/worksheets/sheet2.xml")
+    );
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "D2").value,
+        CellValue::Number { value: 7.0 }
+    );
+    assert_eq!(cell_at(&reopened, "A3").formula.as_deref(), Some("2*2"));
+    assert_eq!(reopened.sheets[0].row_heights.get(&2), Some(&30.0));
+    assert_eq!(reopened.sheets[0].col_widths.get(&2), Some(&0.0));
+    for address in ["A1", "B1", "D1", "A2", "B2", "A3", "D3"] {
+        assert_eq!(cell_at(&reopened, address), cell_at(&workbook, address));
+    }
+}
+
+/// A row insert shifts preserved rows down: their unmodeled markup moves with
+/// them while only `r` (and the array `ref` tied to it) is rewritten.
+#[test]
+fn row_insert_shifts_preserved_row_and_cell_markup() {
+    let parts = markup_package();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    let cells: Vec<(CellRef, Cell)> = workbook.sheets[0]
+        .iter_cells()
+        .map(|(at, cell)| (at, cell.clone()))
+        .collect();
+    for (at, _) in &cells {
+        workbook.sheets[0].set_cell(*at, Cell::default());
+    }
+    for (at, cell) in cells {
+        workbook.sheets[0].set_cell(CellRef::new(at.row + 1, at.col), cell);
+    }
+    let heights: Vec<(u32, f64)> = workbook.sheets[0]
+        .row_heights
+        .iter()
+        .map(|(&row, &height)| (row, height))
+        .collect();
+    workbook.sheets[0].row_heights.clear();
+    for (row, height) in heights {
+        workbook.sheets[0].row_heights.insert(row + 1, height);
+    }
+    let mut provenance = vec![SharedStringCells::new(); 2];
+    for ((row, col), index) in parsed.package.source_shared_string_cells(0) {
+        provenance[0].insert((row + 1, col), index);
+    }
+    let mut axes = vec![Some(SheetAxes::default()), Some(SheetAxes::default())];
+    axes[0].as_mut().unwrap().rows.insert(0, 1);
+    let saved = serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        &axes,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+        SheetId(0),
+    )
+    .unwrap();
+
+    let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains(MARKUP_COLS), "{sheet}");
+    assert!(sheet.contains(MARKUP_SHEETDATA_EXT), "{sheet}");
+    assert!(!sheet.contains(r#"<row r="1""#), "{sheet}");
+    let row_1 = MARKUP_ROW_1
+        .replace(r#"<row r="1""#, r#"<row r="2""#)
+        .replace(r#"r="A1""#, r#"r="A2""#)
+        .replace(r#"ref="A1""#, r#"ref="A2""#)
+        .replace(r#"r="B1""#, r#"r="B2""#)
+        .replace(r#"r="D1""#, r#"r="D2""#);
+    assert!(sheet.contains(&row_1), "{sheet}");
+    let row_2 = MARKUP_ROW_2
+        .replace(r#"<row r="2""#, r#"<row r="3""#)
+        .replace(r#"r="A2""#, r#"r="A3""#)
+        .replace(r#"ref="A2:A3""#, r#"ref="A3:A4""#)
+        .replace(r#"r="B2""#, r#"r="B3""#);
+    assert!(sheet.contains(&row_2), "{sheet}");
+    let row_3 = MARKUP_ROW_3
+        .replace(r#"<row r="3""#, r#"<row r="4""#)
+        .replace(r#"r="A3""#, r#"r="A4""#)
+        .replace(r#"r="D3""#, r#"r="D4""#);
+    assert!(sheet.contains(&row_3), "{sheet}");
+    assert_eq!(
+        part_bytes(&saved, "xl/worksheets/sheet2.xml"),
+        part_bytes(&parts, "xl/worksheets/sheet2.xml")
+    );
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "A2").value,
+        CellValue::Number { value: 1.0 }
+    );
+    assert_eq!(cell_at(&reopened, "A3").formula.as_deref(), Some("2*2"));
+    assert_eq!(cell_at(&reopened, "A4").formula.as_deref(), Some("2*2"));
+    assert_eq!(reopened.sheets[0].row_heights.get(&1), Some(&20.0));
 }
 
 /// Several local `_xlnm.Print_Area` entries are normal, and the model has no
@@ -1357,12 +2132,16 @@ fn patches_only_the_style_pool_entries_that_changed() {
     let mut workbook = parsed.workbook.clone();
     let mut format = workbook.styles.cell_format(None);
     format.font.italic = true;
-    let style = workbook.styles.intern_cell_format(&format);
+    let style = workbook
+        .styles
+        .intern_cell_format(&format)
+        .unwrap()
+        .unwrap();
     workbook.sheets[0].set_cell(
         CellRef::parse_a1("A1").unwrap(),
         Cell {
             value: CellValue::Number { value: 1.0 },
-            style,
+            style: Some(style),
             ..Cell::default()
         },
     );
@@ -1412,14 +2191,15 @@ fn writes_a_strict_theme_for_a_strict_package() {
     );
 }
 
-fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
+fn content_types_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "[Content_Types].xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -1604,14 +2384,15 @@ fn resolves_shared_strings_through_the_workbook_relationship() {
     );
 }
 
-fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
+fn shared_strings_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "xl/sharedStrings.xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -3760,6 +4541,7 @@ fn save_shared(
             moved_references: false,
         },
     )
+    .map(|parts| parts.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect())
 }
 
 /// One chart part cannot hold two sheets' references at once. A save where the
@@ -5220,4 +6002,33 @@ fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
     assert_eq!(reparsed.sheets[0].row_heights.get(&0), Some(&20.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
+}
+
+/// `<f t="array" ref>` records the rectangle the result occupies; a shared
+/// formula's `ref` and an oversized array `ref` are not array anchors.
+#[test]
+fn captures_array_formula_rectangles() {
+    let body = r#"<sheetData>
+      <row r="1">
+        <c r="A1"><f t="array" ref="A1:B2">SEQUENCE(2,2)</f></c>
+        <c r="D1"><f t="shared" ref="D1:D2" si="0">1+1</f></c>
+        <c r="F1"><f t="array" ref="F1:XFD1048576">SEQUENCE(1)</f></c>
+        <c r="H1"><f t="array" ref="ZZZ">1</f></c>
+      </row>
+      <row r="2"><c r="D2"><f t="shared" si="0"/></c></row>
+    </sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(
+        sheet.array_formula(CellRef::parse_a1("A1").unwrap()),
+        Some(xlsx_model::CellRange::parse_a1("A1:B2").unwrap())
+    );
+    for address in ["D1", "F1", "H1"] {
+        assert_eq!(
+            sheet.array_formula(CellRef::parse_a1(address).unwrap()),
+            None,
+            "{address} is not an array anchor"
+        );
+    }
+    assert_eq!(sheet.array_formulas().count(), 1);
 }

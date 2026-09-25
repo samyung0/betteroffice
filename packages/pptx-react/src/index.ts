@@ -3,7 +3,9 @@ export type {
   PptxEditorApi,
   PptxEditorCollaborationOptions,
   PptxEditorProps,
+  PptxPointPosition,
   PptxTextSelection,
+  PptxTextSelectionTarget,
 } from './PptxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {

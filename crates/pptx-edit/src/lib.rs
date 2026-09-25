@@ -14,16 +14,24 @@ use yrs::{
     Update, WriteTxn,
 };
 
+mod comments;
 mod deck;
 mod model;
+mod proposal_diff;
+mod proposals;
 mod rebase;
 mod save;
+mod search;
 mod story;
 mod undo;
 
+pub use deck::baseline_snapshot;
 pub use model::*;
+pub use proposal_diff::*;
+pub use proposals::*;
 pub use rebase::CheckpointRebase;
-pub use undo::DeckUndoManager;
+pub use search::TextSearchMatch;
+pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -33,9 +41,9 @@ pub(crate) const SLIDE_ORDER: &str = "pptx:slide-order";
 pub(crate) const SLIDES: &str = "pptx:slides";
 pub(crate) const SHAPES: &str = "pptx:shapes";
 pub(crate) const STORIES: &str = "pptx:stories";
+pub(crate) const COMMENTS: &str = "pptx:comments";
 pub(crate) const REMOTE_ORIGIN: &str = "pptx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "pptx:hydrate";
-pub(crate) const MIGRATE_ORIGIN: &str = "pptx:migrate";
 pub(crate) const PILCROW_KIND: &str = "pilcrow";
 pub(crate) const KIND: &str = "_kind";
 pub(crate) const PARA_ID: &str = "paraId";
@@ -58,6 +66,23 @@ pub struct DeckSession {
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
     undo: RefCell<DeckUndoManager>,
+    proposals: RefCell<proposals::ProposalStore>,
+    /// Bumped on every committed transaction via `_epoch_observer`, so a value
+    /// uniquely identifies the doc's state for memoized computations.
+    epoch: Arc<AtomicU64>,
+    _epoch_observer: UpdateSubscription,
+    state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
+}
+
+fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
+    let epoch = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&epoch);
+    let observer = doc
+        .observe_update_v1(move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .map_err(|error| EditError::Observer(error.to_string()))?;
+    Ok((epoch, observer))
 }
 
 impl DeckSession {
@@ -102,18 +127,30 @@ impl DeckSession {
             .encode_state_as_update_v1(&StateVector::default());
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, &baseline)?;
-        deck::validate_doc(&doc)?;
+        deck::validated_snapshot(&doc, &package)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
+        let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
             package: Arc::new(package),
             undo: RefCell::new(undo),
+            proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: RefCell::new(None),
         })
     }
 
-    pub fn open_from_update(update: &[u8], client_id: u64) -> EditResult<Self> {
+    /// Opens a stored state. The package (layouts, masters, themes, media) is
+    /// parsed from the fingerprinted source plus any rebase overlay; the state
+    /// carries none of it.
+    pub fn open_from_update_with_source(
+        update: &[u8],
+        source: &[u8],
+        client_id: u64,
+    ) -> EditResult<Self> {
         validate_client_id(client_id)?;
         if update.len() > MAX_UPDATE_BYTES {
             return Err(EditError::InvalidUpdate(format!(
@@ -122,37 +159,28 @@ impl DeckSession {
         }
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
-        deck::migrate_doc(&doc)?;
-        deck::validate_doc(&doc)?;
-        let package = deck::package_from_doc(&doc)?;
-        let undo = DeckUndoManager::new(&doc, client_id)?;
-        Ok(Self {
-            doc,
-            client_id,
-            id_counter: AtomicU64::new(0),
-            package: Arc::new(package),
-            undo: RefCell::new(undo),
-        })
-    }
-
-    /// Attaches the fingerprinted base and any saved source-part overlay so the session can save.
-    pub fn open_from_update_with_source(
-        update: &[u8],
-        source: &[u8],
-        client_id: u64,
-    ) -> EditResult<Self> {
-        let session = Self::open_from_update(update, client_id)?;
-        let recorded = deck::fingerprint_from_doc(&session.doc)?;
+        deck::validate_meta(&doc)?;
+        let recorded = deck::fingerprint_from_doc(&doc)?;
         let actual = format!("{:x}", Sha256::digest(source));
         if recorded != actual {
             return Err(EditError::Parse(
                 "source bytes do not match the fingerprint recorded in the update".to_owned(),
             ));
         }
-        let package = rebase::source_package(&session.doc, source)?;
+        let package = rebase::source_package(&doc, source)?;
+        deck::validated_snapshot(&doc, &package)?;
+        let undo = DeckUndoManager::new(&doc, client_id)?;
+        let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
+            doc,
+            client_id,
+            id_counter: AtomicU64::new(0),
             package: Arc::new(package),
-            ..session
+            undo: RefCell::new(undo),
+            proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: RefCell::new(None),
         })
     }
 
@@ -173,9 +201,27 @@ impl DeckSession {
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
-        self.doc
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default())
+        (*self.state_update_v1()).clone()
+    }
+
+    pub(crate) fn state_update_v1(&self) -> Arc<Vec<u8>> {
+        let epoch = self.epoch();
+        if let Some((cached_epoch, update)) = &*self.state_update.borrow()
+            && *cached_epoch == epoch
+        {
+            return Arc::clone(update);
+        }
+        let update = Arc::new(
+            self.doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
+        );
+        *self.state_update.borrow_mut() = Some((epoch, Arc::clone(&update)));
+        update
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
@@ -197,16 +243,17 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        deck::migrate_doc(&staged)?;
-        deck::validate_doc(&staged)?;
+        let snapshot = deck::validated_snapshot(&staged, &self.package)?;
 
-        let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
+        let diff = staged
+            .transact()
+            .encode_state_as_update_v1(&self.doc.transact().state_vector());
+        let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
+            .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        deck::migrate_doc(&self.doc)?;
-        self.snapshot()
+        Ok(snapshot)
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>
@@ -246,6 +293,20 @@ impl DeckSession {
 
     pub fn can_redo(&self) -> bool {
         self.undo.borrow().can_redo()
+    }
+
+    pub fn undo_capture_mode(&self) -> UndoCaptureMode {
+        self.undo.borrow().capture_mode()
+    }
+
+    pub fn set_undo_capture_mode(&self, mode: UndoCaptureMode) {
+        self.undo.borrow_mut().set_capture_mode(mode);
+    }
+
+    pub(crate) fn automatic_undo_barrier(&self) {
+        if self.undo_capture_mode() == UndoCaptureMode::Auto {
+            self.add_undo_barrier();
+        }
     }
 
     pub fn add_undo_barrier(&self) {
@@ -288,7 +349,7 @@ fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     // An empty container carries no items, so an update cannot carry it either.
     // Every peer registers the roots the same way, which stays convergent.
     txn.get_or_insert_array(SLIDE_ORDER);
-    for root in [SLIDES, SHAPES, STORIES] {
+    for root in [META, SLIDES, SHAPES, STORIES, COMMENTS] {
         txn.get_or_insert_map(root);
     }
     Ok(())

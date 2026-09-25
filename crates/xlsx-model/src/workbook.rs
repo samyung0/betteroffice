@@ -1,5 +1,6 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -10,6 +11,10 @@ use crate::chart::SheetChart;
 use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
+
+/// upper bound on the cells one array formula may fill. a malformed or hostile
+/// `ref` must not be able to ask for a sheet's worth of cells.
+pub const MAX_SPILL_CELLS: usize = 262_144;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezePane {
@@ -36,6 +41,56 @@ pub struct DefinedName {
     pub hidden: bool,
 }
 
+/// One `xl/tables/tableN.xml` definition: the rectangle a structured reference
+/// resolves against, with the header and totals bands split out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Table {
+    pub name: String,
+    pub sheet: SheetId,
+    pub range: CellRange,
+    pub header_rows: u32,
+    pub totals_rows: u32,
+    pub columns: Vec<String>,
+}
+
+impl Table {
+    /// Inclusive row band holding data, `None` when the table has no data rows.
+    pub fn data_rows(&self) -> Option<(RowId, RowId)> {
+        let top = self.range.start.row.checked_add(self.header_rows)?;
+        let bottom = self.range.end.row.checked_sub(self.totals_rows)?;
+        (top <= bottom).then_some((top, bottom))
+    }
+
+    /// Inclusive header band, `None` when the table has no header row.
+    pub fn header_range(&self) -> Option<(RowId, RowId)> {
+        if self.header_rows == 0 {
+            return None;
+        }
+        let bottom = self.range.start.row.checked_add(self.header_rows - 1)?;
+        Some((self.range.start.row, bottom.min(self.range.end.row)))
+    }
+
+    /// Inclusive totals band, `None` when the table has no totals row.
+    pub fn totals_range(&self) -> Option<(RowId, RowId)> {
+        if self.totals_rows == 0 {
+            return None;
+        }
+        let top = self.range.end.row.checked_sub(self.totals_rows - 1)?;
+        Some((top, self.range.end.row))
+    }
+
+    /// 0-based index of `column` within the table, matched case-insensitively.
+    pub fn column_index(&self, column: &str) -> Option<u32> {
+        let index = self
+            .columns
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(column))?;
+        let index = u32::try_from(index).ok()?;
+        let col = self.range.start.col.checked_add(index)?;
+        (col <= self.range.end.col).then_some(index)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hyperlink {
     pub range: CellRange,
@@ -58,6 +113,25 @@ pub struct Cell {
 /// `None` when the cell is refused.
 type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 
+/// `sheetFormatPr` sizing defaults. `custom_height` is the author's claim that
+/// every unsized row is pinned at `default_row_height_pt`; without it an
+/// unsized row takes the height of its tallest content.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SheetFormat {
+    pub default_row_height_pt: Option<f64>,
+    pub custom_height: bool,
+    /// `zeroHeight`: every row without its own `ht` is hidden.
+    pub zero_height: bool,
+}
+
+/// a `<col>` run's style: the `cellXfs` index its columns give a cell that names none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColStyle {
+    pub first: ColId,
+    pub last: ColId,
+    pub xf: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
@@ -67,7 +141,14 @@ pub struct Sheet {
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
+    pub format: SheetFormat,
+    /// `<col>` style runs in source order; read by the renderer, never the writer.
+    pub col_styles: Vec<ColStyle>,
     pub charts: Vec<SheetChart>,
+    /// anchors of `t="array"` formulas mapped to the rectangle their result
+    /// occupies. authored from the file, then kept current by recalc.
+    array_formulas: BTreeMap<(RowId, ColId), CellRange>,
 }
 
 impl Sheet {
@@ -78,8 +159,42 @@ impl Sheet {
         }
     }
 
+    /// the rectangle the array formula anchored at `at` currently fills.
+    pub fn array_formula(&self, at: CellRef) -> Option<CellRange> {
+        self.array_formulas.get(&(at.row, at.col)).copied()
+    }
+
+    pub fn set_array_formula(&mut self, at: CellRef, spill: CellRange) {
+        self.array_formulas.insert((at.row, at.col), spill);
+    }
+
+    pub fn clear_array_formula(&mut self, at: CellRef) {
+        self.array_formulas.remove(&(at.row, at.col));
+    }
+
+    /// every array-formula anchor with its rectangle, in address order.
+    pub fn array_formulas(&self) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
+        self.array_formulas
+            .iter()
+            .map(|(&(row, col), &spill)| (CellRef::new(row, col), spill))
+    }
+
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
         self.cells.get(&(at.row, at.col))
+    }
+
+    /// the style a `<col>` run gives a cell that names none; later runs win.
+    /// only the fill and the row fit consult it; other facets read `Cell::style`.
+    pub fn col_style(&self, col: ColId) -> Option<u32> {
+        self.col_styles
+            .iter()
+            .rev()
+            .find(|run| (run.first..=run.last).contains(&col))
+            .map(|run| run.xf)
+    }
+
+    pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {
+        self.cells.get_mut(&(at.row, at.col))
     }
 
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
@@ -98,6 +213,7 @@ impl Sheet {
         &mut self,
         remap: impl Fn(CellRef) -> Option<CellRef>,
     ) -> Vec<(CellRef, Cell)> {
+        self.remap_array_formulas(&remap);
         let mut dropped = Vec::new();
         self.cells.retain(|_, cell| *cell != Cell::default());
         let mut plan: CellMoves = Vec::new();
@@ -146,6 +262,28 @@ impl Sheet {
             }
         }
         dropped
+    }
+
+    /// move each array anchor with its cell, translating its rectangle by the
+    /// same delta; anchors the remap refuses lose their array identity.
+    fn remap_array_formulas(&mut self, remap: &impl Fn(CellRef) -> Option<CellRef>) {
+        if self.array_formulas.is_empty() {
+            return;
+        }
+        let mut moved = BTreeMap::new();
+        for (&(row, col), &spill) in &self.array_formulas {
+            let Some(to) = remap(CellRef::new(row, col)) else {
+                continue;
+            };
+            let rows = spill.end.row.saturating_sub(spill.start.row);
+            let cols = spill.end.col.saturating_sub(spill.start.col);
+            let end = CellRef::new(
+                to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
+                to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
+            );
+            moved.insert((to.row, to.col), CellRange::new(to, end));
+        }
+        self.array_formulas = moved;
     }
 
     /// ordered iteration over occupied cells (row-major).
@@ -210,6 +348,8 @@ pub struct Workbook {
     pub shared_strings: Vec<String>,
     /// parsed style tables + theme; a cell's `style` indexes `styles.cell_xfs`.
     pub styles: Stylesheet,
+    /// table parts, in package order; structured references resolve through them.
+    pub tables: Vec<Table>,
 }
 
 impl Workbook {
@@ -230,6 +370,12 @@ impl Workbook {
             .map(|(i, s)| (SheetId(i as u32), s))
     }
 
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
+    }
+
     pub fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
         self.defined_names
             .iter()
@@ -247,19 +393,49 @@ impl Workbook {
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
+    /// Borrowing variant of `value`; absent cells read as `CellValue::Empty`.
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        Cow::Owned(self.value(sheet, at))
+    }
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
+        None
+    }
+
+    /// the table a structured reference names, matched case-insensitively.
+    fn table(&self, _name: &str) -> Option<&Table> {
+        None
+    }
+
+    /// rows worth materializing for a whole-column reference; `0` means the
+    /// sheet is empty. bounds array evaluation to authored data.
+    fn used_rows(&self, _sheet: SheetId) -> RowId {
+        0
+    }
+
+    /// columns worth materializing for a whole-row reference; `0` means the
+    /// sheet is empty. bounds array evaluation to authored data.
+    fn used_cols(&self, _sheet: SheetId) -> ColId {
+        0
+    }
+
+    /// the rectangle the array formula anchored at `at` fills, if any.
+    fn spill_range(&self, _sheet: SheetId, _at: CellRef) -> Option<CellRange> {
         None
     }
 }
 
 impl CellProvider for Workbook {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
-        self.sheet(sheet)
-            .and_then(|s| s.cell(at))
-            .map(|c| c.value.clone())
-            .unwrap_or_default()
+        self.value_cow(sheet, at).into_owned()
+    }
+
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        match self.sheet(sheet).and_then(|s| s.cell(at)) {
+            Some(cell) => Cow::Borrowed(&cell.value),
+            None => Cow::Owned(CellValue::Empty),
+        }
     }
 
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str> {
@@ -272,6 +448,26 @@ impl CellProvider for Workbook {
 
     fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
         self.defined_name(sheet, name)
+    }
+
+    fn table(&self, name: &str) -> Option<&Table> {
+        self.table(name)
+    }
+
+    fn used_rows(&self, sheet: SheetId) -> RowId {
+        self.sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.row.saturating_add(1))
+    }
+
+    fn used_cols(&self, sheet: SheetId) -> ColId {
+        self.sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.col.saturating_add(1))
+    }
+
+    fn spill_range(&self, sheet: SheetId, at: CellRef) -> Option<CellRange> {
+        self.sheet(sheet)?.array_formula(at)
     }
 }
 

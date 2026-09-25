@@ -57,6 +57,7 @@
 //! registry lives in this file. Everything below the wrappers is pure and
 //! native-testable.
 
+mod anchor;
 pub mod canonical;
 pub mod hooks;
 pub mod page_flow;
@@ -82,6 +83,8 @@ pub mod section_breaks;
 pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
+
+mod typed_measure;
 
 use wasm_bindgen::prelude::*;
 
@@ -532,6 +535,26 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     })
 }
 
+/// Register a measurement view of `base` carrying the vertical metrics and
+/// advance pitch Word measures `requested_family` with, and return its id;
+/// returns `base` unchanged for a family with no known metrics. Hosts call
+/// this for a face they substituted, and put the result at the head of that
+/// family's chain. Pagination, the display list and glyph outlines all read
+/// this one store, so a widened view measures and paints at one pitch.
+#[wasm_bindgen]
+pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
+    let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
+        return Ok(base);
+    };
+    MEASURE_FONTS.with(|store| {
+        store
+            .borrow_mut()
+            .register_substitute(ooxml_text::FontId::from_u32(base), requested)
+            .map(|id| id.to_u32())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    })
+}
+
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
 #[wasm_bindgen]
@@ -539,6 +562,13 @@ pub fn clear_measure_fonts() {
     MEASURE_FONTS.with(|store| {
         *store.borrow_mut() = ooxml_text::FontStore::new();
     });
+    measure_blocks::clear_extent_cache();
+}
+
+/// Unique id of the current measurement font store, for caches keyed by store
+/// contents. Changes whenever [`clear_measure_fonts`] installs a new store.
+pub(crate) fn measure_store_id() -> u64 {
+    MEASURE_FONTS.with(|store| store.borrow().id())
 }
 
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
@@ -554,6 +584,14 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
     MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+}
+
+/// Typed form of [`measure_paragraph_json_resident`] against the same font
+/// store, skipping both JSON round trips.
+pub(crate) fn measure_paragraph_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<ooxml_text::ParagraphExtentOut, ooxml_text::MeasureError> {
+    MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline

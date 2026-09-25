@@ -41,7 +41,7 @@ impl DeckSession {
         let indexed_ids = export_ids(&captured_snapshot, &indexed_snapshot)?;
         remap_baseline(&mut indexed_snapshot, &indexed_ids, &current_ids)?;
         crate::deck::seed_snapshot(&indexed.doc, &indexed_snapshot)?;
-        set_overlay(&current.doc, new_source, &current_source, current.package())?;
+        set_overlay(&current.doc, new_source, &current_source)?;
         let state = current.encode_state_as_update_v1();
         let reopened = Self::open_from_update_with_source(&state, new_source, client_id)?;
         if parts(&reopened.save()?)? != parts(&current_source)? {
@@ -66,31 +66,20 @@ fn parts(bytes: &[u8]) -> EditResult<BTreeMap<String, Vec<u8>>> {
         .map_err(|error| EditError::Parse(error.to_string()))
 }
 
-fn set_overlay(
-    doc: &Doc,
-    base: &[u8],
-    current: &[u8],
-    package: &pptx_parse::PptxPackage,
-) -> EditResult<()> {
+/// Parts that differ from the published base are stored as bytes, media included.
+fn set_overlay(doc: &Doc, base: &[u8], current: &[u8]) -> EditResult<()> {
     let fingerprint = format!("{:x}", Sha256::digest(base));
     let base = parts(base)?;
     let current = parts(current)?;
-    let media = package
-        .media
-        .iter()
-        .map(|part| part.part_path.as_str())
-        .collect::<HashSet<_>>();
     let mut overlay = Vec::new();
     for (path, bytes) in &current {
         if base.get(path) == Some(bytes) {
             continue;
         }
-        let content = if media.contains(path.as_str()) {
-            Any::Null
-        } else {
-            Any::Buffer(Arc::from(bytes.as_slice()))
-        };
-        overlay.push(Any::Array(Arc::from([Any::from(path.as_str()), content])));
+        overlay.push(Any::Array(Arc::from([
+            Any::from(path.as_str()),
+            Any::Buffer(Arc::from(bytes.as_slice())),
+        ])));
     }
     for path in base.keys().filter(|path| !current.contains_key(*path)) {
         overlay.push(Any::Array(Arc::from([Any::from(path.as_str())])));
@@ -98,11 +87,6 @@ fn set_overlay(
     let mut txn = doc.transact_mut_with("pptx:rebase");
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, "fingerprint", fingerprint);
-    meta.insert(
-        &mut txn,
-        "schemaVersion",
-        crate::deck::SOURCE_OVERLAY_SCHEMA_VERSION,
-    );
     meta.insert(&mut txn, SOURCE_OVERLAY, Any::Array(Arc::from(overlay)));
     Ok(())
 }
@@ -113,16 +97,11 @@ pub(crate) fn source_package(doc: &Doc, source: &[u8]) -> EditResult<pptx_parse:
         .get_map(META)
         .ok_or_else(|| invalid("missing metadata"))?;
     let Some(value) = meta.get(&txn, SOURCE_OVERLAY) else {
-        if matches!(meta.get(&txn, "schemaVersion"), Some(Out::Any(Any::Number(version))) if version == crate::deck::SOURCE_OVERLAY_SCHEMA_VERSION)
-        {
-            return Err(invalid("missing source overlay"));
-        }
         return pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()));
     };
     let Out::Any(Any::Array(overlay)) = value else {
         return Err(invalid("invalid source overlay"));
     };
-    let package = crate::deck::package_from_doc(doc)?;
     let mut parts = parts(source)?;
     let mut seen = HashSet::new();
     for entry in overlay.iter() {
@@ -141,16 +120,6 @@ pub(crate) fn source_package(doc: &Doc, source: &[u8]) -> EditResult<pptx_parse:
             }
             [_, Any::Buffer(bytes)] => {
                 parts.insert(path.to_string(), bytes.to_vec());
-            }
-            [_, Any::Null] => {
-                let bytes = package
-                    .media
-                    .iter()
-                    .find(|media| media.part_path == path.as_ref())
-                    .ok_or_else(|| invalid("missing source overlay media"))?
-                    .bytes
-                    .clone();
-                parts.insert(path.to_string(), bytes);
             }
             _ => return Err(invalid("invalid source overlay content")),
         }

@@ -4,11 +4,6 @@ Framework-free core for the BetterOffice XLSX editor — the Rust engine (parse,
 calc, render) compiled to WebAssembly, plus display-list, viewport, hit-test,
 and accessibility helpers.
 
-> **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
-> components, collaboration — are settling and unlikely to change shape. Smaller
-> APIs may still move between releases; breaking changes are always listed in
-> the changelog.
-
 ```bash
 bun add @betteroffice/xlsx
 ```
@@ -73,6 +68,20 @@ Around the handle, the package exports the helpers a custom grid needs:
 handle itself covers styling (`patchRangeStyle`, `setNumberFormat`), undo/redo,
 and PNG export (`renderPng` / `renderRangePng`; guard with
 `isPngExportAvailable`).
+
+## Print a range
+
+`workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range
+without changing workbook data, the active sheet, or screen geometry. Pass
+`PrintMetrics` measured from the workbook's normal font: `dpi`, `maxDigitWidth`,
+`fontAscent`, and `fontDescent` use the layout device's pixels; `fontSizePt` and
+`defaultRowHeightPt` use points. `fontFamily` supplies the default face, and
+optional `defaultColumnWidth` uses the stored OOXML character width.
+
+The result uses 96-DPI logical coordinates. Paint it with `paintDisplayList(ctx,
+frame, scale, { x, y })`; the optional origin uses backing-store pixels, so page
+margins need no intermediate image. Cell ranges, paper size, and pagination are
+chosen by the caller. See the [Office comparison harness](../../scripts/office-quality).
 
 ## AI agents / human-in-the-loop
 
@@ -142,4 +151,14 @@ root, install `wasm-pack` 0.15.0 and `binaryen`, then run
 `bun run build:xlsx-wasm`. Package builds, tests, demo startup, and CI run this
 step automatically.
 
-Docs: https://betteroffice.dev · Apache-2.0.
+[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
+[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/xlsx/CHANGELOG.md) · Apache-2.0.
+
+### Operation profiles
+
+`editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled` perform the same
+operations as their unprofiled counterparts and return engine stage durations
+in milliseconds. Edit results include `profile` (validate, apply, recalc, result);
+display results contain `{ displayList, profile }` (build, encode). The normal
+entry points do not read profiling clocks. See the
+[corpus and browser tests](../../e2e/README.md) for usage and timing limits.

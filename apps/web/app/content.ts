@@ -1,11 +1,9 @@
-export const SITE = "https://betteroffice.dev";
-export const REPO = "https://github.com/openooxml/betteroffice";
-export const DOCS = "https://docs.betteroffice.dev";
-export const DEMO = "https://demo.betteroffice.dev";
-export const OPENOOXML = "https://openooxml.org";
-export const NPM = "https://www.npmjs.com/org/betteroffice";
-export const CRATES = "https://crates.io/search?q=betteroffice";
-export const PYPI = "https://pypi.org/project/betteroffice-xlsx";
+import { CRATES, DOCS, NPM, PYPI } from "../../../shared/sites";
+export { BENCHMARKS, CRATES, DEMO, DOCS, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
+
+export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
+export const SITE_DESCRIPTION =
+  "Open-source DOCX, XLSX and PPTX editors for React, with Rust and WebAssembly cores, collaboration, and headless APIs. Apache-2.0.";
 
 export const HERO = {
   title: "BetterOffice",
@@ -20,7 +18,7 @@ export const ECOSYSTEMS = [
     install: "npm install @betteroffice/docx-react",
     url: NPM,
     docs: `${DOCS}/docs/javascript`,
-    desc: "React editors and framework-free cores for all three formats.",
+    desc: "Published React editors and framework-free cores for DOCX, XLSX and PPTX.",
   },
   {
     name: "Rust",
@@ -36,15 +34,15 @@ export const ECOSYSTEMS = [
     install: "pip install betteroffice-xlsx",
     url: PYPI,
     docs: `${DOCS}/docs/python`,
-    desc: "Spreadsheets from Python: formulas evaluated, sheets rendered to PNG, workbooks saved.",
+    desc: "Published DOCX, XLSX and PPTX packages, with installation and examples in the Python guide.",
   },
 ];
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors",
+  heading: "One suite, four editors",
   prose:
-    "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets and slides are all live today on the same foundation.",
+    "DOCX, XLSX and PPTX editors are published on npm and render inside your app. The VSDX diagram editor is available from source.",
 };
 
 export const EDITORS = [
@@ -52,19 +50,25 @@ export const EDITORS = [
     name: "Documents",
     format: "docx",
     desc: "Word-faithful editing: fonts, theme colors, styles, tables, headers & footers, tracked changes.",
-    live: true,
+    status: "available",
   },
   {
     name: "Spreadsheets",
     format: "xlsx",
     desc: "Calculation graph, grid rendering and number formats on the same shared core.",
-    live: true,
+    status: "available",
   },
   {
     name: "Slides",
     format: "pptx",
     desc: "Slide model, masters and shape editing on the same shared core.",
-    live: true,
+    status: "available",
+  },
+  {
+    name: "Diagrams",
+    format: "vsdx",
+    desc: "Source preview: edit diagrams with pan and zoom, update shape data in batches, and export to Word or PowerPoint through Rust. Controls the engine would refuse are disabled rather than offered.",
+    status: "source preview",
   },
 ];
 
@@ -72,21 +76,21 @@ export const PACKAGES_SECTION = {
   label: "Packages",
   heading: "Ships as components, not iframes",
   prose:
-    "The editors install from npm and render inside your app — no embeds, no external services, documents never leave the page. The same engines publish to crates.io for native Rust and to PyPI for Python.",
+    "The DOCX, XLSX and PPTX editors install from npm and render inside your app — no embeds, no external services, documents never leave the page. The same engines publish to crates.io for native Rust and to PyPI for Python.",
 };
 
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The full DOCX editor as a React component — toolbar, pages, comments, tracked changes.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving and awaited input flushing.",
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
@@ -94,45 +98,45 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with opt-in operation timings, manual undo boundaries, and comment repositioning.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, and pointer position queries.",
   },
 ];
 
 export const FOUNDATION = {
-  label: "Foundation",
-  heading: "Built on our own engines",
+  label: "Features",
+  heading: "Office editing for people and agents",
   prose:
-    "BetterOffice is built by OpenOOXML, the open-source project writing native OOXML engines in Rust — parsing, layout, editing and rendering, from the file format up. Owning the whole stack is what makes the output Word-faithful.",
+    "OpenOOXML's Rust engines power every BetterOffice editor, from opening and editing files to layout and rendering. The same engines run in your browser and in headless workflows.",
 };
 
 export const CAPABILITIES = [
   {
-    name: "Own engines",
-    desc: "We build the OOXML engines ourselves, in Rust — from the file format up. No wrapper around someone else's suite.",
+    name: "Documents, spreadsheets, and slides",
+    desc: "Open, edit, render, and save DOCX, XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched file parts losslessly when round-tripping.",
   },
   {
-    name: "Native OOXML editing",
-    desc: "Documents are edited in their own format. No lossy conversion on open, none on save.",
-  },
-  {
-    name: "Word-faithful output",
-    desc: "What you see is what Word shows — layout, pagination and styling match the original.",
+    name: "Agent editing with human review",
+    desc: "Review attributed agent edits through tracked changes, inline diffs, and before-and-after previews. Accept or reject changes directly in the editor.",
   },
   {
     name: "Real-time collaboration",
-    desc: "The document is a CRDT — concurrent edits merge in the engine, not on a server.",
+    desc: "People and agents edit the same file together, with live cursors and selections. Concurrent changes merge automatically, and offline edits sync when peers reconnect.",
   },
   {
-    name: "Agent-ready",
-    desc: "Runs headless too — parse, edit and render documents server-side or inside agent pipelines.",
+    name: "Undo and redo",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
   },
   {
-    name: "Apache 2.0",
-    desc: "Permissive license, developed in the open, self-hostable without exceptions.",
+    name: "Embed or automate",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
+  },
+  {
+    name: "Open source and self-hostable",
+    desc: "Apache-2.0 licensed, with control over your document storage, deployment, and collaboration infrastructure.",
   },
 ];
 

@@ -61,6 +61,7 @@ use unicode_segmentation::UnicodeSegmentation;
 thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CARET_STOPS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Vertical slack (px) added on each side of a run's band when testing a
@@ -87,6 +88,9 @@ fn font_px(font: &str) -> f64 {
 }
 
 /// a positioned text-bearing primitive flattened to shared hit geometry.
+/// Caret stops are built lazily: most queries walk every text primitive of a
+/// region for range overlap but resolve caret x for only the few that
+/// intersect, and stop construction is the expensive part.
 struct TextHit<'a> {
     attrs: &'a DocAttrs,
     x: f64,
@@ -96,7 +100,49 @@ struct TextHit<'a> {
     bottom: f64,
     doc_start: i64,
     doc_end: i64,
-    caret_stops: Vec<CaretStop>,
+    stops_source: StopsSource<'a>,
+    caret_stops: std::cell::OnceCell<Vec<CaretStop>>,
+}
+
+enum StopsSource<'a> {
+    Text {
+        text: &'a str,
+        rtl: bool,
+    },
+    Glyphs {
+        text: &'a str,
+        glyphs: &'a [crate::display_list::PlacedGlyph],
+        rtl: bool,
+    },
+}
+
+impl TextHit<'_> {
+    fn stops(&self) -> &[CaretStop] {
+        self.caret_stops.get_or_init(|| {
+            #[cfg(test)]
+            CARET_STOPS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+            match self.stops_source {
+                StopsSource::Text { text, rtl } => {
+                    text_caret_stops(text, self.x, self.width, rtl, self.doc_start, self.doc_end)
+                }
+                StopsSource::Glyphs { text, glyphs, rtl } => {
+                    let stops = glyph_caret_stops(text, glyphs, rtl, self.doc_start, self.doc_end);
+                    if stops.is_empty() {
+                        text_caret_stops(
+                            text,
+                            self.x,
+                            self.width,
+                            rtl,
+                            self.doc_start,
+                            self.doc_end,
+                        )
+                    } else {
+                        stops
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -190,18 +236,23 @@ fn glyph_caret_stops(
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
+    // clusters are byte-ordered and contiguous (each ends where the next
+    // starts), so UTF-16 offsets accumulate in one linear pass — a per-cluster
+    // prefix rescan would be quadratic in the run length
+    let mut logical_cursor = clusters.first().map_or(0, |(byte, _, _)| {
+        text.get(..*byte)
+            .map_or(0, |prefix| prefix.encode_utf16().count() as i64)
+    });
     for (index, (byte_start, left, right)) in clusters.iter().copied().enumerate() {
         let byte_end = clusters
             .get(index + 1)
             .map_or(text.len(), |(byte, _, _)| *byte);
-        let Some(prefix) = text.get(..byte_start) else {
-            continue;
-        };
         let Some(cluster_text) = text.get(byte_start..byte_end) else {
             continue;
         };
-        let logical_start = prefix.encode_utf16().count() as i64;
+        let logical_start = logical_cursor;
         let logical_end = logical_start + cluster_text.encode_utf16().count() as i64;
+        logical_cursor = logical_end;
         let start_position = doc_position_at_utf16(doc_start, doc_end, logical_start, utf16_len);
         let end_position = doc_position_at_utf16(doc_start, doc_end, logical_end, utf16_len);
         stops.push(CaretStop {
@@ -253,7 +304,11 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops: text_caret_stops(&t.text, x, width, is_rtl(&t.attrs, t.rtl), ds, de),
+                stops_source: StopsSource::Text {
+                    text: &t.text,
+                    rtl: is_rtl(&t.attrs, t.rtl),
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         Primitive::GlyphRun(g) => {
@@ -280,10 +335,6 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 .fold(f64::NEG_INFINITY, f64::max);
             let width = (right - min_x).max(0.0);
             let rtl = is_rtl(&g.attrs, g.rtl);
-            let mut caret_stops = glyph_caret_stops(&g.text, &g.glyphs, rtl, ds, de);
-            if caret_stops.is_empty() {
-                caret_stops = text_caret_stops(&g.text, min_x, width, rtl, ds, de);
-            }
             Some(TextHit {
                 attrs: &g.attrs,
                 x: min_x,
@@ -293,7 +344,12 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops,
+                stops_source: StopsSource::Glyphs {
+                    text: &g.text,
+                    glyphs: &g.glyphs,
+                    rtl,
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         _ => None,
@@ -305,12 +361,13 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
 }
 
 fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
-    let mut best = hit.caret_stops.first().copied().unwrap_or(CaretStop {
+    let stops = hit.stops();
+    let mut best = stops.first().copied().unwrap_or(CaretStop {
         x: hit.x,
         position: hit.doc_start,
     });
     let mut best_distance = (x - best.x).abs();
-    for stop in hit.caret_stops.iter().copied().skip(1) {
+    for stop in stops.iter().copied().skip(1) {
         let distance = (x - stop.x).abs();
         if distance < best_distance || (distance == best_distance && stop.x > best.x) {
             best = stop;
@@ -321,7 +378,7 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
 }
 
 fn x_at_position(hit: &TextHit<'_>, position: i64) -> f64 {
-    hit.caret_stops
+    hit.stops()
         .iter()
         .min_by(|left, right| {
             (left.position - position)
@@ -769,16 +826,36 @@ fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
     prims
         .iter()
         .rev()
-        .filter_map(|p| match p {
-            Primitive::Image(img) => Some(img),
-            _ => None,
+        .find(|primitive| match primitive {
+            Primitive::Image(img) => {
+                let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+                let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+                x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    return false;
+                }
+                if shape.attrs.doc_start.is_none() {
+                    return false;
+                }
+                let (sx, sy) = (
+                    shape.x.as_f64().unwrap_or(0.0),
+                    shape.y.as_f64().unwrap_or(0.0),
+                );
+                let (sw, sh) = (
+                    shape.w.as_f64().unwrap_or(0.0),
+                    shape.h.as_f64().unwrap_or(0.0),
+                );
+                x >= sx && x <= sx + sw && y >= sy && y <= sy + sh
+            }
+            _ => false,
         })
-        .find(|img| {
-            let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
-            let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-            x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+        .is_some_and(|primitive| match primitive {
+            Primitive::Image(img) => img.attrs.doc_start.is_some(),
+            Primitive::Shape(shape) => shape.attrs.doc_start.is_some(),
+            _ => false,
         })
-        .is_some_and(|img| img.attrs.doc_start.is_some())
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
@@ -822,17 +899,43 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     // Only the topmost image decides the target, so an unselectable one over
     // this leaves the area's answer standing.
     for p in prims {
-        let Primitive::Image(img) = p else { continue };
-        let Some(ds) = img.attrs.doc_start else {
-            continue;
-        };
-        let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
-        let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-        if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
-            return PointResolution {
-                pos: Some(ds),
-                target,
-            };
+        match p {
+            Primitive::Image(img) => {
+                let Some(ds) = img.attrs.doc_start else {
+                    continue;
+                };
+                let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+                let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+                if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
+                    return PointResolution {
+                        pos: Some(ds),
+                        target,
+                    };
+                }
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    continue;
+                }
+                let Some(ds) = shape.attrs.doc_start else {
+                    continue;
+                };
+                let (sx, sy) = (
+                    shape.x.as_f64().unwrap_or(0.0),
+                    shape.y.as_f64().unwrap_or(0.0),
+                );
+                let (sw, sh) = (
+                    shape.w.as_f64().unwrap_or(0.0),
+                    shape.h.as_f64().unwrap_or(0.0),
+                );
+                if x >= sx && x <= sx + sw && y >= sy && y <= sy + sh {
+                    return PointResolution {
+                        pos: Some(ds),
+                        target,
+                    };
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1132,17 +1235,21 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
+    let mut pending: Vec<(RectOwner<'_>, RangeRect)> = Vec::new();
     for h in text_hits(prims) {
         // blank-line marker: zero-length span selects as a thin sliver
         if h.doc_start == h.doc_end {
             if h.doc_start >= from && h.doc_start < to {
-                out.push(RangeRect {
-                    page_index,
-                    x: h.x,
-                    y: h.top,
-                    width: BLANK_LINE_SELECTION_WIDTH,
-                    height: h.bottom - h.top,
-                });
+                pending.push((
+                    rect_owner(&h),
+                    RangeRect {
+                        page_index,
+                        x: h.x,
+                        y: h.top,
+                        width: BLANK_LINE_SELECTION_WIDTH,
+                        height: h.bottom - h.top,
+                    },
+                ));
             }
             continue;
         }
@@ -1153,31 +1260,144 @@ fn collect_range_rects(
         let end = to.max(h.doc_start).min(h.doc_end);
         let x0 = x_at_position(&h, start);
         let x1 = x_at_position(&h, end);
-        out.push(RangeRect {
-            page_index,
-            x: x0.min(x1),
-            y: h.top,
-            // degenerate overlaps keep a 1px floor like lineSpanRect
-            width: (x1 - x0).abs().max(1.0),
-            height: h.bottom - h.top,
-        });
+        pending.push((
+            rect_owner(&h),
+            RangeRect {
+                page_index,
+                x: x0.min(x1),
+                y: h.top,
+                // degenerate overlaps keep a 1px floor like lineSpanRect
+                width: (x1 - x0).abs().max(1.0),
+                height: h.bottom - h.top,
+            },
+        ));
     }
+    merge_line_rects(pending, out);
 
     for p in prims {
-        let Primitive::Image(img) = p else { continue };
-        let (Some(ds), Some(de)) = (img.attrs.doc_start, img.attrs.doc_end) else {
-            continue;
-        };
-        if de <= from || ds >= to {
+        match p {
+            Primitive::Image(img) => {
+                let (Some(ds), Some(de)) = (img.attrs.doc_start, img.attrs.doc_end) else {
+                    continue;
+                };
+                if de <= from || ds >= to {
+                    continue;
+                }
+                out.push(RangeRect {
+                    page_index,
+                    x: img.x.as_f64().unwrap_or(0.0),
+                    y: img.y.as_f64().unwrap_or(0.0),
+                    width: img.w.as_f64().unwrap_or(0.0),
+                    height: img.h.as_f64().unwrap_or(0.0),
+                });
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    continue;
+                }
+                let (Some(ds), Some(de)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                    continue;
+                };
+                if de <= from || ds >= to {
+                    continue;
+                }
+                out.push(RangeRect {
+                    page_index,
+                    x: shape.x.as_f64().unwrap_or(0.0),
+                    y: shape.y.as_f64().unwrap_or(0.0),
+                    width: shape.w.as_f64().unwrap_or(0.0),
+                    height: shape.h.as_f64().unwrap_or(0.0),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+const LINE_MERGE_BAND_EPSILON: f64 = 1.0;
+const LINE_MERGE_GAP: f64 = 2.0;
+
+/// Line identity for band merging, strict variant of [`same_line_owner`]:
+/// rects union only within one table cell, line, and block, so bands never
+/// bridge adjacent columns or cells that happen to align.
+struct RectOwner<'a> {
+    table_id: Option<&'a str>,
+    cell: Option<(u64, u64, Option<&'a str>)>,
+    line_index: Option<u64>,
+    para_id: Option<&'a str>,
+    block_key: Option<&'a str>,
+    block_id: Option<&'a Number>,
+    doc_start: i64,
+    doc_end: i64,
+}
+
+impl RectOwner<'_> {
+    fn matches(&self, other: &Self) -> bool {
+        self.table_id == other.table_id
+            && self.cell == other.cell
+            && self.line_index == other.line_index
+            && self.para_id == other.para_id
+            && self.block_key == other.block_key
+            && self.block_id == other.block_id
+            && (self.para_id.is_some()
+                || self.block_key.is_some()
+                || self.block_id.is_some()
+                || self.doc_end == other.doc_start
+                || other.doc_end == self.doc_start)
+    }
+
+    fn absorb(&mut self, other: &Self) {
+        self.doc_start = self.doc_start.min(other.doc_start);
+        self.doc_end = self.doc_end.max(other.doc_end);
+    }
+}
+
+fn rect_owner<'a>(hit: &TextHit<'a>) -> RectOwner<'a> {
+    let attrs = hit.attrs;
+    RectOwner {
+        table_id: attrs.table.as_ref().map(|table| table.table_id.as_str()),
+        cell: attrs
+            .cell
+            .as_ref()
+            .map(|cell| (cell.row, cell.col, cell.cell_id.as_deref())),
+        line_index: attrs.line_index,
+        para_id: attrs.para_id.as_deref(),
+        block_key: attrs.block_key.as_deref(),
+        block_id: attrs.block_id.as_ref(),
+        doc_start: hit.doc_start,
+        doc_end: hit.doc_end,
+    }
+}
+
+/// Coalesce one page's text rects into per-line bands: same-owner rects on the
+/// same band that touch or nearly touch horizontally union into one. Selection
+/// highlights are per line visually, so per-run granularity only multiplies
+/// the rect count — a full-document selection must stay O(lines), not O(runs).
+fn merge_line_rects(mut pending: Vec<(RectOwner<'_>, RangeRect)>, out: &mut Vec<RangeRect>) {
+    pending.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then(a.1.x.total_cmp(&b.1.x)));
+    let mut current: Option<(RectOwner<'_>, RangeRect)> = None;
+    for (owner, rect) in pending {
+        if let Some((held_owner, held)) = current.as_mut()
+            && held_owner.matches(&owner)
+            && (rect.y - held.y).abs() <= LINE_MERGE_BAND_EPSILON
+            && (rect.height - held.height).abs() <= LINE_MERGE_BAND_EPSILON
+            && rect.x <= held.x + held.width + LINE_MERGE_GAP
+            && held.x <= rect.x + rect.width + LINE_MERGE_GAP
+        {
+            let left = held.x.min(rect.x);
+            let right = (held.x + held.width).max(rect.x + rect.width);
+            held.x = left;
+            held.width = right - left;
+            held_owner.absorb(&owner);
             continue;
         }
-        out.push(RangeRect {
-            page_index,
-            x: img.x.as_f64().unwrap_or(0.0),
-            y: img.y.as_f64().unwrap_or(0.0),
-            width: img.w.as_f64().unwrap_or(0.0),
-            height: img.h.as_f64().unwrap_or(0.0),
-        });
+        if let Some((_, held)) = current.take() {
+            out.push(held);
+        }
+        current = Some((owner, rect));
+    }
+    if let Some((_, held)) = current {
+        out.push(held);
     }
 }
 
@@ -1222,6 +1442,25 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
                 height: image.h.as_f64().unwrap_or(0.0),
             });
         }
+        if let Some(shape) = page.primitives.iter().find_map(|primitive| {
+            let Primitive::Shape(shape) = primitive else {
+                return None;
+            };
+            if shape.attrs.inline_shape_atom != Some(true) {
+                return None;
+            }
+            let (Some(start), Some(end)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                return None;
+            };
+            (pos >= start && pos < end).then_some(shape)
+        }) {
+            return Some(CaretRect {
+                page_index,
+                x: shape.x.as_f64().unwrap_or(0.0),
+                y: shape.y.as_f64().unwrap_or(0.0),
+                height: shape.h.as_f64().unwrap_or(0.0),
+            });
+        }
     }
     for (page_index, page) in dl.pages.iter().enumerate().rev() {
         if let Some(image) = page.primitives.iter().rev().find_map(|primitive| {
@@ -1238,6 +1477,25 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
                 x: image.x.as_f64().unwrap_or(0.0) + image.w.as_f64().unwrap_or(0.0),
                 y: image.y.as_f64().unwrap_or(0.0),
                 height: image.h.as_f64().unwrap_or(0.0),
+            });
+        }
+        if let Some(shape) = page.primitives.iter().rev().find_map(|primitive| {
+            let Primitive::Shape(shape) = primitive else {
+                return None;
+            };
+            if shape.attrs.inline_shape_atom != Some(true) {
+                return None;
+            }
+            let (Some(start), Some(end)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                return None;
+            };
+            (pos > start && pos <= end).then_some(shape)
+        }) {
+            return Some(CaretRect {
+                page_index,
+                x: shape.x.as_f64().unwrap_or(0.0) + shape.w.as_f64().unwrap_or(0.0),
+                y: shape.y.as_f64().unwrap_or(0.0),
+                height: shape.h.as_f64().unwrap_or(0.0),
             });
         }
         if let Some(hit) = page.primitives.iter().rev().find_map(|primitive| {
@@ -1508,6 +1766,19 @@ mod tests {
         assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::None);
     }
 
+    #[test]
+    fn hit_and_caret_resolve_combining_and_surrogate_clusters() {
+        let mut primitive = run(100.0, 200.0, 60.0, 10);
+        primitive["text"] = "a\u{301}😀b".into();
+        primitive["docEnd"] = 15.into();
+        let dl = page(serde_json::Value::Null, vec![primitive]);
+
+        assert_eq!(hit_test(&dl, 0, 126.0, 195.0), Some(12));
+        assert_eq!(hit_test(&dl, 0, 134.0, 195.0), Some(14));
+        assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
+        assert!((caret_rect(&dl, 14).unwrap().x - 140.0).abs() < 0.01);
+    }
+
     /// Content positioned outside the content box — a floating text box in a
     /// margin — reads as text over its glyphs but not over the blank tail of
     /// its lines, which no container rect in the display list describes. The
@@ -1597,6 +1868,142 @@ mod tests {
         assert_eq!(note.note_id, None);
         assert_eq!(note.pos, None);
         assert_eq!(note.target, HoverTarget::None);
+    }
+
+    #[test]
+    fn range_rects_merge_same_line_runs_into_one_band() {
+        // three adjacent same-line runs (a formatted or per-cluster line) and
+        // one run on the next line: selecting across them yields one rect per
+        // LINE, never one per run
+        let owned = |x: f64, baseline: f64, doc_start: i64, line_index: u64| {
+            let mut prim = run(x, baseline, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["lineIndex"] = line_index.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                owned(100.0, 200.0, 1, 0),
+                owned(140.0, 200.0, 6, 0),
+                owned(180.0, 200.0, 11, 0),
+                owned(100.0, 230.0, 16, 1),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 21);
+        assert_eq!(rects.len(), 2, "one merged band per line: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!(
+            (rects[0].width - 120.0).abs() < 0.01,
+            "merged width {}",
+            rects[0].width
+        );
+        assert!((rects[1].width - 40.0).abs() < 0.01);
+
+        // a selection whose runs do not touch horizontally stays split
+        let sparse = range_rects(&dl, 1, 3);
+        assert_eq!(sparse.len(), 1);
+        assert!(sparse[0].width < 40.0);
+    }
+
+    #[test]
+    fn range_rects_cover_both_half_point_runs_in_one_band() {
+        let sized = |x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized(140.0, 6, "400 15.333333px Calibri"),
+                sized(100.0, 1, "400 14.666667px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 1, "one merged band: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!((rects[0].x + rects[0].width - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn range_rects_do_not_bridge_unselected_text_between_leftward_runs() {
+        let sized = |text: &str, x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 20.0, doc_start);
+            prim["text"] = text.into();
+            prim["docEnd"] = (doc_start + 2).into();
+            prim["blockId"] = 7.into();
+            prim["paraId"] = "paragraph-1".into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized("ab", 100.0, 10, "400 14.666667px Calibri"),
+                sized("middle", 120.0, 20, "400 14.666667px Calibri"),
+                sized("cd", 140.0, 12, "400 15.333333px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 10, 14);
+        assert_eq!(rects.len(), 2, "separate selected bands: {rects:?}");
+        assert!(
+            rects
+                .iter()
+                .all(|rect| rect.x + rect.width <= 120.0 || rect.x >= 140.0),
+            "unselected middle range must remain uncovered: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn range_rects_do_not_merge_unowned_nonadjacent_runs() {
+        let unowned = |x: f64, doc_start: i64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim.as_object_mut().unwrap().remove("blockId");
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![unowned(100.0, 1), unowned(140.0, 20)],
+        );
+
+        let rects = range_rects(&dl, 1, 25);
+        assert_eq!(
+            rects.len(),
+            2,
+            "unowned document gaps stay split: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn range_rects_never_merge_across_table_cells() {
+        // two aligned, touching runs in adjacent cells of one table: the band
+        // may not bridge the cell boundary even though the geometry allows it
+        let celled = |x: f64, doc_start: i64, col: u64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["table"] = serde_json::json!({
+                "tableId": "t1", "rowStart": 0, "rowEnd": 1,
+                "rowCount": 1, "columnCount": 2
+            });
+            prim["cell"] = serde_json::json!({
+                "row": 0, "col": col, "rowSpan": 1, "colSpan": 1
+            });
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![celled(100.0, 1, 0), celled(140.0, 6, 1)],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 2, "one band per cell: {rects:?}");
+        assert!((rects[0].width - 40.0).abs() < 0.01);
+        assert!((rects[1].width - 40.0).abs() < 0.01);
     }
 
     /// Selection geometry follows the same scoping: a range in a note's story
@@ -1713,6 +2120,44 @@ mod tests {
         assert_eq!(hit_builds, 4);
     }
 
+    /// Range queries walk every text primitive for overlap, but caret-stop
+    /// construction (grapheme/cluster segmentation) must only run for the
+    /// primitives the range actually touches.
+    #[test]
+    fn range_rects_build_caret_stops_only_for_overlapping_runs() {
+        let runs: Vec<serde_json::Value> = (0..200)
+            .map(|index| {
+                let doc_start = 1 + index * 10;
+                serde_json::json!({
+                    "kind": "text",
+                    "text": "aaaaaaaaaa",
+                    "x": 100.0 + index as f64,
+                    "baselineY": 200,
+                    "width": 40,
+                    "font": "400 16px Calibri",
+                    "color": "#000000",
+                    "docStart": doc_start,
+                    "docEnd": doc_start + 10,
+                    "blockId": index,
+                    "lineIndex": index
+                })
+            })
+            .collect();
+        let dl: DisplayList = serde_json::from_value(serde_json::json!({
+            "pages": [{ "pageIndex": 0, "width": 816, "height": 1056, "primitives": runs }]
+        }))
+        .unwrap();
+
+        CARET_STOPS_BUILD_COUNT.with(|count| count.set(0));
+        let rects = range_rects(&dl, 15, 18);
+        let stop_builds = CARET_STOPS_BUILD_COUNT.with(std::cell::Cell::get);
+        assert_eq!(rects.len(), 1);
+        assert!(
+            stop_builds <= 2,
+            "a 3-char selection must not segment every run on the page ({stop_builds} builds)"
+        );
+    }
+
     /// Dense pages (fine-print tables, per-character formatting) must not cost
     /// a scan of every line built so far per primitive.
     #[test]
@@ -1772,5 +2217,170 @@ mod tests {
             "grouping compared line owners {compares} times for {PRIMITIVES_PER_PAGE} \
              primitives per page"
         );
+    }
+
+    fn inline_shape_primitive(
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        doc_start: i64,
+        block_key: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "shape",
+            "x": x, "y": y, "w": w, "h": h,
+            "geometryPath": [
+                {"type": "move", "x": 0, "y": 0},
+                {"type": "line", "x": 1, "y": 1}
+            ],
+            "docStart": doc_start,
+            "docEnd": doc_start + 1,
+            "blockKey": block_key,
+            "inlineShapeAtom": true
+        })
+    }
+
+    fn text_atom(
+        text: &str,
+        x: f64,
+        baseline: f64,
+        width: f64,
+        doc_start: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "text",
+            "text": text,
+            "x": x,
+            "baselineY": baseline,
+            "width": width,
+            "font": "400 16px Calibri",
+            "color": "#000000",
+            "docStart": doc_start,
+            "docEnd": doc_start + 1,
+            "blockId": 1,
+            "lineIndex": 0
+        })
+    }
+
+    #[test]
+    fn inline_shape_atom_hits_caret_and_range_without_images() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let dl = page(
+            content,
+            vec![inline_shape_primitive(
+                100.0,
+                200.0,
+                60.0,
+                18.0,
+                2,
+                "shape:inline-test",
+            )],
+        );
+        assert!(dl.pages[0].primitives.iter().all(|primitive| !matches!(
+            primitive,
+            crate::display_list::Primitive::Image(img) if img.rel_id.is_empty()
+        )));
+        let hit = hit_test_regions(&dl, 0, 130.0, 209.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert_eq!(rects.len(), 1);
+        assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
+        assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
+        let before = caret_rect(&dl, 2).unwrap();
+        assert_eq!((before.x, before.y, before.height), (100.0, 200.0, 18.0));
+        let after = caret_rect(&dl, 3).unwrap();
+        assert_eq!((after.x, after.y, after.height), (160.0, 200.0, 18.0));
+    }
+
+    #[test]
+    fn inline_shape_between_text_keeps_atom_caret_at_edges() {
+        let content = serde_json::json!({"x": 60, "y": 80, "width": 400, "height": 340});
+        let dl = page(
+            content,
+            vec![
+                text_atom("A", 80.0, 100.0, 10.0, 1),
+                inline_shape_primitive(90.0, 82.0, 60.0, 18.0, 2, "shape:inline-test"),
+                text_atom("B", 150.0, 100.0, 10.0, 3),
+            ],
+        );
+        let hit = hit_test_regions(&dl, 0, 120.0, 91.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert!(
+            rects
+                .iter()
+                .any(|rect| rect.x == 90.0 && rect.width == 60.0)
+        );
+        let before = caret_rect(&dl, 2).unwrap();
+        assert_eq!((before.x, before.y), (90.0, 82.0));
+        let end = caret_rect(&dl, 3).unwrap();
+        assert_eq!(end.x, 150.0);
+    }
+
+    #[test]
+    fn standalone_shape_without_atom_flag_stays_unselectable() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let mut standalone = inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 9, "shape:block");
+        standalone
+            .as_object_mut()
+            .unwrap()
+            .remove("inlineShapeAtom");
+        let dl = page(content, vec![standalone]);
+        let hit = hit_test_regions(&dl, 0, 130.0, 209.0).unwrap();
+        assert_ne!(hit.target, HoverTarget::Image);
+        assert!(range_rects(&dl, 9, 10).is_empty());
+    }
+
+    #[test]
+    fn unselectable_image_on_top_blocks_selectable_image_and_shape() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let covered_image = page(
+            content.clone(),
+            vec![image(100.0, 200.0, Some(10)), image(100.0, 200.0, None)],
+        );
+        assert_eq!(target(&covered_image, 130.0, 209.0), HoverTarget::None);
+        let covered_shape = page(
+            content.clone(),
+            vec![
+                inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test"),
+                image(100.0, 200.0, None),
+            ],
+        );
+        assert_eq!(target(&covered_shape, 130.0, 209.0), HoverTarget::None);
+        let shape_on_top = page(
+            content,
+            vec![
+                image(100.0, 200.0, None),
+                inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test"),
+            ],
+        );
+        assert_eq!(target(&shape_on_top, 130.0, 209.0), HoverTarget::Image);
+    }
+
+    #[test]
+    fn grouped_child_without_doc_stays_parent_only_atom() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let parent = inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test");
+        let child = serde_json::json!({
+            "kind": "shape",
+            "x": 105.0, "y": 204.0, "w": 10.0, "h": 8.0,
+            "geometryPath": [
+                {"type": "move", "x": 0, "y": 0},
+                {"type": "line", "x": 1, "y": 1}
+            ],
+            "blockKey": "shape:inline-test:child:0",
+            "inlineShapeAtom": true
+        });
+        let dl = page(content, vec![parent, child]);
+        let hit = hit_test_regions(&dl, 0, 110.0, 208.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert_eq!(rects.len(), 1);
+        assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
+        assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
     }
 }

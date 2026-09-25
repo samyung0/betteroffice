@@ -10,6 +10,7 @@ use crate::shape::Shape;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::xml_writer::{XmlWriter, int_attr, js_number};
 
 const VALID_HIGHLIGHT_COLORS: &[&str] = &[
@@ -51,6 +52,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
             fonts.h_ansi_theme.as_deref(),
             fonts.east_asia_theme.as_deref(),
             fonts.cs_theme.as_deref(),
+            fonts.hint.as_deref(),
         ]
         .into_iter()
         .any(|value| nonempty(value).is_some());
@@ -68,6 +70,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 fonts.east_asia_theme.as_deref(),
             );
             optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
     }
@@ -134,6 +137,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     }
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
+    on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
 
     let body = body.finish();
     if body.is_empty() {
@@ -329,11 +333,38 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
-        RunContent::CommentReference { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::HorizontalRule { rule } => {
+            validate_replayed_fragment(&rule.xml)?;
+            return Ok(rule.xml.clone());
+        }
+        RunContent::CommentReference { id } => {
+            writer.start_element("w:commentReference");
+            if let Some(id) = id {
+                writer.attribute("w:id", &js_number(*id));
+            }
+            writer.end_element();
+        }
+        RunContent::Chart { chart } => {
+            let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
+                ParseError::Canonical("chart run carries no drawing to replay".to_owned())
+            })?;
+            validate_raw_subtree(xml, "w", "drawing")?;
+            return Ok(xml.to_owned());
+        }
+        RunContent::OpaqueDrawing { xml, .. } => {
+            validate_replayed_fragment(xml)?;
+            return Ok(xml.clone());
+        }
     }
     Ok(writer.finish())
+}
+
+/// The authored z-order when the anchor carried one; Word's default otherwise.
+fn relative_height_attr(position: Option<&crate::image::ImagePosition>) -> String {
+    position
+        .and_then(|position| position.relative_height)
+        .map(|value| int_attr(Some(value)))
+        .unwrap_or_else(|| "251658240".to_owned())
 }
 
 /// Serializes one image as WordprocessingDrawing XML.
@@ -344,9 +375,10 @@ pub fn serialize_drawing_content(
     let floating = image.wrap.wrap_type != "inline";
     let id = drawing_id(image.id.as_deref(), context);
     let name = image
-        .title
+        .name
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or_else(|| image.title.as_deref().filter(|value| !value.is_empty()))
         .or_else(|| image.filename.as_deref().filter(|value| !value.is_empty()))
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Picture {id}"));
@@ -361,7 +393,10 @@ pub fn serialize_drawing_content(
             .attribute("distL", &int_attr(image.wrap.dist_l))
             .attribute("distR", &int_attr(image.wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(image.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if image.wrap.wrap_type == "behind" {
@@ -438,7 +473,7 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let is_text_box = shape.shape_type == "textBox";
+    let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
         .as_ref()
@@ -479,7 +514,7 @@ pub fn serialize_shape_content(
         .start_element("a:prstGeom")
         .attribute(
             "prst",
-            if is_text_box {
+            if shape.shape_type == "textBox" {
                 "rect"
             } else {
                 &shape.shape_type
@@ -501,6 +536,13 @@ pub fn serialize_shape_content(
                 &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
             )
             .attribute("vert", vertical_token(shape));
+        if let Some(wrap) = shape
+            .text_body_properties
+            .as_ref()
+            .and_then(|properties| nonempty(properties.wrap.as_deref()))
+        {
+            body_properties.attribute("wrap", wrap);
+        }
         if let Some(anchor) = nonempty(text_body.anchor.as_deref()).and_then(anchor_token) {
             body_properties.attribute("anchor", anchor);
         }
@@ -515,7 +557,7 @@ pub fn serialize_shape_content(
         }
         write_auto_fit(&mut body_properties, shape);
         body_properties.end_element();
-        if is_text_box {
+        if is_text_box || !text_body.content.is_empty() {
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
@@ -547,7 +589,10 @@ pub fn serialize_shape_content(
             .attribute("distL", &int_attr(wrap.dist_l))
             .attribute("distR", &int_attr(wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(shape.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if wrap.wrap_type == "behind" { "1" } else { "0" },
@@ -685,9 +730,6 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
         .start_element("pic:cNvPr")
         .attribute("id", id)
         .attribute("name", &name);
-    if let Some(alt) = nonempty(image.alt.as_deref()) {
-        writer.attribute("descr", alt);
-    }
     writer
         .end_element()
         .start_element("pic:cNvPicPr")
@@ -733,7 +775,7 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
     );
     writer
         .start_element("a:prstGeom")
-        .attribute("prst", "rect")
+        .attribute("prst", image.shape_type.as_deref().unwrap_or("rect"))
         .start_element("a:avLst")
         .end_element()
         .end_element();
@@ -1164,6 +1206,34 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn picture_presets_survive_drawing_serialization() {
+        for preset in [None, Some("ellipse"), Some("roundRect")] {
+            let mut value = serde_json::to_value(crate::image::placeholder_image("rId1")).unwrap();
+            if let Some(preset) = preset {
+                value["shapeType"] = serde_json::json!(preset);
+            }
+            let image: Image = serde_json::from_value(value).unwrap();
+            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
+            assert!(xml.contains(&format!(
+                r#"<a:prstGeom prst="{}">"#,
+                preset.unwrap_or("rect")
+            )));
+            let limits = crate::xml::ParseLimits::default();
+            let parsed = crate::xml::parse_xml(
+                xml.as_bytes(),
+                "drawing.xml",
+                &mut crate::xml::ParseBudget::new(&limits),
+            )
+            .unwrap();
+            let image = crate::image::parse_drawing(parsed.root().unwrap(), None, None).unwrap();
+            assert_eq!(
+                serde_json::to_value(image).unwrap()["shapeType"].as_str(),
+                preset
+            );
+        }
     }
 
     #[test]

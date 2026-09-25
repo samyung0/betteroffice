@@ -1,10 +1,13 @@
 use std::fmt;
+use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotOp, PlotRect, PlotSink, chart_aria_label, plot_chart_into,
+    ChartSpace, PlotChart, PlotOp, PlotRect, PlotSink, PlotTextAlign, chart_aria_label,
+    plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
+use xlsx_model::styles::Stylesheet;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{MAX_COLS, MAX_ROWS};
 
@@ -295,8 +298,12 @@ fn px_to_emu(px: f64) -> Option<i64> {
 /// Every chart the viewport shows, in paint order, carrying the geometry the
 /// display list publishes. The label is left empty: resolving anchors needs no
 /// chart part, and a hit test has no use for one.
-pub fn chart_regions(sheet: &Sheet, viewport: &Viewport) -> Result<Vec<ChartRegion>, RenderError> {
-    let geometry = GridGeometry::new(sheet);
+pub fn chart_regions(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    viewport: &Viewport,
+) -> Result<Vec<ChartRegion>, RenderError> {
+    let geometry = GridGeometry::new(sheet, styles);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -371,7 +378,7 @@ fn visible_charts<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_charts<F>(
+pub(crate) fn render_charts<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -382,7 +389,8 @@ pub(crate) fn render_charts<F>(
     resolver: &mut F,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     render_charts_with_budget(
         sheet,
@@ -398,7 +406,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_charts_with_budget<F>(
+fn render_charts_with_budget<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -410,7 +418,8 @@ fn render_charts_with_budget<F>(
     max_ops: usize,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     let mut remaining = max_ops;
     for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
@@ -457,7 +466,7 @@ enum ChartOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plot_one_chart<F>(
+fn plot_one_chart<F, R>(
     chart: &SheetChart,
     rect: PlotRect,
     clip: Rect,
@@ -467,14 +476,15 @@ fn plot_one_chart<F>(
     resolver: &mut F,
 ) -> ChartOutcome
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
-    let space = match resolver(chart) {
-        Ok(space) => space,
+    let space: Arc<ChartSpace> = match resolver(chart) {
+        Ok(space) => space.into(),
         Err(error) if error.refuses_frame() => return ChartOutcome::Fatal(error),
         Err(_) => return ChartOutcome::Degraded(degraded_label(None)),
     };
-    let plot = PlotChart::from(&space);
+    let plot = PlotChart::from(space.as_ref());
     let label = chart_aria_label(&plot);
     if let Some(error) = chart_refusal(chart, &space) {
         if error.refuses_frame() {
@@ -574,7 +584,7 @@ fn paint_chart_placeholder(
         y,
         w,
         h,
-        color: PLACEHOLDER_FILL.to_string(),
+        color: PLACEHOLDER_FILL.into(),
         clip: Some(clip),
     })?;
     if w <= PLACEHOLDER_BORDER_WIDTH || h <= PLACEHOLDER_BORDER_WIDTH {
@@ -595,7 +605,7 @@ fn paint_chart_placeholder(
             x2,
             y2,
             width: PLACEHOLDER_BORDER_WIDTH,
-            color: PLACEHOLDER_BORDER.to_string(),
+            color: PLACEHOLDER_BORDER.into(),
             style: None,
             clip: Some(clip),
         })?;
@@ -803,7 +813,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             y: finite_f32(y)?,
             w: positive_f32(w)?,
             h: positive_f32(h)?,
-            color: fill,
+            color: fill.into(),
             clip: Some(chart_clip),
         })),
         PlotOp::Text {
@@ -813,6 +823,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             width,
             font,
             color,
+            align,
         } => {
             let x = finite_f32(x)?;
             let y = finite_f32(baseline_y)?;
@@ -820,21 +831,25 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let font_size_px = positive_f32(font.size_px)?;
             let font_size = positive_f32(font.size_px * 72.0 / 96.0)?;
             let text_clip = text_clip(x, y, width, font_size_px, chart_clip)?;
+            let (x, align) = match align {
+                PlotTextAlign::Center => (x + width / 2.0, Align::Center),
+                PlotTextAlign::Start => (x, Align::Left),
+            };
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
                 y,
-                text,
+                text: text.into(),
                 font_size,
-                color,
+                color: color.into(),
                 clip,
-                align: Align::Left,
+                align,
                 bold: font.weight >= 600,
                 italic: false,
                 underline: false,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
-                font_family: Some(font.family.to_string()),
+                font_family: Some(font.family.into()),
                 ghost: false,
                 chart: true,
             }))
@@ -852,7 +867,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             x2: finite_f32(x2)?,
             y2: finite_f32(y2)?,
             width: positive_f32(width)?,
-            color,
+            color: color.into(),
             style: None,
             clip: Some(chart_clip),
         })),
@@ -865,11 +880,11 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             validate_path(&commands)?;
             Ok(Some(DrawCmd::Path {
                 commands,
-                fill,
+                fill: fill.into(),
                 stroke: stroke
                     .map(|stroke| {
                         Ok(PathStroke {
-                            color: stroke.color,
+                            color: stroke.color.into(),
                             width: positive_f32(stroke.width)?,
                         })
                     })
@@ -959,7 +974,7 @@ mod tests {
         let mut sheet = Sheet::new("Sheet1");
         sheet.col_widths.insert(1, 0.0);
         sheet.row_heights.insert(1, 0.0);
-        GridGeometry::new(&sheet)
+        GridGeometry::new(&sheet, &Stylesheet::default())
     }
 
     fn cell(col: u32, col_off: i64, row: u32, row_off: i64) -> AnchorCell {
@@ -1114,13 +1129,13 @@ mod tests {
                 refs: Vec::new(),
             });
         }
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let mut commands = Vec::new();
         let mut a11y = Vec::new();
         let resolved = std::cell::Cell::new(0);
         let mut resolver = |_: &SheetChart| {
             resolved.set(resolved.get() + 1);
-            Ok(ChartSpace {
+            Ok(Arc::new(ChartSpace {
                 chart_type: "line".into(),
                 title: None,
                 legend: Some(ChartLegend {
@@ -1133,7 +1148,7 @@ mod tests {
                 plot_groups: Vec::new(),
                 axis_list: None,
                 ..Default::default()
-            })
+            }))
         };
         let error = render_charts_with_budget(
             &sheet,
@@ -1223,7 +1238,7 @@ mod tests {
             },
             refs: Vec::new(),
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let viewport = Viewport {
             x: 0.0,
             y: 0.0,
@@ -1231,7 +1246,7 @@ mod tests {
             height: 200.0,
         };
         let mut resolver = |chart: &SheetChart| {
-            Err(RenderError::ChartParseFailed {
+            Err::<ChartSpace, _>(RenderError::ChartParseFailed {
                 part: chart.part.clone(),
             })
         };
@@ -1278,7 +1293,7 @@ mod tests {
             to: cell(4, 0, 6, 0),
             edit_as: AnchorEditAs::TwoCell,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let before = resolve_chart_anchor(sheet.charts[0].anchor, &geometry, 0, 0).unwrap();
         let moved = moved_chart_anchor(sheet.charts[0].anchor, &geometry, 17.0, -5.0).unwrap();
         let after = resolve_chart_anchor(moved, &geometry, 0, 0).unwrap();
@@ -1306,7 +1321,7 @@ mod tests {
             from: cell(1, 0, 1, 0),
             extent,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let moved =
             moved_chart_anchor(sheet.charts[0].anchor, &geometry, -10_000.0, -10_000.0).unwrap();
         assert_eq!(
@@ -1327,7 +1342,7 @@ mod tests {
                 cy: 476_250,
             },
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         assert!(moved_chart_anchor(sheet.charts[0].anchor, &geometry, 5.0, 5.0).is_none());
         assert!(
             moved_chart_anchor(
@@ -1358,7 +1373,7 @@ mod tests {
             width: 400.0,
             height: 300.0,
         };
-        let regions = chart_regions(&sheet, &viewport).unwrap();
+        let regions = chart_regions(&sheet, &Stylesheet::default(), &viewport).unwrap();
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].id, "xl/drawings/drawing1.xml#0");
         assert!(regions[0].label.is_empty());
@@ -1367,6 +1382,7 @@ mod tests {
 
         let scrolled = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 2_000.0,
                 y: 2_000.0,
@@ -1402,6 +1418,7 @@ mod tests {
         });
         let regions = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 0.0,
                 y: 0.0,

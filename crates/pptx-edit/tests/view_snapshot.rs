@@ -1,4 +1,4 @@
-use pptx_edit::{DeckSession, snapshot_package};
+use pptx_edit::{DeckSession, baseline_snapshot};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
@@ -8,7 +8,7 @@ fn parsed_view_snapshot_matches_an_unedited_editor_session() {
     let editor = DeckSession::open(FIXTURE, 71).unwrap();
 
     assert_eq!(
-        snapshot_package(&package).unwrap(),
+        baseline_snapshot(&package).unwrap(),
         editor.snapshot().unwrap()
     );
 }

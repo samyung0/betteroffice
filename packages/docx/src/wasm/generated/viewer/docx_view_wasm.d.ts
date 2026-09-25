@@ -128,6 +128,16 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `requested_family` with, and return its id;
+ * returns `base` unchanged for a family with no known metrics. Hosts call
+ * this for a face they substituted, and put the result at the head of that
+ * family's chain. Pagination, the display list and glyph outlines all read
+ * this one store, so a widened view measures and paints at one pitch.
+ */
+export function register_substitute_measure_font(base: number, requested_family: string): number;
+
+/**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
  * update to a stored display list so an incremental rebuild re-parses only
  * its changed pages. `Err` closes the handle first, so the caller's fallback
@@ -148,6 +158,7 @@ export interface InitOutput {
     readonly docxviewdocument_open: (a: number, b: number) => [number, number, number];
     readonly docxviewdocument_version: () => [number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -160,12 +171,12 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
-    readonly clear_measure_fonts: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

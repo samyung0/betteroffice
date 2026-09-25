@@ -22,6 +22,17 @@ export interface Viewport {
   height: number;
 }
 
+export interface PrintMetrics {
+  dpi: number;
+  maxDigitWidth: number;
+  defaultRowHeightPt: number;
+  defaultColumnWidth?: number;
+  fontSizePt: number;
+  fontFamily: string;
+  fontAscent: number;
+  fontDescent: number;
+}
+
 /**
  * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
  * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
@@ -57,6 +68,28 @@ export interface EditResult {
   sheetInfo: SheetInfo;
   changed?: string[];
   limitedCells?: string[];
+}
+
+/** Facade stage latencies of one profiled mutation, in ms. */
+export interface EditProfile {
+  validateMs: number;
+  applyMs: number;
+  recalcMs: number;
+  resultMs: number;
+}
+
+export interface ProfiledEditResult extends EditResult {
+  profile: EditProfile;
+}
+
+export interface DisplayListProfile {
+  buildMs: number;
+  encodeMs: number;
+}
+
+export interface ProfiledDisplayList {
+  displayList: DisplayList;
+  profile: DisplayListProfile;
 }
 
 export interface CalculationStatus {
@@ -192,6 +225,25 @@ export interface CellEdit {
   isFormula: boolean;
 }
 
+export interface XlsxTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; defaults to 1000. */
+  limit?: number;
+}
+
+/** Zero-based sheet, row, and column. */
+export interface XlsxTextMatch {
+  sheet: number;
+  sheetId: string;
+  sheetName: string;
+  row: number;
+  col: number;
+  a1: string;
+  /** Formatted display text. */
+  text: string;
+}
+
 /** One cell of a batch edit: target coordinates plus the raw user input. */
 export interface CellInputEdit {
   row: number;
@@ -281,6 +333,11 @@ export interface WorkbookHandle extends CollaborationReplica {
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
+  /** `displayList` with build and encode time measured inside the core. */
+  displayListProfiled(viewport: Viewport): ProfiledDisplayList;
+  printDisplayList(
+    sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean
+  ): DisplayList;
   /**
    * the chart under a viewport-local point on the active sheet, or `null`,
    * resolved against the current model from the same anchor geometry the
@@ -306,14 +363,20 @@ export interface WorkbookHandle extends CollaborationReplica {
    * in `EditResult.changed`.
    */
   editCell(sheet: number, row: number, col: number, input: string): EditResult;
+  /** `editCell` with the facade's stage timings attached. */
+  editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
+  /** `applyOps` with the facade's stage timings attached. */
+  applyOpsProfiled(ops: unknown[]): ProfiledEditResult;
   undo(): EditResult;
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
   cell(sheet: number, row: number, col: number): CellEdit;
+  /** Searches formatted text in sheet and row order. */
+  searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
@@ -588,6 +651,14 @@ export function openWorkbook(
     displayList(viewport: Viewport): DisplayList {
       return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
     },
+    displayListProfiled(viewport: Viewport): ProfiledDisplayList {
+      return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
+    },
+    printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): DisplayList {
+      return parseJson(() =>
+        doc.printDisplayListJson(JSON.stringify({ sheet, range, metrics, gridlines }))
+      );
+    },
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null {
       return parseJson(() => doc.chartAtPointJson(JSON.stringify({ viewport, x, y })));
     },
@@ -600,11 +671,20 @@ export function openWorkbook(
     editCell(sheet: number, row: number, col: number, input: string): EditResult {
       return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
     },
+    editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult {
+      return parseJson(
+        () => doc.editCellProfiledJson(JSON.stringify({ sheet, row, col, input })),
+        true
+      );
+    },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
+    },
+    applyOpsProfiled(ops: unknown[]): ProfiledEditResult {
+      return parseJson(() => doc.applyOpsProfiledJson(JSON.stringify({ ops })), true);
     },
     undo(): EditResult {
       return parseJson(() => doc.undoJson(), true);
@@ -614,6 +694,25 @@ export function openWorkbook(
     },
     cell(sheet: number, row: number, col: number): CellEdit {
       return parseJson(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
+    },
+    searchText(query, options): XlsxTextMatch[] {
+      if (!query) return [];
+      const limit = options?.limit;
+      if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || limit < 0 || limit > 0xffff_ffff)
+      ) {
+        throw new RangeError('search limit must be an unsigned 32-bit integer');
+      }
+      return parseJson(() =>
+        doc.searchTextJson(
+          JSON.stringify({
+            query,
+            caseSensitive: options?.caseSensitive ?? false,
+            ...(limit === undefined ? {} : { limit }),
+          })
+        )
+      );
     },
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));

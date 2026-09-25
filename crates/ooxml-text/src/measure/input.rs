@@ -36,7 +36,7 @@
 //! `floatingZones` and `paragraphYOffset` are optional; absent means no float
 //! context. See [`FloatZoneIn`] for their coordinate space.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
@@ -72,6 +72,58 @@ pub struct MeasureInput {
 }
 
 impl MeasureInput {
+    /// Borrowed view consumed by [`super::measure_paragraph_typed`].
+    pub(super) fn as_request(&self) -> MeasureRequest<'_> {
+        MeasureRequest {
+            block: &self.block,
+            max_width: self.max_width,
+            font_chains: FontChains::Hash(&self.font_chains),
+            defaults: &self.defaults,
+            compat: self.compat,
+            floating_zones: self.floating_zones.as_deref(),
+            paragraph_y_offset: self.paragraph_y_offset,
+            authoritative_shaping: self.authoritative_shaping,
+        }
+    }
+}
+
+/// Borrowed measurement request, field-for-field equivalent to
+/// [`MeasureInput`]. The JSON boundary borrows an owned [`MeasureInput`] via
+/// [`MeasureInput::as_request`]; hosts with typed blocks (docx-layout)
+/// construct it directly so nothing is serialized or cloned on the way in.
+///
+/// `font_chains` is a borrowed table rather than a `Cow` because the two
+/// boundaries own different map types (`HashMap` parsed from JSON,
+/// docx-layout's `BTreeMap` config) and both must stay zero-copy.
+#[derive(Debug, Clone, Copy)]
+pub struct MeasureRequest<'a> {
+    pub block: &'a BlockIn,
+    pub max_width: f32,
+    pub font_chains: FontChains<'a>,
+    pub defaults: &'a DefaultsIn,
+    pub compat: CompatIn,
+    pub floating_zones: Option<&'a [FloatZoneIn]>,
+    pub paragraph_y_offset: Option<f32>,
+    pub authoritative_shaping: bool,
+}
+
+/// Borrowed fallback-chain table for [`MeasureRequest`].
+#[derive(Debug, Clone, Copy)]
+pub enum FontChains<'a> {
+    Hash(&'a HashMap<String, Vec<u32>>),
+    BTree(&'a BTreeMap<String, Vec<u32>>),
+}
+
+impl FontChains<'_> {
+    fn get(&self, key: &str) -> Option<&[u32]> {
+        match self {
+            FontChains::Hash(map) => map.get(key).map(Vec::as_slice),
+            FontChains::BTree(map) => map.get(key).map(Vec::as_slice),
+        }
+    }
+}
+
+impl MeasureRequest<'_> {
     /// Look up the fallback chain for a `(family, bold, italic)` combination.
     pub(super) fn chain_for(
         &self,
@@ -202,6 +254,10 @@ pub struct RunIn {
     /// only affects how neutrals segment.
     #[serde(default)]
     pub rtl: bool,
+    /// Run-level `w:snapToGrid` opt-out. `None` is the OOXML default (on);
+    /// `Some(false)` disables grid snapping for lines containing this run.
+    #[serde(default)]
+    pub snap_to_grid: Option<bool>,
     /// Cached field display text; missing or empty values measure as `"1"`.
     #[serde(default)]
     pub fallback: Option<String>,
@@ -270,6 +326,15 @@ pub struct RotationBoundsIn {
 
 /// `ParagraphAttrs` subset. `alignment` is accepted but never affects
 /// measurement (lines report natural widths; justification is paint-time).
+///
+/// `doc_grid_pitch_px` carries the section's `w:docGrid w:linePitch` in px,
+/// already gated by the host to an activating grid type (`lines`,
+/// `linesAndChars`, `snapToChars`); `None` (or a non-positive value) means
+/// no snapping. `snap_to_grid` is the paragraph-level `w:snapToGrid`
+/// opt-out (`None` is the default, on); a run-level `w:snapToGrid` opt-out
+/// lives on each [`RunIn`]. A line snaps only when the pitch is set, the
+/// paragraph allows it, no contributing run opts out, and the spacing
+/// rule is `auto` (pinned `exact`/`atLeast` heights never snap).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrsIn {
@@ -303,12 +368,16 @@ pub struct AttrsIn {
     pub list_marker_hidden: bool,
     /// Marker face from the numbering level rPr; falls back to the first
     /// text run's font, then the paragraph/document defaults. The host must
-    /// provide the resolved family's **regular** (`|0|0`) chain.
+    /// provide the resolved family's requested style chain.
     #[serde(default)]
     pub list_marker_font_family: Option<String>,
     /// Points.
     #[serde(default)]
     pub list_marker_font_size: Option<f32>,
+    #[serde(default)]
+    pub list_marker_bold: bool,
+    #[serde(default)]
+    pub list_marker_italic: bool,
     /// §17.9.25 `w:suff`: `"tab"` (default) / `"space"` / `"nothing"`.
     #[serde(default)]
     pub list_marker_suffix: Option<String>,
@@ -317,6 +386,22 @@ pub struct AttrsIn {
     /// grid.
     #[serde(default)]
     pub default_tab_stop_twips: Option<f32>,
+    /// Section grid pitch in px (`w:docGrid w:linePitch`), host-gated to an
+    /// activating grid type. `None` (or non-positive) disables snapping.
+    #[serde(default)]
+    pub doc_grid_pitch_px: Option<f32>,
+    /// Paragraph-level `w:snapToGrid` opt-out. `None` is the OOXML default
+    /// (on); `Some(false)` disables snapping for the whole paragraph.
+    #[serde(default)]
+    pub snap_to_grid: Option<bool>,
+    /// `w:autoSpaceDE` opt-out — the space between East Asian and Latin
+    /// letters. `None` is the OOXML default (on).
+    #[serde(default, rename = "autoSpaceDE")]
+    pub auto_space_de: Option<bool>,
+    /// `w:autoSpaceDN` opt-out — the same between East Asian text and
+    /// digits.
+    #[serde(default, rename = "autoSpaceDN")]
+    pub auto_space_dn: Option<bool>,
 }
 
 /// `ParagraphSpacing`: before/after in px; `line` in px or as a multiplier

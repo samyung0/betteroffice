@@ -1,29 +1,49 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
+use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
+use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
+use crate::table_grid::{
+    content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths, resolve_table_width_px,
+};
 use crate::types::{
-    BlockExtent, ChartExtent, ImageExtent, ImageRunPosition, LayoutBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
-    TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
+    BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
+    ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
+    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
+    TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
-const ANCHOR_PROXIMITY: usize = 4;
+/// Zones one anchor frame may accumulate, matching the measurement layer's cap.
+const MAX_ACTIVE_ZONES: usize = 200;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FloatingZone {
-    left_margin: f64,
-    right_margin: f64,
-    top_y: f64,
-    bottom_y: f64,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    full_width_block: bool,
+/// A shape the lowering placed by anchor rather than in the flow.
+fn anchored_shape(shape: &ShapeBlock) -> bool {
+    shape.position.is_some() || shape.wrap_type.is_some()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloatStrip {
+    pub(crate) left_offset: f64,
+    pub(crate) available_width: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FloatingZone {
+    pub(crate) left_margin: f64,
+    pub(crate) right_margin: f64,
+    pub(crate) top_y: f64,
+    pub(crate) bottom_y: f64,
+    /// Usable strips when the float sits inside the text column and text runs
+    /// past it on both sides; empty means the side margins describe the zone.
+    pub(crate) segments: Vec<FloatStrip>,
+    pub(crate) full_width_block: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +55,8 @@ struct AnchoredFloatingZone {
 
 #[derive(Clone, Debug)]
 pub struct FloatPageGeometry {
+    pub page_width: f64,
+    pub margin_left: f64,
     pub page_height: f64,
     pub margin_top: f64,
     pub content_height: f64,
@@ -215,8 +237,8 @@ fn collect_paragraph_font_requirements(
                 .as_deref()
                 .or(first_run_family)
                 .unwrap_or(default_family),
-            false,
-            false,
+            attrs.list_marker_bold.unwrap_or(false),
+            attrs.list_marker_italic.unwrap_or(false),
             scripts,
             requirements,
         );
@@ -302,7 +324,14 @@ pub fn has_floating_zones(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<bool, String> {
-    Ok(!extract_floating_zones(blocks, content_width, config, page_geometry)?.is_empty())
+    Ok(!extract_floating_zones(
+        blocks,
+        content_width,
+        config,
+        page_geometry,
+        &BTreeMap::new(),
+    )?
+    .is_empty())
 }
 
 pub fn measure_blocks_with_floats(
@@ -311,10 +340,21 @@ pub fn measure_blocks_with_floats(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<Vec<BlockExtent>, String> {
+    measure_blocks_with_shape_offsets(blocks, widths, config, page_geometry, &BTreeMap::new())
+}
+
+pub fn measure_blocks_with_shape_offsets(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Vec<BlockExtent>, String> {
     let default_width = widths.first().copied().unwrap_or(0.0);
-    let extracted = extract_floating_zones(blocks, default_width, config, page_geometry)?;
+    let extracted =
+        extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
     let mut margin_groups = BTreeMap::<u64, Vec<AnchoredFloatingZone>>::new();
-    let mut paragraph_zones = Vec::new();
+    let mut paragraph_zones = BTreeMap::<usize, Vec<FloatingZone>>::new();
     for anchored in extracted {
         if anchored.margin_relative {
             margin_groups
@@ -322,20 +362,21 @@ pub fn measure_blocks_with_floats(
                 .or_default()
                 .push(anchored);
         } else {
-            paragraph_zones.push(anchored);
+            paragraph_zones
+                .entry(anchored.anchor_block_index)
+                .or_default()
+                .push(anchored.zone);
         }
     }
-    let mut groups = group_overlapping_zones(paragraph_zones);
-    groups.extend(margin_groups.into_values());
     let mut zones_by_anchor = HashMap::<usize, Vec<FloatingZone>>::new();
-    for group in groups {
+    for group in margin_groups.into_values() {
         let earliest = group
             .iter()
             .map(|anchored| anchored.anchor_block_index)
             .min()
             .unwrap_or(0);
         for anchored in group {
-            let anchor = if anchored.zone.full_width_block && anchored.margin_relative {
+            let anchor = if anchored.zone.full_width_block {
                 0
             } else {
                 earliest
@@ -347,23 +388,74 @@ pub fn measure_blocks_with_floats(
         }
     }
 
+    let section_break_marks = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let opens_its_section =
+                index == 0 || matches!(blocks.get(index - 1), Some(LayoutBlock::SectionBreak(_)));
+            matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
+                && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
+                && !opens_its_section
+        })
+        .collect::<Vec<_>>();
+
     let mut cumulative_y = 0.0;
     let mut active_zones = Vec::new();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
-        if let Some(zones) = zones_by_anchor.get(&index) {
+        if matches!(
+            block,
+            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
+        ) || crate::keep_together::paragraph_breaks_before(block)
+        {
+            active_zones.clear();
             cumulative_y = 0.0;
-            active_zones.clone_from(zones);
+        }
+        if let Some(zones) = paragraph_zones.get(&index) {
+            // A paragraph-anchored band hangs off its own anchor, which sits at
+            // `cumulative_y` in the frame the earlier bands were measured in.
+            if active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+                active_zones.extend(zones.iter().map(|zone| FloatingZone {
+                    top_y: zone.top_y + cumulative_y,
+                    bottom_y: zone.bottom_y + cumulative_y,
+                    ..zone.clone()
+                }));
+            } else {
+                cumulative_y = 0.0;
+                active_zones.clone_from(zones);
+            }
+        }
+        if let Some(zones) = zones_by_anchor.get(&index) {
+            // Anchors the flow has not advanced past share one origin.
+            if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+                active_zones.extend(zones.iter().cloned());
+            } else {
+                cumulative_y = 0.0;
+                active_zones.clone_from(zones);
+            }
         }
         let width = widths.get(index).copied().unwrap_or(default_width);
-        let extent = measure_block_with_context(
-            block,
-            width,
-            config,
-            (!active_zones.is_empty()).then_some(active_zones.as_slice()),
-            cumulative_y,
-        )?;
-        if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some()) {
+        // A bare paragraph mark carrying section properties is the section
+        // break itself and prints no line, unless it is everything its section
+        // holds: Word lays such a section out one line tall.
+        let extent = if section_break_marks[index] {
+            BlockExtent::Paragraph(ParagraphExtent {
+                lines: Vec::new(),
+                total_height: 0.0,
+            })
+        } else {
+            measure_block_with_context(
+                block,
+                width,
+                config,
+                (!active_zones.is_empty()).then_some(active_zones.as_slice()),
+                cumulative_y,
+            )?
+        };
+        if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
+            && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
+        {
             cumulative_y += extent_height(&extent);
         }
         measured.push(extent);
@@ -460,37 +552,271 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
-    if !content_width.is_finite() || content_width <= 0.0 {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+    let lookup = extent_cache_lookup(
+        paragraph,
+        content_width,
+        config,
+        floating_zones,
+        cumulative_y,
+    );
+    if let ExtentLookup::Hit(extent) = lookup {
+        return Ok(extent);
     }
-    let mut envelope = json!({
-        "block": LayoutBlock::Paragraph(paragraph.clone()),
-        "maxWidth": content_width,
-        "fontChains": config.font_chains,
-        "authoritativeShaping": config.authoritative_shaping,
-    });
-    let fields = envelope
-        .as_object_mut()
-        .expect("measurement envelope object");
-    if !config.defaults.is_null() {
-        fields.insert("defaults".to_owned(), config.defaults.clone());
-    }
-    if !config.compat.is_null() {
-        fields.insert("compat".to_owned(), config.compat.clone());
-    }
-    if let Some(zones) = floating_zones {
-        fields.insert(
-            "floatingZones".to_owned(),
-            serde_json::to_value(zones).expect("floating zones serialize"),
-        );
-        fields.insert("paragraphYOffset".to_owned(), json!(cumulative_y));
-    }
-    let Ok(extent) = crate::measure_paragraph_json_resident(&envelope.to_string()) else {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+    let mut extent = if !content_width.is_finite() || content_width <= 0.0 {
+        synthetic_paragraph_extent(paragraph, content_width)
+    } else {
+        crate::typed_measure::measure_paragraph(
+            paragraph,
+            content_width,
+            config,
+            floating_zones,
+            cumulative_y,
+        )
+        .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
     };
-    serde_json::from_str(&extent)
-        .map_err(|error| format!("parse paragraph extent: {error}"))
-        .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
+    measure_horizontal_rules(paragraph, &mut extent);
+    if let ExtentLookup::Miss(Some(key)) = lookup {
+        let weight = extent_weight(&extent);
+        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone(), weight));
+    }
+    Ok(extent)
+}
+
+const MAX_EXTENT_CACHE_ENTRIES: usize = 4_096;
+const MAX_EXTENT_CACHE_KEY_BYTES: usize = 8 * 1024 * 1024;
+/// Estimated retained bytes of cached extents per generation.
+const MAX_EXTENT_CACHE_VALUE_BYTES: usize = 32 * 1024 * 1024;
+
+fn extent_weight(extent: &ParagraphExtent) -> usize {
+    use std::mem::size_of;
+    size_of::<ParagraphExtent>()
+        + extent.lines.capacity() * size_of::<TypesetRow>()
+        + extent
+            .lines
+            .iter()
+            .map(|row| {
+                row.segments
+                    .as_ref()
+                    .map_or(0, |v| v.capacity() * size_of::<TypesetRowSegment>())
+                    + row
+                        .run_advances
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetRunAdvance>())
+                    + row
+                        .cluster_advances
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetClusterAdvance>())
+                    + row
+                        .bidi_slices
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetBidiSlice>())
+            })
+            .sum::<usize>()
+}
+/// Serialized paragraph inputs past this size are measured uncached.
+const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct ExtentCacheGeneration {
+    entries: HashMap<Vec<u8>, (ParagraphExtent, usize)>,
+    key_bytes: usize,
+    value_bytes: usize,
+}
+
+impl ExtentCacheGeneration {
+    fn would_overflow(&self, key: &[u8], weight: usize) -> bool {
+        self.entries.len() >= MAX_EXTENT_CACHE_ENTRIES
+            || self.key_bytes.saturating_add(key.len()) > MAX_EXTENT_CACHE_KEY_BYTES
+            || self.value_bytes.saturating_add(weight) > MAX_EXTENT_CACHE_VALUE_BYTES
+    }
+
+    fn insert(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
+        self.entries.remove(&key);
+        self.key_bytes += key.len();
+        self.value_bytes += weight;
+        self.entries.insert(key, (extent, weight));
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Option<(ParagraphExtent, usize)> {
+        let (extent, weight) = self.entries.remove(key)?;
+        self.key_bytes = self.key_bytes.saturating_sub(key.len());
+        self.value_bytes = self.value_bytes.saturating_sub(weight);
+        Some((extent, weight))
+    }
+}
+
+/// Measured paragraph extents reused across pagination passes; same
+/// two-generation aging as `ooxml_text`'s shape cache.
+#[derive(Default)]
+struct ExtentCache {
+    hot: ExtentCacheGeneration,
+    cold: ExtentCacheGeneration,
+}
+
+impl ExtentCache {
+    fn get(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
+        if let Some((extent, _)) = self.hot.entries.get(key) {
+            return Some(extent.clone());
+        }
+        let (extent, weight) = self.cold.remove(key)?;
+        self.insert_hot(key.to_vec(), extent.clone(), weight);
+        Some(extent)
+    }
+
+    fn insert_hot(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
+        if self.hot.would_overflow(&key, weight) {
+            self.cold = std::mem::take(&mut self.hot);
+        }
+        self.hot.insert(key, extent, weight);
+    }
+}
+
+thread_local! {
+    static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
+    /// Key scratch reused per lookup so a hit allocates nothing.
+    static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn clear_extent_cache() {
+    EXTENT_CACHE.with(|cache| *cache.borrow_mut() = ExtentCache::default());
+}
+
+enum ExtentLookup {
+    Hit(ParagraphExtent),
+    /// The built key to insert under, or `None` for uncached inputs.
+    Miss(Option<Vec<u8>>),
+}
+
+/// Key over every input a measure reads; oversized inputs run uncached.
+fn extent_cache_lookup(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    floating_zones: Option<&[FloatingZone]>,
+    cumulative_y: f64,
+) -> ExtentLookup {
+    EXTENT_KEY_BUF.with(|scratch| {
+        let key = &mut *scratch.borrow_mut();
+        key.clear();
+        if serde_json::to_writer(&mut *key, paragraph).is_err() {
+            return ExtentLookup::Miss(None);
+        }
+        if key.len() > MAX_EXTENT_KEY_BYTES {
+            return ExtentLookup::Miss(None);
+        }
+        key.extend_from_slice(&content_width.to_bits().to_le_bytes());
+        key.extend_from_slice(&cumulative_y.to_bits().to_le_bytes());
+        match floating_zones {
+            None => key.push(0),
+            Some(zones) => {
+                key.push(1);
+                key.extend_from_slice(&(zones.len() as u64).to_le_bytes());
+                for zone in zones {
+                    for value in [
+                        zone.left_margin,
+                        zone.right_margin,
+                        zone.top_y,
+                        zone.bottom_y,
+                    ] {
+                        key.extend_from_slice(&value.to_bits().to_le_bytes());
+                    }
+                    key.push(zone.full_width_block as u8);
+                    key.extend_from_slice(&(zone.segments.len() as u64).to_le_bytes());
+                    for strip in &zone.segments {
+                        key.extend_from_slice(&strip.left_offset.to_bits().to_le_bytes());
+                        key.extend_from_slice(&strip.available_width.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+        key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
+        key.extend_from_slice(&crate::measure_store_id().to_le_bytes());
+        match EXTENT_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+            Some(extent) => ExtentLookup::Hit(extent),
+            None => ExtentLookup::Miss(Some(key.clone())),
+        }
+    })
+}
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x00000100000001b3);
+    }
+    hash
+}
+
+fn config_fingerprint(config: &MeasurementConfig) -> u64 {
+    let mut hash = fnv1a(0xcbf29ce484222325, &[config.authoritative_shaping as u8]);
+    for (name, ids) in &config.font_chains {
+        hash = fnv1a(hash, name.as_bytes());
+        for id in ids {
+            hash = fnv1a(hash, &id.to_le_bytes());
+        }
+    }
+    hash = fnv1a(hash, config.defaults.to_string().as_bytes());
+    fnv1a(hash, config.compat.to_string().as_bytes())
+}
+
+fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    let Some(attrs) = paragraph
+        .attrs
+        .as_ref()
+        .filter(|attrs| !attrs.horizontal_rules.is_empty())
+    else {
+        return;
+    };
+    if attrs
+        .spacing
+        .as_ref()
+        .and_then(|spacing| spacing.line_rule.as_deref())
+        == Some("exact")
+    {
+        return;
+    }
+    for line in &mut extent.lines {
+        let mut height = 0.0_f64;
+        let mut standalone = true;
+        let mut rule_count = 0;
+        for (index, run) in paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .take(line.tail_run + 1)
+            .skip(line.head_run)
+        {
+            if index == line.tail_run && line.tail_char == 0 {
+                continue;
+            }
+            if matches!(run, crate::types::Run::Text(text) if text.fmt.hidden == Some(true)) {
+                continue;
+            }
+            if let Some(rule) = attrs
+                .horizontal_rules
+                .iter()
+                .find(|rule| run.pm_start() == Some(rule.pm_start))
+            {
+                height = height.max(rule.height + 1.0);
+                rule_count += 1;
+            } else if !matches!(run, crate::types::Run::Text(text) if text.text.is_empty()) {
+                standalone = false;
+            }
+        }
+        if height <= 0.0 {
+            continue;
+        }
+        let original_height = line.line_height;
+        if standalone && rule_count == 1 {
+            line.line_height = line.line_height.max(height);
+            line.ascent = line.line_height;
+            line.descent = 0.0;
+        } else if height > line.ascent {
+            let extra = height - line.ascent;
+            line.ascent += extra;
+            line.line_height += extra;
+        }
+        extent.total_height += line.line_height - original_height;
+    }
 }
 
 const SYNTHETIC_ADVANCE_EM: f64 = 1.0;
@@ -644,7 +970,9 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         match run {
             Run::Text(text) => {
                 font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
-                line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                if text.text != "\u{200b}" {
+                    line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                }
             }
             Run::Tab(tab) => {
                 font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));
@@ -705,6 +1033,7 @@ fn extract_floating_zones(
     content_width: f64,
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
     for (block_index, block) in blocks.iter().enumerate() {
@@ -722,10 +1051,141 @@ fn extract_floating_zones(
                 page_geometry,
                 &mut zones,
             ),
+            LayoutBlock::Shape(shape) => extract_shape_zone(
+                shape,
+                block_index,
+                content_width,
+                page_geometry,
+                shape_offsets.get(&block_index).copied(),
+                &mut zones,
+            ),
             _ => {}
         }
     }
     Ok(zones)
+}
+
+/// Whether a line runs past a float rather than stopping at its wider side.
+fn flows_past(strip_left: f64, strip_right: f64, band: f64) -> bool {
+    strip_left >= MIN_WRAP_SEGMENT_WIDTH
+        && strip_right >= MIN_WRAP_SEGMENT_WIDTH
+        && band < strip_left.min(strip_right)
+}
+
+fn extract_shape_zone(
+    shape: &ShapeBlock,
+    block_index: usize,
+    content_width: f64,
+    geometry: Option<&FloatPageGeometry>,
+    resolved_x: Option<f64>,
+    zones: &mut Vec<AnchoredFloatingZone>,
+) {
+    let Some(position) = shape.position.as_ref() else {
+        return;
+    };
+    if !matches!(
+        shape.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "topAndBottom")
+    ) || shape.width <= 0.0
+        || shape.height <= 0.0
+    {
+        return;
+    }
+    let margin_left = geometry.map_or(0.0, |g| g.margin_left);
+    let page_width = geometry.map_or(content_width, |g| g.page_width);
+    let horizontal = position.horizontal.as_ref();
+    let page_relative = horizontal.and_then(|axis| axis.relative_to.as_deref()) == Some("page");
+    let base_x = if page_relative { -margin_left } else { 0.0 };
+    let frame_width = if page_relative {
+        page_width
+    } else {
+        content_width
+    };
+    let x = resolved_x.unwrap_or_else(|| {
+        base_x
+            + match horizontal.and_then(|axis| axis.align.as_deref()) {
+                Some("right" | "outside") => frame_width - shape.width,
+                Some("center") => (frame_width - shape.width) / 2.0,
+                Some("left" | "inside") => 0.0,
+                _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
+            }
+    });
+    let vertical = position.vertical.as_ref();
+    let margin_top = geometry.map_or(0.0, |g| g.margin_top);
+    let content_height = geometry.map_or(0.0, |g| g.content_height);
+    let (base_y, frame_height) = match vertical.and_then(|axis| axis.relative_to.as_deref()) {
+        Some("page") => (
+            -margin_top,
+            geometry.map_or(content_height, |g| g.page_height),
+        ),
+        Some("paragraph" | "line") => (0.0, 0.0),
+        _ => (0.0, content_height),
+    };
+    let y = base_y
+        + match vertical.and_then(|axis| axis.align.as_deref()) {
+            Some("bottom") => frame_height - shape.height,
+            Some("center") => (frame_height - shape.height) / 2.0,
+            Some("top") => 0.0,
+            _ => vertical.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
+        };
+    let distances = shape.wrap_distances.as_ref();
+    let left = x - distances.map_or(0.0, |d| d.left);
+    let right = x + shape.width + distances.map_or(0.0, |d| d.right);
+    let top_y = y - distances.map_or(0.0, |d| d.top);
+    let bottom_y = y + shape.height + distances.map_or(0.0, |d| d.bottom);
+    if right <= 0.0 || left >= content_width || bottom_y <= 0.0 {
+        return;
+    }
+    let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
+        || (left <= 0.0 && right >= content_width);
+    let mut segments = Vec::new();
+    let (left_margin, right_margin) = if full_width_block {
+        (0.0, 0.0)
+    } else {
+        let strip_left = left.max(0.0);
+        let strip_right = (content_width - right).max(0.0);
+        let text_on_left = match shape.wrap_text.as_deref() {
+            Some("left") => true,
+            Some("right") => false,
+            // `bothSides` is the schema default and the only value that puts
+            // text past an interior float; `largest` keeps one side.
+            None | Some("bothSides")
+                if flows_past(strip_left, strip_right, (right - left).max(0.0)) =>
+            {
+                segments = vec![
+                    FloatStrip {
+                        left_offset: 0.0,
+                        available_width: strip_left,
+                    },
+                    FloatStrip {
+                        left_offset: right.max(0.0),
+                        available_width: strip_right,
+                    },
+                ];
+                false
+            }
+            _ => strip_left > strip_right,
+        };
+        if !segments.is_empty() {
+            (0.0, 0.0)
+        } else if text_on_left {
+            (0.0, (content_width - left).max(0.0))
+        } else {
+            (right.max(0.0), 0.0)
+        }
+    };
+    zones.push(AnchoredFloatingZone {
+        zone: FloatingZone {
+            left_margin,
+            right_margin,
+            top_y,
+            bottom_y,
+            segments,
+            full_width_block,
+        },
+        anchor_block_index: block_index,
+        margin_relative: is_margin_relative(Some(position)),
+    });
 }
 
 fn extract_image_zones(
@@ -776,6 +1236,7 @@ fn extract_image_zones(
                 right_margin,
                 top_y: top_y - image.dist_top.unwrap_or(0.0),
                 bottom_y: top_y + image.height + image.dist_bottom.unwrap_or(0.0),
+                segments: Vec::new(),
                 full_width_block: false,
             },
             anchor_block_index: block_index,
@@ -791,11 +1252,29 @@ fn extract_table_zone(
     config: &MeasurementConfig,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) -> Result<(), String> {
-    let Some(floating) = &table.floating else {
+    if table.floating.is_none() {
         return Ok(());
-    };
+    }
     let mut measured_table = table.clone();
     let measure = measure_table(&mut measured_table, content_width, config)?;
+    if let Some(mut zone) = table_floating_zone(table, &measure, content_width) {
+        (zone.left_margin, zone.right_margin) =
+            clamp_margins(zone.left_margin, zone.right_margin, content_width);
+        zones.push(AnchoredFloatingZone {
+            zone,
+            anchor_block_index: block_index,
+            margin_relative: false,
+        });
+    }
+    Ok(())
+}
+
+fn table_floating_zone(
+    table: &TableBlock,
+    measure: &TableExtent,
+    content_width: f64,
+) -> Option<FloatingZone> {
+    let floating = table.floating.as_ref()?;
     let x = if let Some(value) = floating.tblp_x {
         value
     } else {
@@ -812,32 +1291,40 @@ fn extract_table_zone(
             _ => 0.0,
         }
     };
+    Some(table_floating_zone_at_x(
+        floating,
+        measure,
+        content_width,
+        x,
+    ))
+}
+
+fn table_floating_zone_at_x(
+    floating: &FloatingTablePosition,
+    measure: &TableExtent,
+    content_width: f64,
+    x: f64,
+) -> FloatingZone {
     let (left_margin, right_margin) = if x < content_width / 2.0 {
-        clamp_margins(
+        (
             x + measure.total_width + floating.right_from_text.unwrap_or(12.0),
             0.0,
-            content_width,
         )
     } else {
-        clamp_margins(
+        (
             0.0,
             content_width - x + floating.left_from_text.unwrap_or(12.0),
-            content_width,
         )
     };
     let top_y = floating.tblp_y.unwrap_or(0.0);
-    zones.push(AnchoredFloatingZone {
-        zone: FloatingZone {
-            left_margin,
-            right_margin,
-            top_y: top_y - floating.top_from_text.unwrap_or(0.0),
-            bottom_y: top_y + measure.total_height + floating.bottom_from_text.unwrap_or(0.0),
-            full_width_block: false,
-        },
-        anchor_block_index: block_index,
-        margin_relative: false,
-    });
-    Ok(())
+    FloatingZone {
+        left_margin,
+        right_margin,
+        top_y: top_y - floating.top_from_text.unwrap_or(0.0),
+        bottom_y: top_y + measure.total_height + floating.bottom_from_text.unwrap_or(0.0),
+        segments: Vec::new(),
+        full_width_block: false,
+    }
 }
 
 fn extract_text_box_zone(
@@ -875,6 +1362,7 @@ fn extract_text_box_zone(
                 right_margin: 0.0,
                 top_y: (raw_top - text_box.dist_top.unwrap_or(0.0)).max(0.0),
                 bottom_y,
+                segments: Vec::new(),
                 full_width_block: true,
             },
             anchor_block_index: block_index,
@@ -905,6 +1393,7 @@ fn extract_text_box_zone(
             right_margin,
             top_y: top_y - text_box.dist_top.unwrap_or(0.0),
             bottom_y: top_y + height + text_box.dist_bottom.unwrap_or(0.0),
+            segments: Vec::new(),
             full_width_block: false,
         },
         anchor_block_index: block_index,
@@ -992,24 +1481,6 @@ fn anchored_vertical_top(
     }
 }
 
-fn group_overlapping_zones(zones: Vec<AnchoredFloatingZone>) -> Vec<Vec<AnchoredFloatingZone>> {
-    let mut groups: Vec<Vec<AnchoredFloatingZone>> = Vec::new();
-    for zone in zones {
-        if let Some(group) = groups.iter_mut().find(|group| {
-            group.iter().any(|other| {
-                other.anchor_block_index.abs_diff(zone.anchor_block_index) <= ANCHOR_PROXIMITY
-                    && zone.zone.top_y < other.zone.bottom_y
-                    && zone.zone.bottom_y > other.zone.top_y
-            })
-        }) {
-            group.push(zone);
-        } else {
-            groups.push(vec![zone]);
-        }
-    }
-    groups
-}
-
 fn emu_to_pixels(value: f64) -> f64 {
     value / 9_525.0
 }
@@ -1054,6 +1525,133 @@ fn measure_shape(
     })
 }
 
+fn measure_cell_blocks_with_table_floats(
+    blocks: &mut [LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<BlockExtent>, String> {
+    let mut measured = Vec::with_capacity(blocks.len());
+    let mut zones = Vec::new();
+    let mut y = 0.0_f64;
+    let mut previous_after = 0.0_f64;
+    for block in blocks {
+        let spacing = match &*block {
+            LayoutBlock::Paragraph(paragraph) => paragraph
+                .attrs
+                .as_ref()
+                .and_then(|attrs| attrs.spacing.as_ref()),
+            _ => None,
+        };
+        let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
+        let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
+        // `y` tracks the paragraph's top, space-before included, which is the
+        // origin the measurer probes float zones from.
+        y += (previous_after - before).max(0.0);
+        let extent = match &*block {
+            LayoutBlock::Paragraph(paragraph) => {
+                BlockExtent::Paragraph(measure_paragraph_with_context(
+                    paragraph,
+                    content_width,
+                    config,
+                    (!zones.is_empty()).then_some(zones.as_slice()),
+                    y,
+                )?)
+            }
+            _ => measure_block(block, content_width, config)?,
+        };
+        if let (LayoutBlock::Table(table), BlockExtent::Table(measure)) = (&*block, &extent)
+            && let Some(floating) = table.floating.as_ref()
+            && nested_table_float_offset(table.floating.as_ref()).is_some()
+        {
+            let x = nested_table_horizontal_offset(
+                Some(floating),
+                table.justification.as_deref(),
+                table.indent,
+                table.compatibility_mode,
+                table.cell_margin_left,
+                measure.total_width,
+                content_width,
+            );
+            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
+            zone.top_y += y;
+            zone.bottom_y += y;
+            zones.push(zone);
+        } else {
+            y += extent_height(&extent) - after;
+        }
+        previous_after = after;
+        measured.push(extent);
+    }
+    Ok(measured)
+}
+
+/// The width a paragraph wants when nothing forces it to wrap: its widest
+/// typeset line plus the indents that sit beside it.
+fn paragraph_content_width(
+    paragraph: &crate::types::ParagraphBlock,
+    budget: f64,
+    config: &MeasurementConfig,
+) -> Result<f64, String> {
+    let indent = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref());
+    let edge = |value: Option<f64>| value.unwrap_or(0.0).max(0.0);
+    let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
+    let extent = measure_paragraph(paragraph, budget, config)?;
+    let widest = extent
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| line.width + if index == 0 { first_line } else { 0.0 })
+        .fold(0.0_f64, f64::max);
+    Ok(widest + indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right)))
+}
+
+/// Per-column widest unwrapped content, for `columns` only; every other entry
+/// stays zero so [`grow_content_sized_columns`] leaves it alone.
+fn column_content_maximums(
+    table: &TableBlock,
+    columns: &[usize],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<f64>, String> {
+    let mut maximums = vec![0.0_f64; count_table_columns(table)];
+    for entry in resolve_cell_grid(table) {
+        if entry.col_span != 1 || !columns.contains(&entry.column_index) {
+            continue;
+        }
+        let Some(cell) = table
+            .rows
+            .get(entry.row_index)
+            .and_then(|row| row.cells.get(entry.cell_index))
+        else {
+            continue;
+        };
+        let left = cell
+            .padding
+            .as_ref()
+            .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.left);
+        let right = cell
+            .padding
+            .as_ref()
+            .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
+        let budget = (content_width - left - right).max(1.0);
+        let mut widest = 0.0_f64;
+        for block in &cell.blocks {
+            if let LayoutBlock::Paragraph(paragraph) = block {
+                widest = widest.max(paragraph_content_width(paragraph, budget, config)?);
+            }
+        }
+        if widest > 0.0
+            && let Some(slot) = maximums.get_mut(entry.column_index)
+        {
+            *slot = slot.max(widest + left + right);
+        }
+    }
+    Ok(maximums)
+}
+
 fn measure_table(
     table: &mut TableBlock,
     content_width: f64,
@@ -1062,7 +1660,12 @@ fn measure_table(
     let explicit_width =
         resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
     let target_width = explicit_width.unwrap_or(content_width);
-    let column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let content_sized = content_sized_columns(table, content_width, &column_widths);
+    if !content_sized.is_empty() {
+        let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
+        grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
+    }
     let grid = resolve_cell_grid(table);
     let mut rows = Vec::with_capacity(table.rows.len());
 
@@ -1100,11 +1703,29 @@ fn measure_table(
                 .padding
                 .as_ref()
                 .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
-            let measures = measure_blocks(
-                &mut cell.blocks,
-                (cell_width - left - right).max(1.0),
-                config,
-            )?;
+            let rotated = matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"));
+            let measure_width = if rotated {
+                let padding = cell
+                    .padding
+                    .as_ref()
+                    .map_or(0.0, |padding| padding.top + padding.bottom);
+                row.height.unwrap_or(content_width) - padding
+            } else {
+                cell_width - left - right
+            };
+            let has_table_floats = cell.blocks.iter().any(|block| {
+                matches!(block, LayoutBlock::Table(table)
+                    if nested_table_float_offset(table.floating.as_ref()).is_some())
+            });
+            let measures = if has_table_floats {
+                measure_cell_blocks_with_table_floats(
+                    &mut cell.blocks,
+                    measure_width.max(1.0),
+                    config,
+                )?
+            } else {
+                measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?
+            };
             cells.push(TableCellExtent {
                 blocks: measures,
                 width: cell_width,
@@ -1120,13 +1741,39 @@ fn measure_table(
     for (row_index, measured_row) in rows.iter_mut().enumerate() {
         let source_row = &table.rows[row_index];
         let mut max_height = 0.0_f64;
+        let mut max_padding_height = 0.0_f64;
         let mut max_border_height = 0.0_f64;
         for (cell_index, measured_cell) in measured_row.cells.iter_mut().enumerate() {
             let source_cell = &source_row.cells[cell_index];
+            let has_table_floats = source_cell.blocks.iter().any(|block| {
+                matches!(block, LayoutBlock::Table(table)
+                    if nested_table_float_offset(table.floating.as_ref()).is_some())
+            });
             let mut content_height = 0.0_f64;
             let mut previous_after = 0.0_f64;
+            let mut float_bottom = 0.0_f64;
             for (block, measure) in source_cell.blocks.iter().zip(&measured_cell.blocks) {
-                let visual = table_cell_block_height(block, measure);
+                if let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (block, measure)
+                    && let Some(offset) = nested_table_float_offset(table.floating.as_ref())
+                {
+                    content_height += previous_after;
+                    float_bottom = float_bottom.max(content_height + offset + extent.total_height);
+                    previous_after = 0.0;
+                    continue;
+                }
+                if let LayoutBlock::Shape(shape) = block
+                    && crate::cell_layout::cell_overlay_drawing(
+                        shape.position.is_some(),
+                        shape.wrap_type.as_deref(),
+                    )
+                {
+                    continue;
+                }
+                let visual = if has_table_floats {
+                    extent_height(measure)
+                } else {
+                    table_cell_block_height(block, measure)
+                };
                 let spacing = match block {
                     LayoutBlock::Paragraph(paragraph) => paragraph
                         .attrs
@@ -1139,26 +1786,46 @@ fn measure_table(
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
             }
-            measured_cell.height = content_height
-                + previous_after
-                + source_cell
-                    .padding
-                    .as_ref()
-                    .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.top)
+            if matches!(source_cell.text_direction.as_deref(), Some("btLr" | "tbRl")) {
+                content_height = measured_cell
+                    .blocks
+                    .iter()
+                    .filter_map(|measure| {
+                        if let BlockExtent::Paragraph(paragraph) = measure {
+                            Some(
+                                paragraph
+                                    .lines
+                                    .iter()
+                                    .map(|line| line.width)
+                                    .fold(0.0, f64::max),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(0.0, f64::max);
+                previous_after = 0.0;
+            }
+            let padding_height = source_cell
+                .padding
+                .as_ref()
+                .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.top)
                 + source_cell
                     .padding
                     .as_ref()
                     .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.bottom);
+            measured_cell.height =
+                (content_height + previous_after).max(float_bottom) + padding_height;
             if source_cell.row_span.unwrap_or(1.0) <= 1.0 {
                 max_height = max_height.max(measured_cell.height);
+                max_padding_height = max_padding_height.max(padding_height);
             }
             max_border_height = max_border_height.max(cell_border_height(source_cell));
         }
-        exact[row_index] =
-            source_row.height_rule.as_deref() == Some("exact") && source_row.height.is_some();
+        exact[row_index] = source_row.is_exact_height();
         measured_row.height = match (source_row.height, source_row.height_rule.as_deref()) {
             (Some(height), Some("exact")) => height,
-            (Some(height), _) => (max_height + max_border_height).max(height),
+            (Some(height), _) => max_height.max(height + max_padding_height) + max_border_height,
             (None, _) => max_height + max_border_height,
         };
     }
@@ -1221,7 +1888,9 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     let image_height = non_empty
         .iter()
         .filter_map(|run| match run {
-            Run::Image(image) => Some(image.height),
+            Run::Image(image) => {
+                Some(rotation_bound(&image.rotation_bounds, "height").unwrap_or(image.height))
+            }
             _ => None,
         })
         .fold(0.0_f64, f64::max);
@@ -1258,12 +1927,779 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
                 .as_ref()
                 .and_then(|border| border.width)
                 .unwrap_or(0.0)
-    })
+    }) / 2.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_paragraph_anchored_band_hangs_off_its_own_anchor_not_an_earlier_one() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let shape = |id: &str, offset: f64| {
+            json!({"kind":"shape","id":id,"shapeType":"rect","geometryPath":[],"children":[],
+                "width":40,"height":40,"wrapType":"square",
+                "wrapDistances":{"left":0,"right":10,"top":0,"bottom":0},
+                "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                    "vertical":{"relativeTo":"paragraph","posOffset":offset}}})
+        };
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            shape("far", 30.0),
+            {"kind":"paragraph","id":"first","runs":[{"kind":"text","text":"words"}]},
+            shape("near", 0.0),
+            {"kind":"paragraph","id":"second","runs":[{"kind":"text","text":"words"}]}
+        ]))
+        .unwrap();
+        let measures = measure_blocks_with_floats(&mut blocks, &[200.0; 4], &config, None).unwrap();
+        let offset = |measure: &BlockExtent| {
+            let BlockExtent::Paragraph(paragraph) = measure else {
+                panic!()
+            };
+            paragraph.lines[0].left_offset.unwrap_or(0.0)
+        };
+        // `near` starts at the second paragraph, below the first one's line.
+        assert_eq!(offset(&measures[1]), 0.0);
+        assert_eq!(offset(&measures[3]), 50.0);
+    }
+
+    /// Measured at 25px on `oxi-en-correspondence-03` at 150dpi: Word gives a
+    /// section holding only its break mark one line.
+    #[test]
+    fn a_section_break_mark_keeps_its_line_when_it_is_all_the_section_holds() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let measure = |blocks: serde_json::Value| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(blocks).unwrap();
+            measure_blocks_with_floats(&mut blocks, &[200.0; 6], &config, None).unwrap()
+        };
+        let empty = json!({"kind":"paragraph","id":"mark","runs":[]});
+        let spaced = json!({"kind":"paragraph","id":"mark","runs":[{"kind":"text","text":" "}]});
+        let section = json!({"kind":"sectionBreak","id":"sect:mark"});
+        let lead = json!({"kind":"paragraph","id":"lead","runs":[{"kind":"text","text":"words"}]});
+        let tail = json!({"kind":"paragraph","id":"tail","runs":[{"kind":"text","text":"words"}]});
+        let mark_of = |measures: &[BlockExtent], index: usize| {
+            let BlockExtent::Paragraph(mark) = &measures[index] else {
+                panic!()
+            };
+            (mark.lines.len(), mark.total_height)
+        };
+
+        let marked = measure(json!([lead, empty, section, tail]));
+        assert_eq!(mark_of(&marked, 1), (0, 0.0));
+
+        for (measures, index) in [
+            (measure(json!([empty, section, tail])), 0),
+            (measure(json!([lead, section, empty, section, tail])), 2),
+            (measure(json!([empty, tail])), 0),
+            (measure(json!([lead, spaced, section, tail])), 1),
+        ] {
+            let (lines, height) = mark_of(&measures, index);
+            assert_eq!(lines, 1);
+            assert!(height > 0.0);
+        }
+    }
+
+    #[test]
+    fn nested_text_anchored_tables_share_measure_paint_and_break_positions() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..Default::default()
+        };
+        let paragraph = |text: &str, before: f64, after: f64| {
+            json!({"kind":"paragraph","id":text,
+                "attrs":{"spacing":{"before":before,"after":after,"line":16,"lineRule":"exact"}},
+                "runs":[{"kind":"text","text":text}]})
+        };
+        let padding = json!({"top":0,"bottom":0,"left":0,"right":0});
+        let mut cases = Vec::new();
+        for (anchor, offset, width, before, table_top, after_top) in [
+            ("text", 0.0, 220.0, 6.0, 24.0, 70.0),
+            ("text", 20.0, 220.0, 6.0, 44.0, 90.0),
+            ("text", 40.0, 220.0, 6.0, 64.0, 30.0),
+            ("text", 20.0, 220.0, 40.0, 44.0, 124.0),
+            ("text", 20.0, 80.0, 6.0, 44.0, 30.0),
+            ("margin", 20.0, 220.0, 6.0, 24.0, 70.0),
+        ] {
+            cases.push((
+                json!({"vertAnchor":anchor,"horzAnchor":"margin","tblpX":0,"tblpY":offset}),
+                width,
+                before,
+                table_top,
+                after_top,
+                None,
+                None,
+                0.0,
+                None,
+            ));
+        }
+        for (horizontal, indent, justification, table_x, text_x) in [
+            (json!({}), None, None, 0.0, 92.0),
+            (json!({}), Some(30.0), None, 30.0, 122.0),
+            (json!({}), None, Some("center"), 70.0, 162.0),
+            (json!({}), None, Some("right"), 140.0, 0.0),
+            (json!({"tblpXSpec":"left"}), None, None, 0.0, 92.0),
+            (json!({"tblpXSpec":"center"}), None, None, 70.0, 162.0),
+            (json!({"tblpXSpec":"right"}), None, None, 140.0, 0.0),
+            (
+                json!({"tblpX":140,"tblpXSpec":"left"}),
+                None,
+                None,
+                0.0,
+                92.0,
+            ),
+            (
+                json!({"tblpX":140,"tblpXSpec":"center"}),
+                None,
+                None,
+                70.0,
+                162.0,
+            ),
+            (
+                json!({"tblpX":0,"tblpXSpec":"right"}),
+                None,
+                None,
+                140.0,
+                0.0,
+            ),
+        ] {
+            let mut floating = json!({"vertAnchor":"text","horzAnchor":"margin","tblpY":20});
+            floating
+                .as_object_mut()
+                .unwrap()
+                .extend(horizontal.as_object().unwrap().clone());
+            cases.push((
+                floating,
+                80.0,
+                6.0,
+                44.0,
+                30.0,
+                indent,
+                justification,
+                table_x,
+                Some(text_x),
+            ));
+        }
+        for (
+            floating,
+            width,
+            before,
+            table_top,
+            after_top,
+            indent,
+            justification,
+            table_x,
+            text_x,
+        ) in cases
+        {
+            let mut block: LayoutBlock = serde_json::from_value(json!({
+                "kind":"table","id":"outer","columnWidths":[220],
+                "rows":[{"id":"outer-row","cells":[{"id":"outer-cell","padding":padding,"blocks":[
+                    paragraph("Before",0.0,8.0),
+                    {"kind":"table","id":"nested",
+                     "columnWidths":[width],"floating":floating,"indent":indent,"justification":justification,
+                     "rows":[{"id":"nested-row","height":40,"heightRule":"exact","cells":[{"id":"nested-cell","padding":padding,"blocks":[paragraph("Table",0.0,0.0)]}]}]},
+                    paragraph("After",before,0.0),
+                    paragraph("Tail",0.0,0.0)
+                ]}]}]
+            }))
+            .unwrap();
+            let measure = measure_block(&mut block, 220.0, &config).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &measure) else {
+                panic!()
+            };
+            let cell = &table.rows[0].cells[0];
+            let measured_cell = &extent.rows[0].cells[0];
+            let layout = crate::cell_layout::layout_cell_content(
+                Some(&cell.blocks),
+                Some(&measured_cell.blocks),
+                0.0,
+            );
+            assert_eq!(layout.line_tops[2], vec![after_top], "{floating} {width}");
+            assert_eq!(layout.line_tops[3], vec![after_top + 16.0]);
+            let expected_height = (after_top + 32.0).max(table_top + 40.0);
+            assert_eq!(extent.total_height, expected_height);
+            assert_eq!(layout.content_height, expected_height);
+            let breaks = crate::table_row_break::build_table_row_break_info(table, extent);
+            assert!(
+                breaks.break_offsets[0]
+                    .iter()
+                    .all(|offset| { *offset <= table_top || *offset >= table_top + 40.0 })
+            );
+            let mut input = crate::types::Input {
+                measured: vec![crate::types::MeasuredBlock { block, measure }],
+                options: serde_json::from_value(json!({"pageSize":{"w":400,"h":300},
+                    "margins":{"top":0,"bottom":0,"left":0,"right":0}}))
+                .unwrap(),
+            };
+            let pages = crate::compute_layout_input(&mut input).unwrap();
+            let display = crate::build_display_list(&input, &pages).unwrap();
+            let baselines: BTreeMap<String, f64> = display.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    crate::display_list::Primitive::Text(text) => {
+                        Some((text.text.clone(), text.baseline_y.as_f64().unwrap()))
+                    }
+                    crate::display_list::Primitive::GlyphRun(text) => {
+                        Some((text.text.clone(), text.glyphs[0].y))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!((baselines["After"] - baselines["Before"] - after_top).abs() < 0.01);
+            assert!((baselines["Table"] - baselines["Before"] - table_top).abs() < 0.01);
+            let positions: BTreeMap<String, f64> = display.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    crate::display_list::Primitive::Text(text) => {
+                        Some((text.text.clone(), text.x.as_f64().unwrap()))
+                    }
+                    crate::display_list::Primitive::GlyphRun(text) => {
+                        Some((text.text.clone(), text.glyphs[0].x))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                (positions["Table"] - positions["Before"] - table_x).abs() < 0.01,
+                "{floating}"
+            );
+            if let Some(text_x) = text_x {
+                assert!(
+                    (positions["After"] - positions["Before"] - text_x).abs() < 0.01,
+                    "{floating}"
+                );
+            }
+
+            input.options.page_size.as_mut().unwrap().h = 80.0;
+            let split_pages = crate::compute_layout_input(&mut input).unwrap();
+            assert!(split_pages.pages.len() > 1);
+            let split_display = crate::build_display_list(&input, &split_pages).unwrap();
+            let mut painted = BTreeMap::<String, usize>::new();
+            for (page, display) in split_pages.pages.iter().zip(&split_display.pages) {
+                let crate::types::Fragment::Table(fragment) = &page.fragments[0] else {
+                    panic!()
+                };
+                let start = fragment.clip_top.unwrap_or(0.0);
+                let end = start + fragment.height;
+                assert!(start <= table_top || start >= table_top + 40.0);
+                assert!(end <= table_top || end >= table_top + 40.0);
+                for primitive in &display.primitives {
+                    let (text, baseline) = match primitive {
+                        crate::display_list::Primitive::Text(text) => {
+                            (&text.text, text.baseline_y.as_f64().unwrap())
+                        }
+                        crate::display_list::Primitive::GlyphRun(text) => {
+                            (&text.text, text.glyphs[0].y)
+                        }
+                        _ => continue,
+                    };
+                    assert!((baseline + start - baselines[text]).abs() < 0.01);
+                    if baseline >= fragment.y && baseline < fragment.y + fragment.height {
+                        *painted.entry(text.clone()).or_default() += 1;
+                    }
+                }
+            }
+            assert_eq!(painted.len(), 4);
+            assert!(
+                painted.values().all(|count| *count == 1),
+                "{floating} {width}: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_nested_floats_keep_anchor_spacing_and_atomic_row_splits() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..Default::default()
+        };
+        let paragraph = |text: &str, before: f64, after: f64| {
+            json!({"kind":"paragraph","id":text,
+                "attrs":{"spacing":{"before":before,"after":after,"line":16,"lineRule":"exact"}},
+                "runs":[{"kind":"text","text":text}]})
+        };
+        let padding = json!({"top":0,"bottom":0,"left":0,"right":0});
+        let nested = |offset: f64| {
+            json!({"kind":"table","id":offset,"columnWidths":[220],
+                "floating":{"vertAnchor":"text","horzAnchor":"margin","tblpX":0,"tblpY":offset},
+                "rows":[{"id":offset,"height":40,"heightRule":"exact","cells":[
+                    {"id":offset,"padding":padding,"blocks":[paragraph("Table",0.0,0.0)]}]}]})
+        };
+        for offsets in [[20.0, 80.0], [80.0, 20.0]] {
+            let mut block: LayoutBlock = serde_json::from_value(json!({
+                "kind":"table","id":"outer","columnWidths":[220],
+                "rows":[{"id":"row","cells":[{"id":"cell","padding":padding,"blocks":[
+                    paragraph("Before",0.0,8.0), nested(offsets[0]), nested(offsets[1]),
+                    paragraph("After",6.0,0.0), paragraph("Tail",0.0,0.0)
+                ]}]}]
+            }))
+            .unwrap();
+            let measure = measure_block(&mut block, 220.0, &config).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &measure) else {
+                panic!()
+            };
+            let layout = crate::cell_layout::layout_cell_content(
+                Some(&table.rows[0].cells[0].blocks),
+                Some(&extent.rows[0].cells[0].blocks),
+                0.0,
+            );
+            assert_eq!(layout.line_tops[3], vec![150.0]);
+            assert_eq!(layout.line_tops[4], vec![166.0]);
+            assert_eq!(layout.content_height, 182.0);
+            assert_eq!(extent.total_height, 182.0);
+            let info = crate::table_row_break::build_table_row_break_info(table, extent);
+            assert_eq!(info.break_offsets[0], vec![16.0, 84.0, 144.0, 166.0, 182.0]);
+            assert_eq!(
+                crate::table_row_break::snap_row_break(&info, 0, 0.0, 80.0),
+                16.0
+            );
+            assert_eq!(
+                crate::table_row_break::snap_row_break(&info, 0, 16.0, 80.0),
+                68.0
+            );
+            assert_eq!(
+                crate::table_row_break::snap_row_break(&info, 0, 84.0, 80.0),
+                60.0
+            );
+        }
+
+        let mut image_block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"table","id":"outer","columnWidths":[220],
+            "rows":[{"id":"row","cells":[{"id":"cell","padding":padding,"blocks":[
+                paragraph("Before",0.0,8.0), nested(20.0),
+                {"kind":"paragraph","id":"image","attrs":{"spacing":{"before":6}},
+                 "runs":[{"kind":"image","src":"logo","width":20,"height":20}]},
+                paragraph("Tail",0.0,0.0)
+            ]}]}]
+        }))
+        .unwrap();
+        let image_measure = measure_block(&mut image_block, 220.0, &config).unwrap();
+        let (LayoutBlock::Table(table), BlockExtent::Table(extent)) =
+            (&image_block, &image_measure)
+        else {
+            panic!()
+        };
+        let layout = crate::cell_layout::layout_cell_content(
+            Some(&table.rows[0].cells[0].blocks),
+            Some(&extent.rows[0].cells[0].blocks),
+            0.0,
+        );
+        assert_eq!(layout.line_tops[2], vec![90.0]);
+        assert!((layout.content_height - extent.total_height).abs() < 0.01);
+        assert!((layout.line_tops[3][0] + 16.0 - extent.total_height).abs() < 0.01);
+    }
+
+    #[test]
+    fn anchored_shapes_exclude_body_text_without_advancing_the_cursor() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        for (wrap, expected_offset, expected_skip) in [
+            ("square", 50.0, 0.0),
+            ("inFront", 0.0, 0.0),
+            ("topAndBottom", 0.0, 40.0),
+        ] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"shape","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":40,"height":40,"wrapType":wrap,"wrapDistances":{"left":0,"right":10,"top":0,"bottom":0},
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},"vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"words words words words words words words words"}]}
+            ])).unwrap();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0, 200.0], &config, None).unwrap();
+            let BlockExtent::Paragraph(paragraph) = &measures[1] else {
+                panic!()
+            };
+            assert_eq!(
+                paragraph.lines[0].left_offset.unwrap_or(0.0),
+                expected_offset
+            );
+            assert_eq!(
+                paragraph.lines[0].float_skip_before.unwrap_or(0.0),
+                expected_skip
+            );
+
+            blocks.insert(
+                1,
+                serde_json::from_value(json!({"kind":"pageBreak","id":"break"})).unwrap(),
+            );
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            let BlockExtent::Paragraph(paragraph) = &measures[2] else {
+                panic!()
+            };
+            assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
+            assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    /// Word 16.113, probed at twip resolution: the box a paragraph's first
+    /// line is tested against runs from the paragraph top through the line's
+    /// bottom, so it covers space-before. A `topAndBottom` band reaching into
+    /// that box — including the band the paragraph anchors itself — moves the
+    /// line below the band and spends space-before again underneath it, at
+    /// every band height probed from 0.5pt to 200pt. A band starting exactly
+    /// at the line's bottom leaves it alone.
+    #[test]
+    fn a_full_width_band_reaching_a_paragraph_moves_its_first_line_below() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let measure = |offset: f64, height: f64, before: f64| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":200,"height":height,"wrapType":"topAndBottom",
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                             "vertical":{"relativeTo":"paragraph","posOffset":offset}}},
+                {"kind":"paragraph","id":"anchor","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"anchor"}]},
+                {"kind":"paragraph","id":"tail","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"tail"}]}
+            ]))
+            .unwrap();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            let skips: Vec<f64> = measures[1..]
+                .iter()
+                .map(|measure| {
+                    let BlockExtent::Paragraph(paragraph) = measure else {
+                        panic!()
+                    };
+                    paragraph.lines[0].float_skip_before.unwrap_or(0.0)
+                })
+                .collect();
+            (skips[0], skips[1])
+        };
+        let close = |actual: f64, expected: f64, label: &str| {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "{label}: {actual} vs {expected}"
+            );
+        };
+        let before = 4.5;
+        let line = {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"paragraph","id":"anchor","runs":[{"kind":"text","text":"anchor"}]}
+            ]))
+            .unwrap();
+            let BlockExtent::Paragraph(paragraph) =
+                &measure_blocks_with_floats(&mut blocks, &[200.0], &config, None).unwrap()[0]
+            else {
+                panic!()
+            };
+            paragraph.lines[0].line_height
+        };
+        let twip = 0.05 * 96.0 / 72.0;
+
+        // A band starting at the line's bottom clears it; one twip higher does not.
+        close(measure(before + line, 1.0, before).0, 0.0, "at the bottom");
+        let overlapping = before + line - twip;
+        close(
+            measure(overlapping, 1.0, before).0,
+            overlapping + 1.0,
+            "one twip into the line",
+        );
+        // The push clears the whole band, whatever its height.
+        for height in [0.5, 8.0, 96.0, 266.0] {
+            close(
+                measure(before, height, before).0,
+                before + height,
+                "band height",
+            );
+        }
+        // Space-before alone reaching a band moves the line that follows it.
+        let (anchor_skip, tail_skip) = measure(1.0, 1.0, before);
+        close(anchor_skip, 2.0, "space-before overlap");
+        close(tail_skip, 0.0, "tail clear of the band");
+        // A band clear of the paragraph top and of the line leaves both alone.
+        let above = measure(-4.0, 1.0, before);
+        close(above.0, 0.0, "band above the paragraph");
+        close(above.1, 0.0, "tail below a band above the paragraph");
+
+        // A band reaching only the second line moves that line to the band
+        // bottom, with no space-before spent under it.
+        let wrapped = |offset: f64| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":200,"height":2,"wrapType":"topAndBottom",
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                             "vertical":{"relativeTo":"paragraph","posOffset":offset}}},
+                {"kind":"paragraph","id":"anchor","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"alpha beta gamma delta epsilon zeta eta theta"}]}
+            ]))
+            .unwrap();
+            let BlockExtent::Paragraph(paragraph) =
+                &measure_blocks_with_floats(&mut blocks, &[200.0; 2], &config, None).unwrap()[1]
+            else {
+                panic!()
+            };
+            (
+                paragraph.lines[0].float_skip_before.unwrap_or(0.0),
+                paragraph.lines[1].float_skip_before.unwrap_or(0.0),
+            )
+        };
+        let second_bottom = before + 2.0 * line;
+        close(wrapped(second_bottom).1, 0.0, "at the second line's bottom");
+        let reaching = second_bottom - twip;
+        close(
+            wrapped(reaching).1,
+            reaching + 2.0 - before - line,
+            "one twip into the second line",
+        );
+    }
+
+    /// Word 16.113 paints a `wrapNone` anchor over its cell and leaves the row
+    /// alone: probing a two-cell table with and without the anchor kept the row
+    /// at the same bottom and the flow below it unmoved, while the same probe
+    /// with `wrapSquare` grew the row to the float's bottom.
+    #[test]
+    fn a_wrap_none_cell_anchor_leaves_the_row_height_alone() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let cell_blocks = |anchor: Option<Value>| {
+            let mut blocks = Vec::new();
+            if let Some(anchor) = anchor {
+                blocks.push(anchor);
+            }
+            blocks.push(
+                json!({"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"cell"}]}),
+            );
+            json!({"kind":"table","id":"outer","columnWidths":[220],
+                   "rows":[{"id":"row","cells":[{"id":"cell","blocks":blocks}]}]})
+        };
+        let height = |value: Value| {
+            let mut block: LayoutBlock = serde_json::from_value(value).unwrap();
+            let measure = measure_block(&mut block, 220.0, &config).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &measure) else {
+                panic!()
+            };
+            let layout = crate::cell_layout::layout_cell_content(
+                Some(&table.rows[0].cells[0].blocks),
+                Some(&extent.rows[0].cells[0].blocks),
+                0.0,
+            );
+            assert!((layout.content_height - extent.total_height).abs() < 0.01);
+            extent.total_height
+        };
+        let plain = height(cell_blocks(None));
+        let anchor = |wrap: &str| {
+            json!({"kind":"shape","id":"ellipse","shapeType":"ellipse","geometryPath":[],
+                   "children":[],"width":80,"height":40,"wrapType":wrap,
+                   "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                               "vertical":{"relativeTo":"paragraph","posOffset":36}}})
+        };
+        assert_eq!(height(cell_blocks(Some(anchor("inFront")))), plain);
+        assert_eq!(height(cell_blocks(Some(anchor("behind")))), plain);
+        assert_eq!(height(cell_blocks(Some(anchor("square")))), plain + 40.0);
+    }
+
+    /// A wrap-only anchor must not slide the frame out from under a band
+    /// anchored beside it.
+    #[test]
+    fn a_wrap_only_anchor_does_not_advance_the_anchor_frame() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+             "width":40,"height":40,"wrapType":"topAndBottom",
+             "position":{"horizontal":{"relativeTo":"column","posOffset":0},"vertical":{"relativeTo":"paragraph","posOffset":0}}},
+            {"kind":"shape","id":"wrapOnly","shapeType":"rect","geometryPath":[],"children":[],
+             "width":40,"height":40,"wrapType":"topAndBottom"},
+            {"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"words words words"}]}
+        ]))
+        .unwrap();
+        let measures = measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+        let BlockExtent::Paragraph(paragraph) = &measures[2] else {
+            panic!()
+        };
+        assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 40.0);
+    }
+
+    #[test]
+    fn vertical_table_labels_keep_a_single_rotated_line() {
+        for (direction, rotation) in [("btLr", -90.0), ("tbRl", 90.0)] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+                "kind":"table","id":"table","columnWidths":[30],"rows":[{
+                    "id":"row","height":150,"heightRule":"exact","cells":[{
+                        "id":"cell","textDirection":direction,"padding":{"left":0,"right":0,"top":0,"bottom":0},
+                        "blocks":[{"kind":"paragraph","id":"label","runs":[{"kind":"text","text":"Vertical label","fontSize":12}]}]
+                    }]
+                }]
+            }])).unwrap();
+            let measured =
+                measure_blocks(&mut blocks, 200.0, &MeasurementConfig::default()).unwrap();
+            let BlockExtent::Table(table) = &measured[0] else {
+                panic!()
+            };
+            let BlockExtent::Paragraph(label) = &table.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            assert_eq!(label.lines.len(), 1);
+            assert_eq!(table.total_height, 150.0);
+            let mut input = crate::types::Input {
+                measured: blocks
+                    .into_iter()
+                    .zip(measured)
+                    .map(|(block, measure)| crate::types::MeasuredBlock { block, measure })
+                    .collect(),
+                options: crate::types::LayoutOptions::default(),
+            };
+            let layout = crate::compute_layout_input(&mut input).unwrap();
+            let display = crate::build_display_list(&input, &layout).unwrap();
+            let text = display.pages[0]
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    crate::display_list::Primitive::Text(text) if text.text == "Vertical label" => {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                text.rotation_deg
+                    .as_ref()
+                    .and_then(serde_json::Number::as_f64),
+                Some(rotation)
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_borders_expand_minimum_and_auto_rows_but_not_exact_rows() {
+        for (height, rule, expected) in [
+            (Some(40.0), "atLeast", 41.0),
+            (Some(40.0), "exact", 40.0),
+            (None, "auto", 17.0),
+        ] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "kind":"table", "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "height":height, "heightRule":rule, "cells":[{
+                    "id":"cell", "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                    "borders":{"top":{"width":1},"bottom":{"width":1}},
+                    "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":16}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.total_height, expected);
+        }
+    }
+
+    #[test]
+    fn minimum_row_height_reserves_cell_margins_outside_the_content_minimum() {
+        for (minimum, content, expected) in [(40, 16, 56.0), (80, 16, 96.0), (40, 60, 76.0)] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "height":minimum, "heightRule":"atLeast", "cells":[{
+                    "id":"cell", "padding":{"top":5,"bottom":10,"left":0,"right":0},
+                    "borders":{"top":{"width":1},"bottom":{"width":1}},
+                    "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":content}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.rows[0].cells[0].height, content as f64 + 15.0);
+        }
+    }
+
+    #[test]
+    fn rotated_image_only_cells_use_the_visual_height() {
+        for (rotation, expected) in [(None, 102.0), (Some(90), 52.0), (Some(270), 52.0)] {
+            let bounds = rotation.map(|_| json!({"width":80,"height":30}));
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "cells":[{
+                    "id":"cell", "padding":{"top":5,"bottom":7,"left":0,"right":0},
+                    "blocks":[{"kind":"paragraph","id":"paragraph",
+                        "attrs":{"spacing":{"before":4,"after":6}},
+                        "runs":[{"kind":"image","src":"","width":30,"height":80,
+                            "rotationDeg":rotation,"rotationBounds":bounds}]}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.rows[0].cells[0].height, expected);
+        }
+    }
+
+    #[test]
+    fn rotated_images_mixed_with_text_keep_the_measured_line_height() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"paragraph","id":"paragraph","runs":[
+                {"kind":"text","text":"label"},
+                {"kind":"image","src":"","width":30,"height":80,
+                    "rotationDeg":270,"rotationBounds":{"width":80,"height":30}}
+            ]
+        }))
+        .unwrap();
+        let measure: BlockExtent = serde_json::from_value(json!({
+            "kind":"paragraph","totalHeight":44,"lines":[{
+                "headRun":0,"headChar":0,"tailRun":1,"tailChar":1,
+                "width":90,"ascent":30,"descent":4,"lineHeight":44
+            }]
+        }))
+        .unwrap();
+        assert_eq!(table_cell_block_height(&block, &measure), 44.0);
+    }
 
     #[test]
     fn measures_non_text_blocks_without_host_callbacks() {
@@ -1351,5 +2787,107 @@ mod tests {
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);
+    }
+
+    fn wrapped_shape(wrap_text: Option<&str>, x: f64, width: f64) -> ShapeBlock {
+        serde_json::from_value(json!({
+            "id": "s",
+            "shapeType": "rect",
+            "geometryPath": [],
+            "width": width,
+            "height": 40.0,
+            "children": [],
+            "wrapType": "square",
+            "wrapText": wrap_text,
+            "wrapDistances": {"top": 0, "bottom": 0, "left": 12, "right": 12},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": x},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn shape_zone(wrap_text: Option<&str>, x: f64, width: f64) -> FloatingZone {
+        let mut zones = Vec::new();
+        extract_shape_zone(
+            &wrapped_shape(wrap_text, x, width),
+            0,
+            600.0,
+            None,
+            None,
+            &mut zones,
+        );
+        zones.pop().expect("zone").zone
+    }
+
+    #[test]
+    fn a_narrow_interior_both_sides_float_keeps_a_strip_on_each_side() {
+        let zone = shape_zone(None, 300.0, 6.0);
+        assert_eq!(
+            zone.segments
+                .iter()
+                .map(|strip| (strip.left_offset, strip.available_width))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 288.0), (318.0, 282.0)]
+        );
+        assert_eq!((zone.left_margin, zone.right_margin), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_float_wider_than_the_side_it_would_cost_keeps_one_side() {
+        let zone = shape_zone(None, 200.0, 220.0);
+        assert!(zone.segments.is_empty());
+        assert_eq!((zone.left_margin, zone.right_margin), (0.0, 412.0));
+    }
+
+    #[test]
+    fn largest_and_one_sided_wraps_never_split_the_line() {
+        for wrap_text in ["largest", "left", "right"] {
+            assert!(
+                shape_zone(Some(wrap_text), 300.0, 6.0).segments.is_empty(),
+                "{wrap_text} must keep a single side"
+            );
+        }
+    }
+    /// A stale `w:gridCol` must not force a wrap: the heading in
+    /// `oxi-en-administrative-04` fits one line in Word only because Word
+    /// re-measures the `auto` column the declared grid left 5.84px short.
+    #[test]
+    fn a_stale_grid_column_widens_to_keep_its_heading_on_one_line() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..Default::default()
+        };
+        let padding = json!({"top":0,"bottom":0,"left":1,"right":1});
+        let cell = |text: &str, width: Value| {
+            json!({"id":text,"padding":padding,"widthValue":width,"widthType":"dxa","blocks":[
+                {"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}]})
+        };
+        let mut block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"table","id":"stale","columnWidths":[60,100],
+            "rows":[{"id":"row","cells":[
+                cell("Content sized column", json!(0)),
+                cell("Priced", json!(1500)),
+            ]}]
+        }))
+        .unwrap();
+        let measure = measure_block(&mut block, 300.0, &config).unwrap();
+        let BlockExtent::Table(extent) = &measure else {
+            panic!()
+        };
+        let heading = &extent.rows[0].cells[0];
+        let BlockExtent::Paragraph(paragraph) = &heading.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(paragraph.lines.len(), 1);
+        assert!(heading.width > 60.0 && heading.width < 300.0);
+        assert!((heading.width - (paragraph.lines[0].width + 2.0)).abs() < 0.01);
+        assert_eq!(extent.rows[0].cells[1].width, 100.0);
     }
 }

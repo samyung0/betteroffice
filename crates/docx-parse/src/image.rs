@@ -88,7 +88,7 @@ pub struct PositionAxis {
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pos_offset: Option<f64>,
-    // Pinned VML typo: the VML parser emits `offset`, not `posOffset`.
+    // Legacy mirror of `pos_offset` that the VML parser has always emitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
 }
@@ -111,6 +111,8 @@ pub struct Image {
     pub image_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(rename = "rId")]
     pub relationship_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,8 @@ pub struct Image {
     pub padding: Option<ImagePadding>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<ImageCrop>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,6 +308,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
     Image {
         image_type: "image".into(),
         id: None,
+        name: None,
         relationship_id,
         src: None,
         mime_type: None,
@@ -317,6 +322,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
         transform: None,
         padding: None,
         crop: None,
+        shape_type: None,
         opacity: None,
         decorative: None,
         layout_in_cell: None,
@@ -351,6 +357,7 @@ fn apply_common_image_fields(
     relationships: Option<&RelationshipMap>,
 ) {
     image.id = properties.id;
+    image.name = properties.name;
     image.alt = properties.alt;
     image.title = properties.title;
     image.decorative = properties.decorative.then_some(true);
@@ -360,6 +367,11 @@ fn apply_common_image_fields(
     image.padding = padding.clone();
     image.transform = transform;
     image.crop = parse_image_crop(blip_fill);
+    image.shape_type = picture_properties(container)
+        .and_then(|properties| properties.child_by_full_name("a:prstGeom"))
+        .and_then(|geometry| geometry.attribute(None, "prst"))
+        .filter(|preset| !preset.is_empty() && *preset != "rect")
+        .map(str::to_owned);
     image.opacity = parse_image_opacity(blip);
     if let Some(ordered) = parse_blip_effects(blip) {
         image
@@ -390,6 +402,7 @@ fn apply_common_image_fields(
 #[derive(Default)]
 struct DocProperties {
     id: Option<String>,
+    name: Option<String>,
     alt: Option<String>,
     title: Option<String>,
     decorative: bool,
@@ -408,6 +421,10 @@ fn parse_doc_properties(element: Option<&XmlElement>) -> DocProperties {
     DocProperties {
         id: element
             .attribute(None, "id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        name: element
+            .attribute(None, "name")
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
         alt: element
@@ -484,11 +501,15 @@ fn extract_blip_id(blip: Option<&XmlElement>) -> String {
     .to_owned()
 }
 
-fn parse_picture_transform(container: &XmlElement) -> Option<Transform2D> {
+fn picture_properties(container: &XmlElement) -> Option<&XmlElement> {
     let graphic = container.child_by_full_name("a:graphic")?;
     let data = graphic.child_by_full_name("a:graphicData")?;
     let picture = data.child_by_full_name("pic:pic")?;
-    let properties = picture.child_by_full_name("pic:spPr")?;
+    picture.child_by_full_name("pic:spPr")
+}
+
+fn parse_picture_transform(container: &XmlElement) -> Option<Transform2D> {
+    let properties = picture_properties(container)?;
     let transform = properties.child_by_full_name("a:xfrm")?;
     let rotation = rot_to_degrees(transform.attribute(None, "rot"));
     let flip_h = (transform.attribute(None, "flipH") == Some("1")).then_some(true);
@@ -842,6 +863,27 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn picture_presets_are_read_from_picture_properties() {
+        for (geometry, expected) in [
+            ("", None),
+            (r#"<a:prstGeom prst="rect"/>"#, None),
+            (r#"<a:prstGeom prst="ellipse"/>"#, Some("ellipse")),
+            (r#"<a:prstGeom prst="roundRect"/>"#, Some("roundRect")),
+        ] {
+            for container in ["inline", "anchor"] {
+                let drawing = root(&format!(
+                    r#"<w:drawing><wp:{container}><wp:extent cx="1000000" cy="500000"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/><a:srcRect l="10000"/></pic:blipFill><pic:spPr>{geometry}<a:effectLst><a:softEdge rad="112500"/></a:effectLst></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:{container}></w:drawing>"#
+                ));
+                let image = parse_drawing(&drawing, None, None).unwrap();
+                let value = serde_json::to_value(image).unwrap();
+                assert_eq!(value["shapeType"].as_str(), expected);
+                assert_eq!(value["crop"]["left"], 0.1);
+                assert_eq!(value["size"]["width"], 1_000_000.0);
+            }
+        }
     }
 
     #[test]

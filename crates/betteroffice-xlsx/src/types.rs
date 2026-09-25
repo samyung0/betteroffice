@@ -42,6 +42,12 @@ pub struct CellEdit {
     pub is_formula: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchMatch {
+    pub address: CellAddress,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetInfo {
     pub sheet_ids: Vec<String>,
@@ -60,6 +66,25 @@ pub struct CalculationResult {
     pub changed: Vec<CellAddress>,
     pub cycle_cells: Vec<CellAddress>,
     pub limited_cells: Vec<CellAddress>,
+}
+
+/// where a timed mutation stands; see [`Workbook::edit_cell_profiled`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditStage {
+    Validated,
+    Applied,
+    Recalculated,
+}
+
+/// stage latencies of one profiled mutation, in milliseconds. the clock comes
+/// from the caller, so the ordinary mutation path pays no timer calls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditProfile {
+    pub validate_ms: f64,
+    pub apply_ms: f64,
+    pub recalc_ms: f64,
+    pub result_ms: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

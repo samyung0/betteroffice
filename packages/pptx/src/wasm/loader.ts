@@ -1,26 +1,41 @@
 import initWasmModule, {
+  decodeTiffPng,
   parsePptxJson,
   PptxDocument,
   PptxRenderer,
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
+import { StaleProposalError } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 import type {
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
+  HistoryProfile,
   HistoryResult,
   HitTestResult,
+  ParagraphAlignment,
+  PictureDraft,
   PresetShapeDraft,
+  Profiled,
+  ProfiledLayout,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
   ShapeReceipt,
+  ShapeRect,
   ShapeStroke,
   ShapeStrokeReceipt,
+  ShapeZOrderReceipt,
   SlideDisplayList,
   SlideReceipt,
   StorySnapshot,
@@ -43,25 +58,60 @@ export interface OpenPresentationOptions {
   initialUpdate?: Uint8Array;
 }
 
+export type UndoCaptureMode = 'auto' | 'manual';
+
 export interface PresentationHandle extends CollaborationReplica {
+  isProposalsAvailable(): boolean;
+  propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
+  listProposals(): Proposal[];
+  previewProposal(id: string): ProposalPreview;
+  layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
+  layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
+  acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
+  rejectProposal(id: string): boolean;
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Literal search in slide order. */
+  searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
+  /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
+  layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
   /** serialize the presentation back to .pptx bytes, edits included. */
   save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
+  /** `insertText` with the boundary's stage timings attached. */
+  insertTextProfiled(
+    storyId: string,
+    index: number,
+    text: string,
+    style?: TextStyle
+  ): Profiled<TextReceipt>;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
+  deleteTextProfiled(storyId: string, start: number, end: number): Profiled<TextReceipt>;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
+  /** Sets the alignment of every paragraph the range touches; `null` restores
+   *  the inherited value. */
+  setParagraphAlignment(
+    storyId: string,
+    start: number,
+    end: number,
+    alignment: ParagraphAlignment | null
+  ): TextReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
+  insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
+  /** Sets a slide's speaker notes; empty text clears them. */
+  setSlideNotes(slideId: string, text: string): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
+  addTextBoxProfiled(slideId: string, draft: ShapeDraft): Profiled<ShapeReceipt>;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
+  addPicture(slideId: string, draft: PictureDraft): ShapeReceipt;
   setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
   setShapeStroke(
     slideId: string,
@@ -74,11 +124,56 @@ export interface PresentationHandle extends CollaborationReplica {
     adjustments: Record<string, number>
   ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
+  /** Moves a shape to the top of its slide's paint order (drawn last). */
+  bringShapeToFront(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Moves a shape to the bottom of its slide's paint order (drawn first). */
+  sendShapeToBack(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step later in its slide's paint order. */
+  bringShapeForward(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step earlier in its slide's paint order. */
+  sendShapeBackward(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Adds a slide comment; coordinates are EMU. */
+  addComment(
+    slideId: string,
+    comment: {
+      author: string;
+      initials?: string;
+      text: string;
+      created: string;
+      xEmu?: number;
+      yEmu?: number;
+    }
+  ): CommentReceipt;
+  /** Modern decks only; legacy `p:cm` has no reply list. */
+  replyToComment(
+    commentId: string,
+    reply: { author: string; initials?: string; text: string; created: string }
+  ): CommentReceipt;
+  /** Resolves or reopens a modern comment. */
+  setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  /** Moves a root comment on its slide; coordinates are safe integer EMU. */
+  setCommentPosition(commentId: string, position: { xEmu: number; yEmu: number }): CommentReceipt;
+  removeComment(commentId: string): CommentReceipt;
+  /** Only legal while the deck has no comments. */
+  setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
+  comments(): CommentSnapshot[];
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
+  moveShapeProfiled(
+    slideId: string,
+    shapeId: string,
+    x: number,
+    y: number
+  ): Profiled<TransformReceipt>;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
+  setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
+  undoCaptureMode(): UndoCaptureMode;
+  setUndoCaptureMode(mode: UndoCaptureMode): void;
+  addUndoBoundary(): void;
   undo(): HistoryResult;
+  /** `undo` with undo, snapshot and serialize time measured at the boundary. */
+  undoProfiled(): Profiled<HistoryResult, HistoryProfile>;
   redo(): HistoryResult;
   encodeStateVector(): Uint8Array;
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -91,6 +186,11 @@ export interface PresentationHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+
+export function isProposalsAvailable(): boolean {
+  return typeof PptxDocument.prototype.proposeJson === 'function'
+    && typeof PptxRenderer.prototype.layoutProposalSlideJson === 'function';
+}
 let initialization: Promise<void> | undefined;
 
 export function initWasm(
@@ -122,6 +222,11 @@ export function wasmVersion(): string {
 export function inspectPresentation(bytes: Uint8Array): unknown {
   requireInitialized();
   return call(() => parsePptxJson(bytes));
+}
+
+export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
+  requireInitialized();
+  return construct(() => decodeTiffPng(bytes));
 }
 
 export function openPresentation(
@@ -244,6 +349,28 @@ export function openPresentation(
   };
 
   const handle: PresentationHandle = {
+    isProposalsAvailable,
+    propose(agentId, note, edits) {
+      return jsonWasmCall(() => doc.proposeJson(JSON.stringify({ agentId, note, edits })));
+    },
+    listProposals() {
+      return isProposalsAvailable() ? jsonWasmCall(() => doc.listProposalsJson()) : [];
+    },
+    previewProposal(id) {
+      return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
+    },
+    layoutProposalDiffSlide(id, slideIndex) {
+      return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));
+    },
+    layoutProposalSlide(id, slideIndex) {
+      return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));
+    },
+    acceptProposal(id, options) {
+      return jsonWasmCall(() => doc.acceptProposalJson(JSON.stringify({ id, force: options?.force ?? false })), true);
+    },
+    rejectProposal(id) {
+      return jsonWasmCall(() => doc.rejectProposalJson(JSON.stringify({ id })));
+    },
     get clientId(): number {
       return wasmCall(() => doc.clientId);
     },
@@ -253,11 +380,28 @@ export function openPresentation(
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
     },
+    searchText(query, options = {}) {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return jsonWasmCall(() =>
+        doc.searchTextJson(JSON.stringify({
+          query,
+          caseSensitive: options.caseSensitive ?? false,
+          limit: Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined,
+        }))
+      );
+    },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
+    },
+    layoutSlideProfiled(slideIndex: number): ProfiledLayout {
+      return jsonWasmCall(() => renderer.layoutSlideProfiledJson(doc, slideIndex));
     },
     hitTest(x: number, y: number): HitTestResult | null {
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
@@ -274,9 +418,21 @@ export function openPresentation(
         true
       );
     },
+    insertTextProfiled(storyId, index, text, style = {}): Profiled<TextReceipt> {
+      return jsonWasmCall(
+        () => doc.insertTextProfiledJson(JSON.stringify({ storyId, index, text, style })),
+        true
+      );
+    },
     deleteText(storyId, start, end): TextReceipt {
       return jsonWasmCall(
         () => doc.deleteTextJson(JSON.stringify({ storyId, start, end })),
+        true
+      );
+    },
+    deleteTextProfiled(storyId, start, end): Profiled<TextReceipt> {
+      return jsonWasmCall(
+        () => doc.deleteTextProfiledJson(JSON.stringify({ storyId, start, end })),
         true
       );
     },
@@ -292,10 +448,26 @@ export function openPresentation(
         true
       );
     },
+    setParagraphAlignment(storyId, start, end, alignment): TextReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
+        true
+      );
+    },
     insertSlide(index, layoutPartPath): SlideReceipt {
       return jsonWasmCall(
         () =>
           doc.insertSlideJson(JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })),
+        true
+      );
+    },
+    insertSlideProfiled(index, layoutPartPath): Profiled<SlideReceipt> {
+      return jsonWasmCall(
+        () =>
+          doc.insertSlideProfiledJson(
+            JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })
+          ),
         true
       );
     },
@@ -308,11 +480,78 @@ export function openPresentation(
         true
       );
     },
+    setSlideNotes(slideId, text): void {
+      jsonWasmCall(() => doc.setSlideNotesJson(JSON.stringify({ slideId, text })), true);
+    },
+    addComment(slideId, comment): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.addCommentJson(
+            JSON.stringify({
+              slideId,
+              author: comment.author,
+              initials: comment.initials ?? '',
+              text: comment.text,
+              created: comment.created,
+              xEmu: comment.xEmu ?? 0,
+              yEmu: comment.yEmu ?? 0,
+            })
+          ),
+        true
+      );
+    },
+    replyToComment(commentId, reply): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.replyToCommentJson(
+            JSON.stringify({
+              commentId,
+              author: reply.author,
+              initials: reply.initials ?? '',
+              text: reply.text,
+              created: reply.created,
+            })
+          ),
+        true
+      );
+    },
+    setCommentPosition(commentId, position): CommentReceipt {
+      if (!Number.isSafeInteger(position.xEmu) || !Number.isSafeInteger(position.yEmu)) {
+        throw new Error('Comment coordinates must be safe integer EMU');
+      }
+      return jsonWasmCall(
+        () => doc.setCommentPositionJson(JSON.stringify({ commentId, ...position })), true
+      );
+    },
+    setCommentStatus(commentId, resolved): CommentReceipt {
+      return jsonWasmCall(
+        () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
+        true
+      );
+    },
+    removeComment(commentId): CommentReceipt {
+      return jsonWasmCall(() => doc.removeCommentJson(JSON.stringify({ commentId })), true);
+    },
+    setCommentFlavor(flavor): CommentFlavor {
+      return jsonWasmCall(() => doc.setCommentFlavorJson(JSON.stringify({ flavor })), true);
+    },
+    comments(): CommentSnapshot[] {
+      return jsonWasmCall(() => doc.commentsJson());
+    },
     addTextBox(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
     },
+    addTextBoxProfiled(slideId, draft): Profiled<ShapeReceipt> {
+      return jsonWasmCall(
+        () => doc.addTextBoxProfiledJson(JSON.stringify({ slideId, draft })),
+        true
+      );
+    },
     addShape(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addShapeJson(JSON.stringify({ slideId, draft })), true);
+    },
+    addPicture(slideId, draft): ShapeReceipt {
+      return jsonWasmCall(() => doc.addPictureJson(JSON.stringify({ slideId, ...draft })), true);
     },
     setShapeFill(slideId, shapeId, color): ShapeFillReceipt {
       return jsonWasmCall(
@@ -338,9 +577,39 @@ export function openPresentation(
         true
       );
     },
+    bringShapeToFront(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeToFrontJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeToBack(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeToBackJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    bringShapeForward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeForwardJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeBackward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeBackwardJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
     moveShape(slideId, shapeId, x, y): TransformReceipt {
       return jsonWasmCall(
         () => doc.moveShapeJson(JSON.stringify({ slideId, shapeId, x, y })),
+        true
+      );
+    },
+    moveShapeProfiled(slideId, shapeId, x, y): Profiled<TransformReceipt> {
+      return jsonWasmCall(
+        () => doc.moveShapeProfiledJson(JSON.stringify({ slideId, shapeId, x, y })),
         true
       );
     },
@@ -350,14 +619,32 @@ export function openPresentation(
         true
       );
     },
+    setShapeRect(slideId, shapeId, rect): TransformReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeRectJson(JSON.stringify({ slideId, shapeId, rect })),
+        true
+      );
+    },
     canUndo(): boolean {
       return wasmCall(() => doc.canUndo());
     },
     canRedo(): boolean {
       return wasmCall(() => doc.canRedo());
     },
+    undoCaptureMode(): UndoCaptureMode {
+      return wasmCall(() => doc.undoCaptureMode()) as UndoCaptureMode;
+    },
+    setUndoCaptureMode(mode): void {
+      wasmCall(() => doc.setUndoCaptureMode(mode));
+    },
+    addUndoBoundary(): void {
+      wasmCall(() => doc.addUndoBoundary());
+    },
     undo(): HistoryResult {
       return jsonWasmCall(() => doc.undoJson(), true);
+    },
+    undoProfiled(): Profiled<HistoryResult, HistoryProfile> {
+      return jsonWasmCall(() => doc.undoProfiledJson(), true);
     },
     redo(): HistoryResult {
       return jsonWasmCall(() => doc.redoJson(), true);
@@ -475,5 +762,14 @@ function call<T>(operation: () => string): T {
 
 function toError(error: unknown): Error {
   if (error instanceof Error) return error;
+  if (typeof error === 'string') {
+    try {
+      const parsed = JSON.parse(error);
+      if (parsed.code === 'staleProposal' && Array.isArray(parsed.targets)
+          && parsed.targets.every((target: unknown) => typeof target === 'string')) {
+        return new StaleProposalError(parsed.targets);
+      }
+    } catch {}
+  }
   return new Error(typeof error === 'string' ? error : String(error));
 }

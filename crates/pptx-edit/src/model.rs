@@ -1,12 +1,9 @@
 use std::collections::BTreeMap;
 
-use ooxml_drawingml::{
-    ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
-    resolve_color_value_to_hex_with_theme,
-};
-use pptx_parse::{
-    GraphicFrameData, Placeholder, PptxPackage, RunProperties, ShapeNode, Slide, TextBody,
-};
+use ooxml_drawingml::{ShapeFill, ShapeOutline};
+use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
+
+pub use pptx_parse::{CommentFlavor, TextCaps};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -45,6 +42,12 @@ pub struct TextStyle {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -56,6 +59,10 @@ pub struct TextStylePatch {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,6 +120,9 @@ pub struct ShapeSnapshot {
     pub rotation_deg: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// Hides this shape and its descendants.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
@@ -121,9 +131,26 @@ pub struct ShapeSnapshot {
     pub outline: Option<ShapeOutline>,
     pub resolved_outline_color: Option<String>,
     pub media_part_path: Option<String>,
+    /// Image data added to this session, retained across saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_media: Option<PendingMedia>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blip_effects: Vec<BlipEffect>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
+}
+
+/// Image data shared by editing peers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingMedia {
+    pub content_type: String,
+    pub base64: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -142,7 +169,20 @@ pub struct SlideSnapshot {
     pub source_part_path: Option<String>,
     pub layout_part_path: Option<String>,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
     pub shapes: Vec<ShapeSnapshot>,
+}
+
+/// One slide's snapshot plus deck geometry — the slide-scoped render input.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideScope {
+    /// The slide's position in deck order.
+    pub index: usize,
+    pub slide: SlideSnapshot,
+    pub width_emu: i64,
+    pub height_emu: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,277 +191,38 @@ pub struct DeckSnapshot {
     pub width_emu: i64,
     pub height_emu: i64,
     pub slides: Vec<SlideSnapshot>,
+    #[serde(default, skip_serializing_if = "legacy_comment_flavor")]
+    pub comment_flavor: CommentFlavor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CommentSnapshot>,
 }
 
-pub fn snapshot_package(package: &PptxPackage) -> EditResult<DeckSnapshot> {
-    Ok(DeckSnapshot {
-        width_emu: package.presentation.width_emu,
-        height_emu: package.presentation.height_emu,
-        slides: package
-            .slides
-            .iter()
-            .enumerate()
-            .map(|(slide_index, slide)| snapshot_slide(package, slide_index, slide))
-            .collect::<EditResult<Vec<_>>>()?,
-    })
+fn legacy_comment_flavor(flavor: &CommentFlavor) -> bool {
+    *flavor == CommentFlavor::Legacy
 }
 
-fn snapshot_slide(
-    package: &PptxPackage,
-    slide_index: usize,
-    slide: &Slide,
-) -> EditResult<SlideSnapshot> {
-    let reference = package
-        .presentation
-        .slides
-        .get(slide_index)
-        .ok_or_else(|| {
-            EditError::InvalidState(format!("slide {slide_index} has no presentation reference"))
-        })?;
-    let id = format!("slide:{slide_index}:{}", reference.id);
-    let theme = slide_theme(package, slide);
-    Ok(SlideSnapshot {
-        id: id.clone(),
-        source_part_path: Some(slide.part_path.clone()),
-        layout_part_path: slide.layout_part_path.clone(),
-        name: slide.name.clone(),
-        shapes: slide
-            .shapes
-            .iter()
-            .enumerate()
-            .map(|(shape_index, shape)| {
-                snapshot_parsed_shape(&id, &shape_index.to_string(), shape, theme)
-            })
-            .collect(),
-    })
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentSnapshot {
+    pub id: String,
+    pub slide_id: String,
+    pub author: String,
+    pub initials: String,
+    pub text: String,
+    pub created: Option<String>,
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
 }
 
-fn snapshot_parsed_shape(
-    slide_id: &str,
-    path: &str,
-    shape: &ShapeNode,
-    theme: Option<&Theme>,
-) -> ShapeSnapshot {
-    let id = format!("{slide_id}:shape:{path}");
-    let base = match shape {
-        ShapeNode::Shape(shape) => &shape.base,
-        ShapeNode::Picture(shape) => &shape.base,
-        ShapeNode::GraphicFrame(shape) => &shape.base,
-        ShapeNode::Group(shape) => &shape.base,
-    };
-    let (
-        kind,
-        geometry,
-        adjust_values,
-        fill,
-        outline,
-        media_part_path,
-        graphic,
-        text_stories,
-        children,
-    ) = match shape {
-        ShapeNode::Shape(shape) => {
-            let mut adjust_values = preset_geometry_default_adjustments(&shape.geometry)
-                .into_iter()
-                .collect::<BTreeMap<_, _>>();
-            adjust_values.extend(shape.adjust_values.clone());
-            let text_stories = shape
-                .text
-                .as_ref()
-                .map(|body| vec![snapshot_text_body(&format!("story:{id}:0"), body, theme)])
-                .unwrap_or_default();
-            (
-                ShapeKind::Shape,
-                shape.geometry.clone(),
-                adjust_values,
-                shape.fill.clone(),
-                shape.outline.clone(),
-                None,
-                None,
-                text_stories,
-                Vec::new(),
-            )
-        }
-        ShapeNode::Picture(picture) => (
-            ShapeKind::Picture,
-            "rect".to_owned(),
-            BTreeMap::new(),
-            picture.fill.clone(),
-            picture.outline.clone(),
-            picture.media_part_path.clone(),
-            None,
-            Vec::new(),
-            Vec::new(),
-        ),
-        ShapeNode::GraphicFrame(frame) => {
-            let mut text_stories = Vec::new();
-            if let GraphicFrameData::Table { rows } = &frame.data {
-                for (row_index, row) in rows.iter().enumerate() {
-                    for (cell_index, body) in row.iter().enumerate() {
-                        text_stories.push(snapshot_text_body(
-                            &format!("story:{id}:table:{row_index}:{cell_index}"),
-                            body,
-                            theme,
-                        ));
-                    }
-                }
-            }
-            (
-                ShapeKind::GraphicFrame,
-                "rect".to_owned(),
-                BTreeMap::new(),
-                None,
-                None,
-                None,
-                Some(frame.data.clone()),
-                text_stories,
-                Vec::new(),
-            )
-        }
-        ShapeNode::Group(group) => (
-            ShapeKind::Group,
-            "group".to_owned(),
-            BTreeMap::new(),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-            group
-                .children
-                .iter()
-                .enumerate()
-                .map(|(child_index, child)| {
-                    snapshot_parsed_shape(slide_id, &format!("{path}.{child_index}"), child, theme)
-                })
-                .collect(),
-        ),
-    };
-    let resolved_fill_color = fill
-        .as_ref()
-        .filter(|fill| fill.fill_type != "none")
-        .and_then(|fill| resolve_color_value_to_hex_with_theme(fill.color.as_ref(), theme));
-    let resolved_outline_color = outline
-        .as_ref()
-        .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
-    ShapeSnapshot {
-        id,
-        source_id: base.id,
-        kind,
-        name: base.name.clone(),
-        x: base.transform.x,
-        y: base.transform.y,
-        width: base.transform.width,
-        height: base.transform.height,
-        rotation_deg: base.transform.rotation_deg,
-        flip_h: base.transform.flip_h,
-        flip_v: base.transform.flip_v,
-        geometry,
-        adjust_values,
-        placeholder: base.placeholder.clone(),
-        fill,
-        resolved_fill_color,
-        outline,
-        resolved_outline_color,
-        media_part_path,
-        graphic,
-        text_stories,
-        children,
-    }
-}
-
-fn snapshot_text_body(story_id: &str, body: &TextBody, theme: Option<&Theme>) -> StorySnapshot {
-    let paragraphs = if body.paragraphs.is_empty() {
-        vec![ParagraphSnapshot {
-            id: format!("para:{story_id}:0"),
-            alignment: None,
-            level: 0,
-            bullet_json: None,
-            runs: Vec::new(),
-        }]
-    } else {
-        body.paragraphs
-            .iter()
-            .enumerate()
-            .map(|(paragraph_index, paragraph)| ParagraphSnapshot {
-                id: format!("para:{story_id}:{paragraph_index}"),
-                alignment: paragraph.properties.alignment.clone(),
-                level: paragraph.properties.level,
-                bullet_json: paragraph
-                    .properties
-                    .bullet
-                    .as_ref()
-                    .and_then(|bullet| serde_json::to_string(bullet).ok()),
-                runs: paragraph
-                    .runs
-                    .iter()
-                    .filter(|run| !run.text.is_empty())
-                    .map(|run| TextRunSnapshot {
-                        text: run.text.clone(),
-                        style: style_from_run_properties(&run.properties, theme),
-                    })
-                    .collect(),
-            })
-            .collect()
-    };
-    let text_length = paragraphs
-        .iter()
-        .flat_map(|paragraph| &paragraph.runs)
-        .map(|run| run.text.encode_utf16().count() as u32)
-        .sum::<u32>();
-    StorySnapshot {
-        id: story_id.to_owned(),
-        length: text_length.saturating_add(paragraphs.len() as u32),
-        paragraphs,
-    }
-}
-
-fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        bold: properties.bold,
-        italic: properties.italic,
-        font_size_pt: properties.font_size_pt,
-        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
-        font_family: properties.font_family.clone(),
-        underline: properties.underline.clone(),
-    }
-}
-
-fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme> {
-    let layout = slide
-        .layout_part_path
-        .as_deref()
-        .and_then(|path| {
-            package
-                .layouts
-                .iter()
-                .find(|layout| layout.part_path == path)
-        })
-        .or_else(|| package.layouts.first());
-    let master = layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first());
-    master
-        .and_then(|master| master.theme_part_path.as_deref())
-        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
-        .map(|part| &part.theme)
-        .or_else(|| package.themes.first().map(|part| &part.theme))
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentReceipt {
+    pub comment_id: String,
+    pub slide_id: String,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -438,6 +239,15 @@ pub struct ShapeReceipt {
     pub slide_id: String,
     pub shape_id: String,
     pub index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeZOrderReceipt {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub from_index: u32,
+    pub to_index: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -482,6 +292,14 @@ pub struct PresetShapeDraft {
     pub geometry: String,
     pub rect: ShapeRect,
     pub fill: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PictureDraft {
+    pub name: String,
+    pub rect: ShapeRect,
+    pub content_type: String,
+    pub media_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -548,6 +366,10 @@ pub enum EditError {
     ShapeNotFound(String),
     #[error("story {0:?} was not found")]
     StoryNotFound(String),
+    #[error("comment {0:?} was not found")]
+    CommentNotFound(String),
+    #[error("invalid comment: {0}")]
+    InvalidComment(String),
     #[error("index {index} is outside length {length}")]
     OutOfBounds { index: u32, length: u32 },
     #[error("text range {start}..{end} crosses a paragraph boundary")]

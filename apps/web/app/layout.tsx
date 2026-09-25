@@ -1,9 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { Logo } from "./components/Logo";
+import { BENCHMARKS, DOCS, SITE, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import "./globals.css";
-
-const SITE = "https://betteroffice.dev";
 
 const navLink =
   "font-mono text-xs text-ink no-underline transition-colors hover:text-fg";
@@ -14,11 +13,10 @@ const footLink = "font-mono text-xs text-ink no-underline hover:text-fg";
 export const metadata: Metadata = {
   metadataBase: new URL(SITE),
   title: {
-    default: "BetterOffice — The open-source office suite",
+    default: SITE_TITLE,
     template: "%s — BetterOffice",
   },
-  description:
-    "Apache-2.0 DOCX, XLSX and PPTX editors and viewers for React and plain JavaScript, by the OpenOOXML project. Native OOXML engines written in Rust, compiled to WebAssembly, with real-time collaboration in the engine.",
+  description: SITE_DESCRIPTION,
   keywords: [
     "BetterOffice",
     "open-source office suite",
@@ -51,9 +49,13 @@ export const metadata: Metadata = {
     type: "website",
     siteName: "BetterOffice",
     url: SITE,
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
   },
   twitter: {
     card: "summary_large_image",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
   },
   robots: {
     index: true,
@@ -148,6 +150,11 @@ export default function RootLayout({
                     </a>
                   </li>
                   <li>
+                    <a href={BENCHMARKS} className={footLink}>
+                      Fidelity results
+                    </a>
+                  </li>
+                  <li>
                     <a href="/llms.txt" className={footLink}>
                       llms.txt
                     </a>
@@ -169,7 +176,7 @@ export default function RootLayout({
                   </li>
                   <li>
                     <a
-                      href="https://openooxml.org/eigenpal"
+                      href={`${DOCS}/docs/javascript#migrate-from-eigenpal`}
                       target="_blank"
                       rel="noopener"
                       className={footLink}

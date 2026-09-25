@@ -1,12 +1,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::Theme;
+use ooxml_drawingml::{ColorMap, TableStyleList, Theme};
 
 use crate::chart::parse_chart_part;
+use crate::comments::{
+    Comment, CommentAuthor, CommentFlavor, authors_part, parse_comment_authors, parse_comments,
+    slide_comment_parts,
+};
 use crate::drawing::{common_slide_data, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
-use crate::theme::parse_theme;
+use crate::table_style::parse_table_styles;
+use crate::theme::{parse_background_pictures, parse_format_scheme, parse_theme};
 use crate::xml::{ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
 
@@ -15,6 +20,23 @@ pub fn parse_pptx(data: &[u8]) -> Result<PptxPackage, PptxError> {
 }
 
 pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxPackage, PptxError> {
+    parse_package(data, limits, ShapeElements::WithConnectors)
+}
+
+/// Preserves pre-connector source ordinals.
+pub fn parse_pptx_without_connectors(data: &[u8]) -> Result<PptxPackage, PptxError> {
+    parse_package(
+        data,
+        &ParseLimits::default(),
+        ShapeElements::WithoutConnectors,
+    )
+}
+
+fn parse_package(
+    data: &[u8],
+    limits: &ParseLimits,
+    shape_elements: ShapeElements,
+) -> Result<PptxPackage, PptxError> {
     let source_parts = ooxml_opc::unzip_parts(data).map_err(PptxError::Container)?;
     let parts: HashMap<&str, &[u8]> = source_parts
         .iter()
@@ -42,6 +64,7 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
         presentation_relationships,
     )?;
 
+    let mut has_connectors = false;
     let mut slides = Vec::with_capacity(presentation.slides.len());
     for reference in &presentation.slides {
         let root = parse_part(&parts, &reference.part_path, &mut budget)?;
@@ -49,12 +72,21 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             .get(&reference.part_path)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        has_connectors |= !root.descendants_named("cxnSp").is_empty();
         let data = common_slide_data(
             &root,
             slide_relationships,
             &reference.part_path,
             &mut budget,
+            shape_elements,
         )?;
+        let notes = match crate::notes::slide_notes_part(slide_relationships) {
+            Some(notes_path) => match parts.get(notes_path.as_str()) {
+                Some(bytes) => crate::notes::parse_notes_text(bytes, &notes_path, &mut budget)?,
+                None => String::new(),
+            },
+            None => String::new(),
+        };
         slides.push(Slide {
             part_path: reference.part_path.clone(),
             name: data.name,
@@ -64,7 +96,11 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
+            color_map_override: parse_color_map_override(&root),
+            notes,
         });
     }
 
@@ -80,7 +116,14 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             .get(part_path)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let data = common_slide_data(&root, master_relationships, part_path, &mut budget)?;
+        has_connectors |= !root.descendants_named("cxnSp").is_empty();
+        let data = common_slide_data(
+            &root,
+            master_relationships,
+            part_path,
+            &mut budget,
+            shape_elements,
+        )?;
         masters.push(SlideMaster {
             part_path: part_path.clone(),
             name: data.name,
@@ -91,8 +134,11 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
                 .filter_map(|relationship| relationship.resolved_target.clone())
                 .collect(),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
             text_styles: parse_text_styles(&root),
+            color_map: parse_color_map(&root),
         });
     }
 
@@ -111,7 +157,14 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             .get(part_path)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let data = common_slide_data(&root, layout_relationships, part_path, &mut budget)?;
+        has_connectors |= !root.descendants_named("cxnSp").is_empty();
+        let data = common_slide_data(
+            &root,
+            layout_relationships,
+            part_path,
+            &mut budget,
+            shape_elements,
+        )?;
         layouts.push(SlideLayout {
             part_path: part_path.clone(),
             name: root
@@ -125,7 +178,10 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
+            color_map_override: parse_color_map_override(&root),
         });
     }
 
@@ -140,11 +196,19 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
     let mut themes = Vec::with_capacity(theme_paths.len());
     for part_path in theme_paths {
         let root = parse_part(&parts, &part_path, &mut budget)?;
+        let theme_relationships = relationships
+            .get(&part_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         themes.push(ThemePart {
-            part_path,
             theme: parse_theme(&root),
+            format_scheme: parse_format_scheme(&root),
+            background_pictures: parse_background_pictures(&root, theme_relationships),
+            part_path,
         });
     }
+
+    let table_styles = parse_table_style_part(&parts, presentation_relationships, &mut budget)?;
 
     let charts = parse_chart_parts(
         &parts,
@@ -157,6 +221,14 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
         },
         limits,
     );
+
+    let deck_comments = parse_package_comments(
+        &parts,
+        &presentation,
+        presentation_relationships,
+        &relationships,
+        &mut budget,
+    )?;
 
     let content_types = parse_content_types(&parts, &mut budget)?;
     let media = source_parts
@@ -180,9 +252,86 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
         themes,
         charts,
         media,
+        table_styles,
+        comment_authors: deck_comments.authors,
+        comments: deck_comments.comments,
+        comment_flavor: deck_comments.flavor,
         relationships,
         parts,
+        source_container: ooxml_opc::SourceContainer::new(data.to_vec()),
+        shape_elements: if has_connectors {
+            shape_elements
+        } else {
+            ShapeElements::WithoutConnectors
+        },
     })
+}
+
+fn parse_package_comments(
+    parts: &HashMap<&str, &[u8]>,
+    presentation: &Presentation,
+    presentation_relationships: &[Relationship],
+    relationships: &BTreeMap<String, Vec<Relationship>>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<PackageComments, PptxError> {
+    let mut found: Vec<(CommentFlavor, String, String)> = Vec::new();
+    for reference in &presentation.slides {
+        let slide_relationships = relationships
+            .get(&reference.part_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let slide_parts = slide_comment_parts(slide_relationships);
+        if let Some(part) = slide_parts.legacy {
+            found.push((CommentFlavor::Legacy, reference.part_path.clone(), part));
+        }
+        if let Some(part) = slide_parts.modern {
+            found.push((CommentFlavor::Modern, reference.part_path.clone(), part));
+        }
+    }
+    let Some(flavor) = found
+        .iter()
+        .any(|(flavor, _, _)| *flavor == CommentFlavor::Legacy)
+        .then_some(CommentFlavor::Legacy)
+        .or_else(|| (!found.is_empty()).then_some(CommentFlavor::Modern))
+    else {
+        return Ok(PackageComments::default());
+    };
+
+    let mut comments = Vec::new();
+    for (_, slide_part_path, part) in found
+        .iter()
+        .filter(|(candidate, _, _)| *candidate == flavor)
+    {
+        let Some(bytes) = parts.get(part.as_str()) else {
+            continue;
+        };
+        comments.extend(parse_comments(
+            bytes,
+            part,
+            slide_part_path,
+            flavor,
+            budget,
+        )?);
+    }
+
+    let comment_authors = match authors_part(presentation_relationships, flavor)
+        .and_then(|part| parts.get(part.as_str()).map(|bytes| (part, *bytes)))
+    {
+        Some((part, bytes)) => parse_comment_authors(bytes, &part, flavor, budget)?,
+        None => Vec::new(),
+    };
+    Ok(PackageComments {
+        authors: comment_authors,
+        comments,
+        flavor: Some(flavor),
+    })
+}
+
+#[derive(Default)]
+struct PackageComments {
+    authors: Vec<CommentAuthor>,
+    comments: Vec<Comment>,
+    flavor: Option<CommentFlavor>,
 }
 
 pub fn write_pptx(package: &PptxPackage) -> Result<Vec<u8>, PptxError> {
@@ -191,7 +340,8 @@ pub fn write_pptx(package: &PptxPackage) -> Result<Vec<u8>, PptxError> {
         .iter()
         .map(|part| (part.path.clone(), part.bytes.clone()))
         .collect::<Vec<_>>();
-    ooxml_opc::rezip_parts(&parts).map_err(PptxError::Container)
+    ooxml_opc::rezip_parts_preserving(&parts, package.source_container.as_bytes())
+        .map_err(PptxError::Container)
 }
 
 fn parse_package_relationships(
@@ -229,6 +379,19 @@ fn parse_part(
     parse_xml(bytes, path, budget)
 }
 
+fn parse_table_style_part(
+    parts: &HashMap<&str, &[u8]>,
+    presentation_relationships: &[Relationship],
+    budget: &mut ParseBudget<'_>,
+) -> Result<TableStyleList, PptxError> {
+    let path = relationship_by_type(presentation_relationships, relationship_types::TABLE_STYLES)
+        .unwrap_or_else(|| "ppt/tableStyles.xml".to_owned());
+    let Some(bytes) = parts.get(path.as_str()) else {
+        return Ok(TableStyleList::default());
+    };
+    Ok(parse_table_styles(&parse_xml(bytes, &path, budget)?))
+}
+
 fn parse_presentation(
     root: &XmlElement,
     part_path: &str,
@@ -237,6 +400,10 @@ fn parse_presentation(
     let slide_size = root.child("sldSz");
     let width_emu = positive_integer_attribute(slide_size, "cx").unwrap_or(12_192_000);
     let height_emu = positive_integer_attribute(slide_size, "cy").unwrap_or(6_858_000);
+    let first_slide_num = root
+        .attribute("firstSlideNum")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
     let mut slides = Vec::new();
     if let Some(list) = root.child("sldIdLst") {
         for slide in list.children_named("sldId") {
@@ -274,6 +441,7 @@ fn parse_presentation(
         part_path: part_path.to_owned(),
         width_emu,
         height_emu,
+        first_slide_num,
         slides,
         master_part_paths,
     })
@@ -580,12 +748,101 @@ fn bool_attribute(element: &XmlElement, name: &str, default: bool) -> bool {
     }
 }
 
+/// The `p:clrMap` in effect for a slide: its own `p:clrMapOvr`, else its
+/// layout's, else the master's. Every projection resolves scheme colours
+/// through this one predicate.
+pub fn effective_color_map(
+    slide: Option<&Slide>,
+    layout: Option<&SlideLayout>,
+    master: Option<&SlideMaster>,
+) -> ColorMap {
+    slide
+        .and_then(|slide| slide.color_map_override.clone())
+        .or_else(|| layout.and_then(|layout| layout.color_map_override.clone()))
+        .or_else(|| master.map(|master| master.color_map.clone()))
+        .unwrap_or_default()
+}
+
+/// The theme a slide's colours resolve against: its master's theme part
+/// carrying [`effective_color_map`].
+pub fn slide_theme(
+    package: &PptxPackage,
+    slide_part_path: Option<&str>,
+    layout_part_path: Option<&str>,
+) -> Theme {
+    let slide = slide_part_path
+        .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
+    let layout = layout_part_path
+        .or_else(|| slide.and_then(|slide| slide.layout_part_path.as_deref()))
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
+    let master = master_for_layout(package, layout);
+    let base = master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .or_else(|| package.themes.first());
+    Theme {
+        color_map: effective_color_map(slide, layout, master),
+        ..base.map(|part| part.theme.clone()).unwrap_or_default()
+    }
+}
+
+/// The master a layout belongs to, by relationship then by back-reference.
+pub fn master_for_layout<'a>(
+    package: &'a PptxPackage,
+    layout: Option<&SlideLayout>,
+) -> Option<&'a SlideMaster> {
+    layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        })
+        .or_else(|| package.masters.first())
+}
+
+fn parse_color_map(root: &XmlElement) -> ColorMap {
+    root.child("clrMap").map(color_map).unwrap_or_default()
+}
+
+fn parse_color_map_override(root: &XmlElement) -> Option<ColorMap> {
+    root.child("clrMapOvr")
+        .and_then(|element| element.child("overrideClrMapping"))
+        .map(color_map)
+}
+
+fn color_map(element: &XmlElement) -> ColorMap {
+    let mut map = ColorMap::default();
+    for (name, slot) in &element.attributes {
+        map.set(name, slot);
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const CHART_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/chart-deck.pptx");
+    const NUMBERED_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/slide-number-fields.pptx");
     const CHART_PART: &str = "ppt/charts/chart1.xml";
 
     #[test]
@@ -624,6 +881,51 @@ mod tests {
                 }) if paragraphs.iter().flat_map(|paragraph| &paragraph.runs).any(|run| run.text.contains("Rust"))
             )
         }));
+    }
+
+    #[test]
+    fn first_slide_num_is_read_signed_and_defaults_to_one() {
+        assert_eq!(parse_pptx(FIXTURE).unwrap().presentation.first_slide_num, 1);
+        assert_eq!(
+            parse_pptx(NUMBERED_FIXTURE)
+                .unwrap()
+                .presentation
+                .first_slide_num,
+            10
+        );
+        for (value, expected) in [
+            ("0", 0),
+            ("-3", -3),
+            ("-2147483648", i32::MIN),
+            ("2147483647", i32::MAX),
+            ("2147483648", 1),
+            ("-2147483649", 1),
+            ("ten", 1),
+            ("", 1),
+        ] {
+            let package = parse_pptx(&demo_deck_numbered_from(value)).unwrap();
+            assert_eq!(
+                package.presentation.first_slide_num, expected,
+                "firstSlideNum={value:?}"
+            );
+        }
+    }
+
+    fn demo_deck_numbered_from(value: &str) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+        let slot = parts
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/presentation.xml")
+            .unwrap();
+        let xml = String::from_utf8(slot.1.clone()).unwrap();
+        let numbered = xml.replacen(
+            "<p:presentation ",
+            &format!("<p:presentation firstSlideNum=\"{value}\" "),
+            1,
+        );
+        assert_ne!(numbered, xml);
+        slot.1 = numbered.into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
     #[test]
@@ -727,7 +1029,11 @@ mod tests {
                 layout_part_path: Some(layout.to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: vec![chart_shape(id)],
+                color_map_override: None,
+                notes: String::new(),
             }
         }
 
@@ -754,7 +1060,10 @@ mod tests {
                 master_part_path: Some("ppt/slideMasters/master1.xml".to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
+                color_map_override: None,
             },
             SlideLayout {
                 part_path: "ppt/slideLayouts/layout2.xml".to_owned(),
@@ -763,7 +1072,10 @@ mod tests {
                 master_part_path: Some("ppt/slideMasters/master2.xml".to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
+                color_map_override: None,
             },
         ];
         let masters = vec![
@@ -773,8 +1085,11 @@ mod tests {
                 theme_part_path: Some("ppt/theme/theme1.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout1.xml".to_owned()],
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
+                color_map: ColorMap::default(),
             },
             SlideMaster {
                 part_path: "ppt/slideMasters/master2.xml".to_owned(),
@@ -782,8 +1097,11 @@ mod tests {
                 theme_part_path: Some("ppt/theme/theme2.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout2.xml".to_owned()],
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
+                color_map: ColorMap::default(),
             },
         ];
         let mut first_theme = Theme::default();
@@ -794,10 +1112,14 @@ mod tests {
             ThemePart {
                 part_path: "ppt/theme/theme1.xml".to_owned(),
                 theme: first_theme,
+                format_scheme: Default::default(),
+                background_pictures: Vec::new(),
             },
             ThemePart {
                 part_path: "ppt/theme/theme2.xml".to_owned(),
                 theme: second_theme,
+                format_scheme: Default::default(),
+                background_pictures: Vec::new(),
             },
         ];
         let relationships = BTreeMap::from([

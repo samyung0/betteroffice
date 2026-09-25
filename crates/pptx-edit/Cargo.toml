@@ -20,6 +20,7 @@ wasm = ["dep:js-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 ooxml-opc.workspace = true
+base64 = "0.22"
 js-sys = { version = "0.3", optional = true }
 ooxml-drawingml.workspace = true
 pptx-parse.workspace = true

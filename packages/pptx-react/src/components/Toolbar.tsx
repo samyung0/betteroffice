@@ -1,11 +1,13 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import type { ParagraphAlignment } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { useTranslation } from '../i18n';
 import { EditorToolbarContext } from './EditorToolbarContext';
 import { ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
 import { ToolbarIcon } from './ui/ToolbarIcon';
+import type { ToolbarIconName } from './ui/ToolbarIcon';
 import {
   ToolbarButton,
   ToolbarDropdown,
@@ -46,6 +48,7 @@ export interface SelectionFormatting {
   italic?: boolean;
   underline?: boolean;
   textColor?: string;
+  align?: ParagraphAlignment;
 }
 
 export type FormattingAction =
@@ -54,7 +57,8 @@ export type FormattingAction =
   | 'underline'
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
-  | { type: 'textColor'; value: string };
+  | { type: 'textColor'; value: string }
+  | { type: 'align'; value: ParagraphAlignment };
 
 export interface ShapeFormatting {
   geometry?: string;
@@ -64,11 +68,14 @@ export interface ShapeFormatting {
   adjustments?: Record<string, number>;
 }
 
+export type ShapeZOrder = 'front' | 'forward' | 'backward' | 'back';
+
 export type ShapeFormattingAction =
   | { type: 'fillColor'; value: string | null }
   | { type: 'strokeColor'; value: string | null }
   | { type: 'strokeWidth'; value: number | null }
-  | { type: 'adjust'; name: string; value: number };
+  | { type: 'adjust'; name: string; value: number }
+  | { type: 'zOrder'; value: ShapeZOrder };
 
 export interface SlideLayoutOption {
   partPath: string | null;
@@ -81,11 +88,15 @@ export interface ToolbarProps {
   onFormat?: (action: FormattingAction) => void;
   currentShapeFormatting?: ShapeFormatting;
   shapeSelectionActive?: boolean;
+  /** Enables the arrange (z-order) menu for any selected object. */
+  shapeArrangeActive?: boolean;
   onShapeFormat?: (action: ShapeFormattingAction) => void;
   onInsertSlide?: (layoutPartPath?: string | null) => void;
+  onInsertImage?: () => void;
   slideLayouts?: readonly SlideLayoutOption[];
   currentLayoutPartPath?: string | null;
   onSave?: () => void;
+  onExportPng?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -119,6 +130,17 @@ const DEFAULT_FONT_FAMILIES = [
   'Verdana',
 ] as const;
 const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
+const ALIGNMENTS = [
+  { value: 'l', icon: 'alignLeft', labelKey: 'toolbar.align.left', testId: 'left' },
+  { value: 'ctr', icon: 'alignCenter', labelKey: 'toolbar.align.center', testId: 'center' },
+  { value: 'r', icon: 'alignRight', labelKey: 'toolbar.align.right', testId: 'right' },
+  { value: 'just', icon: 'alignJustify', labelKey: 'toolbar.align.justify', testId: 'justify' },
+] as const satisfies ReadonlyArray<{
+  value: ParagraphAlignment;
+  icon: ToolbarIconName;
+  labelKey: TranslationKey;
+  testId: string;
+}>;
 const BORDER_WIDTHS = [1, 2, 3, 4, 8] as const;
 const CORNER_RADIUS_OPTIONS = [0, 10, 17, 25, 33, 50] as const;
 const SHAPE_ADJUSTMENT_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] as const;
@@ -159,11 +181,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
     onFormat,
     currentShapeFormatting = {},
     shapeSelectionActive = false,
+    shapeArrangeActive = false,
     onShapeFormat,
     onInsertSlide,
+    onInsertImage,
     slideLayouts = [],
     currentLayoutPartPath,
     onSave,
+    onExportPng,
     onUndo,
     onRedo,
     canUndo = false,
@@ -183,8 +208,10 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const [rootWidth, setRootWidth] = useState(Number.POSITIVE_INFINITY);
   const formattingEnabled = !disabled && textSelectionActive && Boolean(onFormat);
   const shapeFormattingEnabled = !disabled && shapeSelectionActive && Boolean(onShapeFormat);
+  const arrangeEnabled = !disabled && shapeArrangeActive && Boolean(onShapeFormat);
   const slideEnabled = !disabled && Boolean(onInsertSlide);
   const toolEnabled = !disabled && Boolean(onToolChange);
+  const insertImageEnabled = !disabled && Boolean(onInsertImage);
   const fontSize = currentFormatting.fontSize ?? 24;
   const fitLabel = t('toolbar.fit');
   const zoomValue = zoom === 'fit' ? fitLabel : `${Math.round(zoom * 100)}%`;
@@ -221,13 +248,17 @@ export function Toolbar(explicitProps: ToolbarProps) {
     if (formattingEnabled) onFormat?.(action);
   };
   const applyShape = (action: ShapeFormattingAction) => {
+    if (action.type === 'zOrder') {
+      if (arrangeEnabled) onShapeFormat?.(action);
+      return;
+    }
     if (shapeFormattingEnabled) onShapeFormat?.(action);
   };
 
   const sections: ToolbarSection[] = [
     {
       key: 'file',
-      width: 40,
+      width: 72,
       node: (
         <ToolbarGroup label={t('toolbar.groups.file')}>
           <ToolbarButton
@@ -237,6 +268,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
             testId="pptx-save"
           >
             <ToolbarIcon name="save" size={18} />
+          </ToolbarButton>
+          <ToolbarButton
+            title={t('toolbar.exportPng')}
+            disabled={disabled || !onExportPng}
+            onClick={onExportPng}
+            testId="pptx-export-png"
+          >
+            <ToolbarIcon name="image" size={18} />
           </ToolbarButton>
         </ToolbarGroup>
       ),
@@ -340,7 +379,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
     {
       key: 'tools',
-      width: 127,
+      width: 169,
       node: (
         <>
           <ToolbarSeparator />
@@ -362,6 +401,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
               testId="pptx-tool-text-box"
             >
               <ToolbarIcon name="textBox" />
+            </ToolbarButton>
+            <ToolbarButton
+              title={t('toolbar.insertImage')}
+              disabled={!insertImageEnabled}
+              onClick={() => onInsertImage?.()}
+              testId="pptx-insert-image"
+            >
+              <ToolbarIcon name="insertImage" />
             </ToolbarButton>
             <ToolbarDropdown
               title={t('toolbar.shapeTool')}
@@ -558,8 +605,31 @@ export function Toolbar(explicitProps: ToolbarProps) {
       ),
     },
     {
+      key: 'align',
+      width: 126,
+      node: (
+        <>
+          <ToolbarSeparator />
+          <ToolbarGroup label={t('toolbar.groups.alignment')}>
+            {ALIGNMENTS.map((alignment) => (
+              <ToolbarButton
+                key={alignment.value}
+                title={t(alignment.labelKey)}
+                active={currentFormatting.align === alignment.value}
+                disabled={!formattingEnabled}
+                onClick={() => apply({ type: 'align', value: alignment.value })}
+                testId={`pptx-align-${alignment.testId}`}
+              >
+                <ToolbarIcon name={alignment.icon} />
+              </ToolbarButton>
+            ))}
+          </ToolbarGroup>
+        </>
+      ),
+    },
+    {
       key: 'shape-formatting',
-      width: shapeAdjustment ? 244 : 172,
+      width: (shapeAdjustment ? 244 : 172) + 40,
       node: (
         <>
           <ToolbarSeparator />
@@ -654,6 +724,42 @@ export function Toolbar(explicitProps: ToolbarProps) {
                 }
               />
             ) : null}
+            <ToolbarDropdown
+              title={t('toolbar.arrange')}
+              disabled={!arrangeEnabled}
+              menuWidth={190}
+              testId="pptx-shape-arrange"
+              trigger={<ToolbarIcon name="bringToFront" />}
+            >
+              {(close) => (
+                <>
+                  <ToolbarMenuItem
+                    label={t('toolbar.bringForward')}
+                    icon={<ToolbarIcon name="bringForward" size={16} />}
+                    onClick={() => applyShape({ type: 'zOrder', value: 'forward' })}
+                    close={close}
+                  />
+                  <ToolbarMenuItem
+                    label={t('toolbar.sendBackward')}
+                    icon={<ToolbarIcon name="sendBackward" size={16} />}
+                    onClick={() => applyShape({ type: 'zOrder', value: 'backward' })}
+                    close={close}
+                  />
+                  <ToolbarMenuItem
+                    label={t('toolbar.bringToFront')}
+                    icon={<ToolbarIcon name="bringToFront" size={16} />}
+                    onClick={() => applyShape({ type: 'zOrder', value: 'front' })}
+                    close={close}
+                  />
+                  <ToolbarMenuItem
+                    label={t('toolbar.sendToBack')}
+                    icon={<ToolbarIcon name="sendToBack" size={16} />}
+                    onClick={() => applyShape({ type: 'zOrder', value: 'back' })}
+                    close={close}
+                  />
+                </>
+              )}
+            </ToolbarDropdown>
           </ToolbarGroup>
         </>
       ),

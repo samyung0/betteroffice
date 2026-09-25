@@ -6,6 +6,7 @@ export const docxviewdocument_displayListJson: (a: number, b: number, c: number)
 export const docxviewdocument_open: (a: number, b: number) => [number, number, number];
 export const docxviewdocument_version: () => [number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
+export const clear_measure_fonts: () => void;
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -18,12 +19,12 @@ export const range_rects_json: (a: number, b: number, c: number, d: number) => [
 export const range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const register_measure_font: (a: number, b: number) => [number, number, number];
+export const register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
 export const update_display_list: (a: number, b: number, c: number) => [number, number];
 export const vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
-export const clear_measure_fonts: () => void;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

@@ -1,4 +1,4 @@
-use pptx_edit::{DeckSnapshot, snapshot_package};
+use pptx_edit::{DeckSnapshot, baseline_snapshot};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -11,7 +11,7 @@ pub struct PptxViewDocument {
 impl PptxViewDocument {
     pub fn open(bytes: &[u8]) -> Result<PptxViewDocument, JsValue> {
         let package = pptx_parse::parse_pptx(bytes).map_err(js_error)?;
-        let snapshot = snapshot_package(&package).map_err(js_error)?;
+        let snapshot = baseline_snapshot(&package).map_err(js_error)?;
         Ok(Self { package, snapshot })
     }
 

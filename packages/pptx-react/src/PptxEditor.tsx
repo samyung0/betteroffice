@@ -2,17 +2,24 @@ import {
   initWasm,
   openPresentation,
   paintSlide,
+  presentationImageBlob,
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
+  slideToPng,
+  StaleProposalError,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
   CollaborationReplica,
   DeckSnapshot,
+  HitTestResult,
+  ParagraphAlignment,
   PptxPresence,
   PptxPresencePeer,
   PptxFontFace,
   PresentationHandle,
+  Proposal,
+  ProposalDiffSlide,
   SlideDisplayList,
   StorySnapshot,
   TextBoxPrimitive,
@@ -20,6 +27,8 @@ import type {
 } from '@betteroffice/pptx';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
+import { ProposalsPanel } from './components/ProposalsPanel';
+import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   useCallback,
   useEffect,
@@ -33,6 +42,7 @@ import type {
   PointerEvent,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
+import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
   FormattingAction,
   PptxEditorTool,
@@ -44,18 +54,27 @@ import type {
 } from './components/Toolbar';
 import { SHAPE_PRESETS } from './components/Toolbar';
 import {
+  RESIZE_HANDLES,
+  canResizeShape,
   canMoveShape,
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
-  hoverTargetAtPoint,
+  gestureOwnsPointer,
+  pointerTargetAtPoint,
   indexShapes,
   movedShapePosition,
   passedDragThreshold,
+  handleAnchor,
+  resizeCommitDelta,
+  resizeCursor,
+  resizedShapeBox,
+  resizedShapeBounds,
+  shapeTargetExists,
   slidePoint,
-  textPositionAtPoint,
+  textLocationAtPoint,
 } from './interactions';
-import type { FrameBounds, HoverTarget, SlidePoint } from './interactions';
+import type { FrameBounds, HoverTarget, ResizeHandle, SlidePoint } from './interactions';
 import {
   groupPresenceBySlide,
   groupShapePresence,
@@ -64,26 +83,59 @@ import {
 } from './presence-rendering';
 import {
   effectiveStyleFromSelection,
+  paragraphAlignmentFromSelection,
   selectionFormattingFromStory,
   storyFormattingFromStory,
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
 import { shapeFormattingFromShape } from './shapeFormatting';
-import { extendTextRange, textRangeAt } from './textSelection';
-import type { TextSelectionGranularity } from './textSelection';
+import {
+  caretGoalX,
+  caretLineIndex,
+  extendTextRange,
+  lineEdge,
+  sameCaretGoalKey,
+  textRangeAt,
+  verticalCaretMove,
+  wordBoundary,
+} from './textSelection';
+import type { CaretLine, TextSelectionGranularity } from './textSelection';
 
 export interface PptxTextSelection {
   shapeId: string;
   storyId: string;
   anchor: number;
   focus: number;
+  focusLine?: number;
 }
 
+export interface PptxTextSelectionTarget {
+  /** 1-based slide number. */
+  slide: number;
+  shapeId: string;
+  storyId: string;
+  start: number;
+  end: number;
+}
+
+export type PptxPointPosition = HitTestResult & { slide: number; slideId: string };
+
 export interface PptxEditorApi {
+  /** Waits for accepted input; rejects during unfinished pointer gestures. */
+  flushPendingInput: () => Promise<void>;
+  /** Client coordinates; returns null outside slide content. */
+  getPositionAtPoint: (clientX: number, clientY: number) => PptxPointPosition | null;
+  clearSelection: () => void;
+  focus: () => void;
+  /** Accepts a 1-based slide number. */
+  goToSlide: (slide: number) => boolean;
   handle: PresentationHandle;
   refresh: () => void;
+  refreshProposals: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
   save: () => Uint8Array;
+  /** Also navigates to the slide. */
+  selectText: (target: PptxTextSelectionTarget) => boolean;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -103,11 +155,17 @@ export interface PptxEditorProps {
   className?: string;
   /** Download name for the save button; falls back to `presentation.pptx`. */
   fileName?: string;
+  /** 1-based; clamped to the deck. */
+  initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Return true for built-in saving; false or void handles/cancels the request. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
+  /** Blocks user edits; navigation and selection remain available. */
+  readOnly?: boolean;
 }
 
 interface EditorModel {
@@ -131,6 +189,7 @@ type PointerGesture =
       storyId: string;
       anchor: number;
       focus: number;
+      focusLine?: number;
       granularity: 'character' | TextSelectionGranularity;
       clickCount: number;
       clickShapeId: string;
@@ -196,6 +255,12 @@ interface RecentCanvasClick {
 const PPTX_MIME =
   'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 
+// the png download name derived from the deck name: swap .pptx for the slide.
+function pngName(fileName: string | undefined, slideIndex: number): string {
+  const stem = (fileName ?? 'presentation.pptx').replace(/\.pptx$/i, '');
+  return `${stem}-slide-${slideIndex + 1}.png`;
+}
+
 // trigger a browser download of a byte blob under the given name and mime type.
 function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
   const blob = new Blob([new Uint8Array(bytes)], { type: mime });
@@ -208,6 +273,38 @@ function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/** Reads a file as a `data:` URL, e.g. for handing an image to `<img>`/`Image`. */
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('failed to read the file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** The pixel size a `data:` image URL decodes to. */
+function loadImageSize(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error('failed to decode the image'));
+    image.src = dataUrl;
+  });
+}
+
+const MAX_INSERT_IMAGE_BYTES = 8 * 1024 * 1024;
+const INSERT_IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp', svg: 'image/svg+xml',
+};
+
+/** Windows/Office caret phase. */
+const CARET_BLINK_MS = 530;
+
+/** Screen-space diameter of a resize grip. */
+const HANDLE_SIZE = 9;
 
 const initialStyle: EffectiveTextStyle = {
   bold: false,
@@ -236,10 +333,13 @@ function PptxEditorContent({
   collaboration,
   className,
   fileName,
+  initialSlide,
   onReady,
   onChange,
   onError,
   onSave,
+  onSaveRequest,
+  readOnly = false,
 }: Omit<PptxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -249,13 +349,43 @@ function PptxEditorContent({
   const collaborationPresence = collaboration?.presence;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
+  const pendingInputRef = useRef(new Set<Promise<void>>());
+  const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
+  const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
+    if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+    while (pendingInputRef.current.size) {
+      await Promise.all([...pendingInputRef.current]);
+      if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
+    }
+    if (pointerGestureRef.current || resizeRef.current) {
+      throw new Error('Finish the pointer gesture before flushing input');
+    }
+  }, []);
+  const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const pictureInputRef = useRef<HTMLInputElement>(null);
+  const [stageFocused, setStageFocused] = useState(false);
+  const caretGoalRef = useRef<{
+    shapeId: string;
+    position: number;
+    lineIndex?: number;
+    goalX: number;
+  } | null>(null);
+  const resizeRef = useRef<{
+    pointerId: number;
+    handle: ResizeHandle;
+    start: SlidePoint;
+    slideId: string;
+    shapeId: string;
+    delta: SlidePoint;
+  } | null>(null);
+  const [resizeDelta, setResizeDelta] = useState<SlidePoint | null>(null);
   const pointerGestureRef = useRef<PointerGesture | null>(null);
   const recentClickRef = useRef<RecentCanvasClick | null>(null);
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
@@ -276,11 +406,50 @@ function PptxEditorContent({
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
+  const [presenting, setPresenting] = useState(false);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [proposalsOpen, setProposalsOpen] = useState(false);
+  const proposalButtonRef = useRef<HTMLButtonElement>(null);
+  const canvasReview = useProposalCanvas(
+    handleRef.current,
+    readOnly ? [] : proposals,
+    model?.snapshot,
+    model?.slideIndex ?? 0
+  );
+  const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
+  const resolveProposalImage = useCallback((assetId: string) =>
+    resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
+
+  useEffect(() => {
+    if (!canvasReview.reviewing) return;
+    setSelection(null);
+    setShapeSelection(null);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, [canvasReview.reviewing]);
+
+  useEffect(() => {
+    if (!readOnly) return;
+    setActiveTool('select');
+    setProposalsOpen(false);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    recentClickRef.current = null;
+    setResizeDelta(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, [readOnly]);
 
   onReadyRef.current = onReady;
+  initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   modelRef.current = model;
+  const imageInsertAllowedRef = useRef(false);
+  imageInsertAllowedRef.current = !readOnly && !canvasReview.reviewing;
 
   const reportError = useCallback((value: unknown) => {
     const next = value instanceof Error ? value : new Error(String(value));
@@ -293,6 +462,7 @@ function PptxEditorContent({
       const handle = handleRef.current;
       if (!handle) return null;
       try {
+        caretGoalRef.current = null;
         const snapshot = handle.snapshot();
         const index = clampSlideIndex(
           requestedIndex ?? modelRef.current?.slideIndex ?? 0,
@@ -333,9 +503,15 @@ function PptxEditorContent({
           setDragPreview(null);
           setTextBoxPreview(null);
         }
+        const resize = resizeRef.current;
+        if (resize && !shapeTargetExists(activeSlide, resize)) {
+          resizeRef.current = null;
+          setResizeDelta(null);
+        }
         modelRef.current = next;
         setModel(next);
         setHistoryState({ canUndo: handle.canUndo(), canRedo: handle.canRedo() });
+        setProposals(handle.listProposals());
         setError(null);
         if (notify) onChangeRef.current?.(snapshot);
         return next;
@@ -351,6 +527,115 @@ function PptxEditorContent({
     refreshAt(undefined, false, true);
   }, [refreshAt]);
 
+  const clearSelection = useCallback(() => {
+    caretGoalRef.current = null;
+    resizeRef.current = null;
+    pointerGestureRef.current = null;
+    recentClickRef.current = null;
+    setResizeDelta(null);
+    setSelection(null);
+    setShapeSelection(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, []);
+
+  const goToSlide = useCallback(
+    (slide: number): boolean => {
+      const current = modelRef.current;
+      if (
+        !current ||
+        !Number.isInteger(slide) ||
+        slide < 1 ||
+        slide > current.snapshot.slides.length
+      ) {
+        return false;
+      }
+      clearSelection();
+      if (!refreshAt(slide - 1)) return false;
+      stageRef.current?.focus();
+      return true;
+    },
+    [clearSelection, refreshAt]
+  );
+
+  const selectText = useCallback(
+    (target: PptxTextSelectionTarget): boolean => {
+      const handle = handleRef.current;
+      const current = modelRef.current;
+      if (
+        !handle ||
+        !current ||
+        !Number.isInteger(target.slide) ||
+        !Number.isInteger(target.start) ||
+        !Number.isInteger(target.end) ||
+        target.start < 0 ||
+        target.end < target.start
+      ) {
+        return false;
+      }
+      const slide = current.snapshot.slides[target.slide - 1];
+      const shape = slide ? findShape(slide.shapes, target.shapeId) : null;
+      if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
+      try {
+        const story = handle.story(target.storyId);
+        if (target.end > story.length) return false;
+        clearSelection();
+        if (!refreshAt(target.slide - 1)) return false;
+        setSelection({
+          shapeId: target.shapeId,
+          storyId: target.storyId,
+          anchor: target.start,
+          focus: target.end,
+        });
+        stageRef.current?.focus();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [clearSelection, refreshAt]
+  );
+
+  const navigateProposalTarget = useCallback((slideId: string, shapeId: string | null, proposalId?: string) => {
+    const index = modelRef.current?.snapshot.slides.findIndex((slide) => slide.id === slideId) ?? -1;
+    if (index < 0) return;
+    const refreshed = refreshAt(index);
+    const slide = refreshed?.snapshot.slides[refreshed.slideIndex];
+    setSelection(null);
+    setShapeSelection(shapeId && slide && findShape(slide.shapes, shapeId) ? { slideId, shapeId } : null);
+    if (proposalId) canvasReview.select(proposalId);
+    canvasReview.setEnabled(true);
+  }, [refreshAt, canvasReview.select, canvasReview.setEnabled]);
+
+  const refreshProposals = useCallback(() => {
+    try {
+      setProposals(handleRef.current?.listProposals() ?? []);
+    } catch (value) {
+      reportError(value);
+    }
+  }, [reportError]);
+
+  const acceptProposal = useCallback((id: string, force = false) => {
+    if (readOnly) return;
+    try {
+      handleRef.current?.acceptProposal(id, { force });
+      refreshAt(undefined, true, true);
+    } catch (value) {
+      refreshProposals();
+      if (!(value instanceof StaleProposalError)) reportError(value);
+    }
+  }, [readOnly, refreshAt, refreshProposals, reportError]);
+
+  const rejectProposal = useCallback((id: string) => {
+    if (readOnly) return;
+    try {
+      handleRef.current?.rejectProposal(id);
+      refreshProposals();
+    } catch (value) {
+      reportError(value);
+    }
+  }, [readOnly, refreshProposals, reportError]);
+
   useEffect(() => {
     let disposed = false;
     let handle: PresentationHandle | null = null;
@@ -365,11 +650,19 @@ function PptxEditorContent({
     setShapeSelection(null);
     setDragPreview(null);
     setTextBoxPreview(null);
+    setResizeDelta(null);
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
+    setPresenting(false);
+    setProposals([]);
+    setProposalsOpen(false);
     pointerGestureRef.current = null;
+    resizeRef.current = null;
+    caretGoalRef.current = null;
     recentClickRef.current = null;
     setError(null);
+    pendingInputRef.current = new Set();
+    pendingSaveRef.current = null;
     imageCacheRef.current.clear();
     if (!file) return;
     setLoading(true);
@@ -390,11 +683,33 @@ function PptxEditorContent({
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
-          refreshAt(0);
+          const requestedSlide = initialSlideRef.current;
+          refreshAt(
+            typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
+              ? requestedSlide - 1
+              : 0
+          );
           setLoading(false);
           setCollaborationReplica(handle);
           const opened = handle;
-          onReadyRef.current?.({ handle: opened, refresh, save: () => opened.save() });
+          onReadyRef.current?.({
+            clearSelection,
+            goToSlide,
+            handle: opened,
+            refresh,
+            refreshProposals,
+            flushPendingInput: () => flushPendingInput(opened),
+            getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
+            save: () => {
+              if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+              if (pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
+                throw new Error('Await flushPendingInput before saving pending input');
+              }
+              return opened.save();
+            },
+            selectText,
+            focus: () => stageRef.current?.focus(),
+          });
         } catch (value) {
           setLoading(false);
           reportError(value);
@@ -416,11 +731,14 @@ function PptxEditorContent({
   }, [
     collaborationClientId,
     collaborationInitialUpdate,
+    clearSelection,
     file,
+    goToSlide,
     stableFonts,
     refresh,
     refreshAt,
     reportError,
+    selectText,
   ]);
 
   useEffect(() => {
@@ -482,17 +800,6 @@ function PptxEditorContent({
     };
   }, [decodeImageError, model?.frame, reportError, scale]);
 
-  useEffect(() => {
-    const canvas = overlayCanvasRef.current;
-    const frame = model?.frame;
-    if (!canvas || !frame) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    sizeCanvasForSlide(canvas, frame, dpr, scale);
-    paintSelection(ctx, frame, selection, dpr, scale);
-  }, [model?.frame, scale, selection]);
-
   const selectedShape = useMemo(() => {
     if (!model?.frame || !shapeSelection) return null;
     const slide = model.snapshot.slides[model.slideIndex];
@@ -512,6 +819,13 @@ function PptxEditorContent({
         : null,
     [model, selectedShape]
   );
+
+  const editedShapeBounds = useMemo<FrameBounds | null>(() => {
+    if (!model?.frame || !selection || selectedShapeBounds) return null;
+    const slide = model.snapshot.slides[model.slideIndex];
+    const shape = slide ? findShape(slide.shapes, selection.shapeId) : null;
+    return shape ? frameBoundsForShape(model.snapshot, model.frame, shape) : null;
+  }, [model, selectedShapeBounds, selection]);
 
   const activeSlide = model?.snapshot.slides[model.slideIndex];
   const currentSlideId = activeSlide?.id;
@@ -621,6 +935,24 @@ function PptxEditorContent({
     }
   }, [model, selectedShapeStoryId, selection, textStyle]);
 
+  const selectionAlignment = useMemo<ParagraphAlignment | undefined>(() => {
+    const handle = handleRef.current;
+    const storyId = selection?.storyId ?? selectedShapeStoryId;
+    if (!handle || !storyId) return undefined;
+    try {
+      const story = handle.story(storyId);
+      const textBox = model?.frame?.primitives.find(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === storyId
+      );
+      return selection
+        ? paragraphAlignmentFromSelection(story, textBox, selection.anchor, selection.focus)
+        : paragraphAlignmentFromSelection(story, textBox, 0, story.length);
+    } catch {
+      return undefined;
+    }
+  }, [model, selectedShapeStoryId, selection]);
+
   const slideLayouts = useMemo<SlideLayoutOption[]>(() => {
     const unique = new Set<string | null>();
     for (const slide of model?.snapshot.slides ?? []) unique.add(slide.layoutPartPath);
@@ -628,20 +960,13 @@ function PptxEditorContent({
   }, [model?.snapshot]);
 
   const selectSlide = (index: number) => {
-    setSelection(null);
-    setShapeSelection(null);
-    setDragPreview(null);
-    setTextBoxPreview(null);
-    pointerGestureRef.current = null;
-    recentClickRef.current = null;
-    refreshAt(index);
-    stageRef.current?.focus();
+    goToSlide(index + 1);
   };
 
   const createTextBox = (start: SlidePoint, end: SlidePoint) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame) return;
+    if (!handle || !current?.frame || readOnly) return;
     const slide = current.snapshot.slides[current.slideIndex];
     if (!slide) return;
     const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
@@ -689,7 +1014,13 @@ function PptxEditorContent({
       );
       const story = shape?.textStories[0];
       if (story) {
-        setSelection({ shapeId: shape.id, storyId: story.id, anchor: 0, focus: 0 });
+        setSelection({
+          shapeId: shape.id,
+          storyId: story.id,
+          anchor: 0,
+          focus: 0,
+          focusLine: 0,
+        });
         stageRef.current?.focus();
       }
     } catch (value) {
@@ -704,7 +1035,7 @@ function PptxEditorContent({
   ) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame) return;
+    if (!handle || !current?.frame || readOnly) return;
     const slide = current.snapshot.slides[current.slideIndex];
     const preset = SHAPE_PRESETS.find((candidate) => candidate.geometry === geometry);
     if (!slide || !preset) return;
@@ -755,6 +1086,68 @@ function PptxEditorContent({
     }
   };
 
+  const insertPicture = async (file: File) => {
+    const handle = handleRef.current;
+    if (!handle || !imageInsertAllowedRef.current) return;
+    try {
+      if (file.size > MAX_INSERT_IMAGE_BYTES) {
+        throw new Error(
+          `image is ${file.size} bytes, exceeds the ${MAX_INSERT_IMAGE_BYTES}-byte limit`
+        );
+      }
+      const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+      const contentType = file.type === 'image/jpg' ? 'image/jpeg' : file.type || INSERT_IMAGE_TYPES[extension];
+      if (!Object.values(INSERT_IMAGE_TYPES).includes(contentType)) {
+        throw new Error(`unsupported image type ${file.type || extension}`);
+      }
+      const dataUrl = await readFileAsDataUrl(file);
+      const mediaBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      let previewUrl = `data:${contentType};base64,${mediaBase64}`;
+      if (contentType === 'image/tiff') {
+        const bytes = Uint8Array.from(atob(mediaBase64), (char) => char.charCodeAt(0));
+        previewUrl = await readFileAsDataUrl(presentationImageBlob(bytes));
+      }
+      const natural = await loadImageSize(previewUrl);
+      const current = modelRef.current;
+      if (handleRef.current !== handle || !imageInsertAllowedRef.current || !current?.frame) return;
+      if (natural.width <= 0 || natural.height <= 0) throw new Error('image dimensions must be positive');
+      const slide = current.snapshot.slides[current.slideIndex];
+      if (!slide) return;
+      const maxWidth = current.frame.width * 0.5;
+      const maxHeight = current.frame.height * 0.5;
+      const scale = Math.min(maxWidth / natural.width, maxHeight / natural.height, 1);
+      const width = Math.max(1, natural.width * scale);
+      const height = Math.max(1, natural.height * scale);
+      const x = (current.frame.width - width) / 2;
+      const y = (current.frame.height - height) / 2;
+      const receipt = handle.addPicture(slide.id, {
+        name: file.name || t('objects.defaultPictureName'),
+        rect: {
+          x: Math.round((x * current.snapshot.widthEmu) / current.frame.width),
+          y: Math.round((y * current.snapshot.heightEmu) / current.frame.height),
+          width: Math.round((width * current.snapshot.widthEmu) / current.frame.width),
+          height: Math.round((height * current.snapshot.heightEmu) / current.frame.height),
+        },
+        contentType,
+        mediaBase64,
+      });
+      const next = refreshAt(undefined, true);
+      setActiveTool('select');
+      setSelection(null);
+      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+      setDragPreview(null);
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      recentClickRef.current = null;
+      if (next) stageRef.current?.focus();
+    } catch (value) {
+      if (handleRef.current === handle && imageInsertAllowedRef.current) {
+        reportError(value);
+      }
+      throw value;
+    }
+  };
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (!event.isPrimary || event.button !== 0) return;
     const handle = handleRef.current;
@@ -767,9 +1160,12 @@ function PptxEditorContent({
       event.clientY
     );
     if (!point) return;
+    caretGoalRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
     const slide = current.snapshot.slides[current.slideIndex];
     const shapePreset = shapePresetFromTool(activeTool);
-    if ((activeTool === 'textBox' || shapePreset) && slide) {
+    if (!readOnly && (activeTool === 'textBox' || shapePreset) && slide) {
       setSelection(null);
       setShapeSelection(null);
       setDragPreview(null);
@@ -798,7 +1194,14 @@ function PptxEditorContent({
     }
     try {
       handle.layoutSlide(current.slideIndex);
-      const hit = handle.hitTest(point.x, point.y);
+      const engineHit = handle.hitTest(point.x, point.y);
+      // The edge band grabs the box rather than typing in it, so a click there
+      // reads as a shape hit and matches the cursor the pointer showed.
+      const hit =
+        engineHit?.kind === 'text' &&
+        pointerTargetAtPoint(current.frame, point, scale) === 'shape'
+          ? { kind: 'shape' as const, shapeId: engineHit.shapeId }
+          : engineHit;
       const shape = slide && hit ? findTopLevelShape(slide, hit.shapeId) : null;
       const recentClick = recentClickRef.current;
       const repeatedClick = Boolean(
@@ -814,6 +1217,10 @@ function PptxEditorContent({
       );
       const clickCount =
         repeatedClick && recentClick ? Math.min(recentClick.count + 1, 3) : 1;
+      const hitLocation =
+        hit?.kind === 'text'
+          ? textLocationAtPoint(current.frame, hit.shapeId, hit.storyId, point)
+          : null;
       recentClickRef.current = null;
       if (
         slide &&
@@ -829,6 +1236,7 @@ function PptxEditorContent({
           storyId: hit.storyId,
           anchor: range.start,
           focus: range.end,
+          focusLine: hitLocation?.lineIndex,
         });
         setShapeSelection(null);
         setDragPreview(null);
@@ -840,6 +1248,7 @@ function PptxEditorContent({
           storyId: hit.storyId,
           anchor: range.start,
           focus: range.end,
+          focusLine: hitLocation?.lineIndex,
           granularity,
           clickCount,
           clickShapeId: shape.id,
@@ -862,6 +1271,7 @@ function PptxEditorContent({
           storyId: hit.storyId,
           anchor,
           focus: hit.position,
+          focusLine: hitLocation?.lineIndex,
         });
         setShapeSelection(null);
         setDragPreview(null);
@@ -873,6 +1283,7 @@ function PptxEditorContent({
           storyId: hit.storyId,
           anchor,
           focus: hit.position,
+          focusLine: hitLocation?.lineIndex,
           granularity: 'character',
           clickCount,
           clickShapeId: shape?.id ?? hit.shapeId,
@@ -886,7 +1297,7 @@ function PptxEditorContent({
           setSelection(null);
           setShapeSelection({ slideId: slide.id, shapeId: shape.id });
           setDragPreview(null);
-          if (canMoveShape(shape)) {
+          if (!readOnly && canMoveShape(shape)) {
             pointerGestureRef.current = {
               kind: 'shape',
               pointerId: event.pointerId,
@@ -950,21 +1361,21 @@ function PptxEditorContent({
       ) {
         gesture.dragging = true;
       }
-      const focus = textPositionAtPoint(
+      const focus = textLocationAtPoint(
         current.frame,
         gesture.shapeId,
         gesture.storyId,
         point
       );
-      if (focus !== null) {
+      if (focus) {
         const range =
           gesture.granularity === 'character'
-            ? { anchor: gesture.anchor, focus }
+            ? { anchor: gesture.anchor, focus: focus.position }
             : extendTextRange(
                 { start: gesture.anchor, end: gesture.focus },
                 textRangeAt(
                   storyText(handle.story(gesture.storyId)),
-                  focus,
+                  focus.position,
                   gesture.granularity
                 )
               );
@@ -972,6 +1383,7 @@ function PptxEditorContent({
           shapeId: gesture.shapeId,
           storyId: gesture.storyId,
           ...range,
+          focusLine: focus.lineIndex,
         });
       }
     } else if (gesture.kind === 'shape') {
@@ -1016,7 +1428,7 @@ function PptxEditorContent({
       event.clientX,
       event.clientY
     );
-    setHoverTarget(point ? hoverTargetAtPoint(current.frame, point) : null);
+    setHoverTarget(point ? pointerTargetAtPoint(current.frame, point, scale) : null);
   };
 
   const pointerLeave = () => {
@@ -1073,7 +1485,7 @@ function PptxEditorContent({
     const handle = handleRef.current;
     const current = modelRef.current;
     const slide = current?.snapshot.slides[current.slideIndex];
-    if (!handle || !current?.frame || slide?.id !== gesture.slideId) return;
+    if (!handle || !current?.frame || slide?.id !== gesture.slideId || readOnly) return;
     const shape = findShape(slide.shapes, gesture.shapeId);
     if (!shape) return;
     try {
@@ -1101,7 +1513,8 @@ function PptxEditorContent({
   };
 
   const commit = (nextSelection: PptxTextSelection | null) => {
-    setSelection(nextSelection);
+    if (readOnly) return;
+    setSelection(nextSelection ? { ...nextSelection, focusLine: undefined } : null);
     setShapeSelection(null);
     recentClickRef.current = null;
     refreshAt(undefined, true);
@@ -1112,38 +1525,42 @@ function PptxEditorContent({
     if (!handle) return;
     const modifier = event.metaKey || event.ctrlKey;
     if (event.key === 'Escape') {
+      canvasReview.setEnabled(false);
       setActiveTool('select');
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
+      resizeRef.current = null;
+      setResizeDelta(null);
       event.preventDefault();
       return;
     }
-    if (modifier && (event.key === 'z' || event.key === 'Z')) {
+    if (!readOnly && modifier && (event.key === 'z' || event.key === 'Z')) {
       event.preventDefault();
       history(event.shiftKey ? 'redo' : 'undo');
       return;
     }
     if (modifier && (event.key === 's' || event.key === 'S')) {
       event.preventDefault();
-      save();
+      if (!event.repeat) void save();
       return;
     }
+    if (canvasReview.reviewing) return;
     if (!selection && !selectedShapeStoryId) return;
-    if (modifier && (event.key === 'b' || event.key === 'B')) {
+    if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
       applyFormatting({
         bold: selection ? !textStyle.bold : !selectionFormatting.bold,
       });
       return;
     }
-    if (modifier && (event.key === 'i' || event.key === 'I')) {
+    if (!readOnly && modifier && (event.key === 'i' || event.key === 'I')) {
       event.preventDefault();
       applyFormatting({
         italic: selection ? !textStyle.italic : !selectionFormatting.italic,
       });
       return;
     }
-    if (modifier && (event.key === 'u' || event.key === 'U')) {
+    if (!readOnly && modifier && (event.key === 'u' || event.key === 'U')) {
       event.preventDefault();
       applyFormatting({
         underline: selection
@@ -1160,18 +1577,18 @@ function PptxEditorContent({
     const start = Math.min(selection.anchor, selection.focus);
     const end = Math.max(selection.anchor, selection.focus);
     try {
-      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const moved = caretDestination(event, selection);
+      if (moved !== null) {
         event.preventDefault();
-        const story = handle.story(selection.storyId);
-        const delta = event.key === 'ArrowLeft' ? -1 : 1;
-        const focus = Math.max(0, Math.min(story.length, selection.focus + delta));
         setSelection({
           ...selection,
-          anchor: event.shiftKey ? selection.anchor : focus,
-          focus,
+          anchor: event.shiftKey ? selection.anchor : moved.position,
+          focus: moved.position,
+          focusLine: moved.lineIndex,
         });
         return;
       }
+      if (readOnly) return;
       if (event.key === 'Backspace') {
         event.preventDefault();
         if (start !== end) {
@@ -1226,6 +1643,7 @@ function PptxEditorContent({
   };
 
   const applyFormatting = (patch: TextStylePatch) => {
+    if (readOnly) return;
     setTextStyle((current) => ({ ...current, ...patch }));
     const handle = handleRef.current;
     if (!handle) return;
@@ -1250,6 +1668,93 @@ function PptxEditorContent({
     }
   };
 
+  /** Where a caret-movement key lands, or `null` when the key moves nothing.
+   *  Vertical steps hold the column they started from; the goal is tied to the
+   *  position it produced, so a click or a keystroke in between drops it. */
+  const caretDestination = (
+    event: KeyboardEvent<HTMLDivElement>,
+    selection: PptxTextSelection
+  ): { position: number; lineIndex?: number } | null => {
+    const handle = handleRef.current;
+    if (!handle) return null;
+    const story = handle.story(selection.storyId);
+    const last = Math.max(0, story.length - 1);
+    const clamp = (position: number) => Math.max(0, Math.min(last, position));
+    const lines = caretLinesFor(model?.frame, selection);
+    const current = { position: selection.focus, lineIndex: selection.focusLine };
+    // macOS reads Option as word-wise and Command as line-edge; Control is the
+    // Windows word-wise modifier.
+    const wordWise = event.altKey || (event.ctrlKey && !event.metaKey);
+    const toEdge = event.metaKey;
+
+    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      const goalKey = { shapeId: selection.shapeId, ...current };
+      const goal =
+        caretGoalRef.current && sameCaretGoalKey(caretGoalRef.current, goalKey)
+          ? caretGoalRef.current.goalX
+          : caretGoalX(lines, current);
+      const direction = event.key === 'ArrowUp' ? 'up' : 'down';
+      const moved = verticalCaretMove(lines, current, direction, goal);
+      const destination = { ...moved, position: clamp(moved.position) };
+      caretGoalRef.current =
+        goal === undefined
+          ? null
+          : {
+              shapeId: selection.shapeId,
+              goalX: goal,
+              position: destination.position,
+              lineIndex: destination.lineIndex,
+            };
+      return destination;
+    }
+    caretGoalRef.current = null;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      if (toEdge) {
+        const destination = lineEdge(lines, current, direction < 0 ? 'start' : 'end');
+        return { ...destination, position: clamp(destination.position) };
+      }
+      const position = wordWise
+        ? wordBoundary(storyText(story), selection.focus, direction)
+        : selection.focus + direction;
+      return { position: clamp(position), lineIndex: selection.focusLine };
+    }
+    if (event.key === 'Home') {
+      if (toEdge || event.ctrlKey) return { position: 0, lineIndex: 0 };
+      const destination = lineEdge(lines, current, 'start');
+      return { ...destination, position: clamp(destination.position) };
+    }
+    if (event.key === 'End') {
+      if (toEdge || event.ctrlKey) {
+        return { position: last, lineIndex: Math.max(0, lines.length - 1) };
+      }
+      const destination = lineEdge(lines, current, 'end');
+      return { ...destination, position: clamp(destination.position) };
+    }
+    return null;
+  };
+
+  const applyAlignment = (alignment: ParagraphAlignment) => {
+    const handle = handleRef.current;
+    const storyId = selection?.storyId ?? selectedShapeStoryId;
+    if (!handle || !storyId || readOnly) return;
+    try {
+      if (selection) {
+        handle.setParagraphAlignment(
+          storyId,
+          Math.min(selection.anchor, selection.focus),
+          Math.max(selection.anchor, selection.focus),
+          alignment
+        );
+      } else {
+        handle.setParagraphAlignment(storyId, 0, handle.story(storyId).length, alignment);
+      }
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
   const formatSelection = (action: FormattingAction) => {
     if (action === 'bold') {
       applyFormatting({ bold: !selectionFormatting.bold });
@@ -1263,12 +1768,14 @@ function PptxEditorContent({
       applyFormatting({ fontSizePt: action.value });
     } else if (action.type === 'textColor') {
       applyFormatting({ color: action.value });
+    } else if (action.type === 'align') {
+      applyAlignment(action.value);
     }
   };
 
   const formatShape = (action: ShapeFormattingAction) => {
     const handle = handleRef.current;
-    if (!handle || !shapeSelection || !selectedShape) return;
+    if (!handle || !shapeSelection || !selectedShape || readOnly) return;
     try {
       if (action.type === 'fillColor') {
         handle.setShapeFill(shapeSelection.slideId, shapeSelection.shapeId, action.value);
@@ -1284,11 +1791,19 @@ function PptxEditorContent({
           shapeSelection.shapeId,
           action.value === null ? {} : { widthPt: action.value }
         );
-      } else {
+      } else if (action.type === 'adjust') {
         handle.setShapeAdjust(shapeSelection.slideId, shapeSelection.shapeId, {
           ...selectedShape.adjustValues,
           [action.name]: action.value,
         });
+      } else if (action.type === 'zOrder') {
+        const zOrder = {
+          front: handle.bringShapeToFront,
+          back: handle.sendShapeToBack,
+          forward: handle.bringShapeForward,
+          backward: handle.sendShapeBackward,
+        }[action.value];
+        zOrder(shapeSelection.slideId, shapeSelection.shapeId);
       }
       refreshAt(undefined, true);
     } catch (value) {
@@ -1299,7 +1814,7 @@ function PptxEditorContent({
   const addSlide = (layoutPartPath?: string | null) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current) return;
+    if (!handle || !current || readOnly) return;
     try {
       const index = current.slideIndex + 1;
       const layout =
@@ -1314,6 +1829,8 @@ function PptxEditorContent({
       setActiveTool('select');
       pointerGestureRef.current = null;
       recentClickRef.current = null;
+      resizeRef.current = null;
+      setResizeDelta(null);
       refreshAt(index, true, true);
     } catch (value) {
       reportError(value);
@@ -1322,7 +1839,7 @@ function PptxEditorContent({
 
   const history = (direction: 'undo' | 'redo') => {
     const handle = handleRef.current;
-    if (!handle) return;
+    if (!handle || readOnly) return;
     try {
       if (direction === 'undo') handle.undo();
       else handle.redo();
@@ -1332,19 +1849,149 @@ function PptxEditorContent({
       setActiveTool('select');
       pointerGestureRef.current = null;
       recentClickRef.current = null;
+      resizeRef.current = null;
+      setResizeDelta(null);
       refreshAt(undefined, true);
     } catch (value) {
       reportError(value);
     }
   };
 
-  const save = () => {
+  const save = (): Promise<void> => {
+    if (pendingSaveRef.current) return pendingSaveRef.current;
     const handle = handleRef.current;
-    if (!handle) return;
-    try {
+    if (!handle) return Promise.resolve();
+    const pending = Promise.resolve().then(async () => {
+      if (onSaveRequest && await onSaveRequest() !== true) return;
+      if (handleRef.current !== handle) return;
+      await flushPendingInput(handle);
+      if (handleRef.current !== handle) return;
       const bytes = handle.save();
       if (onSave) onSave(bytes);
       else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
+    }).catch((value: unknown) => {
+      if (handleRef.current === handle) reportError(value);
+    }).finally(() => {
+      if (pendingSaveRef.current === pending) pendingSaveRef.current = null;
+    });
+    pendingSaveRef.current = pending;
+    return pending;
+  };
+
+  hostPointRef.current = (clientX, clientY) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const canvas = canvasRef.current;
+    if (!handle || !current?.frame || !canvas || canvasReview.reviewing) return null;
+    const point = slidePoint(canvas.getBoundingClientRect(), current.frame, clientX, clientY);
+    if (!point || point.x < 0 || point.y < 0 ||
+        point.x >= current.frame.width || point.y >= current.frame.height) return null;
+    handle.layoutSlide(current.slideIndex);
+    const hit = handle.hitTest(point.x, point.y);
+    const slide = current.snapshot.slides[current.slideIndex];
+    return hit && slide ? { ...hit, slide: current.slideIndex + 1, slideId: slide.id } : null;
+  };
+
+  const slidePointFromClient = (clientX: number, clientY: number): SlidePoint | null => {
+    const canvas = canvasRef.current;
+    const frame = model?.frame;
+    if (!canvas || !frame) return null;
+    return slidePoint(canvas.getBoundingClientRect(), frame, clientX, clientY);
+  };
+
+  const resizePointerDown =
+    (handle: ResizeHandle) => (event: PointerEvent<HTMLSpanElement>) => {
+      if (readOnly || !shapeSelection || !selectedShape || !canResizeShape(selectedShape)) return;
+      const point = slidePointFromClient(event.clientX, event.clientY);
+      if (!point) return;
+      event.preventDefault();
+      event.stopPropagation();
+      resizeRef.current = {
+        pointerId: event.pointerId,
+        handle,
+        start: point,
+        slideId: shapeSelection.slideId,
+        shapeId: shapeSelection.shapeId,
+        delta: { x: 0, y: 0 },
+      };
+      setResizeDelta({ x: 0, y: 0 });
+      event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+  /** The gesture's geometry lives on the ref, and the state only mirrors it for
+   *  the preview: the release commits the pointer's own position, so a move
+   *  whose render has not landed yet cannot resize the shape to a stale size. */
+  const resizeDeltaFrom = (event: PointerEvent<HTMLSpanElement>): SlidePoint | null => {
+    const gesture = resizeRef.current;
+    if (!gestureOwnsPointer(gesture, event.pointerId)) return null;
+    return resizeCommitDelta(
+      gesture.start,
+      gesture.delta,
+      slidePointFromClient(event.clientX, event.clientY)
+    );
+  };
+
+  const resizePointerMove = (event: PointerEvent<HTMLSpanElement>) => {
+    const gesture = resizeRef.current;
+    const delta = resizeDeltaFrom(event);
+    if (!gestureOwnsPointer(gesture, event.pointerId) || !delta) return;
+    gesture.delta = delta;
+    setResizeDelta(delta);
+  };
+
+  const endResizeGesture = (event: PointerEvent<HTMLSpanElement>) => {
+    const gesture = resizeRef.current;
+    if (!gestureOwnsPointer(gesture, event.pointerId)) return null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    return gesture;
+  };
+
+  /** A cancelled pointer abandons the drag; the shape keeps the size it had. */
+  const resizePointerCancel = (event: PointerEvent<HTMLSpanElement>) => {
+    endResizeGesture(event);
+  };
+
+  const resizePointerUp = (event: PointerEvent<HTMLSpanElement>) => {
+    const delta = resizeDeltaFrom(event);
+    const gesture = endResizeGesture(event);
+    const api = handleRef.current;
+    const current = modelRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    const shape = slide && gesture ? findShape(slide.shapes, gesture.shapeId) : null;
+    if (
+      readOnly ||
+      !gesture ||
+      !delta ||
+      !api ||
+      !current?.frame ||
+      slide?.id !== gesture.slideId ||
+      !shape
+    ) {
+      return;
+    }
+    if (delta.x === 0 && delta.y === 0) return;
+    try {
+      const box = resizedShapeBox(
+        current.snapshot,
+        current.frame,
+        shape,
+        gesture.handle,
+        delta
+      );
+      if (
+        box &&
+        (box.x !== shape.x ||
+          box.y !== shape.y ||
+          box.width !== shape.width ||
+          box.height !== shape.height)
+      ) {
+        api.setShapeRect(gesture.slideId, gesture.shapeId, box);
+        refreshAt(undefined, true);
+      }
     } catch (value) {
       reportError(value);
     }
@@ -1352,23 +1999,86 @@ function PptxEditorContent({
 
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
+
+  const startPresenting = () => {
+    if (slideCount === 0) return;
+    setPresenting(true);
+  };
+
+  // Export the current slide through the same canvas painter the editor draws
+  // with, so the png matches what is on screen.
+  const exportPng = () => {
+    const frame = model?.frame;
+    const handle = handleRef.current;
+    if (!frame || !handle) return;
+    // Painting is async, so the deck can be replaced or disposed mid-export.
+    // Pin the handle the frame came from, behind its own decode cache, rather
+    // than reading whichever deck `handleRef` holds by the time an asset
+    // resolves.
+    const pinned = { current: handle };
+    const cache = { current: new Map<string, Promise<CanvasImageSource | null>>() };
+    void slideToPng(frame, {
+      scale: window.devicePixelRatio || 1,
+      resolveImage: (assetId) => resolveImage(assetId, pinned, cache, decodeImageError),
+    })
+      .then(async (blob) => {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (handleRef.current !== handle) return;
+        downloadBytes(bytes, pngName(fileName, currentSlide), 'image/png');
+      })
+      .catch((value: unknown) => {
+        if (handleRef.current === handle) reportError(value);
+      });
+  };
   const shapeDragDelta =
     dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
+  const resizingHandle = resizeRef.current?.handle;
+  const resizePreview =
+    model?.frame && selectedShape && resizeDelta && resizingHandle
+      ? resizedShapeBounds(
+          model.snapshot,
+          model.frame,
+          selectedShape,
+          resizingHandle,
+          resizeDelta
+        )
+      : null;
+  const selectionBox = selectedShapeBounds
+    ? resizeDelta && resizingHandle
+      ? resizePreview ?? selectedShapeBounds
+      : {
+          ...selectedShapeBounds,
+          x: selectedShapeBounds.x + (shapeDragDelta?.x ?? 0),
+          y: selectedShapeBounds.y + (shapeDragDelta?.y ?? 0),
+        }
+    : null;
 
   return (
-    <div className={className} style={styles.root}>
+    <div className={className} style={styles.root}
+      onKeyDownCapture={(event) => {
+        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) void save();
+        }
+      }}
+    >
       <div style={styles.toolbarShell}>
+        {!readOnly && (
         <EditorToolbar
-          currentFormatting={selectionFormatting}
-          textSelectionActive={selection !== null || selectedShapeStoryId !== null}
+          currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
+          textSelectionActive={!canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null)}
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
-          shapeSelectionActive={selectedShape?.kind === 'shape'}
+          shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
+          shapeArrangeActive={!canvasReview.reviewing && Boolean(selectedShape)}
           onShapeFormat={formatShape}
           onInsertSlide={addSlide}
+          onInsertImage={canvasReview.reviewing ? undefined : () => pictureInputRef.current?.click()}
           slideLayouts={slideLayouts}
           currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
           onSave={save}
+          onExportPng={exportPng}
           onUndo={() => history('undo')}
           onRedo={() => history('redo')}
           canUndo={historyState.canUndo}
@@ -1377,6 +2087,7 @@ function PptxEditorContent({
           onZoomChange={setZoom}
           activeTool={activeTool}
           onToolChange={(tool) => {
+            canvasReview.setEnabled(false);
             setActiveTool(tool);
             if (tool !== 'select') {
               setSelection(null);
@@ -1384,6 +2095,8 @@ function PptxEditorContent({
             }
             setTextBoxPreview(null);
             pointerGestureRef.current = null;
+            resizeRef.current = null;
+            setResizeDelta(null);
             stageRef.current?.focus();
           }}
           disabled={!model || slideCount === 0}
@@ -1391,6 +2104,14 @@ function PptxEditorContent({
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
+        )}
+        {!readOnly && handleRef.current?.isProposalsAvailable() && (
+          <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
+            aria-expanded={proposalsOpen} style={styles.presentButton}
+            onClick={() => { refreshProposals(); setProposalsOpen((open) => !open); }}>
+            {t('proposals.title')} <span data-testid="pptx-proposals-count">{proposals.length}</span>
+          </button>
+        )}
         {remotePeers.length > 0 ? (
           <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
             {toolbarPresence.visible.map((peer) => {
@@ -1419,6 +2140,38 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
+        <input
+          ref={pictureInputRef}
+          type="file"
+          accept={Object.values(INSERT_IMAGE_TYPES).join(',')}
+          disabled={readOnly || canvasReview.reviewing}
+          tabIndex={-1}
+          aria-hidden="true"
+          data-testid="pptx-insert-image-input"
+          style={styles.hiddenFileInput}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (file) {
+              const pending = pendingInputRef.current;
+              const operation = insertPicture(file);
+              pending.add(operation);
+              void operation.catch(() => {}).finally(() => pending.delete(operation));
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={startPresenting}
+          disabled={slideCount === 0}
+          data-testid="pptx-present"
+          style={styles.presentButton}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M6 4.5v15l13-7.5Z" />
+          </svg>
+          {t('toolbar.present')}
+        </button>
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
@@ -1479,7 +2232,13 @@ function PptxEditorContent({
           role="application"
           aria-label={t('editor.appLabel')}
           onKeyDown={keyDown}
+          onFocus={() => setStageFocused(true)}
+          onBlur={() => setStageFocused(false)}
         >
+          {!readOnly && (
+            <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} onAccept={acceptProposal} onReject={rejectProposal}
+              onDetails={() => setProposalsOpen(true)} />
+          )}
           <div ref={canvasHostRef} style={styles.canvasHost}>
             {model?.frame ? (
               <div
@@ -1492,6 +2251,7 @@ function PptxEditorContent({
                 <canvas
                   ref={canvasRef}
                   data-testid="pptx-slide-canvas"
+                  aria-hidden={canvasReview.reviewing}
                   style={{
                     ...styles.canvas,
                     cursor:
@@ -1503,7 +2263,7 @@ function PptxEditorContent({
                             ? 'move'
                             : 'default',
                   }}
-                  onPointerDown={pointerDown}
+                  onPointerDown={canvasReview.reviewing ? undefined : pointerDown}
                   onPointerMove={pointerMove}
                   onPointerUp={pointerUp}
                   onPointerLeave={pointerLeave}
@@ -1522,7 +2282,13 @@ function PptxEditorContent({
                         })
                   }
                 />
-                <canvas ref={overlayCanvasRef} style={styles.canvasOverlay} aria-hidden="true" />
+                {!canvasReview.reviewing && <>
+                <SelectionOverlay
+                  frame={model.frame}
+                  selection={selection}
+                  scale={scale}
+                  focused={stageFocused}
+                />
                 {remoteShapePresence.visible.map(
                   ({ peer, peerCount, shapeId, bounds }, index) => (
                     <RemoteShapeOutline
@@ -1540,14 +2306,50 @@ function PptxEditorContent({
                     +{remoteShapePresence.overflow} selections
                   </span>
                 ) : null}
-                {selectedShapeBounds ? (
+                {selectionBox ? (
+                  <>
+                    <span
+                      style={{
+                        ...styles.shapeSelection,
+                        left: selectionBox.x * scale,
+                        top: selectionBox.y * scale,
+                        width: Math.max(1, selectionBox.width * scale),
+                        height: Math.max(1, selectionBox.height * scale),
+                      }}
+                      aria-hidden="true"
+                    />
+                    {!readOnly && selectedShape && canResizeShape(selectedShape)
+                      ? RESIZE_HANDLES.map((handle) => {
+                          const anchor = handleAnchor(selectionBox, handle);
+                          return (
+                            <span
+                              key={handle}
+                              data-testid={`pptx-resize-${handle}`}
+                              onPointerDown={resizePointerDown(handle)}
+                              onPointerMove={resizePointerMove}
+                              onPointerUp={resizePointerUp}
+                              onPointerCancel={resizePointerCancel}
+                              onLostPointerCapture={resizePointerCancel}
+                              style={{
+                                ...styles.resizeHandle,
+                                left: anchor.x * scale - HANDLE_SIZE / 2,
+                                top: anchor.y * scale - HANDLE_SIZE / 2,
+                                cursor: resizeCursor(handle),
+                              }}
+                            />
+                          );
+                        })
+                      : null}
+                  </>
+                ) : null}
+                {editedShapeBounds ? (
                   <span
                     style={{
-                      ...styles.shapeSelection,
-                      left: (selectedShapeBounds.x + (shapeDragDelta?.x ?? 0)) * scale,
-                      top: (selectedShapeBounds.y + (shapeDragDelta?.y ?? 0)) * scale,
-                      width: Math.max(1, selectedShapeBounds.width * scale),
-                      height: Math.max(1, selectedShapeBounds.height * scale),
+                      ...styles.textEditOutline,
+                      left: editedShapeBounds.x * scale,
+                      top: editedShapeBounds.y * scale,
+                      width: Math.max(1, editedShapeBounds.width * scale),
+                      height: Math.max(1, editedShapeBounds.height * scale),
                     }}
                     aria-hidden="true"
                   />
@@ -1568,6 +2370,16 @@ function PptxEditorContent({
                     aria-hidden="true"
                   />
                 ) : null}
+                </>}
+                {canvasReview.diff && <ProposalCanvasOverlay
+                  key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
+                  diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
+                  slideIndex={model.slideIndex} scale={scale} resolveImage={resolveProposalImage}
+                  onPainted={setPaintedReview}
+                  onTarget={(slideId, shapeId) => {
+                    navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
+                    setProposalsOpen(true);
+                  }} />}
               </div>
             ) : (
               <div style={styles.empty}>
@@ -1581,7 +2393,52 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
+        {!readOnly && proposalsOpen && model && handleRef.current && (
+          <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
+            resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
+            onAccept={acceptProposal} onReject={rejectProposal}
+            onNavigate={navigateProposalTarget}
+            onClose={() => { setProposalsOpen(false); proposalButtonRef.current?.focus(); }} />
+        )}
       </div>
+      {activeSlide && canvasReview.diff?.proposal.changes.some((change) => change.slideId === activeSlide.id && !change.shapeId && change.oldText !== change.newText) ? (
+        <ProposalNotesDiff diff={canvasReview.diff} slideId={activeSlide.id} />
+      ) : activeSlide ? (
+        <NotesPanel
+          key={activeSlide.id}
+          value={activeSlide.notes ?? ''}
+          disabled={!model || canvasReview.reviewing || readOnly}
+          label={t('notes.panelLabel')}
+          placeholder={t('notes.placeholder')}
+          onCommit={(text) => {
+            const handle = handleRef.current;
+            if (!handle || readOnly) return;
+            try {
+              handle.setSlideNotes(activeSlide.id, text);
+              refreshAt(undefined, true);
+            } catch (value) {
+              reportError(value);
+            }
+          }}
+        />
+      ) : null}
+      {presenting && slideCount > 0 && handleRef.current ? (
+        <PresentationOverlay
+          handle={handleRef.current}
+          slideCount={slideCount}
+          startIndex={currentSlide}
+          resolveImage={(assetId) =>
+            resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
+          }
+          counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
+          label={t('presentation.label')}
+          exitLabel={t('presentation.exit')}
+          previousLabel={t('presentation.previousSlide')}
+          nextLabel={t('presentation.nextSlide')}
+          onExit={() => setPresenting(false)}
+          onError={reportError}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1647,6 +2504,35 @@ function RemoteShapeOutline({
   );
 }
 
+function NotesPanel({
+  value,
+  disabled,
+  label,
+  placeholder,
+  onCommit,
+}: {
+  value: string;
+  disabled: boolean;
+  label: string;
+  placeholder: string;
+  onCommit: (text: string) => void;
+}) {
+  return (
+    <div style={styles.notesPanel}>
+      <span style={styles.notesLabel}>{label}</span>
+      <textarea
+        aria-label={label}
+        style={styles.notesTextarea}
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        data-testid="pptx-notes-textarea"
+        onChange={(event) => onCommit(event.target.value)}
+      />
+    </div>
+  );
+}
+
 function SlideThumbnail({
   frame,
   resolveImage,
@@ -1666,6 +2552,55 @@ function SlideThumbnail({
     void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
   }, [frame, resolveImage]);
   return <canvas ref={canvasRef} style={styles.thumbnailCanvas} aria-hidden="true" />;
+}
+
+export function SelectionOverlay({
+  frame,
+  selection,
+  scale,
+  focused,
+}: {
+  frame: SlideDisplayList;
+  selection: PptxTextSelection | null;
+  scale: number;
+  focused: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === 'undefined' || document.visibilityState === 'visible'
+  );
+  const [caretVisible, setCaretVisible] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const update = () => setPageVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, []);
+
+  useEffect(() => {
+    const blinking =
+      focused && pageVisible && selection !== null && selection.anchor === selection.focus;
+    setCaretVisible(blinking);
+    if (!blinking) return;
+    const timer = window.setInterval(
+      () => setCaretVisible((visible) => !visible),
+      CARET_BLINK_MS
+    );
+    return () => window.clearInterval(timer);
+  }, [focused, pageVisible, selection]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    sizeCanvasForSlide(canvas, frame, dpr, scale);
+    paintSelection(ctx, frame, selection, dpr, scale, caretVisible);
+  }, [caretVisible, frame, scale, selection]);
+
+  return <canvas ref={canvasRef} style={styles.canvasOverlay} aria-hidden="true" />;
 }
 
 function clampSlideIndex(index: number, count: number): number {
@@ -1788,7 +2723,7 @@ async function decodeImage(
   errorMessage: string
 ): Promise<CanvasImageSource | null> {
   if (!bytes) return null;
-  const blob = new Blob([bytes.slice()]);
+  const blob = presentationImageBlob(bytes);
   if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
   const url = URL.createObjectURL(blob);
   try {
@@ -1803,12 +2738,26 @@ async function decodeImage(
   }
 }
 
-function paintSelection(
+function caretLinesFor(
+  frame: SlideDisplayList | null | undefined,
+  selection: PptxTextSelection
+): CaretLine[] {
+  const textBox = frame?.primitives.find(
+    (primitive): primitive is TextBoxPrimitive =>
+      primitive.kind === 'textBox' &&
+      primitive.storyId === selection.storyId &&
+      primitive.shapeId === selection.shapeId
+  );
+  return textBox?.lines ?? [];
+}
+
+export function paintSelection(
   ctx: CanvasRenderingContext2D,
   frame: SlideDisplayList,
   selection: PptxTextSelection | null,
   dpr: number,
-  scale: number
+  scale: number,
+  caretVisible = true
 ): void {
   if (!selection) return;
   const textBox = frame.primitives.find(
@@ -1832,10 +2781,13 @@ function paintSelection(
       const x2 = caretX(line, lineEnd);
       ctx.fillRect(Math.min(x1, x2), line.y, Math.max(1, Math.abs(x2 - x1)), line.height);
     }
-  } else {
-    const line =
-      textBox.lines.find((candidate) => start >= candidate.start && start <= candidate.end) ??
-      textBox.lines[textBox.lines.length - 1];
+  } else if (caretVisible) {
+    const line = textBox.lines[
+      caretLineIndex(textBox.lines, {
+        position: start,
+        lineIndex: selection.focusLine,
+      })
+    ];
     if (line) {
       const x = caretX(line, start);
       ctx.fillStyle = '#1d4ed8';
@@ -1946,11 +2898,31 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 700,
     lineHeight: '8px',
   },
-  stage: { position: 'relative', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
-  canvasHost: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', overflow: 'auto' },
+  stage: { position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
+  canvasHost: { display: 'flex', flex: 1, minHeight: 0, alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'auto' },
   canvasFrame: { position: 'relative', flex: '0 0 auto' },
   canvas: { display: 'block', flex: '0 0 auto', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' },
   canvasOverlay: { position: 'absolute', inset: 0, display: 'block', pointerEvents: 'none' },
+  textEditOutline: {
+    position: 'absolute',
+    zIndex: 3,
+    border: '2px dashed #6b7280',
+    boxSizing: 'border-box',
+    boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
+    pointerEvents: 'none',
+  },
+  resizeHandle: {
+    position: 'absolute',
+    zIndex: 4,
+    width: HANDLE_SIZE,
+    height: HANDLE_SIZE,
+    borderRadius: '50%',
+    border: '1px solid #2563eb',
+    background: '#ffffff',
+    boxShadow: '0 1px 2px rgba(15, 23, 42, 0.35)',
+    boxSizing: 'border-box',
+    touchAction: 'none',
+  },
   shapeSelection: {
     position: 'absolute',
     zIndex: 3,
@@ -2009,8 +2981,63 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
+  notesPanel: {
+    flex: '0 0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '8px 14px 10px',
+    background: '#ffffff',
+    borderTop: '1px solid #e2e8f0',
+  },
+  notesLabel: {
+    fontSize: 11,
+    fontWeight: 650,
+    color: '#647087',
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
+  },
+  notesTextarea: {
+    width: '100%',
+    height: 64,
+    resize: 'vertical',
+    border: '1px solid #d8dee9',
+    borderRadius: 6,
+    padding: '6px 8px',
+    font: '13px ui-sans-serif, system-ui, sans-serif',
+    color: '#172033',
+    boxSizing: 'border-box',
+    outline: 'none',
+  },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  hiddenFileInput: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    padding: 0,
+    margin: -1,
+    overflow: 'hidden',
+    clip: 'rect(0, 0, 0, 0)',
+    whiteSpace: 'nowrap',
+    border: 0,
+  },
+  presentButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    flex: '0 0 auto',
+    margin: '0 12px 0 4px',
+    padding: '0 14px',
+    height: 30,
+    border: 0,
+    borderRadius: 15,
+    background: '#1a73e8',
+    color: '#ffffff',
+    font: '600 13px ui-sans-serif, system-ui, sans-serif',
+    cursor: 'pointer',
+  },
+
 };
 
 function presenceInitials(name: string): string {

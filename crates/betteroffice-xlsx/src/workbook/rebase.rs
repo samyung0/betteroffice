@@ -335,6 +335,7 @@ impl Workbook {
                 false,
                 Some(self.client_id()),
                 &[],
+                None,
                 Some(source_sha),
             )?,
         };
@@ -346,6 +347,10 @@ impl Workbook {
         }
         let observers = self.update_observers.clone();
         candidate.source_sha = self.source_sha.clone();
+        // An unchanged source keeps its container for verbatim member copies.
+        if candidate.source_container.is_none() {
+            candidate.source_container = self.source_container.take();
+        }
         candidate.update_observers = observers;
         *self = candidate;
         self.emit_update(UpdateEvent {

@@ -92,6 +92,48 @@ paragraphs styles each of them as a single undoable edit. `delete_text` is the
 strict one: a range crossing a paragraph boundary raises `RangeError` rather
 than silently swallowing the break.
 
+## Agent proposals
+
+Proposals stage a group of edits without modifying the deck, its saved file, or
+its undo history:
+
+```python
+proposal = deck.propose("editor-agent", [{
+    "type": "setSlideNotes",
+    "slideId": deck.slide_ids[0],
+    "text": "Explain the customer outcome first.",
+}], note="Clarify the opening")
+
+preview = deck.preview_proposal(proposal.id)
+layout = deck.render_proposal(proposal.id, 0)
+deck.accept_proposal(proposal.id)
+deck.undo()
+```
+
+Register fonts before `render_proposal`, just as for `render_slide`.
+`proposals()` returns `Proposal` values with agent attribution, notes,
+`ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
+a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
+Snapshot and edit dictionaries use the core's camelCase JSON fields; the
+dataclass attributes use Python snake_case.
+
+Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
+`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
+`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
+geometry uses EMU. A group has 1–256 edits, applied in order, with up to 64
+pending groups per session.
+
+`accept_proposal` applies the entire validated group as one local undo step,
+regardless of the current `origin` setting. A changed target raises
+`StaleProposalError` with a `targets` list. Review the fresh preview before
+retrying with `force=True`. Deleted targets and invalid ranges remain errors.
+`reject_proposal(id)` removes the proposal without changing the deck.
+
+Pending proposals are local to the open session and are excluded from saved
+PPTX files and collaboration updates. Accepted edits save and synchronize
+normally, and Undo preserves unrelated peer edits.
+
 ## Lay a slide out
 
 **No font is compiled into the wheel**, so laying out a slide that has text
@@ -124,8 +166,19 @@ every slide — in that one typeface, at its metrics. Register the real faces wh
 line breaking has to match what PowerPoint would do.
 
 `render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
-description rather than pixels; feed it to your own canvas or renderer.
+editor paints, as JSON — for hosts that paint it themselves. `render_png`
+rasterizes a slide instead, resolving pictures out of the package so only fonts
+need registering:
+
+```python
+png = deck.render_png(0, scale=2.0)
+print(png.width, png.height, png.skipped_images)   # 2560 1440 0
+png.write("slide-0.png")
+```
+
+`background` picks what fills the pixels the slide leaves uncovered: `"slide"`
+(the default, opaque white under the slide's own background), `"transparent"`,
+or a `#rrggbb` color.
 
 ## Collaboration
 
@@ -230,11 +283,15 @@ edits that merge across replicas, that is the gap this fills.
 | `deck.media()` | embedded images and other binary parts |
 | `insert_slide` / `delete_slide` / `move_slide` | slide order |
 | `add_text_box` / `add_shape` / `remove_shape` | shape lifecycle |
-| `move_shape` / `resize_shape` | shape geometry |
+| `move_shape` / `resize_shape` / `set_shape_rect` | shape geometry |
 | `set_shape_fill` / `set_shape_stroke` / `set_shape_adjust` | shape styling |
 | `insert_text` / `delete_text` / `format_text` | text editing |
 | `insert_paragraph_break` | split a paragraph |
-| `register_font` / `render_slide` | layout |
+| `add_comment` / `reply_to_comment` / `set_comment_status` / `remove_comment` | comment threads |
+| `comments` / `comment_flavor` / `set_comment_flavor` | read comments, pick the comment system |
+| `propose` / `proposals` / `preview_proposal` / `render_proposal` | stage and preview agent edits |
+| `accept_proposal` / `reject_proposal` | apply or drop a proposal |
+| `register_font` / `render_slide` / `render_png` | layout and PNG export |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
 | `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
 | `deck.is_edited` | whether the engine has accepted an edit since open |
@@ -243,7 +300,7 @@ edits that merge across replicas, that is the gap this fills.
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`.
+`NotCollaborativeError`, `StaleProposalError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
@@ -289,12 +346,13 @@ drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
 The heavy operations release the GIL while they run — `open`, `open_path`,
-`render_slide`, `save`, `save_path`, `register_font`, and `apply_update` — as do
-the file writes in `Media.write` and `DisplayList.write`.
+`open_collaborative`, `render_slide`, `render_png`, `save`, `save_path`,
+`register_font`, and `apply_update` — as do the file writes in `Media.write`,
+`DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` writes edits back at the
+`0.1.x`: the API may change before `1.0`. `save` writes edits back at the
 XML level and copies untouched parts through byte for byte; the container is
 rebuilt, so output is not byte-identical to the source — see *Writing*.
 

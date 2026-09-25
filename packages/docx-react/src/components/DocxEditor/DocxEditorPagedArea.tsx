@@ -74,6 +74,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
   onPagedSelectionChange,
@@ -105,6 +106,7 @@ export function DocxEditorPagedArea({
   // Scroll page indicator
   onTotalPagesChange,
   onLayoutComputed,
+  onError,
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
@@ -151,6 +153,7 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  showHiddenText?: boolean;
   onYrsContentChange: () => void;
   onYrsHistoryChange: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
@@ -190,6 +193,7 @@ export function DocxEditorPagedArea({
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
   /** Receives each computed layout. */
+  onError?: (error: Error) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
@@ -430,6 +434,7 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
@@ -453,6 +458,7 @@ export function DocxEditorPagedArea({
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
+        onError={onError}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}

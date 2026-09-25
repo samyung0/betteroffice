@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-use xlsx_model::{CellRange, CellRef, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetId, Workbook};
+use xlsx_model::{
+    CellRange, CellRef, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetId, Stylesheet, Workbook,
+};
 use xlsx_parse::PreservedPackage;
 use xlsx_render::{
     ChartRegion, GridGeometry, RenderError, Viewport, build_display_list_with_charts,
@@ -95,7 +97,7 @@ impl XlsxViewDocument {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| js_error(format!("bad viewport: {error}")))?;
         let sheet = self.sheet(self.active_sheet)?;
-        validate_display_region(sheet, &viewport)?;
+        validate_display_region(sheet, &self.workbook.styles, &viewport)?;
         let theme = &self.workbook.styles.theme;
         let owner = sheet.name.clone();
         let display_list =
@@ -111,8 +113,9 @@ impl XlsxViewDocument {
         let args: ChartHitArgs = serde_json::from_str(args)
             .map_err(|error| js_error(format!("bad chart hit args: {error}")))?;
         let sheet = self.sheet(self.active_sheet)?;
-        validate_display_region(sheet, &args.viewport)?;
-        let regions = chart_regions(sheet, &args.viewport).map_err(js_error)?;
+        validate_display_region(sheet, &self.workbook.styles, &args.viewport)?;
+        let regions =
+            chart_regions(sheet, &self.workbook.styles, &args.viewport).map_err(js_error)?;
         let hit: Option<ChartRegion> = chart_at_point(&regions, args.x, args.y).cloned();
         serde_json::to_string(&hit).map_err(js_error)
     }
@@ -124,7 +127,7 @@ impl XlsxViewDocument {
         let cell = CellRef::new(args.row, args.col);
         validate_cell(cell)?;
         let sheet = self.sheet(SheetId(args.sheet))?;
-        let geometry = GridGeometry::new(sheet);
+        let geometry = GridGeometry::new(sheet, &self.workbook.styles);
         let (frozen_rows, frozen_cols) = sheet
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -182,7 +185,7 @@ impl XlsxViewDocument {
 
     fn sheet_info(&self) -> Result<SheetInfo, JsValue> {
         let sheet = self.sheet(self.active_sheet)?;
-        let geometry = GridGeometry::new(sheet);
+        let geometry = GridGeometry::new(sheet, &self.workbook.styles);
         let used_range = sheet.used_range();
         let mut content_col = used_range
             .map_or(26, |range| range.end.col.saturating_add(2))
@@ -250,7 +253,11 @@ impl XlsxViewDocument {
     }
 }
 
-fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<(), JsValue> {
+fn validate_display_region(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    viewport: &Viewport,
+) -> Result<(), JsValue> {
     if !viewport.x.is_finite()
         || !viewport.y.is_finite()
         || !viewport.width.is_finite()
@@ -262,7 +269,7 @@ fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<(), JsV
     {
         return Err(js_error("invalid viewport"));
     }
-    let geometry = GridGeometry::new(sheet);
+    let geometry = GridGeometry::new(sheet, styles);
     if viewport.x + viewport.width > geometry.col_x(MAX_COLS)
         || viewport.y + viewport.height > geometry.row_y(MAX_ROWS)
     {

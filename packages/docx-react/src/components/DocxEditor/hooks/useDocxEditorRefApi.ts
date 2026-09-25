@@ -15,6 +15,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
 import type { SelectionState } from '../types';
+import { overlapsTextRevision } from './agentProposalRange';
 
 type LocatedParagraph = {
   story: string;
@@ -74,9 +75,7 @@ function normalizeSelection(session: YrsSession): YrsStoryRange | null {
   const anchorOffset = storyOffset(session, selection.anchor);
   const headOffset = storyOffset(session, selection.head);
   const [start, end] =
-    anchorOffset <= headOffset
-      ? [selection.anchor, selection.head]
-      : [selection.head, selection.anchor];
+    anchorOffset <= headOffset ? [selection.anchor, selection.head] : [selection.head, selection.anchor];
   return {
     story: start.story,
     start: { paraId: start.paraId, offset: start.offset },
@@ -122,7 +121,9 @@ function formattingDelta(marks: Parameters<DocxEditorRef['applyFormatting']>[0][
   if (marks.fontSize !== undefined) delta.fontSize = marks.fontSize > 0 ? marks.fontSize : null;
   if (marks.fontFamily !== undefined) {
     const ascii = marks.fontFamily.ascii ?? marks.fontFamily.hAnsi;
-    delta.fontFamily = ascii ? { ascii, hAnsi: marks.fontFamily.hAnsi ?? ascii } : null;
+    delta.fontFamily = ascii
+      ? { ascii, hAnsi: marks.fontFamily.hAnsi ?? ascii }
+      : null;
   }
   return delta;
 }
@@ -176,6 +177,14 @@ export function useDocxEditorRefApi({
     () => ({
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
+      flushPendingInput: async () => {
+        const editor = pagedEditorRef.current;
+        if (!editor) throw new Error('The editor input is unavailable');
+        await editor.flushPendingInput();
+        if (editor !== pagedEditorRef.current) {
+          throw new Error('The document changed while flushing input');
+        }
+      },
       save: handleSave,
       setZoom,
       getZoom: () => zoom,
@@ -238,10 +247,7 @@ export function useDocxEditorRefApi({
         if (!editor || !session || (!options.search && !options.replaceWith)) return false;
         const range = paragraphRange(session, options.paraId, options.search);
         if (!range) return false;
-        if (options.search) {
-          const context = session.selectionContext(range);
-          if (context.inInsertion || context.inDeletion) return false;
-        }
+        if (overlapsTextRevision(session, range)) return false;
         session.replaceRange(range, options.replaceWith, {
           name: options.author,
           date: new Date().toISOString(),
@@ -256,8 +262,7 @@ export function useDocxEditorRefApi({
         const session = editor?.getYrsSession();
         const range = session ? paragraphRange(session, options.paraId, options.search) : null;
         if (!editor || !session || !range) return false;
-        if (textForRange(session, range).length > 0)
-          session.formatRange(range, formattingDelta(options.marks));
+        if (textForRange(session, range).length > 0) session.formatRange(range, formattingDelta(options.marks));
         editor.syncYrsInputState(true);
         return true;
       },

@@ -3,8 +3,12 @@
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
 import { projectYrsComments, commentSharedId } from './comments';
+import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
-import { applyContentControlValue, type ContentControlValue } from './contentControlValues';
+import {
+  applyContentControlValue,
+  type ContentControlValue,
+} from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import {
   paragraphAttrsToFormatting,
@@ -23,6 +27,7 @@ import type {
   ParagraphContent,
   Run,
   RunContent,
+  HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
   TrackedChangeInfo,
@@ -36,6 +41,7 @@ import type {
   MathEquation,
   Image,
   Shape,
+  Chart,
   InlineSdt,
   SdtProperties,
   Comment,
@@ -60,6 +66,7 @@ interface YrsImageAttrs {
   distLeft?: number;
   distRight?: number;
   position?: {
+    relativeHeight?: number;
     horizontal?: { relativeTo?: string; posOffset?: number; align?: string };
     vertical?: { relativeTo?: string; posOffset?: number; align?: string };
   };
@@ -72,6 +79,7 @@ interface YrsImageAttrs {
   cropRight?: number;
   cropBottom?: number;
   cropLeft?: number;
+  shapeType?: string;
   opacity?: number;
   layoutInCell?: boolean;
   allowOverlap?: boolean;
@@ -131,6 +139,9 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   keepLines: null,
   widowControl: null,
   contextualSpacing: null,
+  snapToGrid: null,
+  autoSpaceDE: null,
+  autoSpaceDN: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
   bidi: null,
@@ -202,6 +213,8 @@ interface BookmarkBoundary extends CommentBoundary {
 interface OriginalRunBoundary {
   text: string;
   noteMarks?: string[];
+  /** Flow breaks the run held, at their offsets into `text`. */
+  breaks?: Array<{ offset: number; type: 'page' | 'column' }>;
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
@@ -299,7 +312,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const underline = asObject(attributes.underline);
-  if (underline) {
+  if (underline && underline.inheritedHyperlink !== true) {
     formatting.underline = {
       style: (asString(underline.style) || 'single') as NonNullable<
         TextFormatting['underline']
@@ -315,7 +328,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const textColor = asObject(attributes.textColor);
-  if (textColor) {
+  if (textColor && textColor.inheritedHyperlink !== true) {
     formatting.color = {
       rgb: (asString(textColor.rgb) ?? null) as string | undefined,
       themeColor: (textColor.themeColor ?? null) as NonNullable<
@@ -582,6 +595,33 @@ function mathFromPayload(payload: Attrs): MathEquation {
   };
 }
 
+function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
+  const value = asObject(payload.rule);
+  const height = asFiniteNumber(value?.height);
+  if (
+    !value || height === undefined ||
+    (value.width != null && asFiniteNumber(value.width) === undefined) ||
+    (value.widthPercent != null && asFiniteNumber(value.widthPercent) === undefined) ||
+    typeof value.alignment !== 'string' || typeof value.noShade !== 'boolean' ||
+    typeof value.color !== 'string' || typeof value.xml !== 'string'
+  ) throw new Error('Malformed horizontalRule embed payload');
+  const rule: HorizontalRuleContent['rule'] = {
+    width: asFiniteNumber(value.width) ?? null,
+    widthPercent: asFiniteNumber(value.widthPercent) ?? null,
+    height,
+    alignment: value.alignment,
+    noShade: value.noShade,
+    color: value.color,
+    xml: value.xml,
+  };
+  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  return {
+    type: 'run',
+    content: [{ type: 'horizontalRule', rule }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
+}
+
 function imageRunFromPayload(payload: Attrs): Run {
   const attrs = payload as YrsImageAttrs & Attrs;
   const wrap: Image['wrap'] = {
@@ -599,6 +639,7 @@ function imageRunFromPayload(payload: Attrs): Run {
     src: asString(attrs.src) || '',
     alt: asString(attrs.alt) || undefined,
     title: asString(attrs.title) || undefined,
+    shapeType: asString(attrs.shapeType) || undefined,
     size: {
       width: pixelsToEmu(Number(attrs.width) || 0),
       height: pixelsToEmu(Number(attrs.height) || 0),
@@ -617,6 +658,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 
   if (attrs.position?.horizontal && attrs.position.vertical) {
     image.position = {
+      relativeHeight: attrs.position.relativeHeight,
       horizontal: {
         relativeTo: (attrs.position.horizontal.relativeTo || 'column') as NonNullable<
           Image['position']
@@ -691,6 +733,18 @@ function storedShape(value: unknown): Shape | undefined {
   }
 }
 
+function chartRunFromPayload(payload: Attrs): Run | null {
+  const json = asString(payload.chartJson);
+  if (!json) return null;
+  try {
+    const chart = JSON.parse(json) as Chart;
+    if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') return null;
+    return { type: 'run', content: [{ type: 'chart', chart }] };
+  } catch {
+    return null;
+  }
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
@@ -729,9 +783,7 @@ function shapeRunFromPayload(payload: Attrs): Run {
     } catch {
       shape.fill = {
         type: 'solid',
-        color: {
-          rgb: (asString(payload.fillColor) || '000000').replace('#', ''),
-        },
+        color: { rgb: (asString(payload.fillColor) || '000000').replace('#', '') },
       };
     }
   } else if (typeof payload.fillColor === 'string') {
@@ -861,16 +913,17 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes);
   switch (item.embedKind) {
     case 'break':
-      return {
-        type: 'run',
-        content: [{ type: 'break', breakType: 'textWrapping' }],
-      };
+      return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
       return imageRunFromPayload(item.payload);
+    case 'horizontalRule':
+      return horizontalRuleRun(item.payload, item.attributes);
     case 'shape':
       return shapeRunFromPayload(item.payload);
+    case 'chart':
+      return chartRunFromPayload(item.payload);
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
@@ -899,8 +952,12 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
 function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
   let run: Run;
   if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
+    run = horizontalRuleRun(item.payload, item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     run = shapeRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'chart')
+    run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') {
     const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
     run = {
@@ -934,6 +991,8 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     });
   } else if (item.embedKind === 'tab') {
     hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
+  } else if (item.embedKind === 'horizontalRule') {
+    hyperlink.children.push(horizontalRuleRun(item.payload, item.attributes));
   } else if (item.embedKind === 'field') {
     const child =
       commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
@@ -944,7 +1003,83 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
   }
 }
 
+function projectionSignature(items: InlineItem[]): string {
+  const normalized: InlineItem[] = [];
+  for (const source of items) {
+    const attributes = { ...source.attributes };
+    delete attributes.fieldResult;
+    const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
+      ? { kind: 'text', text: '\t', attributes }
+      : { ...source, attributes };
+    const previous = normalized.at(-1);
+    if (item.kind === 'text' && previous?.kind === 'text' && stableStringify(previous.attributes) === stableStringify(attributes)) {
+      previous.text += item.text;
+    } else normalized.push(item);
+  }
+  return stableStringify(normalized);
+}
+
+function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
+  const owners: { id: number; owner: EmbedItem; position: number }[] = [];
+  for (const [position, item] of items.entries()) {
+    if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
+    const id = asFiniteNumber(asObject(item.payload.resultProjection)?.id);
+    if (id !== undefined) owners.push({ id, owner: item, position });
+  }
+  if (owners.length === 0) return items;
+  const groups = new Map<EmbedItem, Map<number, InlineItem[]>>();
+  const remaining = items.filter((item, position) => {
+    const marker = asObject(item.attributes.fieldResult);
+    const id = asFiniteNumber(marker?.id);
+    const index = asFiniteNumber(marker?.index);
+    const owner = owners.find((entry) => entry.id === id && entry.position > position)?.owner;
+    if (index === undefined || !owner) return true;
+    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
+    const group = children.get(index) ?? [];
+    const attributes = { ...item.attributes };
+    delete attributes.fieldResult;
+    group.push({ ...item, attributes });
+    children.set(index, group);
+    groups.set(owner, children);
+    return false;
+  });
+  for (const { owner } of owners) {
+    const stored = fieldFromPayload(owner.payload, owner.attributes);
+    if (stored.type !== 'complexField') continue;
+    const projection = asObject(owner.payload.resultProjection);
+    const originals = Array.isArray(projection?.children) ? projection.children : [];
+    const replacements = new Map<number, ReturnType<typeof inlineSdtContent>>();
+    for (const raw of originals) {
+      const child = asObject(raw);
+      const index = asFiniteNumber(child?.index);
+      if (index === undefined || !Array.isArray(child?.items)) continue;
+      const current = groups.get(owner)?.get(index) ?? [];
+      if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
+      const rebuilt = inlineSdtContent(buildParagraphContent(current));
+      const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
+      if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
+        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+      }
+      replacements.set(index, rebuilt);
+    }
+    if (replacements.size === 0) continue;
+    const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
+    const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
+    stored.structuredResult = { ...stored.structuredResult, inline };
+    if (code) stored.structuredCode = { ...stored.structuredCode, inline: code };
+    if (stored.fieldTree) {
+      stored.fieldTree.result = { ...stored.fieldTree.result, inline };
+      if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
+    }
+    stored.fieldResult = inline.flatMap((child) => child.type === 'run' ? [child]
+      : child.type === 'hyperlink' ? child.children.filter((entry): entry is Run => entry.type === 'run') : []);
+    owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
+  }
+  return remaining;
+}
+
 function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
+  items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
@@ -1053,6 +1188,30 @@ function noteMarkContent(boundary: OriginalRunBoundary): RunContent[] | null {
   }));
 }
 
+/**
+ * Rebuilds a run from its recorded boundary. Flow breaks occupy no story unit,
+ * so without their recorded offsets an authored page break would not be saved.
+ */
+function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatting): RunContent[] {
+  const notes = noteMarkContent(boundary);
+  if (notes) return notes;
+  if (!boundary.breaks?.length) return runContentForText(boundary.text, formatting);
+  const content: RunContent[] = [];
+  let cursor = 0;
+  for (const entry of boundary.breaks) {
+    const at = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+    if (at > cursor) {
+      content.push(...runContentForText(boundary.text.slice(cursor, at), formatting));
+    }
+    content.push({ type: 'break', breakType: entry.type });
+    cursor = at;
+  }
+  if (cursor < boundary.text.length) {
+    content.push(...runContentForText(boundary.text.slice(cursor), formatting));
+  }
+  return content;
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1108,7 +1267,7 @@ function restoreOriginalRuns(
         : attrsToTextFormatting(restoredAttrs[index]);
     const run: Run = {
       type: 'run',
-      content: noteMarkContent(boundary) ?? runContentForText(boundary.text, formatting ?? {}),
+      content: boundaryContent(boundary, formatting ?? {}),
     };
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
@@ -1126,7 +1285,8 @@ function runTextLength(run: Run): number {
       content.type === 'softHyphen' ||
       content.type === 'noBreakHyphen' ||
       content.type === 'footnoteRef' ||
-      content.type === 'endnoteRef'
+      content.type === 'endnoteRef' ||
+      content.type === 'horizontalRule'
     ) {
       return length + 1;
     }
@@ -1249,15 +1409,22 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
     else if (bookmark.kind === 'end') result.push({ id, kind: 'end', offset, ...metadata });
     else {
       result.push({ id, kind: 'start', offset: 0, ...metadata });
-      result.push({
-        id,
-        kind: 'end',
-        offset: Number.MAX_SAFE_INTEGER,
-        ...metadata,
-      });
+      result.push({ id, kind: 'end', offset: Number.MAX_SAFE_INTEGER, ...metadata });
     }
   }
   return result;
+}
+
+function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+  if (!base) return content;
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const boundaries: CommentBoundary[] = [];
+  let offset = 0;
+  for (const [index, child] of base.content.entries()) {
+    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    offset += paragraphContentLength(child);
+  }
+  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
 }
 
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
@@ -1285,6 +1452,7 @@ function paragraphFromStory(
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
       : undefined
   );
+  content = restoreRawInlines(content, baseParagraph);
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -1306,11 +1474,7 @@ function paragraphFromStory(
             ...(boundary.colLast !== undefined ? { colLast: boundary.colLast } : {}),
             position: { offset: boundary.offset },
           }
-        : {
-            type: 'bookmarkEnd',
-            id: boundary.id,
-            position: { offset: boundary.offset },
-          };
+        : { type: 'bookmarkEnd', id: boundary.id, position: { offset: boundary.offset } };
     });
   }
 
@@ -1426,12 +1590,7 @@ function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): 
   } as unknown as TableCellSaveAttrs;
   const content =
     payload.story && context.storyIds.has(payload.story)
-      ? context
-          .storyToBlocks(payload.story)
-          .filter(
-            (block): block is Paragraph | Table =>
-              block.type === 'paragraph' || block.type === 'table'
-          )
+      ? context.storyToBlocks(payload.story)
       : [];
   const cell: TableCell = {
     type: 'tableCell',
@@ -1535,10 +1694,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       col += covering.colspan;
     }
 
-    const attrs = {
-      ...TABLE_ROW_ATTR_DEFAULTS,
-      ...(rowPayload.trPr ?? {}),
-    } as TableRowSaveAttrs;
+    const attrs = { ...TABLE_ROW_ATTR_DEFAULTS, ...(rowPayload.trPr ?? {}) } as TableRowSaveAttrs;
     const row: TableRow = {
       type: 'tableRow',
       formatting: tableRowAttrsToFormatting(attrs),
@@ -1640,7 +1796,7 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
         if (block.paraId && !paragraphs.has(block.paraId)) paragraphs.set(block.paraId, block);
       } else if (block.type === 'table') {
         for (const row of block.rows) for (const cell of row.cells) visit(cell.content);
-      } else {
+      } else if (block.type === 'blockSdt') {
         visit(block.content);
       }
     }
@@ -1658,7 +1814,12 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
     stories.set(storyId, blocks);
     let tableIndex = 0;
+    let sdtIndex = 0;
     for (const block of blocks) {
+      if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
+        continue;
+      }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
       block.rows.forEach((row, rowIndex) => {
@@ -1707,6 +1868,104 @@ function commentRanges(
   return byStory;
 }
 
+function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[]): BlockContent[] {
+  let offset = 0;
+  for (let index = 0; index < base.length; index += 1) {
+    const block = base[index]!;
+    if (!isRawXml(block)) continue;
+    const following = base.slice(index + 1).find((candidate) =>
+      candidate.type === 'paragraph' && candidate.paraId && projected.some((entry) =>
+        entry.type === 'paragraph' && entry.paraId === candidate.paraId));
+    const anchor = following?.type === 'paragraph'
+      ? projected.findIndex((entry) => entry.type === 'paragraph' && entry.paraId === following.paraId)
+      : -1;
+    const position = anchor >= 0 ? anchor : Math.min(index + offset, projected.length);
+    projected.splice(position, 0, block);
+    offset = Math.max(0, position - index);
+  }
+  return projected;
+}
+
+/** A projected block plus a fingerprint of the story inputs it was built from. */
+interface ProjectedBlockMemo {
+  /** Bucket key for locating same-container candidates (first cell story / child story). */
+  key?: string;
+  /** Snapshot of the raw story inputs the block was built from. */
+  inputs?: readonly unknown[];
+  /** Container cell/child content arrays in payload order (tables, block SDTs). */
+  children?: readonly BlockContent[][];
+}
+
+interface ProjectedStory {
+  commentsKey: string;
+  blocks: BlockContent[];
+}
+
+/** Per-session projection reuse state shared across `yrsToDocument` calls. */
+interface SessionProjectionMemo {
+  /** An op without story scope ran; every story counts dirty except `clean` ones. */
+  wholesale: boolean;
+  clean: Set<string>;
+  dirty: Set<string>;
+  stories: Map<string, ProjectedStory>;
+}
+
+const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
+const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
+
+function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
+  let memo = sessionProjectionMemos.get(session);
+  if (!memo) {
+    memo = { wholesale: true, clean: new Set(), dirty: new Set(), stories: new Map() };
+    sessionProjectionMemos.set(session, memo);
+  }
+  return memo;
+}
+
+/** Structural equality over JSON-shaped story inputs — allocation-free sig check. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((entry, index) => sameJson(entry, b[index]));
+  }
+  const left = asObject(a);
+  const right = asObject(b);
+  if (!left || !right) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => key in right && sameJson(left[key], right[key]))
+  );
+}
+
+const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
+
+/** Stories a committed op touched; `all` invalidates the whole session. */
+export function noteYrsStoriesDirty(
+  session: YrsSession,
+  stories: 'all' | string | Iterable<string>
+): void {
+  const memo = sessionProjectionMemo(session);
+  if (stories === 'all') {
+    memo.wholesale = true;
+    memo.clean.clear();
+    memo.dirty.clear();
+    memo.stories.clear();
+    return;
+  }
+  const queue = typeof stories === 'string' ? [stories] : [...stories];
+  for (let index = 0; index < queue.length; index += 1) {
+    const story = queue[index]!;
+    memo.dirty.add(story);
+    memo.clean.delete(story);
+    memo.stories.delete(story);
+    const parent = NESTED_STORY_ID.exec(story)?.[1];
+    if (parent) queue.push(parent);
+  }
+}
+
+const EMPTY_BLOCKS: BlockContent[] = [];
+
 class SaveContext {
   readonly storyIds: Set<string>;
   readonly projectedComments: Comment[];
@@ -1715,47 +1974,116 @@ class SaveContext {
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
+  private readonly memo: SessionProjectionMemo;
+  private readonly bypassMemo: boolean;
 
   constructor(
     private readonly session: YrsSession,
     base: Document,
     private readonly onEmbed?: YrsToDocumentOptions['onEmbed'],
-    private readonly onParagraph?: YrsToDocumentOptions['onParagraph']
+    private readonly onParagraph?: YrsToDocumentOptions['onParagraph'],
+    trackStories = false
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
     this.baseStories = collectBaseStories(base);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
+    this.memo = sessionProjectionMemo(session);
+    // Hooked projections (checkpoint export, rebase) run once and must see
+    // every block, so they neither read nor fill the session cache.
+    this.bypassMemo = trackStories || onEmbed !== undefined || onParagraph !== undefined;
+  }
+
+  private storyIsClean(storyId: string): boolean {
+    return this.memo.wholesale
+      ? this.memo.clean.has(storyId)
+      : !this.memo.dirty.has(storyId);
+  }
+
+  private cellContents(payload: TablePayload): BlockContent[][] {
+    const contents: BlockContent[][] = [];
+    for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
+      for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        contents.push(
+          cell.story !== undefined && this.storyIds.has(cell.story)
+            ? this.storyToBlocks(cell.story)
+            : EMPTY_BLOCKS
+        );
+      }
+    }
+    return contents;
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
     this.projectedStories.add(storyId);
-    const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
-    const segments = this.session.storySegments(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
+    const commentsKey = storyComments.length === 0 ? '' : stableStringify(storyComments);
+    const priorStory = this.memo.stories.get(storyId);
+    // Nested stories are mapped positionally, so a different array means
+    // drift, not divergence — mutation paths mark them dirty anyway. A root
+    // story on a different array is genuine divergence and forces a fresh
+    // projection.
+    if (
+      !this.bypassMemo &&
+      priorStory !== undefined &&
+      priorStory.commentsKey === commentsKey &&
+      this.storyIsClean(storyId) &&
+      (NESTED_STORY_ID.test(storyId) ||
+        baseBlocks === undefined ||
+        baseBlocks === priorStory.blocks)
+    ) {
+      return priorStory.blocks;
+    }
+    const blocks: BlockContent[] = [];
+    const baseParagraphBlocks = baseBlocks?.filter((block): block is Paragraph => block.type === 'paragraph');
+    const segments = this.session.storySegments(storyId);
     let items: InlineItem[] = [];
     let paragraphStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
+    let candidatesByKey: Map<string, BlockContent[]> | null = null;
+
+    const candidatesFor = (key: string): BlockContent[] => {
+      if (this.bypassMemo) return EMPTY_BLOCKS;
+      if (!candidatesByKey) {
+        candidatesByKey = new Map();
+        for (const block of baseBlocks ?? []) {
+          const blockKey = projectedBlocks.get(block)?.key;
+          if (blockKey === undefined) continue;
+          const bucket = candidatesByKey.get(blockKey);
+          if (bucket) bucket.push(block);
+          else candidatesByKey.set(blockKey, [block]);
+        }
+      }
+      return candidatesByKey.get(key) ?? [];
+    };
+
+    const reuseContainer = (
+      key: string,
+      inputs: readonly unknown[],
+      children: readonly BlockContent[][]
+    ): BlockContent | undefined =>
+      candidatesFor(key).find((block) => {
+        const memo = projectedBlocks.get(block);
+        return (
+          memo?.inputs !== undefined &&
+          memo.children !== undefined &&
+          sameJson(memo.inputs, inputs) &&
+          memo.children.length === children.length &&
+          memo.children.every((child, index) => child === children[index])
+        );
+      });
 
     const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
         if (range.start >= paragraphStart && range.start <= end) {
-          boundaries.push({
-            id: range.id,
-            kind: 'start',
-            offset: range.start - paragraphStart,
-          });
+          boundaries.push({ id: range.id, kind: 'start', offset: range.start - paragraphStart });
         }
         if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({
-            id: range.id,
-            kind: 'end',
-            offset: range.end - paragraphStart,
-          });
+          boundaries.push({ id: range.id, kind: 'end', offset: range.end - paragraphStart });
         }
       }
       return boundaries;
@@ -1766,17 +2094,8 @@ class SaveContext {
       for (let index = 0; index < text.length; index += 1) {
         if (text[index] !== '\t') continue;
         if (index > cursor)
-          items.push({
-            kind: 'text',
-            text: text.slice(cursor, index),
-            attributes,
-          });
-        items.push({
-          kind: 'embed',
-          embedKind: 'tab',
-          payload: {},
-          attributes,
-        });
+          items.push({ kind: 'text', text: text.slice(cursor, index), attributes });
+        items.push({ kind: 'embed', embedKind: 'tab', payload: {}, attributes });
         cursor = index + 1;
       }
       if (cursor < text.length) items.push({ kind: 'text', text: text.slice(cursor), attributes });
@@ -1794,23 +2113,46 @@ class SaveContext {
           segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
             ? ''
             : segment.paraId;
-        blocks.push(
-          paragraphFromStory(
+        const baseParagraph =
+          this.baseParagraphs.get(segment.paraId) ??
+          (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
+        const boundaries = paragraphCommentBoundaries(storyOffset);
+        const inputs = [
+          segment.paraId,
+          savedParaId,
+          segment.properties,
+          segment.attributes,
+          items,
+          boundaries,
+        ] as const;
+        const priorMemo =
+          baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
+        let paragraph: Paragraph;
+        if (
+          !this.bypassMemo &&
+          baseParagraph !== undefined &&
+          priorMemo?.inputs !== undefined &&
+          sameJson(priorMemo.inputs, inputs)
+        ) {
+          paragraph = baseParagraph;
+        } else {
+          // Projection mutates `item.payload`; pin the pre-mutation inputs.
+          const snapshot = inputs.map((input, index) =>
+            index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
+          );
+          paragraph = paragraphFromStory(
             savedParaId,
             asObject(segment.properties.sourceBinding)?.ownerParaId === segment.paraId
               ? segment.properties
               : { ...segment.properties, sourceBinding: undefined },
             items,
-            paragraphCommentBoundaries(storyOffset),
-            this.baseParagraphs.get(segment.paraId)
-          )
-        );
-        this.onParagraph?.(
-          storyId,
-          storyOffset,
-          blocks[blocks.length - 1] as Paragraph,
-          segment.paraId
-        );
+            boundaries,
+            baseParagraph
+          );
+          projectedBlocks.set(paragraph, { inputs: snapshot });
+        }
+        blocks.push(paragraph);
+        this.onParagraph?.(storyId, storyOffset, paragraph, segment.paraId);
         items = [];
         paragraphIndex += 1;
         storyOffset += 1;
@@ -1820,25 +2162,73 @@ class SaveContext {
 
       let projectedEmbed: ParagraphContent | BlockContent | null = null;
       if (segment.embedKind === 'table') {
-        projectedEmbed = tableFromPayload(this, segment.payload as TablePayload);
-        blocks.push(projectedEmbed);
-      } else if (segment.embedKind === 'blockSdt') {
-        const childStory = asString(segment.payload.story);
-        let properties = sdtAttrsToProps(segment.payload);
-        let content =
-          childStory && this.storyIds.has(childStory) ? this.storyToBlocks(childStory) : [];
-        const authoredValue = contentControlValue(segment.payload.value);
-        if (authoredValue) {
-          try {
-            const applied = applyContentControlValue(properties, authoredValue);
-            properties = applied.properties;
-            content = applied.content;
-          } catch {
-            // Retain the child story if the authored value is invalid.
+        const payload = segment.payload as TablePayload;
+        const inputs = [segment.attributes, payload] as const;
+        const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
+        const key = `T${firstCell?.story ?? ''}`;
+        const contents =
+          candidatesFor(key).length > 0 ? this.cellContents(payload) : undefined;
+        const reused =
+          contents !== undefined
+            ? (reuseContainer(key, inputs, contents) as Table | undefined)
+            : undefined;
+        let table: Table;
+        if (reused) {
+          table = reused;
+        } else {
+          table = tableFromPayload(this, payload);
+          if (!this.bypassMemo) {
+            projectedBlocks.set(table, {
+              key,
+              inputs,
+              children: contents ?? this.cellContents(payload),
+            });
           }
         }
-        projectedEmbed = { type: 'blockSdt', properties, content };
-        blocks.push(projectedEmbed);
+        projectedEmbed = table;
+        blocks.push(table);
+      } else if (segment.embedKind === 'blockSdt') {
+        const childStory = asString(segment.payload.story);
+        const childContent =
+          childStory && this.storyIds.has(childStory)
+            ? this.storyToBlocks(childStory)
+            : EMPTY_BLOCKS;
+        const inputs = [segment.attributes, segment.payload] as const;
+        const reused = reuseContainer(`S${childStory ?? ''}`, inputs, [childContent]);
+        if (reused) {
+          projectedEmbed = reused;
+          blocks.push(reused);
+        } else {
+          let properties = sdtAttrsToProps(segment.payload);
+          let content = childContent;
+          const authoredValue = contentControlValue(segment.payload.value);
+          if (authoredValue) {
+            try {
+              const applied = applyContentControlValue(properties, authoredValue);
+              properties = applied.properties;
+              content = applied.content;
+            } catch {
+              // Retain the child story if the authored value is invalid.
+            }
+          }
+          const block: BlockContent = {
+            type: 'blockSdt',
+            properties,
+            content: content === EMPTY_BLOCKS ? [] : content,
+          };
+          // Rebind the child's entry to the embedded array for the next projection.
+          if (!this.bypassMemo && content !== childContent && childStory !== undefined) {
+            const childEntry = this.memo.stories.get(childStory);
+            if (childEntry) childEntry.blocks = block.content;
+          }
+          projectedBlocks.set(block, {
+            key: `S${childStory ?? ''}`,
+            inputs,
+            children: [block.content],
+          });
+          projectedEmbed = block;
+          blocks.push(block);
+        }
       } else if (segment.embedKind === 'opaque') {
         const blob = asObject(segment.payload.blob);
         const sourceBlock = asObject(segment.payload.sourceBlock);
@@ -1849,9 +2239,7 @@ class SaveContext {
           projectedEmbed = pageBreakParagraph();
           blocks.push(projectedEmbed);
         } else {
-          // Opaque authored blocks have no editable yrs sub-story yet. Carry a
-          // same-position base block when it is still structurally compatible;
-          // this keeps block SDTs lossless until they become native.
+          // Carry a same-position base block while block SDTs stay opaque.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
             projectedEmbed = baseBlock;
@@ -1870,11 +2258,20 @@ class SaveContext {
     }
 
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
+    // A story ending in a flow-break embed is well-formed, not a lost
+    // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
-      blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
+      const trailing = buildParagraphContent(items);
+      if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
     }
-    for (const block of blocks) this.storyOwners.set(block, storyId);
-    return blocks;
+    const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
+    for (const block of projected) this.storyOwners.set(block, storyId);
+    if (!this.bypassMemo) {
+      this.memo.stories.set(storyId, { commentsKey, blocks: projected });
+      this.memo.dirty.delete(storyId);
+      this.memo.clean.add(storyId);
+    }
+    return projected;
   }
 
   visitReachableStories(document: Document, visit: (storyId: string) => void): void {
@@ -1929,19 +2326,23 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const context = new SaveContext(session, base, options.onEmbed, options.onParagraph);
+  const context = new SaveContext(
+    session,
+    base,
+    options.onEmbed,
+    options.onParagraph,
+    options.onStory !== undefined
+  );
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
-  const bodyContent =
-    context.storyIds.has('body') && shouldProject('body')
-      ? context.storyToBlocks('body')
-      : base.package.document.content;
+  const bodyContent = context.storyIds.has('body') && shouldProject('body')
+    ? context.storyToBlocks('body')
+    : base.package.document.content;
 
   let headers = base.package.headers;
   if (
     headers &&
-    (options.storyIds === undefined ||
-      [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
+    (options.storyIds === undefined || [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
   ) {
     headers = new Map(
       [...headers].map(([rId, part]) => {
@@ -1959,8 +2360,7 @@ export function yrsToDocument(
   let footers = base.package.footers;
   if (
     footers &&
-    (options.storyIds === undefined ||
-      [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
+    (options.storyIds === undefined || [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
   ) {
     footers = new Map(
       [...footers].map(([rId, part]) => {
@@ -1980,7 +2380,8 @@ export function yrsToDocument(
     prefix: string
   ): T[] | undefined => {
     const shouldProjectNotes =
-      options.storyIds === undefined || notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+      options.storyIds === undefined ||
+      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
     if (!shouldProjectNotes) return notes;
     return notes?.map((note) => {
       const storyId = `${prefix}${note.id}`;

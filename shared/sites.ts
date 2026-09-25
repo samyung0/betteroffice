@@ -1,0 +1,10 @@
+export const SITE = "https://betteroffice.dev";
+export const DOCS = "https://docs.betteroffice.dev";
+export const DEMO = "https://demo.betteroffice.dev";
+export const OPENOOXML = "https://openooxml.org";
+export const REPO = "https://github.com/openooxml/betteroffice";
+export const NPM = "https://www.npmjs.com/org/betteroffice";
+export const CRATES = "https://crates.io/search?q=betteroffice";
+export const PYPI = "https://pypi.org/project/betteroffice-xlsx";
+export const BENCHMARKS = `${REPO}#visual-fidelity`;
+export const RELEASES = `${REPO}/releases`;

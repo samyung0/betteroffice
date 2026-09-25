@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, MutationResult, NumberFormatMutation, Op, Proposal,
+    CellRef, EditProfile, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -57,6 +57,27 @@ struct CellArgs {
     sheet: u32,
     row: u32,
     col: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchTextArgs {
+    query: String,
+    #[serde(default)]
+    case_sensitive: bool,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextSearchMatch {
+    sheet: u32,
+    sheet_id: String,
+    sheet_name: String,
+    row: u32,
+    col: u32,
+    a1: String,
+    text: String,
 }
 
 #[derive(Serialize)]
@@ -120,6 +141,20 @@ struct EditResult {
     sheet_info: SheetInfo,
     changed: Vec<String>,
     limited_cells: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ProfiledEditResult {
+    #[serde(flatten)]
+    result: EditResult,
+    profile: EditProfile,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayListProfile {
+    build_ms: f64,
+    encode_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -250,6 +285,23 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn print_display_list_json(&self, args: &str) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            sheet: u32,
+            range: String,
+            metrics: PrintMetrics,
+            gridlines: bool,
+        }
+        let args: Args = serde_json::from_str(args).map_err(|e| format!("bad print args: {e}"))?;
+        let range = CellRange::parse_a1(&args.range).map_err(|e| e.to_string())?;
+        let display_list = self
+            .workbook
+            .print_display_list(SheetId(args.sheet), range, &args.metrics, args.gridlines)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&display_list).map_err(|e| e.to_string())
+    }
+
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
@@ -258,6 +310,31 @@ impl Session {
             .display_list(&viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    /// `display_list_json` split into build and encode time by `now`, returned
+    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`.
+    pub fn display_list_profiled_json(
+        &self,
+        viewport_json: &str,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let started = now();
+        let display_list = self
+            .workbook
+            .display_list(&viewport)
+            .map_err(|error| error.to_string())?;
+        let built = now();
+        let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
+        let encoded = now();
+        let profile = serde_json::to_string(&DisplayListProfile {
+            build_ms: built - started,
+            encode_ms: encoded - built,
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(format!("{{\"displayList\":{json},\"profile\":{profile}}}"))
     }
 
     pub fn chart_at_point_json(&self, args: &str) -> Result<String, String> {
@@ -408,6 +485,28 @@ impl Session {
         self.edit_result(result)
     }
 
+    /// `edit_cell_json` with the facade's stage profile attached under `profile`.
+    pub fn edit_cell_profiled_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let args: EditArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
+        let (result, profile) = self
+            .workbook
+            .edit_cell_profiled(
+                SheetId(args.sheet),
+                CellRef::new(args.row, args.col),
+                &args.input,
+                calculation_options(now_serial),
+                now,
+            )
+            .map_err(|error| error.to_string())?;
+        self.profiled_edit_result(result, profile)
+    }
+
     pub fn edit_cells_json(
         &mut self,
         args: &str,
@@ -444,6 +543,22 @@ impl Session {
         self.edit_result(result)
     }
 
+    /// `apply_ops_json` with the facade's stage profile attached under `profile`.
+    pub fn apply_ops_profiled_json(
+        &mut self,
+        transaction_json: &str,
+        now_serial: Option<f64>,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let args: OpsArgs =
+            serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
+        let (result, profile) = self
+            .workbook
+            .apply_ops_profiled(args.ops, calculation_options(now_serial), now)
+            .map_err(|error| error.to_string())?;
+        self.profiled_edit_result(result, profile)
+    }
+
     pub fn undo_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
         let result = self
             .workbook
@@ -473,6 +588,37 @@ impl Session {
             is_formula: cell.is_formula,
         })
         .map_err(|error| error.to_string())
+    }
+
+    pub fn search_text_json(&self, args: &str) -> Result<String, String> {
+        let args: SearchTextArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad search text args: {error}"))?;
+        let info = self
+            .workbook
+            .sheet_info()
+            .map_err(|error| error.to_string())?;
+        let matches = self
+            .workbook
+            .search_text(
+                &args.query,
+                args.case_sensitive,
+                args.limit.map(|limit| limit as usize),
+            )
+            .into_iter()
+            .map(|result| {
+                let sheet = result.address.sheet.0;
+                TextSearchMatch {
+                    sheet,
+                    sheet_id: info.sheet_ids[sheet as usize].clone(),
+                    sheet_name: info.sheet_names[sheet as usize].clone(),
+                    row: result.address.cell.row,
+                    col: result.address.cell.col,
+                    a1: result.address.cell.to_a1(),
+                    text: result.text,
+                }
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&matches).map_err(|error| error.to_string())
     }
 
     pub fn cell_position_json(&self, args: &str) -> Result<String, String> {
@@ -691,13 +837,28 @@ impl Session {
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {
-        serde_json::to_string(&EditResult {
+        serde_json::to_string(&self.edit_payload(result)?).map_err(|error| error.to_string())
+    }
+
+    fn profiled_edit_result(
+        &self,
+        result: MutationResult,
+        profile: EditProfile,
+    ) -> Result<String, String> {
+        serde_json::to_string(&ProfiledEditResult {
+            result: self.edit_payload(result)?,
+            profile,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn edit_payload(&self, result: MutationResult) -> Result<EditResult, String> {
+        Ok(EditResult {
             applied: result.applied,
             sheet_info: self.sheet_info()?,
             changed: self.changed_list(&result.changed),
             limited_cells: self.changed_list(&result.limited_cells),
         })
-        .map_err(|error| error.to_string())
     }
 
     fn changed_list(&self, changed: &[CellAddress]) -> Vec<String> {
@@ -1202,6 +1363,11 @@ mod tests {
     #[test]
     fn calculation_limits_are_visible_on_the_wire() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        // a cell in the far corner gives Empty the extent the limit is for,
+        // now that a whole-column read costs only the rows a sheet reaches
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":1048575,"col":16383,"input":"1"}"#, None)
+            .unwrap();
         let result = session
             .edit_cell_json(
                 r#"{"sheet":0,"row":2,"col":0,"input":"=SUM(Empty!A1:XFD1048576)"}"#,
@@ -1213,6 +1379,52 @@ mod tests {
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":["A3"]}"#
         );
+    }
+
+    #[test]
+    fn profiled_calls_carry_their_stage_profile() {
+        let mut session = Session::open(&formula_xlsx(), None).unwrap();
+        let mut ticks = 0.0;
+        let mut clock = || {
+            ticks += 1.0;
+            ticks
+        };
+        let edited: serde_json::Value = serde_json::from_str(
+            &session
+                .edit_cell_profiled_json(
+                    r#"{"sheet":0,"row":0,"col":0,"input":"7"}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(edited["applied"], true);
+        assert_eq!(edited["profile"]["applyMs"], 1.0);
+        assert_eq!(edited["profile"]["recalcMs"], 1.0);
+
+        let shifted: serde_json::Value = serde_json::from_str(
+            &session
+                .apply_ops_profiled_json(
+                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shifted["applied"], true);
+        assert_eq!(shifted["profile"]["validateMs"], 1.0);
+
+        let listed: serde_json::Value = serde_json::from_str(
+            &session
+                .display_list_profiled_json(r#"{"x":0,"y":0,"width":400,"height":300}"#, &mut clock)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(listed["displayList"]["commands"].is_array());
+        assert_eq!(listed["profile"]["buildMs"], 1.0);
+        assert_eq!(listed["profile"]["encodeMs"], 1.0);
     }
 
     #[test]
@@ -1289,14 +1501,15 @@ mod tests {
         let ghosted = session
             .display_list_json(r#"{"x":0,"y":0,"width":200,"height":80}"#)
             .unwrap();
-        assert!(
-            ghosted.contains(r##""text":"$2,000.00","fontSize":11.0,"color":"#2e7d32""##),
-            "{ghosted}"
-        );
-        assert!(
-            ghosted.contains(r##""text":"$1,000.00","fontSize":11.0,"color":"#c62828""##),
-            "{ghosted}"
-        );
+        let rendered: serde_json::Value = serde_json::from_str(&ghosted).unwrap();
+        let commands = rendered["commands"].as_array().unwrap();
+        for (text, color) in [("$2,000.00", "#2e7d32"), ("$1,000.00", "#c62828")] {
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command["text"] == text && command["color"] == color)
+            );
+        }
         assert!(ghosted.contains(r#""strike":true"#), "{ghosted}");
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"3000"}"#, None)

@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{
+    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -51,6 +53,15 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="4" name="Halfway"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
 <p:spPr><a:xfrm rot="1200000"><a:off x="123456" y="654321"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Halfway</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="6" name="Script"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>1</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>st</a:t></a:r><a:r><a:rPr sz="1200"/><a:t> place, H</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>2</a:t></a:r><a:r><a:rPr sz="1200"/><a:t>O</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="7" name="Tracked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr spc="300"/><a:t>Wide</a:t></a:r><a:r><a:rPr spc="300" b="1"/><a:t>Caps</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="8" name="Linked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r><a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -138,8 +149,113 @@ fn presentation_xml(first_slide_id: u32) -> String {
     )
 }
 
+const LEGACY_AUTHORS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cmAuthor id="0" name="Mary Smith" initials="mas" lastIdx="1" clrIdx="0"/>
+</p:cmAuthorLst>"#;
+
+const LEGACY_COMMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cm authorId="0" dt="2005-11-13T17:00:22.071" idx="1"><p:pos x="576" y="288"/><p:text>Needs a source.</p:text></p:cm>
+</p:cmLst>"#;
+
+const MODERN_AUTHORS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">
+<p188:author id="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" name="Mary Smith" initials="mas" userId="" providerId=""/>
+</p188:authorLst>"#;
+
+const MODERN_COMMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p188:cmLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pc="http://schemas.microsoft.com/office/powerpoint/2013/main/command" xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">
+<p188:cm id="{62A8A96D-E5A8-4BFC-B993-A6EAE3907CAD}" authorId="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" created="2024-12-30T20:26:06.503">
+<pc:sldMkLst><pc:docMk/><pc:sldMk cId="0" sldId="256"/></pc:sldMkLst>
+<p188:pos x="576" y="288"/>
+<p188:replyLst><p188:reply id="{9F5B1E2C-4A7D-4E93-9B1A-2C3D4E5F6A7B}" authorId="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" created="2024-12-30T20:31:12.117"><p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Added one.</a:t></a:r></a:p></p188:txBody></p188:reply></p188:replyLst>
+<p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Needs a source.</a:t></a:r></a:p></p188:txBody>
+</p188:cm>
+</p188:cmLst>"#;
+
+const LEGACY_COMMENTS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/>"#;
+const LEGACY_AUTHORS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/commentAuthors" Target="commentAuthors.xml"/>"#;
+const MODERN_COMMENTS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2018/10/relationships/comments" Target="../comments/modernComment1.xml"/>"#;
+const MODERN_AUTHORS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2018/10/relationships/authors" Target="authors.xml"/>"#;
+
+fn commented_fixture(flavor: CommentFlavor) -> Vec<u8> {
+    let (
+        authors_part,
+        comments_part,
+        authors,
+        comments,
+        authors_rel,
+        comments_rel,
+        authors_type,
+        comments_type,
+    ) = match flavor {
+        CommentFlavor::Legacy => (
+            "ppt/commentAuthors.xml",
+            "ppt/comments/comment1.xml",
+            LEGACY_AUTHORS,
+            LEGACY_COMMENTS,
+            LEGACY_AUTHORS_REL,
+            LEGACY_COMMENTS_REL,
+            "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.comments+xml",
+        ),
+        CommentFlavor::Modern => (
+            "ppt/authors.xml",
+            "ppt/comments/modernComment1.xml",
+            MODERN_AUTHORS,
+            MODERN_COMMENTS,
+            MODERN_AUTHORS_REL,
+            MODERN_COMMENTS_REL,
+            "application/vnd.ms-powerpoint.authors+xml",
+            "application/vnd.ms-powerpoint.comments+xml",
+        ),
+    };
+    let mut parts = fixture_parts(256);
+    for (path, body) in parts.iter_mut() {
+        match path.as_str() {
+            "[Content_Types].xml" => {
+                *body = body.replace(
+                    "</Types>",
+                    &format!(
+                        r#"<Override PartName="/{authors_part}" ContentType="{authors_type}"/><Override PartName="/{comments_part}" ContentType="{comments_type}"/></Types>"#
+                    ),
+                );
+            }
+            "ppt/_rels/presentation.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{authors_rel}</Relationships>"),
+                );
+            }
+            "ppt/slides/_rels/slide1.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{comments_rel}</Relationships>"),
+                );
+            }
+            _ => {}
+        }
+    }
+    parts.push((authors_part.to_owned(), authors.to_owned()));
+    parts.push((comments_part.to_owned(), comments.to_owned()));
+    zip(parts)
+}
+
+fn zip(parts: Vec<(String, String)>) -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(path, body)| (path, body.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn fixture(first_slide_id: u32) -> Vec<u8> {
-    let parts: Vec<(String, Vec<u8>)> = [
+    zip(fixture_parts(first_slide_id))
+}
+
+fn fixture_parts(first_slide_id: u32) -> Vec<(String, String)> {
+    [
         ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
         ("_rels/.rels", ROOT_RELS.to_owned()),
         ("ppt/presentation.xml", presentation_xml(first_slide_id)),
@@ -169,9 +285,8 @@ fn fixture(first_slide_id: u32) -> Vec<u8> {
         ("ppt/theme/theme1.xml", THEME.to_owned()),
     ]
     .into_iter()
-    .map(|(path, body)| (path.to_owned(), body.into_bytes()))
-    .collect();
-    ooxml_opc::rezip_parts(&parts).unwrap()
+    .map(|(path, body)| (path.to_owned(), body))
+    .collect()
 }
 
 fn open() -> DeckSession {
@@ -350,6 +465,231 @@ fn a_shape_added_to_an_emptied_slide_lands_after_the_group_properties() {
 }
 
 #[test]
+fn an_added_picture_mints_its_media_part_content_type_and_relationship() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Logo".to_owned(),
+                rect: pptx_edit::ShapeRect {
+                    x: 10,
+                    y: 20,
+                    width: 3_000,
+                    height: 4_000,
+                },
+                content_type: "image/png".to_owned(),
+                media_bytes: png_bytes.clone(),
+            },
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert_relationships_resolve(&saved);
+
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(
+        content_types.contains(r#"Extension="png""#),
+        "{content_types}"
+    );
+    assert!(
+        content_types.contains(r#"ContentType="image/png""#),
+        "{content_types}"
+    );
+
+    let media = saved
+        .get("ppt/media/image1.png")
+        .expect("the picture's bytes land in a fresh media part");
+    assert_eq!(media, &png_bytes);
+
+    let slide_rels = part_text(&saved, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(
+        slide_rels
+            .contains("http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"),
+        "{slide_rels}"
+    );
+    assert!(
+        slide_rels.contains(r#"Target="../media/image1.png""#),
+        "{slide_rels}"
+    );
+    // The slide already had rId1 (layout) and rId2 (hyperlink); the image gets its own id.
+    assert!(slide_rels.contains(r#"Id="rId3""#), "{slide_rels}");
+    assert!(slide_rels.contains(r#"Id="rId1""#), "{slide_rels}");
+    assert!(slide_rels.contains(r#"Id="rId2""#), "{slide_rels}");
+
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<p:pic>"#), "{slide}");
+    assert!(slide.contains(r#"name="Logo""#), "{slide}");
+    assert!(slide.contains(r#"r:embed="rId3""#), "{slide}");
+    assert!(slide.contains(r#"<a:off x="10" y="20"/>"#), "{slide}");
+    assert!(slide.contains(r#"<a:ext cx="3000" cy="4000"/>"#), "{slide}");
+}
+
+#[test]
+fn an_unsupported_or_oversized_picture_is_rejected_before_it_touches_the_deck() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let rect = pptx_edit::ShapeRect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+    };
+
+    let error = session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Bad type".to_owned(),
+                rect,
+                content_type: "image/avif".to_owned(),
+                media_bytes: vec![1, 2, 3, 4],
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidState(_)), "{error:?}");
+
+    let error = session
+        .add_picture(
+            &context(),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Too big".to_owned(),
+                rect,
+                content_type: "image/png".to_owned(),
+                media_bytes: vec![0; 8 * 1024 * 1024 + 1],
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidState(_)), "{error:?}");
+
+    // Neither rejected draft left a shape behind.
+    assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
+}
+
+#[test]
+fn shape_z_order_operations_reorder_within_the_slide() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[0].clone();
+    let names: Vec<&str> = slide
+        .shapes
+        .iter()
+        .map(|shape| shape.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Title",
+            "Connector",
+            "Box",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+    let box_id = slide.shapes[2].id.clone();
+
+    let names_after = |session: &DeckSession| -> Vec<String> {
+        session.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .map(|shape| shape.name.clone())
+            .collect()
+    };
+
+    let receipt = session
+        .bring_to_front(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (2, 6));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked",
+            "Box"
+        ]
+    );
+
+    let receipt = session
+        .send_to_back(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (6, 0));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Box",
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    let receipt = session
+        .bring_forward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (0, 1));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Title",
+            "Box",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    let receipt = session
+        .send_backward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (1, 0));
+    assert_eq!(
+        names_after(&session),
+        [
+            "Box",
+            "Title",
+            "Connector",
+            "Halfway",
+            "Script",
+            "Tracked",
+            "Linked"
+        ]
+    );
+
+    // Already at the edge: stepping further is a clamped no-op.
+    let receipt = session
+        .send_backward(&context(), &slide.id, &box_id)
+        .unwrap();
+    assert_eq!((receipt.from_index, receipt.to_index), (0, 0));
+
+    let saved = parts(&session.save().unwrap());
+    let slide_xml = part_text(&saved, "ppt/slides/slide1.xml");
+    let box_pos = slide_xml.find(r#"name="Box""#).unwrap();
+    let title_pos = slide_xml.find(r#"name="Title""#).unwrap();
+    assert!(box_pos < title_pos, "{slide_xml}");
+
+    let error = session
+        .bring_to_front(&context(), &slide.id, "missing-shape")
+        .unwrap_err();
+    assert!(matches!(error, EditError::ShapeNotFound(_)));
+}
+
+#[test]
 fn junk_style_values_are_rejected_at_the_edit() {
     let session = open();
     let snapshot = session.snapshot().unwrap();
@@ -375,6 +715,73 @@ fn junk_style_values_are_rejected_at_the_edit() {
         assert!(matches!(error, EditError::InvalidText(_)));
     }
     assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
+}
+
+fn tracked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+#[test]
+fn an_edit_inside_a_tracked_run_keeps_its_letter_spacing() {
+    let session = open();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 2, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>Wi</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>de</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr b="1" spc="300"/><a:t>Caps</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let story = reopened.story(&tracked_story(&reopened)).unwrap();
+    let spacing = story.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.spacing_pt))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spacing,
+        vec![
+            ("Wi".to_owned(), Some(3.0)),
+            ("X".to_owned(), None),
+            ("de".to_owned(), Some(3.0)),
+            ("Caps".to_owned(), Some(3.0)),
+        ]
+    );
+}
+
+#[test]
+fn an_edit_across_two_tracked_runs_rebuilds_their_letter_spacing() {
+    let session = open();
+    let story_id = tracked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 5).unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>Wid</a:t>"));
+    assert!(slide.contains("<a:t>aps</a:t>"));
+    assert_eq!(slide.matches(r#"spc="300""#).count(), 2);
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let story = reopened.story(&tracked_story(&reopened)).unwrap();
+    assert_eq!(story.plain_text(), "Widaps");
+    assert!(
+        story.paragraphs[0]
+            .runs
+            .iter()
+            .all(|run| run.style.spacing_pt == Some(3.0))
+    );
 }
 
 #[test]
@@ -435,6 +842,284 @@ fn an_edit_before_a_hyperlink_keeps_links_fields_and_theme_colours() {
     let reopened = DeckSession::open(&saved, 12).unwrap();
     let text = reopened.story(&story_id).unwrap().plain_text();
     assert_eq!(text, "Hi Hello link\n1Accent");
+}
+
+fn script_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Script")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn run_baselines(session: &DeckSession, story_id: &str) -> Vec<(String, Option<f64>)> {
+    session.story(story_id).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.baseline_pct))
+        .collect()
+}
+
+#[test]
+fn an_edit_inside_a_raised_run_keeps_its_baseline() {
+    let session = open();
+    let story_id = script_story(&session);
+    session
+        .insert_text(&context(), &story_id, 2, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("X".to_owned(), None),
+            ("t".to_owned(), Some(30.0)),
+            (" place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
+}
+
+#[test]
+fn an_edit_spanning_two_runs_keeps_both_baselines() {
+    let session = open();
+    let story_id = script_story(&session);
+    session.delete_text(&context(), &story_id, 2, 4).unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"baseline="-25000""#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
+}
+
+const LINK_RUN: &str = r#"<a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+const SLIDE_NUMBER_FIELD: &str = r#"<a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#;
+
+fn linked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Linked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn linked_shape_xml(saved: &[u8]) -> String {
+    part_text(&parts(saved), "ppt/slides/slide1.xml")
+        .split(r#"name="Linked""#)
+        .nth(1)
+        .unwrap()
+        .split("</p:sp>")
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn linked_runs(saved: &[u8]) -> Vec<(String, Option<String>, Option<bool>)> {
+    let package = pptx_parse::parse_pptx(saved).unwrap();
+    let shape = package.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Linked" => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    shape.text.as_ref().unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.properties.hyperlink_relationship_id.clone(),
+                run.properties.bold,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_edit_spanning_plain_and_linked_runs_keeps_the_link_and_the_field() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 4).unwrap();
+    session.delete_text(&context(), &story_id, 10, 11).unwrap();
+    session.delete_text(&context(), &story_id, 11, 16).unwrap();
+    session
+        .insert_text(&context(), &story_id, 11, "now", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>See</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the doc</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t> now </a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See".to_owned(), None, None),
+            ("the doc".to_owned(), Some("rId2".to_owned()), None),
+            (" now ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "Seethe doc now 1"
+    );
+}
+
+#[test]
+fn a_field_in_an_edited_span_keeps_its_binding_until_its_text_changes() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 13, 18).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>  </a:t></a:r>"#),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs  1"
+    );
+
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 19, 20).unwrap();
+    session
+        .insert_text(&context(), &story_id, 19, "2", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("<a:fld"), "{shape}");
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>2</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs today 2"
+    );
+}
+
+#[test]
+fn text_typed_at_the_end_of_a_link_stays_linked() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session
+        .insert_text(
+            &context(),
+            &story_id,
+            12,
+            "X",
+            &TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(&format!(
+            r#"{LINK_RUN}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        )),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See ".to_owned(), None, None),
+            ("the docs".to_owned(), Some("rId2".to_owned()), None),
+            ("X".to_owned(), Some("rId2".to_owned()), Some(true)),
+            (" today ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docsX today 1"
+    );
+}
+
+#[test]
+fn deleting_a_linked_run_drops_its_link() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 4, 12).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("hlinkClick"), "{shape}");
+    assert!(
+        shape.contains(
+            r#"<a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        ),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See  today 1"
+    );
 }
 
 #[test]
@@ -512,6 +1197,158 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
 }
 
+const CUSTOM_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Custom"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path w="21600" h="21600"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="21600" y="0"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Custom</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+fn cust_geom_fixture() -> Vec<u8> {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace("</p:spTree>", &format!("{CUSTOM_SHAPE}</p:spTree>"));
+        }
+    }
+    zip(part_list)
+}
+
+#[test]
+fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
+    let session = DeckSession::open(&cust_geom_fixture(), 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Custom")
+        .unwrap();
+    assert_eq!(shape.geometry, "custom");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &shape.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn adjust_edits_on_shapes_without_preset_geometry_are_refused() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let missing = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap();
+    assert_eq!(missing.geometry, "rect");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &missing.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+
+    let preset = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap();
+    assert_eq!(preset.geometry, "roundRect");
+    session
+        .set_shape_adjust(&context(), &slide.id, &preset.id, &adjustments)
+        .unwrap();
+}
+
+#[test]
+fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(matches!(error, EditError::Write(message) if message.contains("shape id")));
+}
+
+#[test]
+fn an_exhausted_shape_id_space_still_saves_edits_that_allocate_nothing() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list.clone()), 11).unwrap();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 0, "X", &TextStyle::default())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>X</a:t>"), "{slide}");
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    assert_eq!(
+        reopened
+            .story(&tracked_story(&reopened))
+            .unwrap()
+            .plain_text(),
+        "XWideCaps"
+    );
+
+    let session = DeckSession::open(&zip(part_list), 12).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(
+        matches!(error, EditError::Write(ref message) if message.contains("shape id space is exhausted")),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn a_colour_write_replaces_an_existing_no_fill() {
     let session = open();
@@ -541,6 +1378,28 @@ fn a_colour_write_replaces_an_existing_no_fill() {
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
     assert!(slide.contains(r#"srgbClr val="FF0000""#));
     assert!(!slide.contains("<a:noFill/></a:rPr>"));
+}
+
+#[test]
+fn an_alignment_write_reaches_the_paragraph_properties() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Title")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone();
+    session
+        .set_paragraph_alignment(&context(), &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert_eq!(slide.matches(r#"algn="ctr""#).count(), 1);
+    assert!(slide.contains("Accent"));
 }
 
 #[test]
@@ -606,13 +1465,47 @@ fn an_unknown_layout_is_rejected_at_insert_slide() {
 }
 
 #[test]
-fn a_session_opened_from_an_update_alone_refuses_to_save() {
+fn an_update_seeded_by_a_different_parse_refuses_to_save_through_stale_ordinals() {
+    let source = fixture(256);
+
+    let mut stale = pptx_parse::parse_pptx(&source).unwrap();
+    let slide = stale
+        .slides
+        .iter_mut()
+        .find(|slide| slide.shapes.len() > 1)
+        .expect("the fidelity deck has a slide with several shapes");
+    slide.shapes.remove(0);
+
+    let seeded = DeckSession::from_package_with_source(stale, &source, 21).unwrap();
+    let update = seeded.encode_state_as_update_v1();
+
+    let reattached = DeckSession::open_from_update_with_source(&update, &source, 22).unwrap();
+    let snapshot = reattached.snapshot().unwrap();
+    let (slide_id, shape_id) = snapshot
+        .slides
+        .iter()
+        .find_map(|slide| {
+            slide
+                .shapes
+                .first()
+                .map(|shape| (slide.id.clone(), shape.id.clone()))
+        })
+        .expect("the reattached session has a shape");
+    reattached
+        .move_shape(&context(), &slide_id, &shape_id, 1_000, 2_000)
+        .unwrap();
+
+    assert!(matches!(
+        reattached.save(),
+        Err(EditError::Write(message)) if message.contains("no longer addresses source shape")
+    ));
+}
+
+#[test]
+fn a_state_reopens_only_with_its_fingerprinted_source() {
     let source = fixture(256);
     let seeded = DeckSession::open(&source, 11).unwrap();
     let update = seeded.encode_state_as_update_v1();
-
-    let bare = DeckSession::open_from_update(&update, 12).unwrap();
-    assert!(matches!(bare.save(), Err(EditError::Write(_))));
 
     let attached = DeckSession::open_from_update_with_source(&update, &source, 13).unwrap();
     let saved = attached.save().unwrap();
@@ -656,7 +1549,8 @@ fn rebase_keeps_later_edits_and_maps_only_the_remaining_changes() {
         DeckSession::rebase_checkpoint(&source, &captured, &captured, &published, 21).unwrap();
     let zero_current =
         DeckSession::open_from_update_with_source(&zero.state, &published, 22).unwrap();
-    let zero_indexed = DeckSession::open_from_update(&zero.indexed_state, 23).unwrap();
+    let zero_indexed =
+        DeckSession::open_from_update_with_source(&zero.indexed_state, &published, 23).unwrap();
     assert_eq!(
         zero_current.snapshot().unwrap(),
         zero_indexed.snapshot().unwrap()
@@ -691,7 +1585,8 @@ fn rebase_keeps_later_edits_and_maps_only_the_remaining_changes() {
         DeckSession::rebase_checkpoint(&source, &captured, &latest, &published, 21).unwrap();
     let current =
         DeckSession::open_from_update_with_source(&rebased.state, &published, 22).unwrap();
-    let baseline = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+    let baseline =
+        DeckSession::open_from_update_with_source(&rebased.indexed_state, &published, 23).unwrap();
     assert_eq!(parts(&current.save().unwrap()), expected);
     let current_snapshot = current.snapshot().unwrap();
     let indexed_snapshot = baseline.snapshot().unwrap();
@@ -756,7 +1651,8 @@ fn rebase_keeps_later_edits_and_maps_only_the_remaining_changes() {
     let next_current =
         DeckSession::open_from_update_with_source(&next.state, &next_source, 32).unwrap();
     assert_eq!(parts(&next_current.save().unwrap()), parts(&next_source));
-    let next_indexed = DeckSession::open_from_update(&next.indexed_state, 33).unwrap();
+    let next_indexed =
+        DeckSession::open_from_update_with_source(&next.indexed_state, &next_source, 33).unwrap();
     assert_eq!(
         next_current.snapshot().unwrap(),
         next_indexed.snapshot().unwrap()
@@ -849,10 +1745,14 @@ fn rebase_restores_saved_slide_and_picture_with_binary_media_and_opaque_parts() 
                 actual.get(path.as_ref())
             );
             if path.as_ref() == "ppt/media/unique.png" {
-                assert!(matches!(&fields[1], Any::Null));
+                assert!(
+                    matches!(&fields[1], Any::Buffer(bytes) if bytes.as_ref() == media.as_slice())
+                );
             }
         }
-        let indexed = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+        let indexed =
+            DeckSession::open_from_update_with_source(&rebased.indexed_state, &published, 23)
+                .unwrap();
         assert!(
             !indexed
                 .snapshot()
@@ -906,7 +1806,8 @@ fn rebase_maps_paragraph_restoration_without_replaying_captured_changes() {
     let current =
         DeckSession::open_from_update_with_source(&rebased.state, &published, 22).unwrap();
     assert_eq!(parts(&current.save().unwrap()), parts(&source));
-    let baseline = DeckSession::open_from_update(&rebased.indexed_state, 23).unwrap();
+    let baseline =
+        DeckSession::open_from_update_with_source(&rebased.indexed_state, &published, 23).unwrap();
     let current_snapshot = current.snapshot().unwrap();
     let indexed_snapshot = baseline.snapshot().unwrap();
     let current_story = &current_snapshot.slides[0]
@@ -934,5 +1835,702 @@ fn rebase_maps_paragraph_restoration_without_replaying_captured_changes() {
     assert!(
         part_text(&parts(&current.save().unwrap()), "ppt/slides/slide1.xml")
             .contains("a:hlinkClick")
+    );
+}
+
+#[test]
+fn a_deck_reads_the_comments_it_was_opened_with() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 21).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Legacy);
+    assert_eq!(snapshot.comments.len(), 1);
+    let comment = &snapshot.comments[0];
+    assert_eq!(comment.text, "Needs a source.");
+    assert_eq!(comment.author, "Mary Smith");
+    assert_eq!(comment.initials, "mas");
+    assert_eq!(comment.slide_id, snapshot.slides[0].id);
+    assert_eq!(comment.x_emu, 914_400);
+    assert_eq!(comment.y_emu, 457_200);
+}
+
+#[test]
+fn a_modern_deck_reads_its_threads_and_flavour() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Modern), 22).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Modern);
+    assert_eq!(snapshot.comments.len(), 2);
+    let root = snapshot
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_none())
+        .unwrap();
+    let reply = snapshot
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_some())
+        .unwrap();
+    assert_eq!(root.text, "Needs a source.");
+    assert_eq!(reply.text, "Added one.");
+    assert_eq!(reply.parent_id.as_deref(), Some(root.id.as_str()));
+}
+
+#[test]
+fn an_unrelated_edit_leaves_existing_comment_parts_byte_for_byte() {
+    let source = commented_fixture(CommentFlavor::Legacy);
+    let session = DeckSession::open(&source, 23).unwrap();
+    let story = session.snapshot().unwrap().slides[1].shapes[0].text_stories[0]
+        .id
+        .clone();
+    session
+        .insert_text(&context(), &story, 0, "x", &TextStyle::default())
+        .unwrap();
+
+    let before = parts(&source);
+    let after = parts(&session.save().unwrap());
+    for path in ["ppt/commentAuthors.xml", "ppt/comments/comment1.xml"] {
+        assert_eq!(before[path], after[path], "{path} was rewritten");
+    }
+    assert_relationships_resolve(&after);
+}
+
+#[test]
+fn deleting_a_commented_slide_prunes_its_comment_part() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 24).unwrap();
+    let first = session.snapshot().unwrap().slides[0].id.clone();
+    session.delete_slide(&context(), &first).unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(!content_types.contains("comments/comment1.xml"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn adding_a_comment_mints_the_part_relationship_and_override() {
+    let session = open();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada Lovelace",
+            "AL",
+            "Check this figure.",
+            "2026-09-01T10:00:00.000",
+            914_400,
+            457_200,
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let comments = part_text(&saved, "ppt/comments/comment1.xml");
+    assert!(comments.contains("<p:text>Check this figure.</p:text>"));
+    assert!(comments.contains(r#"<p:pos x="576" y="288"/>"#));
+    assert!(comments.contains(r#"authorId="0""#));
+    assert!(comments.contains(r#"idx="1""#));
+
+    let authors = part_text(&saved, "ppt/commentAuthors.xml");
+    assert!(authors.contains(r#"name="Ada Lovelace""#));
+    assert!(authors.contains(r#"initials="AL""#));
+    assert!(authors.contains(r#"lastIdx="1""#));
+
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(content_types.contains(
+        "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"
+    ));
+    assert!(
+        content_types
+            .contains("application/vnd.openxmlformats-officedocument.presentationml.comments+xml")
+    );
+    let slide_rels = part_text(&saved, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(slide_rels.contains("Target=\"../comments/comment1.xml\""));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn removing_the_last_comment_drops_the_part_and_its_bookkeeping() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 25).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    session.remove_comment(&context(), &comment).unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    assert!(!saved.contains_key("ppt/commentAuthors.xml"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(!content_types.contains("commentAuthors.xml"));
+    assert!(!content_types.contains("comments/comment1.xml"));
+    assert!(!part_text(&saved, "ppt/slides/_rels/slide1.xml.rels").contains("comments"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn a_modern_thread_round_trips_through_a_save() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Modern), 26).unwrap();
+    let root = session
+        .snapshot()
+        .unwrap()
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_none())
+        .unwrap()
+        .id
+        .clone();
+    session.set_comment_status(&context(), &root, true).unwrap();
+
+    let saved = session.save().unwrap();
+    let text = part_text(&parts(&saved), "ppt/comments/modernComment1.xml");
+    assert!(text.contains(r#"status="resolved""#));
+    assert!(text.contains("<p188:replyLst>"));
+    assert!(text.contains("<a:t>Added one.</a:t>"));
+    assert!(text.contains(r#"sldId="256""#));
+
+    let reopened = DeckSession::open(&saved, 27).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Modern);
+    assert_eq!(snapshot.comments.len(), 2);
+    assert!(
+        snapshot
+            .comments
+            .iter()
+            .any(|comment| comment.resolved && comment.parent_id.is_none())
+    );
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn replies_and_status_are_rejected_on_a_legacy_deck() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 28).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    assert!(matches!(
+        session.reply_to_comment(
+            &context(),
+            &comment,
+            "Ada",
+            "AL",
+            "no",
+            "2026-09-01T10:00:00"
+        ),
+        Err(EditError::InvalidComment(_))
+    ));
+    assert!(matches!(
+        session.set_comment_status(&context(), &comment, true),
+        Err(EditError::InvalidComment(_))
+    ));
+}
+
+#[test]
+fn the_comment_flavour_is_fixed_once_a_deck_has_comments() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 29).unwrap();
+    assert!(matches!(
+        session.set_comment_flavor(&context(), CommentFlavor::Modern),
+        Err(EditError::InvalidComment(_))
+    ));
+}
+
+#[test]
+fn switching_an_emptied_deck_to_modern_drops_the_legacy_parts() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 30).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    session.remove_comment(&context(), &comment).unwrap();
+    session
+        .set_comment_flavor(&context(), CommentFlavor::Modern)
+        .unwrap();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    let root = session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada Lovelace",
+            "AL",
+            "Threaded now.",
+            "2026-09-01T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+    session
+        .reply_to_comment(
+            &context(),
+            &root.comment_id,
+            "Grace Hopper",
+            "GH",
+            "Agreed.",
+            "2026-09-01T10:05:00.000",
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    assert!(!saved.contains_key("ppt/commentAuthors.xml"));
+    let modern = part_text(&saved, "ppt/comments/modernComment1.xml");
+    assert!(modern.contains("<a:t>Threaded now.</a:t>"));
+    assert!(modern.contains("<a:t>Agreed.</a:t>"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(content_types.contains("application/vnd.ms-powerpoint.comments+xml"));
+    assert!(content_types.contains("application/vnd.ms-powerpoint.authors+xml"));
+    assert!(!content_types.contains("presentationml.comments+xml"));
+    assert!(!content_types.contains("presentationml.commentAuthors+xml"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn a_minted_comment_part_never_overwrites_another_slides() {
+    let mut sources = fixture_parts(256);
+    for (path, body) in sources.iter_mut() {
+        match path.as_str() {
+            "[Content_Types].xml" => {
+                *body = body.replace(
+                    "</Types>",
+                    r#"<Override PartName="/ppt/commentAuthors.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"/><Override PartName="/ppt/comments/comment1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.comments+xml"/></Types>"#,
+                );
+            }
+            "ppt/_rels/presentation.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{LEGACY_AUTHORS_REL}</Relationships>"),
+                );
+            }
+            "ppt/slides/_rels/slide2.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{LEGACY_COMMENTS_REL}</Relationships>"),
+                );
+            }
+            _ => {}
+        }
+    }
+    sources.push((
+        "ppt/commentAuthors.xml".to_owned(),
+        LEGACY_AUTHORS.to_owned(),
+    ));
+    sources.push((
+        "ppt/comments/comment1.xml".to_owned(),
+        LEGACY_COMMENTS.to_owned(),
+    ));
+
+    let session = DeckSession::open(&zip(sources), 31).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(
+        snapshot.comments.len(),
+        1,
+        "slide 2 starts with the comment"
+    );
+    assert_eq!(snapshot.comments[0].slide_id, snapshot.slides[1].id);
+
+    let first = snapshot.slides[0].id.clone();
+    session
+        .add_comment(
+            &context(),
+            &first,
+            "Ada Lovelace",
+            "AL",
+            "First slide, new comment.",
+            "2026-09-02T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let back = DeckSession::open(&saved, 32).unwrap();
+    let comments = back.snapshot().unwrap();
+    assert_eq!(
+        comments.comments.len(),
+        2,
+        "both slides keep their own comment"
+    );
+    let texts: Vec<&str> = comments
+        .comments
+        .iter()
+        .map(|comment| comment.text.as_str())
+        .collect();
+    assert!(
+        texts.contains(&"Needs a source."),
+        "slide 2's comment was lost: {texts:?}"
+    );
+    assert!(texts.contains(&"First slide, new comment."));
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn notes_read_from_an_existing_part_default_to_empty() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.slides[1].notes, "");
+}
+
+#[test]
+fn setting_notes_patches_an_existing_notes_part_in_place() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Remember the demo flow.")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let notes_xml = part_text(&parts(&saved), "ppt/notesSlides/notesSlide1.xml");
+    assert!(notes_xml.contains("Remember the demo flow."));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[1].notes, "Remember the demo flow.");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn setting_notes_mints_a_new_part_for_a_slide_that_has_none() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Line one\nLine two")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    let notes_xml = part_text(&saved_parts, "ppt/notesSlides/notesSlide2.xml");
+    assert!(notes_xml.contains("Line one"));
+    assert!(notes_xml.contains("Line two"));
+    let slide1_rels = part_text(&saved_parts, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(slide1_rels.contains("relationships/notesSlide"));
+    let content_types = part_text(&saved_parts, "[Content_Types].xml");
+    assert!(content_types.contains("notesSlide2.xml"));
+    let notes_rels = part_text(&saved_parts, "ppt/notesSlides/_rels/notesSlide2.xml.rels");
+    assert!(notes_rels.contains("relationships/slide\""));
+    assert!(notes_rels.contains("Target=\"../slides/slide1.xml\""));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "Line one\nLine two");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn reverting_notes_does_not_mint_a_part() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Temporary note.")
+        .unwrap();
+    session.set_slide_notes(&context(), &slide_id, "").unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    assert!(!saved_parts.contains_key("ppt/notesSlides/notesSlide2.xml"));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn invalid_notes_leave_state_and_history_unchanged() {
+    let session = open();
+    let before = session.snapshot().unwrap();
+    for text in ["bad\0note", "bad\u{b}note", "bad\u{ffff}note"] {
+        assert!(matches!(
+            session.set_slide_notes(&context(), &before.slides[0].id, text),
+            Err(EditError::InvalidText(_))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+    assert!(matches!(
+        session.set_slide_notes(&context(), "missing-slide", "notes"),
+        Err(EditError::SlideNotFound(_))
+    ));
+}
+
+#[test]
+fn notes_roundtrip_xml_sensitive_text_and_support_history() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let text = "  <&> \"notes\"\t\r\nSecond line 😀\n";
+    session
+        .set_slide_notes(&context(), &slide_id, text)
+        .unwrap();
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().slides[0].notes, text);
+    assert_eq!(
+        parts(&saved)["ppt/slides/slide1.xml"],
+        parts(&fixture(256))["ppt/slides/slide1.xml"]
+    );
+    assert!(session.undo());
+    assert!(session.snapshot().unwrap().slides[0].notes.is_empty());
+    assert!(session.redo());
+    assert_eq!(session.snapshot().unwrap().slides[0].notes, text);
+}
+
+#[test]
+fn clearing_saved_notes_preserves_the_notes_page_and_relationships() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Temporary notes")
+        .unwrap();
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let id = reopened.snapshot().unwrap().slides[1].id.clone();
+    reopened.set_slide_notes(&context(), &id, "").unwrap();
+    let cleared = reopened.save().unwrap();
+    let saved_parts = parts(&saved);
+    let cleared_parts = parts(&cleared);
+    assert_eq!(
+        saved_parts.keys().collect::<Vec<_>>(),
+        cleared_parts.keys().collect::<Vec<_>>()
+    );
+    for (path, bytes) in &saved_parts {
+        if path != "ppt/notesSlides/notesSlide1.xml" {
+            assert_eq!(&cleared_parts[path], bytes, "{path}");
+        }
+    }
+    assert!(
+        DeckSession::open(&cleared, 13)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .slides[1]
+            .notes
+            .is_empty()
+    );
+    assert_relationships_resolve(&cleared_parts);
+}
+
+#[test]
+fn notes_follow_inserted_and_reordered_slides_and_are_deleted_with_them() {
+    let session = open();
+    session.insert_slide(&context(), 1, None).unwrap();
+    let id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &id, "New slide notes")
+        .unwrap();
+    session.move_slide(&context(), &id, 0).unwrap();
+    let saved = session.save().unwrap();
+    assert_relationships_resolve(&parts(&saved));
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "New slide notes");
+    assert!(snapshot.slides[1].notes.is_empty());
+    reopened
+        .delete_slide(&context(), &snapshot.slides[0].id)
+        .unwrap();
+    let deleted = reopened.save().unwrap();
+    assert_relationships_resolve(&parts(&deleted));
+    assert!(
+        !parts(&deleted)
+            .values()
+            .any(|bytes| String::from_utf8_lossy(bytes).contains("New slide notes"))
+    );
+}
+
+fn picture_draft() -> pptx_edit::PictureDraft {
+    pptx_edit::PictureDraft {
+        name: "Inserted picture".to_owned(),
+        rect: ShapeRect {
+            x: 10,
+            y: 20,
+            width: 3000,
+            height: 4000,
+        },
+        content_type: "image/png".to_owned(),
+        media_bytes: vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10],
+    }
+}
+
+#[test]
+fn concurrent_shape_arrangement_can_be_rearranged_and_deleted() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides.remove(0);
+    let shape_id = &slide.shapes[2].id;
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    second
+        .send_to_back(&context(), &slide.id, shape_id)
+        .unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    assert_eq!(
+        first.snapshot().unwrap().slides[0]
+            .shapes
+            .last()
+            .unwrap()
+            .id,
+        *shape_id
+    );
+    first.remove_shape(&context(), &slide.id, shape_id).unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    first.save().unwrap();
+}
+
+#[test]
+fn concurrent_shape_arrangement_and_deletion_converge() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides.remove(0);
+    let shape_id = &slide.shapes[2].id;
+    first
+        .bring_to_front(&context(), &slide.id, shape_id)
+        .unwrap();
+    second
+        .remove_shape(&context(), &slide.id, shape_id)
+        .unwrap();
+    first
+        .apply_update_v1(&second.encode_state_as_update_v1())
+        .unwrap();
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(first.snapshot().unwrap(), second.snapshot().unwrap());
+    assert!(
+        !first.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .any(|s| s.id == *shape_id)
+    );
+    first.save().unwrap();
+    first.search_text("Title", false, None).unwrap();
+    first.delete_slide(&context(), &slide.id).unwrap();
+    first.save().unwrap();
+}
+
+#[test]
+fn inserted_picture_preserves_conflicting_content_type_defaults() {
+    let mut source = fixture_parts(256);
+    source[0].1 = source[0].1.replace(
+        "</Types>",
+        r#"<Default Extension="png" ContentType="application/octet-stream"/></Types>"#,
+    );
+    let session = DeckSession::open(&zip(source), 11).unwrap();
+    let slide = session.snapshot().unwrap().slides.remove(0);
+    session
+        .add_picture(&context(), &slide.id, &picture_draft())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let package = pptx_parse::parse_pptx(&saved).unwrap();
+    assert_eq!(
+        package
+            .media
+            .iter()
+            .find(|m| m.part_path.ends_with(".png"))
+            .unwrap()
+            .content_type,
+        "image/png"
+    );
+    assert!(
+        part_text(&parts(&saved), "[Content_Types].xml")
+            .contains(r#"ContentType="application/octet-stream""#)
+    );
+}
+
+#[test]
+fn pictures_on_existing_and_new_slides_survive_sync_undo_and_repeated_save() {
+    let first = open();
+    let second = DeckSession::open(&fixture(256), 12).unwrap();
+    let slide = first.snapshot().unwrap().slides[0].id.clone();
+    let added = first.insert_slide(&context(), 1, None).unwrap();
+    first
+        .add_picture(&context(), &slide, &picture_draft())
+        .unwrap();
+    first.add_undo_barrier();
+    first
+        .add_picture(&context(), &added.slide_id, &picture_draft())
+        .unwrap();
+    let expected = first.snapshot().unwrap();
+    assert!(first.undo());
+    assert!(first.snapshot().unwrap().slides[1].shapes.is_empty());
+    assert!(first.redo());
+    assert_eq!(first.snapshot().unwrap(), expected);
+    second
+        .apply_update_v1(&first.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(second.snapshot().unwrap(), expected);
+    let saved = first.save().unwrap();
+    assert_eq!(parts(&saved), parts(&first.save().unwrap()));
+    assert_eq!(parts(&saved), parts(&second.save().unwrap()));
+    assert_relationships_resolve(&parts(&saved));
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    for slide in &reopened.snapshot().unwrap().slides[..2] {
+        let picture = slide
+            .shapes
+            .iter()
+            .find(|s| s.name == picture_draft().name)
+            .unwrap();
+        assert_eq!(picture.kind, pptx_edit::ShapeKind::Picture);
+        assert!(picture.media_part_path.is_some());
+    }
+}
+
+#[test]
+fn picture_insertion_preserves_prefixed_metadata_and_exhausted_numeric_names() {
+    let mut source = fixture_parts(256);
+    for (path, xml) in &mut source {
+        if path == "[Content_Types].xml" {
+            *xml = xml
+                .replace("xmlns=", "xmlns:ct=")
+                .replace("<Types", "<ct:Types")
+                .replace("</Types>", "</ct:Types>")
+                .replace("<Default", "<ct:Default")
+                .replace("<Override", "<ct:Override");
+        }
+        if path == "ppt/slides/_rels/slide1.xml.rels" {
+            *xml = xml
+                .replace("xmlns=", "xmlns:rel=")
+                .replace("<Relationships", "<rel:Relationships")
+                .replace("</Relationships>", "</rel:Relationships>")
+                .replace("<Relationship ", "<rel:Relationship ")
+                .replace("rId2", "rId18446744073709551615");
+        }
+        if path == "ppt/slides/slide1.xml" {
+            *xml = xml
+                .replace("rId2", "rId18446744073709551615")
+                .replace("xmlns:r=", "xmlns:links=")
+                .replace("r:id=", "links:id=")
+                .replace("<p:sld ", r#"<p:sld xmlns:r="urn:preserved" "#);
+        }
+    }
+    source.push((
+        "ppt/media/image18446744073709551615.png".to_owned(),
+        "existing".to_owned(),
+    ));
+    let session = DeckSession::open(&zip(source), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_picture(&context(), &slide_id, &picture_draft())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let package = pptx_parse::parse_pptx(&saved).unwrap();
+    let image = package
+        .media
+        .iter()
+        .find(|media| media.bytes == picture_draft().media_bytes)
+        .unwrap();
+    assert_eq!(image.content_type, "image/png");
+    let saved_parts = parts(&saved);
+    assert!(part_text(&saved_parts, "[Content_Types].xml").contains("<ct:Default"));
+    assert!(
+        part_text(&saved_parts, "ppt/slides/_rels/slide1.xml.rels")
+            .contains("<rel:Relationship Id=\"rId2\"")
+    );
+    assert!(
+        part_text(&saved_parts, "ppt/slides/slide1.xml").contains(r#"xmlns:r="urn:preserved""#)
+    );
+    assert_eq!(
+        saved_parts["ppt/media/image18446744073709551615.png"],
+        b"existing"
     );
 }

@@ -2,17 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::block::transparent_children;
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
-    ParagraphFormatting, ParagraphFrame, SpacingExplicit, TextFormatting,
-    parse_paragraph_properties,
+    ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
-    ComplexField, ComplexFieldType, ContentPosition, Hyperlink, InlineNode, InlineSdt,
-    InlineSdtType, MathEquation, MathType, Run, RunContent, SimpleField, SimpleFieldType,
-    StructuredFieldContent, StructuredFieldTree, parse_bookmark_end, parse_bookmark_start,
-    parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
+    ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
+    OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
+    StructuredFieldTree, parse_bookmark_end, parse_bookmark_start, parse_field_type,
+    parse_hyperlink, parse_run, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -24,7 +24,7 @@ use crate::shape::{
 use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
-use crate::vml::parse_vml_image_content;
+use crate::vml::{parse_horizontal_rule, parse_vml_image_content};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -133,6 +133,13 @@ impl ParagraphContent {
     }
 }
 
+/// One attribute kept exactly as authored, prefixed name and all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RawAttribute {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paragraph {
@@ -142,6 +149,10 @@ pub struct Paragraph {
     pub para_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_id: Option<String>,
+    /// Attributes the model does not type, kept in authored form so a save
+    /// re-emits them; dropping an attribute the parser never read is a loss.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_attributes: Vec<RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting: Option<ParagraphFormatting>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +208,20 @@ impl HexIdAllocator {
     }
 }
 
+/// Everything on `w:p` the model does not consume itself.
+fn extra_paragraph_attributes(element: &XmlElement) -> Vec<RawAttribute> {
+    const CONSUMED: [&str; 4] = ["w14:paraId", "w:paraId", "w14:textId", "w:textId"];
+    element
+        .attributes
+        .iter()
+        .filter(|(name, _)| !CONSUMED.contains(&name.as_str()))
+        .map(|(name, value)| RawAttribute {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn parse_paragraph(
     element: &XmlElement,
@@ -228,6 +253,7 @@ pub fn parse_paragraph(
                 .or_else(|| element.attribute(Some("w"), "textId")),
             ids,
         ),
+        extra_attributes: extra_paragraph_attributes(element),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -281,9 +307,11 @@ pub fn parse_document_paragraph_properties(
     if let Some(spacing) = properties.child("w", "spacing") {
         let before = spacing
             .parse_numeric_attribute(Some("w"), "before", 1.0)
+            .or(value.space_before_lines)
             .map(|_| true);
         let after = spacing
             .parse_numeric_attribute(Some("w"), "after", 1.0)
+            .or(value.space_after_lines)
             .map(|_| true);
         if before.is_some() || after.is_some() {
             value.spacing_explicit = Some(SpacingExplicit { before, after });
@@ -396,26 +424,6 @@ enum TrackedContext {
     Deletion,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldMode {
-    Code,
-    Result,
-}
-
-#[derive(Clone, Debug)]
-struct OpenComplexField {
-    instruction: String,
-    code_runs: Vec<Run>,
-    result_runs: Vec<Run>,
-    structured_code: Vec<InlineNode>,
-    structured_result: Vec<InlineNode>,
-    children: Vec<StructuredFieldTree>,
-    mode: FieldMode,
-    fld_lock: bool,
-    dirty: bool,
-    formatting: Option<TextFormatting>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph_contents(
     element: &XmlElement,
@@ -437,7 +445,7 @@ fn parse_paragraph_contents(
     };
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
-    for child in element.child_elements() {
+    for child in transparent_children(element, false) {
         match child.local_name() {
             "r" => {
                 let normalized;
@@ -458,8 +466,8 @@ fn parse_paragraph_contents(
                 )?;
                 process_field_run(run, &mut fields, &mut output, part)?;
             }
-            "hyperlink" => output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
-                parse_hyperlink_composed(
+            "hyperlink" => {
+                let hyperlink = parse_hyperlink_composed(
                     child,
                     relationships,
                     theme,
@@ -469,16 +477,39 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
-                )?,
-            )))),
-            "bookmarkStart" => output.push(ParagraphContent::Inline(InlineNode::BookmarkStart(
-                parse_bookmark_start(child),
-            ))),
-            "bookmarkEnd" => output.push(ParagraphContent::Inline(InlineNode::BookmarkEnd(
-                parse_bookmark_end(child),
-            ))),
-            "fldSimple" => output.push(ParagraphContent::Inline(InlineNode::SimpleField(
-                Box::new(parse_simple_field_composed(
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs: Vec<Run> = hyperlink
+                        .children
+                        .iter()
+                        .filter_map(|node| match node {
+                            InlineNode::Run(run) => Some(run.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                } else {
+                    output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
+                        hyperlink,
+                    ))));
+                }
+            }
+            "bookmarkStart" => {
+                let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(ParagraphContent::Inline(node)),
+                }
+            }
+            "bookmarkEnd" => {
+                let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(ParagraphContent::Inline(node)),
+                }
+            }
+            "fldSimple" => {
+                let field = parse_simple_field_composed(
                     child,
                     relationships,
                     theme,
@@ -488,8 +519,16 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
-                )?),
-            ))),
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs = field.content.clone();
+                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                } else {
+                    output.push(ParagraphContent::Inline(InlineNode::SimpleField(Box::new(
+                        field,
+                    ))));
+                }
+            }
             "sdt" => {
                 if let Some(container) = child.child("w", "sdtContent") {
                     let parsed = parse_paragraph_contents(
@@ -579,14 +618,18 @@ fn parse_paragraph_contents(
                 parse_math(child),
             ))),
             // Paragraph properties are handled by the orchestrator.
-            "pPr" | "proofErr" | "permStart" | "permEnd" | "customXml" | "smartTag" => {}
-            _ => {}
+            "pPr" | "proofErr" | "permStart" | "permEnd" => {}
+            _ => {
+                if let Some(node) = crate::inline::raw_foreign_inline(child) {
+                    output.push(ParagraphContent::Inline(node));
+                }
+            }
         }
     }
     while let Some(field) = fields.pop() {
-        let completed = finalize_open_complex_field(field);
+        let completed = field.finish();
         if let Some(parent) = fields.last_mut() {
-            append_nested_field(parent, completed);
+            parent.absorb_nested(completed);
         } else {
             output.push(ParagraphContent::Inline(InlineNode::ComplexField(
                 Box::new(completed),
@@ -625,34 +668,21 @@ fn process_field_run(
                 part: part.to_owned(),
             });
         }
-        fields.push(create_open_complex_field(&run));
+        fields.push(OpenComplexField::opening(&run));
     }
     if let Some(active) = fields.last_mut() {
-        if !instruction.is_empty() {
-            active.instruction.push_str(&instruction);
-        }
-        if active.formatting.is_none() {
-            active.formatting.clone_from(&run.formatting);
-        }
+        active.append_instruction(&instruction);
+        active.adopt_formatting(&run);
         if has_separate {
-            active.mode = FieldMode::Result;
+            active.switch_to_result();
         }
         if !has_begin && !has_separate && !has_end {
-            match active.mode {
-                FieldMode::Code => {
-                    active.code_runs.push(run.clone());
-                    active.structured_code.push(InlineNode::Run(run));
-                }
-                FieldMode::Result => {
-                    active.result_runs.push(run.clone());
-                    active.structured_result.push(InlineNode::Run(run));
-                }
-            }
+            active.absorb(InlineNode::Run(run.clone()), vec![run]);
         }
         if has_end {
-            let completed = finalize_open_complex_field(fields.pop().unwrap());
+            let completed = fields.pop().unwrap().finish();
             if let Some(parent) = fields.last_mut() {
-                append_nested_field(parent, completed);
+                parent.absorb_nested(completed);
             } else {
                 output.push(ParagraphContent::Inline(InlineNode::ComplexField(
                     Box::new(completed),
@@ -663,77 +693,6 @@ fn process_field_run(
         output.push(ParagraphContent::Inline(InlineNode::Run(run)));
     }
     Ok(())
-}
-
-fn create_open_complex_field(run: &Run) -> OpenComplexField {
-    let flags = run.content.iter().find_map(|content| match content {
-        RunContent::FieldChar {
-            char_type,
-            fld_lock,
-            dirty,
-            ..
-        } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
-        _ => None,
-    });
-    OpenComplexField {
-        instruction: String::new(),
-        code_runs: Vec::new(),
-        result_runs: Vec::new(),
-        structured_code: Vec::new(),
-        structured_result: Vec::new(),
-        children: Vec::new(),
-        mode: FieldMode::Code,
-        fld_lock: flags.is_some_and(|flags| flags.0),
-        dirty: flags.is_some_and(|flags| flags.1),
-        formatting: run.formatting.clone(),
-    }
-}
-
-fn finalize_open_complex_field(field: OpenComplexField) -> ComplexField {
-    let structured_code = (!field.structured_code.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_code),
-        blocks: None,
-    });
-    let structured_result = (!field.structured_result.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_result),
-        blocks: None,
-    });
-    let field_tree = StructuredFieldTree {
-        version: Some(1.0),
-        code: structured_code.clone(),
-        result: structured_result.clone(),
-        children: (!field.children.is_empty()).then_some(field.children),
-        display_mode: Some("result".to_owned()),
-    };
-    let instruction = field.instruction.trim().to_owned();
-    ComplexField {
-        node_type: ComplexFieldType::ComplexField,
-        field_type: parse_field_type(&instruction),
-        instruction,
-        field_code: field.code_runs,
-        field_result: field.result_runs,
-        formatting: field.formatting,
-        fld_lock: field.fld_lock.then_some(true),
-        dirty: field.dirty.then_some(true),
-        structured_code,
-        structured_result,
-        field_tree: Some(field_tree),
-    }
-}
-
-fn append_nested_field(parent: &mut OpenComplexField, field: ComplexField) {
-    let tree = field.field_tree.clone();
-    match parent.mode {
-        FieldMode::Code => parent
-            .structured_code
-            .push(InlineNode::ComplexField(Box::new(field))),
-        FieldMode::Result => parent
-            .structured_result
-            .push(InlineNode::ComplexField(Box::new(field))),
-    }
-    if let Some(tree) = tree {
-        parent.children.push(tree);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1047,6 +1006,11 @@ fn parse_drawing_owned(
     drawing: Option<&mut DrawingContext<'_>>,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
+        if let Some(rule) = parse_horizontal_rule(element) {
+            return Ok(vec![RunContent::HorizontalRule {
+                rule: Box::new(rule),
+            }]);
+        }
         let media = drawing.as_ref().map(|context| context.media);
         return Ok(parse_vml_image_content(element, relationships, media)
             .map(|image| RunContent::Drawing {
@@ -1064,6 +1028,7 @@ fn parse_drawing_owned(
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
+                xml: element.to_raw_inline_xml(),
             }]);
         }
         DrawingChart::None => {}
@@ -1240,6 +1205,7 @@ fn paragraph_content_length(content: &ParagraphContent) -> usize {
 
 fn inline_node_length(node: &InlineNode) -> usize {
     match node {
+        InlineNode::RawXml(_) => 0,
         InlineNode::Run(run) => run
             .content
             .iter()
@@ -1327,50 +1293,42 @@ fn apply_list_rendering(
         rendering.marker = convert_bullet_to_unicode(&rendering.marker);
     }
     let level = numbering.get_level(rendering.num_id, rendering.level);
-    paragraph.list_rendering = Some(rendering);
-    let Some(level_properties) = level.and_then(|level| level.p_pr) else {
-        return;
-    };
-    let style_indents = if from_style {
-        style_chain_ind(
-            paragraph
-                .formatting
-                .as_ref()
-                .and_then(|formatting| formatting.style_id.as_deref()),
-            styles,
-        )
-    } else {
-        (false, false)
-    };
-    let direct_indent = direct_properties.and_then(|properties| properties.child("w", "ind"));
-    let direct_left = direct_indent.is_some_and(|indent| {
-        ["left", "start", "leftChars", "startChars"]
-            .iter()
-            .any(|name| indent.attribute(Some("w"), name).is_some())
-    });
-    let direct_first = direct_indent.is_some_and(|indent| {
-        ["firstLine", "hanging", "firstLineChars", "hangingChars"]
-            .iter()
-            .any(|name| {
-                indent.attribute(Some("w"), name).is_some_and(|raw| {
-                    parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+    if let Some(level_properties) = level.and_then(|level| level.p_pr) {
+        let style_indents = if from_style {
+            style_chain_ind(
+                paragraph
+                    .formatting
+                    .as_ref()
+                    .and_then(|formatting| formatting.style_id.as_deref()),
+                styles,
+            )
+        } else {
+            (false, false)
+        };
+        let direct_indent = direct_properties.and_then(|properties| properties.child("w", "ind"));
+        let direct_left = direct_indent.is_some_and(|indent| {
+            ["left", "start", "leftChars", "startChars"]
+                .iter()
+                .any(|name| indent.attribute(Some("w"), name).is_some())
+        });
+        let direct_first = direct_indent.is_some_and(|indent| {
+            ["firstLine", "hanging", "firstLineChars", "hangingChars"]
+                .iter()
+                .any(|name| {
+                    indent.attribute(Some("w"), name).is_some_and(|raw| {
+                        parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+                    })
                 })
-            })
-    });
-    let formatting = paragraph
-        .formatting
-        .get_or_insert_with(ParagraphFormatting::default);
-    if !direct_left && !style_indents.0 {
-        formatting.indent_left = level_properties.indent_left;
-    }
-    if !direct_first && !style_indents.1 {
-        if level_properties.indent_first_line.is_some() {
-            formatting.indent_first_line = level_properties.indent_first_line;
+        });
+        if !direct_left && !style_indents.0 {
+            rendering.indent_left = level_properties.indent_left;
         }
-        if level_properties.hanging_indent.is_some() {
-            formatting.hanging_indent = level_properties.hanging_indent;
+        if !direct_first && !style_indents.1 {
+            rendering.indent_first_line = level_properties.indent_first_line;
+            rendering.hanging_indent = level_properties.hanging_indent;
         }
     }
+    paragraph.list_rendering = Some(rendering);
 }
 
 fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, bool) {
@@ -1648,6 +1606,54 @@ mod tests {
             panic!("bookmark end")
         };
         assert_eq!(end.position.as_ref().unwrap().offset, Some(5.0));
+    }
+
+    fn run_texts(paragraph: &Paragraph) -> Vec<&str> {
+        paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => {
+                    run.content.iter().find_map(|content| match content {
+                        RunContent::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn smart_tag_wrapped_runs_keep_their_text() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>in </w:t></w:r>
+              <w:smartTag w:uri="urn:schemas-microsoft-com:office:smarttags" w:element="place">
+                <w:smartTagPr><w:attr w:name="k" w:val="v"/></w:smartTagPr>
+                <w:r><w:t>Paris</w:t></w:r>
+              </w:smartTag>
+            </w:p>"#,
+        );
+        assert_eq!(run_texts(&paragraph), ["in ", "Paris"]);
+        assert_eq!(paragraph.content.len(), 2);
+    }
+
+    #[test]
+    fn custom_xml_wrapped_runs_and_nested_smart_tags_keep_document_order() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>a</w:t></w:r>
+              <w:customXml w:uri="urn:x" w:element="e">
+                <w:customXmlPr><w:placeholder w:val="p"/></w:customXmlPr>
+                <w:r><w:t>b</w:t></w:r>
+                <w:smartTag w:element="date"><w:r><w:t>c</w:t></w:r></w:smartTag>
+              </w:customXml>
+              <w:r><w:t>d</w:t></w:r>
+            </w:p>"#,
+        );
+        assert_eq!(run_texts(&paragraph), ["a", "b", "c", "d"]);
+        assert_eq!(paragraph.content.len(), 4);
     }
 
     #[test]

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator, Mapping, Union
+import json
+from typing import Iterator, Mapping, Sequence, Union
+from .proposals import Proposal, ProposalChange, ProposalPreview
 
 from ._betteroffice_pptx import (
     AdjustEdit,
     CollaborativeStateError,
+    Comment,
+    CommentEdit,
     Deck,
     DisplayList,
     FillEdit,
@@ -17,6 +21,7 @@ from ._betteroffice_pptx import (
     NotCollaborativeError,
     Paragraph,
     ParseError,
+    Png,
     RangeError,
     Rect,
     RenderError,
@@ -25,6 +30,7 @@ from ._betteroffice_pptx import (
     Slide,
     SlideEdit,
     Story,
+    StaleProposalError,
     Stroke,
     StrokeEdit,
     TextEdit,
@@ -37,6 +43,8 @@ from ._betteroffice_pptx import PptxError, __version__
 __all__ = [
     "AdjustEdit",
     "CollaborativeStateError",
+    "Comment",
+    "CommentEdit",
     "Deck",
     "DisplayList",
     "EMU_PER_CENTIMETER",
@@ -49,8 +57,13 @@ __all__ = [
     "NotCollaborativeError",
     "Paragraph",
     "ParseError",
+    "Png",
     "PptxError",
     "Presentation",
+    "Proposal",
+    "ProposalChange",
+    "ProposalPreview",
+    "StaleProposalError",
     "RangeError",
     "Rect",
     "RenderError",
@@ -297,6 +310,17 @@ class Presentation:
     ) -> TransformEdit:
         return self._inner.resize_shape(slide, shape_id, width, height)
 
+    def set_shape_rect(
+        self,
+        slide: SlideKey,
+        shape_id: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> TransformEdit:
+        return self._inner.set_shape_rect(slide, shape_id, x, y, width, height)
+
     def insert_text(
         self,
         story_id: str,
@@ -356,6 +380,57 @@ class Presentation:
     def insert_paragraph_break(self, story_id: str, index: int) -> TextEdit:
         return self._inner.insert_paragraph_break(story_id, index)
 
+    def add_comment(
+        self,
+        slide: SlideKey,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+        x: int = 0,
+        y: int = 0,
+    ) -> CommentEdit:
+        """Add a slide comment at an EMU position."""
+        return self._inner.add_comment(
+            slide, text, author=author, initials=initials, created=created, x=x, y=y
+        )
+
+    def reply_to_comment(
+        self,
+        comment_id: str,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+    ) -> CommentEdit:
+        """Reply to a thread. Modern comments only: legacy has no reply list."""
+        return self._inner.reply_to_comment(
+            comment_id, text, author=author, initials=initials, created=created
+        )
+
+    def set_comment_status(self, comment_id: str, resolved: bool = True) -> CommentEdit:
+        """Mark a thread resolved. Modern comments only; legacy has no status."""
+        return self._inner.set_comment_status(comment_id, resolved)
+
+    def remove_comment(self, comment_id: str) -> CommentEdit:
+        """Remove a comment; a thread root takes its replies with it."""
+        return self._inner.remove_comment(comment_id)
+
+    def comments(self) -> "list[Comment]":
+        """Every comment on the deck, replies included."""
+        return self._inner.comments()
+
+    @property
+    def comment_flavor(self) -> str:
+        """Either ``legacy`` or ``modern``; a deck never carries both."""
+        return self._inner.comment_flavor
+
+    def set_comment_flavor(self, flavor: str) -> str:
+        """Switch comment systems. Only legal while the deck has no comments."""
+        return self._inner.set_comment_flavor(flavor)
+
     def register_font(
         self,
         family: str,
@@ -372,6 +447,52 @@ class Presentation:
     def render_slide(self, slide: SlideKey) -> DisplayList:
         """Lay a slide out into the renderer's display list."""
         return self._inner.render_slide(slide)
+
+    def propose(
+        self, agent_id: str, edits: Sequence[Mapping[str, object]], *,
+        note: str | None = None,
+    ) -> Proposal:
+        """Stage edit objects without changing the presentation."""
+        request = json.dumps(
+            {"agentId": agent_id, "note": note, "edits": [dict(edit) for edit in edits]},
+            allow_nan=False,
+        )
+        return Proposal._from_dict(json.loads(self._inner.propose_json(request)))
+
+    def proposals(self) -> list[Proposal]:
+        """Read pending proposals and their current stale targets."""
+        return [
+            Proposal._from_dict(value)
+            for value in json.loads(self._inner.proposals_json())
+        ]
+
+    def preview_proposal(self, proposal_id: str) -> ProposalPreview:
+        """Preview edits against the current document without applying them."""
+        return ProposalPreview._from_dict(
+            json.loads(self._inner.preview_proposal_json(proposal_id))
+        )
+
+    def render_proposal(self, proposal_id: str, slide: SlideKey) -> DisplayList:
+        """Render one proposed slide without changing the presentation."""
+        return self._inner.render_proposal(proposal_id, slide)
+
+    def accept_proposal(self, proposal_id: str, *, force: bool = False) -> bool:
+        """Apply the proposal atomically as one local undo step."""
+        return self._inner.accept_proposal(proposal_id, force=force)
+
+    def reject_proposal(self, proposal_id: str) -> bool:
+        """Remove a proposal without changing the presentation."""
+        return self._inner.reject_proposal(proposal_id)
+
+    def render_png(
+        self,
+        slide: SlideKey,
+        *,
+        scale: float = 1.0,
+        background: str = "slide",
+    ) -> Png:
+        """Rasterize a slide to PNG bytes. Register a font first."""
+        return self._inner.render_png(slide, scale=scale, background=background)
 
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""

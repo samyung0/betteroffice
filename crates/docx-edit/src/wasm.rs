@@ -39,6 +39,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use js_sys::{Function, Uint8Array};
 use serde::Serialize;
@@ -52,11 +53,12 @@ use yrs::{
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
+use crate::segments::SegKind;
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange, TabStop, TableLocator,
-    TableRange, TriState, UndoSession, story_ref,
+    Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
+    TableLocator, TableRange, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -130,35 +132,18 @@ enum AdjacentStoryUnit {
     Pilcrow,
 }
 
-/// Whether the layout gives an embed its own block.
-fn is_block_embed(kind: &str) -> bool {
-    matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
-}
-
-/// Resolves a paragraph to its story span by walking the public segment view.
+/// Resolves a paragraph to its story span via the committed segment index.
 /// Story-scoped: a `para_id` that lives in another story is "not found".
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
-    let mut offset: u32 = 0;
-    let mut para_start: u32 = 0;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if properties.para_id == para_id {
-                    return Ok(ParaSpan {
-                        start: para_start,
-                        pilcrow: offset,
-                    });
-                }
-                offset += 1;
-                para_start = offset;
-            }
-            SegmentContent::OtherEmbed { .. } => offset += 1,
-        }
-    }
-    Err(js_err(format!(
-        "paragraph {para_id:?} was not found in story {story:?}"
-    )))
+    doc.segment_index(story)
+        .map_err(js_err)?
+        .para_span(para_id)
+        .map(|(start, pilcrow)| ParaSpan { start, pilcrow })
+        .ok_or_else(|| {
+            js_err(format!(
+                "paragraph {para_id:?} was not found in story {story:?}"
+            ))
+        })
 }
 
 /// `Loc { story, paraId, offset }` -> transient story-global index.
@@ -177,35 +162,17 @@ fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Resul
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
-    let mut cursor = 0_u32;
-    let mut para_start = 0_u32;
-    let mut node_start = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if index <= cursor {
-                    return Ok(IndexedLoc {
-                        para_id: properties.para_id,
-                        offset: index.saturating_sub(para_start),
-                        node_offset: index.saturating_sub(node_start),
-                    });
-                }
-                cursor += 1;
-                para_start = cursor;
-                node_start = cursor;
-            }
-            SegmentContent::OtherEmbed { ref kind, .. } => {
-                if cursor == node_start && is_block_embed(kind) {
-                    node_start = cursor + 1;
-                }
-                cursor += 1;
-            }
-        }
-    }
-    Err(js_err(format!(
-        "selection index {index} does not resolve in story {story:?}"
-    )))
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    let para = segments.para_at(index).ok_or_else(|| {
+        js_err(format!(
+            "selection index {index} does not resolve in story {story:?}"
+        ))
+    })?;
+    Ok(IndexedLoc {
+        para_id: para.para_id.to_string(),
+        offset: index.saturating_sub(para.start),
+        node_offset: index.saturating_sub(para.node_start),
+    })
 }
 
 fn adjacent_story_unit(
@@ -214,66 +181,40 @@ fn adjacent_story_unit(
     index: u32,
     direction: DeleteDirection,
 ) -> Result<Option<AdjacentStoryUnit>, JsValue> {
-    let mut cursor = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => {
-                let units: Vec<u16> = text.encode_utf16().collect();
-                let end = cursor + units.len() as u32;
-                let relative = match direction {
-                    DeleteDirection::Backward if index > cursor && index <= end => {
-                        Some((index - cursor) as usize)
-                    }
-                    DeleteDirection::Forward if index >= cursor && index < end => {
-                        Some((index - cursor) as usize)
-                    }
-                    _ => None,
-                };
-                if let Some(relative) = relative {
-                    let width = match direction {
-                        DeleteDirection::Backward
-                            if relative > 1
-                                && (0xdc00..=0xdfff).contains(&units[relative - 1])
-                                && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
-                        {
-                            2
-                        }
-                        DeleteDirection::Forward
-                            if relative + 1 < units.len()
-                                && (0xd800..=0xdbff).contains(&units[relative])
-                                && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
-                        {
-                            2
-                        }
-                        _ => 1,
-                    };
-                    return Ok(Some(AdjacentStoryUnit::Content(width)));
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    let position = match direction {
+        DeleteDirection::Backward => index.checked_sub(1),
+        DeleteDirection::Forward => Some(index),
+    };
+    let Some(segment) = position.and_then(|pos| segments.segment_at(pos)) else {
+        return Ok(None);
+    };
+    Ok(Some(match &segment.kind {
+        SegKind::Text(text) => {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let relative = (index - segment.start) as usize;
+            let width = match direction {
+                DeleteDirection::Backward
+                    if relative > 1
+                        && (0xdc00..=0xdfff).contains(&units[relative - 1])
+                        && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
+                {
+                    2
                 }
-                cursor = end;
-            }
-            SegmentContent::Pilcrow(_) => {
-                let adjacent = match direction {
-                    DeleteDirection::Backward => index == cursor + 1,
-                    DeleteDirection::Forward => index == cursor,
-                };
-                if adjacent {
-                    return Ok(Some(AdjacentStoryUnit::Pilcrow));
+                DeleteDirection::Forward
+                    if relative + 1 < units.len()
+                        && (0xd800..=0xdbff).contains(&units[relative])
+                        && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
+                {
+                    2
                 }
-                cursor += 1;
-            }
-            SegmentContent::OtherEmbed { .. } => {
-                let adjacent = match direction {
-                    DeleteDirection::Backward => index == cursor + 1,
-                    DeleteDirection::Forward => index == cursor,
-                };
-                if adjacent {
-                    return Ok(Some(AdjacentStoryUnit::Content(1)));
-                }
-                cursor += 1;
-            }
+                _ => 1,
+            };
+            AdjacentStoryUnit::Content(width)
         }
-    }
-    Ok(None)
+        SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+        SegKind::Embed => AdjacentStoryUnit::Content(1),
+    }))
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held
@@ -902,10 +843,15 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
-/// "pageContentHeight": number|null, "numericIds": {yrsId: number} }`.
+/// "pageContentHeight": number|null, "numericIds": {yrsId: number},
+/// "showHiddenText": bool, "defaultParagraphStyleId": string }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
+    if let Some(Value::Array(ids)) = value.get("tocStyleIds") {
+        env.toc_style_ids
+            .extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
     if let Some(Value::Object(colors)) = value.get("themeColors") {
         for (key, entry) in colors {
             if let Some(hex) = entry.as_str() {
@@ -915,6 +861,15 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
     }
     env.default_tab_stop_twips = value.get("defaultTabStopTwips").and_then(Value::as_f64);
     env.page_content_height = value.get("pageContentHeight").and_then(Value::as_f64);
+    env.default_paragraph_style_id = value
+        .get("defaultParagraphStyleId")
+        .and_then(Value::as_str)
+        .filter(|style| !style.is_empty())
+        .map(str::to_owned);
+    env.show_hidden_text = value
+        .get("showHiddenText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(Value::Object(ids)) = value.get("numericIds") {
         for (key, entry) in ids {
             if let Some(id) = entry.as_f64() {
@@ -985,6 +940,7 @@ fn thin_header_footer(
                         story_type: part.story_type.clone(),
                         hdr_ftr_type: part.hdr_ftr_type.clone(),
                         content: Vec::new(),
+                        custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
                     },
                 )
@@ -999,6 +955,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
             .iter()
             .map(|note| docx_parse::Note {
                 story_type: note.story_type.clone(),
+                custom_root_bindings: note.custom_root_bindings.clone(),
                 id: note.id,
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
@@ -1029,6 +986,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                     content: Vec::new(),
                     sections,
                     final_section_properties: package.document.final_section_properties.clone(),
+                    custom_root_bindings: package.document.custom_root_bindings.clone(),
                     comments: package.document.comments.clone(),
                 },
                 styles: package.styles.clone(),
@@ -1186,7 +1144,7 @@ impl EditSession {
             docx_source: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
-            undo: UndoSession::new(),
+            undo: UndoSession::with_clock(Arc::new(|| js_sys::Date::now() as u64)),
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
@@ -1203,6 +1161,18 @@ impl EditSession {
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
         docx_layout::register_measure_font(bytes)
+    }
+
+    /// Registers a measurement view of `base` carrying the vertical metrics
+    /// and advance pitch Word measures `requested_family` with — for a face
+    /// this host had to substitute. Returns `base` for a family whose metrics
+    /// are unknown.
+    pub fn register_substitute_measure_font(
+        &self,
+        base: u32,
+        requested_family: &str,
+    ) -> Result<u32, JsValue> {
+        docx_layout::register_substitute_measure_font(base, requested_family)
     }
 
     /// Drops every registered measurement font (ids restart at zero) and
@@ -1244,6 +1214,27 @@ impl EditSession {
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_with_regions_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Same full region pass as [`Self::layout_document_with_regions_json`],
+    /// but the reply carries only `{ layout, headersFooters?, notesConverged }`
+    /// — the measured arena stays retained wasm-side and is fetched on demand
+    /// via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input: &str,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Retained `{ measured, options }` for the main-thread display-list
+    /// fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_kernel_inputs_json()
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1711,59 +1702,24 @@ impl EditSession {
                 )));
             }
 
-            let (text, p_style, alignment) = seed_paragraph(&paragraphs[0]);
-            self.engine
-                .doc()
-                .create_story(story_id, &text, &p_style, &alignment)
-                .map_err(js_err)?;
-            let seed_ctx = EditCtx::local(String::new(), String::new());
-            for paragraph in &paragraphs[1..] {
-                let (text, p_style, alignment) = seed_paragraph(paragraph);
-                // Splitting at the final pilcrow appends: the first half keeps
-                // the original paraId, so the appended paragraph — whose
-                // properties this seeds — is the SECOND half.
-                let boundary = self.engine.doc().story_len(story_id).map_err(js_err)? - 1;
-                if !text.is_empty() {
-                    self.engine
-                        .doc()
-                        .insert_text(
-                            &seed_ctx,
-                            Position::new(story_id, boundary),
-                            &text,
-                            FormatPolicy::Inherit,
-                        )
-                        .map_err(js_err)?;
-                }
-                let split = self
-                    .engine
-                    .doc()
-                    .split_paragraph(&seed_ctx, Position::new(story_id, boundary), None)
-                    .map_err(js_err)?;
-                self.engine
-                    .doc()
-                    .set_paragraph_attr(
-                        &split.second_para_id,
-                        "pStyle",
-                        Any::from(p_style.as_str()),
-                    )
-                    .map_err(js_err)?;
-                self.engine
-                    .doc()
-                    .set_paragraph_attr(
-                        &split.second_para_id,
-                        "alignment",
-                        Any::from(alignment.as_str()),
-                    )
-                    .map_err(js_err)?;
-            }
-
+            let seed_paragraphs: Vec<SeedParagraph> = paragraphs
+                .iter()
+                .map(|paragraph| {
+                    let (text, p_style, alignment) = seed_paragraph(paragraph);
+                    SeedParagraph {
+                        text,
+                        p_style,
+                        alignment,
+                    }
+                })
+                .collect();
             let para_ids: Vec<Value> = self
                 .engine
                 .doc()
-                .paragraphs(story_id)
+                .seed_story(story_id, &seed_paragraphs)
                 .map_err(js_err)?
                 .into_iter()
-                .map(|paragraph| Value::String(paragraph.para_id))
+                .map(Value::String)
                 .collect();
             receipt.insert(story_id.to_owned(), Value::Array(para_ids));
         }
@@ -1903,30 +1859,54 @@ impl EditSession {
 
     // -- local input state (undo + awareness selection) --
 
-    /// Starts local-origin undo tracking for one story, replacing any scope
-    /// already tracked (and its history). Call this after import or seeding but
-    /// before the first edit, so the initial document is not an undo step.
-    /// Re-tracking the same story is a no-op that preserves the history.
-    /// Errors on an unknown story.
-    pub fn track_undo(&self, story: &str) -> Result<(), JsValue> {
-        self.undo.track(self.engine.doc(), story).map_err(js_err)
+    /// Starts local-origin undo tracking across every story. Call this after
+    /// import or seeding but before the first edit, so the initial document is
+    /// not an undo step; later calls keep the history.
+    pub fn track_undo(&self) {
+        self.undo.track(self.engine.doc());
     }
 
-    /// Starts local undo tracking for a structural table edit in `story`.
-    /// Besides the parent story, which owns the table embed, this widens the
-    /// scope to the stories root so undo and redo also remove and restore the
-    /// cell stories the edit created or destroyed. Tracked separately from
-    /// [`EditSession::track_undo`] on the same story, so switching between
-    /// them starts a fresh history. Errors on an unknown story.
-    pub fn track_table_undo(&self, story: &str) -> Result<(), JsValue> {
-        self.undo
-            .track_table(self.engine.doc(), story)
-            .map_err(js_err)
+    /// Closes the current undo capture without adding an empty step.
+    pub fn add_undo_boundary(&self) {
+        self.undo.add_undo_barrier();
     }
 
-    /// Reverts the latest local-origin transaction and reports whether
-    /// anything was reverted. Remote and system transactions are excluded by
-    /// the manager's tracked-origin policy; `false` before a story is tracked.
+    /// Changes grouping policy while retaining undo and redo history.
+    pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
+        let mode = match mode {
+            "auto" => UndoCaptureMode::Auto,
+            "manual" => UndoCaptureMode::Manual,
+            _ => {
+                return Err(js_err("undo capture mode must be auto or manual"));
+            }
+        };
+        self.undo.set_capture_mode(mode);
+        Ok(())
+    }
+
+    /// Current undo grouping policy.
+    pub fn undo_capture_mode(&self) -> String {
+        match self.undo.capture_mode() {
+            UndoCaptureMode::Auto => "auto",
+            UndoCaptureMode::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    /// Selects a story, closing capture unless manual grouping is selected.
+    pub fn select_story(&self, story: &str) {
+        self.undo.select_story(story);
+    }
+
+    fn select_embed_story(&self, embed_id: &str) -> Result<(), JsValue> {
+        let story = self.engine.doc().embed_story(embed_id).map_err(js_err)?;
+        self.undo.select_story(&story);
+        Ok(())
+    }
+
+    /// Reverts the latest local-origin step and reports whether anything was
+    /// reverted. Remote and system transactions are excluded by the manager's
+    /// tracked-origin policy; `false` before tracking starts.
     pub fn undo(&self) -> bool {
         self.undo.undo()
     }
@@ -1947,14 +1927,9 @@ impl EditSession {
         self.undo.can_redo()
     }
 
-    /// Current local undo stack size. Zero before a story starts tracking.
-    pub fn undo_depth(&self) -> u32 {
-        self.undo.undo_depth() as u32
-    }
-
-    /// Current local redo stack size. Zero before a story starts tracking.
-    pub fn redo_depth(&self) -> u32 {
-        self.undo.redo_depth() as u32
+    /// Stories changed by the latest undo or redo, sorted.
+    pub fn history_stories(&self) -> Vec<String> {
+        self.undo.changed_stories()
     }
 
     /// Stores this peer's anchor and head as sticky positions, replacing any
@@ -1987,6 +1962,7 @@ impl EditSession {
             anchor,
             head,
         });
+        self.undo.select_story(story);
         Ok(())
     }
 
@@ -2824,6 +2800,7 @@ impl EditSession {
         value_json: &str,
     ) -> Result<(), JsValue> {
         let value = Any::from_json(value_json).map_err(js_err)?;
+        self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2862,6 +2839,7 @@ impl EditSession {
     /// `embed_id`, leaving the control itself in place. Errors when no embed
     /// has that id.
     pub fn clear_content_control_value(&self, embed_id: &str) -> Result<(), JsValue> {
+        self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -2894,6 +2872,7 @@ impl EditSession {
                 entries.push((key.clone(), json_to_any(value)?));
             }
         }
+        self.select_embed_story(embed_id)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
@@ -3246,6 +3225,20 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<u32>,
+    ) -> Result<String, JsValue> {
+        let matches = self
+            .engine
+            .doc()
+            .search_text(query, case_sensitive, limit.map(|value| value as usize))
+            .map_err(js_err)?;
+        serde_json::to_string(&matches).map_err(js_err)
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
@@ -3279,7 +3272,9 @@ impl EditSession {
     /// table vocabulary the layout engine consumes. `env_json` supplies the
     /// document-level values lowering cannot read off the story:
     /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
-    /// "pageContentHeight":number|null,"numericIds":{yrsId: number}}`, all
+    /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
+    /// "tocStyleIds":[styleId],"showHiddenText":bool,
+    /// "defaultParagraphStyleId":string}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.
@@ -3335,17 +3330,6 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// The story as an ordered run of formatted segments — the same view
-    /// lowering reads:
-    ///
-    /// - `{"kind":"text","text","attributes"}`
-    /// - `{"kind":"pilcrow","paraId","properties","attributes"}`
-    /// - `{"kind":"embed","embedKind","payload","attributes"}`
-    ///
-    /// A text segment covers one maximal run of identically formatted
-    /// characters; each pilcrow and embed is its own segment worth one unit.
-    /// `attributes` holds the segment's run marks together with any `ins`/`del`
-    /// tracked-change stamps. Errors on an unknown story.
     pub fn story_object_ids(&self, story: &str) -> Result<String, JsValue> {
         let txn = self.engine.doc().yrs_doc().transact();
         let story = story_ref(&txn, story).map_err(js_err)?;
@@ -3360,6 +3344,17 @@ impl EditSession {
         serde_json::to_string(&ids).map_err(js_err)
     }
 
+    /// The story as an ordered run of formatted segments — the same view
+    /// lowering reads:
+    ///
+    /// - `{"kind":"text","text","attributes"}`
+    /// - `{"kind":"pilcrow","paraId","properties","attributes"}`
+    /// - `{"kind":"embed","embedKind","payload","attributes"}`
+    ///
+    /// A text segment covers one maximal run of identically formatted
+    /// characters; each pilcrow and embed is its own segment worth one unit.
+    /// `attributes` holds the segment's run marks together with any `ins`/`del`
+    /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
         let items = segments
@@ -3399,10 +3394,6 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
-    /// Where a comment's sticky anchors currently sit:
-    /// `[{"story","start","end"}, …]`, one entry per anchored range, in
-    /// story-global UTF-16 units. Errors on an unknown comment id and when an
-    /// anchor no longer resolves.
     pub fn list_comments(&self) -> Result<String, JsValue> {
         let comments = self.engine.doc().list_comments().map_err(js_err)?;
         let values: Vec<Value> = comments
@@ -3417,6 +3408,10 @@ impl EditSession {
         serde_json::to_string(&values).map_err(js_err)
     }
 
+    /// Where a comment's sticky anchors currently sit:
+    /// `[{"story","start","end"}, …]`, one entry per anchored range, in
+    /// story-global UTF-16 units. Errors on an unknown comment id and when an
+    /// anchor no longer resolves.
     pub fn resolve_comment(&self, comment_id: &str) -> Result<String, JsValue> {
         let anchors = self
             .engine
@@ -3437,6 +3432,69 @@ impl EditSession {
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn seeded_docx_retains_original_images_for_materialization_and_save() {
+        let image_bytes = vec![1, 2, 3, 4];
+        let source = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/original.png"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="original"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+            ("word/media/original.png".to_owned(), image_bytes.clone()),
+        ])
+        .unwrap();
+        let expected = crate::seed::parse_docx_for_edit(&source).unwrap();
+        assert!(!expected.document.package.media_entries.is_empty());
+        let session = EditSession::new(7.0).unwrap();
+        let host: Value = serde_json::from_str(&session.open_docx(&source, true).unwrap()).unwrap();
+        assert_eq!(
+            host["envelope"]["document"]["package"]["mediaEntries"],
+            json!([])
+        );
+        assert_eq!(
+            session.docx_source.borrow().as_deref(),
+            Some(source.as_slice())
+        );
+        let blocks = session
+            .engine
+            .lower_story_json("body", &crate::bridge::RenderEnv::default())
+            .unwrap();
+        assert!(blocks.contains("data:image/png;base64,AQIDBA=="));
+        let materialized: docx_parse::S9WireEnvelope =
+            serde_json::from_str(&session.materialize_docx().unwrap().unwrap()).unwrap();
+        assert_eq!(materialized, expected);
+
+        let request = serde_json::from_value(json!({
+            "determinism": {
+                "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "now": "2030-01-02T03:04:05.006Z"
+            },
+            "document": {"content": materialized.document.package.document.content},
+            "relationshipEntries": materialized.document.package.relationship_entries,
+            "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        let saved = docx_parse::serializer::write_docx_s13(
+            request,
+            session.docx_source.borrow().as_deref().unwrap(),
+        )
+        .unwrap();
+        let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        assert_eq!(
+            saved_parts
+                .iter()
+                .find(|(path, _)| path == "word/media/original.png")
+                .unwrap()
+                .1,
+            image_bytes
+        );
+        let reopened = crate::seed::parse_docx_for_edit(&saved).unwrap();
+        assert_eq!(
+            reopened.document.package.media_entries,
+            expected.document.package.media_entries
+        );
+    }
 
     fn seed_paragraph_after_embeds(doc: &EditingDoc, embeds: &[&str], text: &str) {
         doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")

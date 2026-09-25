@@ -252,6 +252,7 @@ fn parse_comments_back(xml: &str, seed: &str) -> Result<Vec<Comment>, ParseError
         root,
         None,
         None,
+        None,
         &mut StoryParser {
             relationships: None,
             theme: None,
@@ -315,6 +316,8 @@ fn required_root<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::inline::{InlineNode, Run, RunContent, RunType};
     use crate::paragraph::{Paragraph, ParagraphContent};
 
@@ -329,10 +332,11 @@ mod tests {
 
     fn body() -> DocumentBody {
         DocumentBody {
-            content: vec![crate::block::BlockContent::Paragraph(Paragraph {
+            content: vec![crate::block::BlockContent::Paragraph(Arc::new(Paragraph {
                 node_type: "paragraph".to_owned(),
                 para_id: None,
                 text_id: None,
+                extra_attributes: Vec::new(),
                 formatting: None,
                 property_changes: None,
                 p_pr_ins: None,
@@ -349,7 +353,7 @@ mod tests {
                 list_rendering: None,
                 rendered_page_break_before: None,
                 section_properties: None,
-            })],
+            }))],
             ..DocumentBody::default()
         }
     }

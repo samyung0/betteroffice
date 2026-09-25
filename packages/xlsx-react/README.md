@@ -8,11 +8,6 @@ Rust/WebAssembly engine; the grid is painted onto canvas.
 
 <!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
 
-> **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
-> components, collaboration — are settling and unlikely to change shape. Smaller
-> APIs may still move between releases; breaking changes are always listed in
-> the changelog.
-
 ```bash
 bun add @betteroffice/xlsx-react @betteroffice/xlsx react react-dom
 ```
@@ -124,4 +119,5 @@ import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
 />;
 ```
 
-Docs: https://betteroffice.dev · Apache-2.0.
+[JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
+[Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/xlsx-react/CHANGELOG.md) · Apache-2.0.

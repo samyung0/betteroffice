@@ -66,8 +66,8 @@ export async function rasterizeDisplayPageToBackBuffer(
   const ctx = canvas.getContext('2d') as PageCanvasContext | null;
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
   const scale = devicePixelRatio * zoom;
-  const width = page.width * scale;
-  const height = page.height * scale;
+  const width = Math.ceil(page.width * scale);
+  const height = Math.ceil(page.height * scale);
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.resetTransform();
@@ -161,8 +161,8 @@ export function sizeCanvasForPage(
   zoom: number = 1
 ): void {
   const backingScale = devicePixelRatio * zoom;
-  canvas.width = page.width * backingScale;
-  canvas.height = page.height * backingScale;
+  canvas.width = Math.ceil(page.width * backingScale);
+  canvas.height = Math.ceil(page.height * backingScale);
   canvas.style.width = `${page.width * zoom}px`;
   canvas.style.height = `${page.height * zoom}px`;
   ctx.scale(backingScale, backingScale);
@@ -1311,7 +1311,15 @@ async function drawImagePrimitive(
     if (image.flipH || image.flipV) ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
-  drawCroppedImage(ctx, source, frame, image.crop);
+  if (image.shapeType === 'ellipse') {
+    ctx.save();
+    traceImageEllipse(ctx, frame);
+    ctx.clip();
+    drawCroppedImage(ctx, source, frame, image.crop);
+    ctx.restore();
+  } else {
+    drawCroppedImage(ctx, source, frame, image.crop);
+  }
   drawImageBorder(ctx, image, frame);
   if (image.revision) {
     ctx.strokeStyle = image.revision.kind === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
@@ -1439,6 +1447,11 @@ function sanitizeCanvasFilter(filter: string | undefined): string | null {
   return filter.length <= 512 && allowed.test(filter) ? filter.trim() : null;
 }
 
+function traceImageEllipse(ctx: CanvasRenderingContext2D, frame: GeoRect): void {
+  ctx.beginPath();
+  ctx.ellipse(frame.x + frame.w / 2, frame.y + frame.h / 2, frame.w / 2, frame.h / 2, 0, 0, 2 * Math.PI);
+}
+
 function drawImageBorder(
   ctx: CanvasRenderingContext2D,
   image: ImagePrimitive,
@@ -1450,7 +1463,12 @@ function drawImageBorder(
   ctx.strokeStyle = border.color ?? '#000000';
   ctx.lineWidth = width;
   ctx.setLineDash(border.dash ?? shapeDashPattern(border.style, width));
-  ctx.strokeRect(frame.x, frame.y, frame.w, frame.h);
+  if (image.shapeType === 'ellipse') {
+    traceImageEllipse(ctx, frame);
+    ctx.stroke();
+  } else {
+    ctx.strokeRect(frame.x, frame.y, frame.w, frame.h);
+  }
 }
 
 function clipTextPaintToSlot(ctx: CanvasRenderingContext2D, clip: DisplayPaintClip): void {

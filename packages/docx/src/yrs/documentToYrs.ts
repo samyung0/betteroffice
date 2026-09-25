@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the complete load projection is intentionally co-located */
 
+import { isRawXml } from '../types/content/rawXml';
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
@@ -16,6 +17,7 @@ import type {
   InlineSdt,
   MathEquation,
   Paragraph,
+  ParagraphFormatting,
   ParagraphContent,
   Run,
   RunContent,
@@ -33,7 +35,10 @@ import type {
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
+import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
+import { noteYrsStoriesDirty } from './yrsToDocument';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -91,9 +96,11 @@ interface StoryOptions {
   appendBodyTail: boolean;
   seedComments: boolean;
   extraRunFormatting?: TextFormatting;
+  tableParagraphFormatting?: ParagraphFormatting;
 }
 
 interface ProjectedCell {
+  paragraphFormatting?: ParagraphFormatting;
   attrs: Attrs;
   content: BlockContent[];
   extraRunFormatting?: TextFormatting;
@@ -113,6 +120,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -234,6 +247,9 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
   if (formatting.outline) add('textOutline');
   if (formatting.hidden) add('hidden');
   if (formatting.rtl) add('rtl');
+  // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+  // becomes a mark, mirroring how the layout bridge reads it.
+  if (formatting.snapToGrid === false) marks.push({ name: 'snapToGrid', attrs: {} });
   if (formatting.effect && formatting.effect !== 'none') {
     add('textEffect', { effect: formatting.effect });
   }
@@ -250,6 +266,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
     if (mark.name === 'comment' || mark.name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(mark.name)) {
       attrs[mark.name] = true;
+    } else if (mark.name === 'snapToGrid') {
+      attrs.snapToGrid = false;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
@@ -314,9 +332,20 @@ function runMarks(
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
-  return formattingToMarks(
+  const marks = formattingToMarks(
     mergeTextFormatting(mergeTextFormatting(styleFormatting, runStyleFormatting), run.formatting)
   );
+  const styleId = run.formatting?.styleId;
+  const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
+  if ([styleId, styleName].some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''))) {
+    for (const [property, name] of [['color', 'textColor'], ['underline', 'underline']] as const) {
+      if (run.formatting?.[property] === undefined && runStyleFormatting?.[property] !== undefined) {
+        const mark = marks.find((mark) => mark.name === name);
+        if (mark) mark.attrs.inheritedHyperlink = true;
+      }
+    }
+  }
+  return marks;
 }
 
 function imagePayload(image: Image): Attrs {
@@ -386,6 +415,7 @@ function imagePayload(image: Image): Attrs {
     distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
     position: image.position
       ? {
+          relativeHeight: image.position.relativeHeight,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,
@@ -411,6 +441,7 @@ function imagePayload(image: Image): Attrs {
     cropRight: image.crop?.right ?? null,
     cropBottom: image.crop?.bottom ?? null,
     cropLeft: image.crop?.left ?? null,
+    shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
     effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
     effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
@@ -493,6 +524,44 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
   };
 }
 
+function fieldToUnits(
+  value: SimpleField | ComplexField,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  projectionId: number
+): InlineUnit[] {
+  const result = value.structuredResult?.inline ?? [];
+  const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
+  const projectedChildren = [
+    ...code.map((child, index) => ({ child, index: -index - 1 })),
+    ...result.map((child, index) => ({ child, index })),
+  ];
+  if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+    const field = fieldPayload(value, styleFormatting);
+    return [embedUnit('field', field.payload, field.marks)];
+  }
+  const units: InlineUnit[] = [];
+  const children: Attrs[] = [];
+  projectedChildren.forEach(({ child, index }) => {
+    if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+    const projected = child.type === 'hyperlink'
+      ? hyperlinkToUnits(child, styleFormatting, styleResolver)
+      : [embedUnit('field', nested!.payload, nested!.marks)];
+    children.push({ index, items: projected.map((unit) => unit.kind === 'text'
+      ? { kind: 'text', text: unit.text, attributes: unit.attrs }
+      : { kind: 'embed', embedKind: unit.embedKind, payload: unit.payload, attributes: unit.attrs }) });
+    for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
+    units.push(...projected);
+  });
+  const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
+  const field = fieldPayload(visible, styleFormatting);
+  field.payload.fieldData = JSON.stringify(value);
+  field.payload.resultProjection = { id: projectionId, children };
+  units.push(embedUnit('field', field.payload, field.marks));
+  return units;
+}
+
 function noteRefUnit(
   id: number,
   noteType: 'footnote' | 'endnote',
@@ -565,6 +634,8 @@ function runContentToUnits(
       ];
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
+    case 'horizontalRule':
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
@@ -683,11 +754,7 @@ function sdtPayload(
       }
       return;
     }
-    content.push({
-      kind: unit.embedKind,
-      payload: unit.payload,
-      attrs: unit.attrs,
-    });
+    content.push({ kind: unit.embedKind, payload: unit.payload, attrs: unit.attrs });
   };
 
   for (const child of sdt.content) {
@@ -735,6 +802,44 @@ function noteRefMarkTypes(run: Run): string[] {
   return marks;
 }
 
+function unitsText(units: readonly InlineUnit[]): string {
+  return units
+    .map((unit) => {
+      if (unit.kind === 'text') return unit.text;
+      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
+      return String(id ?? '');
+    })
+    .join('');
+}
+
+/**
+ * `w:br w:type="page"|"column"`, which the story carries as a block embed
+ * beside the paragraph instead of as an inline unit.
+ */
+function flowBreakType(content: RunContent): 'page' | 'column' | null {
+  if (content.type !== 'break') return null;
+  return content.breakType === 'page' || content.breakType === 'column' ? content.breakType : null;
+}
+
+/**
+ * Where a run's flow breaks sit in its text. They occupy no story unit, so
+ * the save projection rebuilds them from these offsets.
+ */
+function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'column' }> {
+  if (!run.content.some((content) => flowBreakType(content) !== null)) return [];
+  const breaks: Array<{ offset: number; type: 'page' | 'column' }> = [];
+  let offset = 0;
+  for (const content of run.content) {
+    const type = flowBreakType(content);
+    if (type !== null) {
+      breaks.push({ offset, type });
+      continue;
+    }
+    offset += unitsText(runContentToUnits(content, [])).length;
+  }
+  return breaks;
+}
+
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
@@ -745,17 +850,12 @@ function runBoundary(
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
   const marks = noteRefMarkTypes(run);
-  const text = units
-    .map((unit) => {
-      if (unit.kind === 'text') return unit.text;
-      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
-      return String(id ?? '');
-    })
-    .join('');
+  const breaks = flowBreakOffsets(run);
   const key = keys[0];
   return {
-    text,
+    text: unitsText(units),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
+    ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
@@ -766,10 +866,16 @@ function paragraphAttrs(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
   units: readonly InlineUnit[],
-  runBoundaries: Attrs[] | undefined
+  runBoundaries: Attrs[] | undefined,
+  tableParagraphFormatting?: ParagraphFormatting
 ): Attrs {
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
+  const directFirst = formatting?.indentFirstLine === 0 ? undefined : formatting?.indentFirstLine;
+  const firstLine = directFirst ?? paragraph.listRendering?.indentFirstLine ?? formatting?.indentFirstLine;
+  const hanging = directFirst === undefined && paragraph.listRendering?.indentFirstLine !== undefined
+    ? paragraph.listRendering.hangingIndent
+    : formatting?.hangingIndent ?? paragraph.listRendering?.hangingIndent;
   const attrs: Attrs = {
     paraId: paragraph.paraId ?? null,
     textId: paragraph.textId ?? null,
@@ -782,6 +888,9 @@ function paragraphAttrs(
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
+    listMarkerBold: paragraph.listRendering?.markerBold ?? null,
+    listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,
+    listMarkerColor: paragraph.listRendering?.markerColor ?? null,
     listMarkerSuffix: paragraph.listRendering?.markerSuffix || null,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
@@ -790,21 +899,35 @@ function paragraphAttrs(
   };
 
   if (styleResolver) {
-    const resolved = styleResolver.resolveParagraphStyle(styleId);
+    const resolved = styleResolver.resolveParagraphStyle(styleId, tableParagraphFormatting);
     const stylePpr = resolved.paragraphFormatting;
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? stylePpr?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? stylePpr?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? stylePpr?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? stylePpr?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? stylePpr?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
-    attrs.indentLeft = formatting?.indentLeft ?? stylePpr?.indentLeft ?? null;
+    attrs.indentLeft =
+      formatting?.indentLeft ??
+      paragraph.listRendering?.indentLeft ??
+      stylePpr?.indentLeft ??
+      null;
     attrs.indentRight = formatting?.indentRight ?? stylePpr?.indentRight ?? null;
     const numberingRemoved =
       formatting?.numPr?.numId === 0 && stylePpr?.numPr && stylePpr.numPr.numId !== 0;
     const styleFirstLine = numberingRemoved ? undefined : stylePpr;
-    attrs.indentFirstLine = formatting?.indentFirstLine ?? styleFirstLine?.indentFirstLine ?? null;
-    attrs.hangingIndent = formatting?.hangingIndent ?? styleFirstLine?.hangingIndent ?? false;
+    attrs.indentFirstLine =
+      firstLine ??
+      styleFirstLine?.indentFirstLine ??
+      null;
+    attrs.hangingIndent =
+      hanging ??
+      styleFirstLine?.hangingIndent ??
+      false;
     attrs.borders = formatting?.borders ?? stylePpr?.borders ?? null;
     attrs.shading = formatting?.shading ?? stylePpr?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? stylePpr?.tabs ?? null;
@@ -813,6 +936,9 @@ function paragraphAttrs(
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? stylePpr?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? stylePpr?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -833,13 +959,19 @@ function paragraphAttrs(
     attrs.alignment = formatting?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? null;
     attrs.spaceAfter = formatting?.spaceAfter ?? null;
+    attrs.spaceBeforeLines = formatting?.spaceBeforeLines ?? null;
+    attrs.spaceAfterLines = formatting?.spaceAfterLines ?? null;
+    attrs.beforeAutospacing = formatting?.beforeAutospacing ?? null;
+    attrs.afterAutospacing = formatting?.afterAutospacing ?? null;
     attrs.lineSpacing = formatting?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
-    attrs.indentLeft = formatting?.indentLeft ?? null;
+    attrs.indentLeft = formatting?.indentLeft ?? paragraph.listRendering?.indentLeft ?? null;
     attrs.indentRight = formatting?.indentRight ?? null;
-    attrs.indentFirstLine = formatting?.indentFirstLine ?? null;
-    attrs.hangingIndent = formatting?.hangingIndent ?? false;
+    attrs.indentFirstLine =
+      firstLine ?? null;
+    attrs.hangingIndent =
+      hanging ?? false;
     attrs.borders = formatting?.borders ?? null;
     attrs.shading = formatting?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? null;
@@ -847,6 +979,9 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
@@ -866,7 +1001,7 @@ function paragraphAttrs(
     }
   }
   if (paragraph.renderedPageBreakBefore) attrs.renderedPageBreakBefore = true;
-  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBefore = true;
+  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBeforeRun = true;
   if (paragraph.pPrIns) {
     attrs.pPrIns = {
       revisionId: paragraph.pPrIns.id,
@@ -921,14 +1056,15 @@ function unitsForParagraphContent(content: ParagraphContent): number {
 function paragraphUnits(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
-  extraRunFormatting?: TextFormatting
+  extraRunFormatting?: TextFormatting,
+  tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; ppr: Attrs } {
   const units: InlineUnit[] = [];
   const activeComments = new Set<number>();
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
-  for (const content of paragraph.content) {
+  for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
     const commentId = activeComments.values().next().value as number | undefined;
     if (content.type === 'commentRangeStart') activeComments.add(content.id);
@@ -943,8 +1079,7 @@ function paragraphUnits(
       units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      const field = fieldPayload(content, styleFormatting);
-      units.push(embedUnit('field', field.payload, field.marks));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
@@ -961,12 +1096,12 @@ function paragraphUnits(
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
-    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
+    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
       boundaries = undefined;
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
-  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries);
+  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
   return { units, ppr: paraAttrsToPpr(attrs) };
 }
 
@@ -1030,11 +1165,7 @@ function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
     const cells = row.cells.map((cell) => {
       const current = column;
       column += cell.formatting?.gridSpan ?? 1;
-      return {
-        column: current,
-        vMerge: cell.formatting?.vMerge,
-        key: `${rowIndex}-${current}`,
-      };
+      return { column: current, vMerge: cell.formatting?.vMerge, key: `${rowIndex}-${current}` };
     });
     const empty =
       cells.length > 0 &&
@@ -1181,7 +1312,9 @@ function projectRow(
   rowSpans: Map<string, RowSpanInfo>,
   tableBorders: TableBorders | undefined,
   defaultMargins: { top?: number; bottom?: number; left?: number; right?: number } | undefined,
-  theme: Theme | null
+  theme: Theme | null,
+  tableStyle: Style | undefined,
+  styleColumns: number
 ): ProjectedRow {
   const attrs: Attrs = {
     height: row.formatting?.height?.value ?? null,
@@ -1228,8 +1361,16 @@ function projectRow(
     }
     column += colspan;
     if (rowSpan?.skip) return;
-    cells.push(
-      projectCell(cell, {
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        startColumn,
+        column,
+        styleColumns
+      ),
+      ...projectCell(cell, {
         isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
         rowspan: rowSpan?.rowSpan ?? 1,
         gridWidth,
@@ -1241,12 +1382,20 @@ function projectRow(
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
-      })
-    );
+      }),
+    });
   });
   if (cells.length === 0) {
-    cells.push(
-      projectCell(
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        0,
+        totalColumns,
+        styleColumns
+      ),
+      ...projectCell(
         {
           type: 'tableCell',
           formatting: totalColumns > 1 ? { gridSpan: totalColumns } : undefined,
@@ -1265,8 +1414,8 @@ function projectRow(
           theme,
           tableBidi: Boolean(table.formatting?.bidi),
         }
-      )
-    );
+      ),
+    });
   }
   return { attrs: tableRowAttrsToTrPr(attrs), cells };
 }
@@ -1274,7 +1423,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1324,14 +1474,28 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
   const rowSpans = calculateRowSpans(table);
+  const styleColumns = tableColumnCount(table);
   return {
     attrs,
     rows: table.rows.map((row, rowIndex) =>
-      projectRow(row, table, rowIndex, rowSpans, borders, defaultMargins, theme)
+      projectRow(
+        row,
+        table,
+        rowIndex,
+        rowSpans,
+        borders,
+        defaultMargins,
+        theme,
+        tableStyle ?? defaultStyle,
+        styleColumns
+      )
     ),
   };
 }
@@ -1355,6 +1519,71 @@ function addCommentCoverage(plan: StoryPlan): void {
   }
 }
 
+interface BlockCursor {
+  paragraph: number;
+  table: number;
+  sdt: number;
+}
+
+/** Hands each block of a story the identity `visitStory` seeds it with. */
+function takeBlockId(cursor: BlockCursor, storyId: string, block: BlockContent): string | null {
+  if (isRawXml(block)) return null;
+  if (block.type === 'paragraph') {
+    const index = cursor.paragraph++;
+    return block.paraId || `${storyId}:p${index}`;
+  }
+  if (block.type === 'table') return `${storyId}:t${cursor.table++}`;
+  return blockSdtStoryId(storyId, cursor.sdt++);
+}
+
+function numericFieldInstruction(instruction: string): boolean {
+  return /^\d+$/.test(instruction.trim());
+}
+
+/** How many story blocks a suppressed field's cached result duplicates. */
+function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
+  const blocks = field.structuredResult?.blocks ?? [];
+  const last = blocks[blocks.length - 1];
+  if (!last || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  return blocks.length;
+}
+
+/** Binds each suppressed field to the story blocks its cached result duplicates. */
+function bindFieldResultBlocks(
+  units: readonly InlineUnit[],
+  storyId: string,
+  blocks: readonly BlockContent[],
+  owner: number,
+  afterOwner: BlockCursor,
+  tableIds: Map<number, string>
+): void {
+  for (const unit of units) {
+    if (unit.kind !== 'embed' || unit.embedKind !== 'field') continue;
+    const instruction = unit.payload.instruction;
+    if (typeof instruction !== 'string' || !numericFieldInstruction(instruction)) continue;
+    const data = unit.payload.fieldData;
+    if (typeof data !== 'string') continue;
+    let parsed: SimpleField | ComplexField;
+    try {
+      parsed = JSON.parse(data) as SimpleField | ComplexField;
+    } catch {
+      continue;
+    }
+    const count = cachedResultBlockCount(parsed);
+    if (count === null || owner + 1 + count > blocks.length) continue;
+    const cursor = { ...afterOwner };
+    const ids: string[] = [];
+    for (let offset = 0; offset < count; offset += 1) {
+      const block = blocks[owner + 1 + offset]!;
+      const id = takeBlockId(cursor, storyId, block);
+      if (id === null) continue;
+      if (block.type === 'table') tableIds.set(owner + 1 + offset, id);
+      ids.push(id);
+    }
+    if (ids.length > 0) unit.payload.fieldResultBlocks = ids;
+  }
+}
+
 function visitStory(
   context: LoweringContext,
   storyId: string,
@@ -1369,22 +1598,32 @@ function visitStory(
   context.plans.push(plan);
   const blocks =
     sourceBlocks.length > 0 ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
-  let tableIndex = 0;
-  let sdtIndex = 0;
-  let paragraphIndex = 0;
+  const cursor: BlockCursor = { paragraph: 0, table: 0, sdt: 0 };
+  const resultTableIds = new Map<number, string>();
   let lastKind: 'paragraph' | 'table' | 'blockSdt' | null = null;
 
-  for (const block of blocks) {
+  for (const [blockIndex, block] of blocks.entries()) {
+    if (isRawXml(block)) continue;
+    const currentTable = cursor.table;
+    const blockId = takeBlockId(cursor, storyId, block);
+    if (blockId === null) continue;
     if (block.type === 'paragraph') {
-      const paragraph = paragraphUnits(block, context.styleResolver, options.extraRunFormatting);
-      plan.units.push(...paragraph.units);
-      plan.units.push(
-        embedUnit('pilcrow', {
-          ...paragraph.ppr,
-          paraId: block.paraId || `${storyId}:p${paragraphIndex}`,
-        })
+      const paragraph = paragraphUnits(
+        block,
+        context.styleResolver,
+        options.extraRunFormatting,
+        options.tableParagraphFormatting
       );
-      paragraphIndex += 1;
+      bindFieldResultBlocks(
+        paragraph.units,
+        storyId,
+        blocks,
+        blockIndex,
+        cursor,
+        resultTableIds
+      );
+      plan.units.push(...paragraph.units);
+      plan.units.push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
       if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
         plan.units.push(embedUnit('pageBreak', {}));
       }
@@ -1392,8 +1631,12 @@ function visitStory(
       continue;
     }
     if (block.type === 'table') {
-      const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1401,11 +1644,13 @@ function visitStory(
           story: tableCellStoryId(storyId, currentTable, rowIndex, cellIndex),
         })),
       }));
+      const resultTableId = resultTableIds.get(blockIndex);
       plan.units.push(
         embedUnit('table', {
           tblPr: tableAttrsToTblPr(table.attrs),
           grid: tableAttrsToGrid(table.attrs),
           rows,
+          ...(resultTableId === undefined ? {} : { blockId: resultTableId }),
         })
       );
       table.rows.forEach((row, rowIndex) => {
@@ -1419,6 +1664,7 @@ function visitStory(
               appendBodyTail: false,
               seedComments: false,
               extraRunFormatting: cell.extraRunFormatting,
+              tableParagraphFormatting: cell.paragraphFormatting,
             }
           );
         });
@@ -1426,8 +1672,7 @@ function visitStory(
       lastKind = 'table';
       continue;
     }
-    const currentSdt = sdtIndex++;
-    const childStory = blockSdtStoryId(storyId, currentSdt);
+    const childStory = blockId;
     plan.units.push(
       embedUnit('blockSdt', {
         ...blockSdtAttrs(block.properties),
@@ -1438,6 +1683,7 @@ function visitStory(
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
       seedComments: false,
+      tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';
   }
@@ -1446,7 +1692,7 @@ function visitStory(
     plan.units.push(
       embedUnit('pilcrow', {
         hangingIndent: false,
-        paraId: `${storyId}:p${paragraphIndex}`,
+        paraId: `${storyId}:p${cursor.paragraph}`,
       })
     );
   }
@@ -1513,10 +1759,12 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(session: YrsSession, document: Document): void {
+  noteYrsStoriesDirty(session, 'all');
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,

@@ -220,6 +220,10 @@ pub struct RunFormatting {
     pub hidden: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtl: Option<bool>,
+    /// Run-level `w:snapToGrid` (§17.3.2). Absent is the OOXML default (on);
+    /// `Some(false)` disables grid snapping for lines containing this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_effect: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,6 +317,8 @@ pub struct ImageRun {
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,6 +373,8 @@ pub struct ImageRun {
     pub decorative: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hyperlink: Option<HyperlinkInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_shape: Option<Box<ShapeBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_insertion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -466,6 +474,10 @@ impl Run {
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<f64>,
@@ -546,6 +558,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horizontal_rules: Vec<HorizontalRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -563,8 +577,13 @@ pub struct ParagraphAttrs {
     pub widow_control: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_break_before: Option<bool>,
+    /// Opens with a hard `w:br w:type="page"` run rather than `w:pageBreakBefore`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_break_before_run: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contextual_spacing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -588,6 +607,12 @@ pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_suffix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<String>,
@@ -599,10 +624,57 @@ pub struct ParagraphAttrs {
     pub default_font_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_empty_paragraph_height: Option<bool>,
+    /// Effective paragraph-level `w:snapToGrid` (§17.3.1) resolved from the
+    /// direct pPr child AND the paragraph-mark rPr (absent is the OOXML
+    /// default, on). `Some(false)` opts the whole paragraph out of
+    /// document-grid snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    /// Effective `w:autoSpaceDE` (§17.3.1.11) — the space Word inserts
+    /// between East Asian and Latin text. Absent is the OOXML default (on);
+    /// `Some(false)` opts the paragraph out.
+    #[serde(rename = "autoSpaceDE", skip_serializing_if = "Option::is_none")]
+    pub auto_space_de: Option<bool>,
+    /// Effective `w:autoSpaceDN` (§17.3.1.12) — the same between East Asian
+    /// text and numbers.
+    #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
+    pub auto_space_dn: Option<bool>,
+    /// Section grid pitch in px (`w:docGrid w:linePitch`), set by the
+    /// section-grid resolve pass for the paragraph's section and already
+    /// gated to an activating grid type. `None` disables snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_del: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalRule {
+    pub width: Option<f64>,
+    pub width_percent: Option<f64>,
+    pub height: f64,
+    pub alignment: String,
+    pub no_shade: bool,
+    pub color: String,
+    pub pm_start: f64,
+    pub pm_end: f64,
+}
+
+impl HorizontalRule {
+    pub(crate) fn rendered_width(&self, content_width: f64) -> f64 {
+        self.width_percent
+            .map(|percent| content_width * percent / 100.0)
+            .or(self.width)
+            .unwrap_or(content_width)
+            .clamp(0.0, content_width.max(0.0))
+    }
+
+    pub(crate) fn advance_width(&self, content_width: f64) -> f64 {
+        self.rendered_width(content_width) + 2.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -695,6 +767,8 @@ pub struct PreferredWidth {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_direction: Option<String>,
     pub id: BlockId,
     pub blocks: Vec<LayoutBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -756,6 +830,16 @@ pub struct TableRow {
     pub tracked_del: Option<Value>,
 }
 
+impl TableRow {
+    /// Word's `w:trHeight w:hRule="exact"` fixed-height row: measurement treats
+    /// it as a verbatim block and pagination must not split it mid-row. The
+    /// `height.is_some()` conjunct mirrors measurement — an `exact` rule with
+    /// no height value carries no fixed size and stays splittable.
+    pub fn is_exact_height(&self) -> bool {
+        self.height_rule.as_deref() == Some("exact") && self.height.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatingTablePosition {
@@ -814,6 +898,10 @@ pub struct TableBlock {
     pub indent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub floating: Option<FloatingTablePosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_margin_left: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -858,6 +946,8 @@ pub struct ImageBlock {
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -922,6 +1012,8 @@ pub struct ShapeBlock {
     pub effects: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_body_properties: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_distances: Option<BoxEdges>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImageRunPosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1136,6 +1228,40 @@ impl PartialEq for LayoutBlock {
     }
 }
 
+impl LayoutBlock {
+    /// Identity used for delta bookkeeping; every block kind that can place
+    /// a fragment has one.
+    pub fn block_id(&self) -> Option<&BlockId> {
+        match self {
+            Self::Paragraph(block) => Some(&block.id),
+            Self::Table(block) => Some(&block.id),
+            Self::Image(block) => Some(&block.id),
+            Self::Shape(block) => Some(&block.id),
+            Self::Chart(block) => Some(&block.id),
+            Self::TextBox(block) => Some(&block.id),
+            Self::SectionBreak(block) => Some(&block.id),
+            Self::PageBreak(block) => Some(&block.id),
+            Self::ColumnBreak(block) => Some(&block.id),
+            Self::Unsupported => None,
+        }
+    }
+
+    /// Document start offset, regardless of block flavor.
+    pub fn pm_start(&self) -> Option<f64> {
+        match self {
+            Self::Paragraph(block) => block.pm_start,
+            Self::Table(block) => block.pm_start,
+            Self::Image(block) => block.pm_start,
+            Self::Shape(block) => block.pm_start,
+            Self::Chart(block) => block.pm_start,
+            Self::TextBox(block) => block.pm_start,
+            Self::PageBreak(block) => block.pm_start,
+            Self::ColumnBreak(block) => block.pm_start,
+            Self::SectionBreak(_) | Self::Unsupported => None,
+        }
+    }
+}
+
 impl PartialEq for Run {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1192,6 +1318,7 @@ impl PartialEq for ImageRun {
             width: _,
             height: _,
             alt: _,
+            shape_type: _,
             transform: _,
             position: _,
             wrap_type: _,
@@ -1219,6 +1346,7 @@ impl PartialEq for ImageRun {
             outline: _,
             decorative: _,
             hyperlink: _,
+            inline_shape: _,
             is_insertion: _,
             is_deletion: _,
             change_author: _,
@@ -1231,6 +1359,7 @@ impl PartialEq for ImageRun {
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
+            && self.shape_type == other.shape_type
             && self.transform == other.transform
             && self.position == other.position
             && self.wrap_type == other.wrap_type
@@ -1258,6 +1387,7 @@ impl PartialEq for ImageRun {
             && self.outline == other.outline
             && self.decorative == other.decorative
             && self.hyperlink == other.hyperlink
+            && self.inline_shape == other.inline_shape
             && self.is_insertion == other.is_insertion
             && self.is_deletion == other.is_deletion
             && self.change_author == other.change_author
@@ -1333,6 +1463,8 @@ impl PartialEq for TableBlock {
             bidi: _,
             indent: _,
             floating: _,
+            compatibility_mode: _,
+            cell_margin_left: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1352,6 +1484,8 @@ impl PartialEq for TableBlock {
             && self.bidi == other.bidi
             && self.indent == other.indent
             && self.floating == other.floating
+            && self.compatibility_mode == other.compatibility_mode
+            && self.cell_margin_left == other.cell_margin_left
     }
 }
 
@@ -1364,6 +1498,7 @@ impl PartialEq for ImageBlock {
             width: _,
             height: _,
             alt: _,
+            shape_type: _,
             transform: _,
             opacity: _,
             rotation_deg: _,
@@ -1386,6 +1521,7 @@ impl PartialEq for ImageBlock {
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
+            && self.shape_type == other.shape_type
             && self.transform == other.transform
             && self.opacity == other.opacity
             && self.rotation_deg == other.rotation_deg
@@ -1422,6 +1558,7 @@ impl PartialEq for ShapeBlock {
             scene: _,
             effects: _,
             text_body_properties: _,
+            wrap_distances: _,
             position: _,
             wrap_type: _,
             wrap_text: _,
@@ -1452,6 +1589,7 @@ impl PartialEq for ShapeBlock {
             && self.scene == other.scene
             && self.effects == other.effects
             && self.text_body_properties == other.text_body_properties
+            && self.wrap_distances == other.wrap_distances
             && self.position == other.position
             && self.wrap_type == other.wrap_type
             && self.wrap_text == other.wrap_text
@@ -1792,8 +1930,17 @@ pub struct LayoutOptions {
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
     pub body_break_type: Option<SectionBreakType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageRestart {
+    pub start: u64,
+    pub align_parity: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1912,6 +2059,8 @@ pub struct ImageFragment {
 #[serde(rename_all = "camelCase")]
 pub struct ShapeFragment {
     pub block_id: BlockId,
+    #[serde(skip)]
+    pub wrap_offset_x: Option<f64>,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -2012,6 +2161,51 @@ impl Fragment {
             }
         }
     }
+
+    /// `(y, height, lead)` for a flow-placed fragment, `None` for a float.
+    /// `lead` approximates the first row or line — the unit Word relocates
+    /// whole — as the fragment's mean; per-row heights are not carried here.
+    pub fn flow_box(&self) -> Option<(f64, f64, f64)> {
+        let share = |height: f64, units: usize| height / units.max(1) as f64;
+        match self {
+            Fragment::Paragraph(f) => Some((
+                f.y,
+                f.height,
+                share(f.height, f.to_line.saturating_sub(f.from_line)),
+            )),
+            Fragment::Table(f) => (f.is_floating != Some(true)).then(|| {
+                (
+                    f.y,
+                    f.height,
+                    share(f.height, f.row_end.saturating_sub(f.row_start)),
+                )
+            }),
+            Fragment::Image(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::Shape(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::Chart(f) => {
+                (f.is_anchored != Some(true)).then_some((f.y, f.height, f.height))
+            }
+            Fragment::TextBox(f) => {
+                (f.is_floating != Some(true)).then_some((f.y, f.height, f.height))
+            }
+        }
+    }
+
+    /// Moves the fragment down the page.
+    pub fn shift_y(&mut self, delta: f64) {
+        match self {
+            Fragment::Paragraph(f) => f.y += delta,
+            Fragment::Table(f) => f.y += delta,
+            Fragment::Image(f) => f.y += delta,
+            Fragment::Shape(f) => f.y += delta,
+            Fragment::Chart(f) => f.y += delta,
+            Fragment::TextBox(f) => f.y += delta,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2079,6 +2273,9 @@ pub struct Page {
     pub vertical_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_areas: Option<Vec<NoteAreaContract>>,
+    /// Automatic parity filler: suppress header/footer bands, keep the sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parity_filler: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]

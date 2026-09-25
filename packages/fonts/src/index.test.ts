@@ -33,12 +33,30 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Liberation Sans');
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
     expect(resolveLastResortFace('Unknown', true, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
   test('script fallbacks prefer the sans face of the bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
     expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf');
+  });
+
+  test('known heavy family names select the bold face and preserve italics', () => {
+    for (const family of ['Arial Black', ' ARIAL-BLACK ', 'Arial Heavy', 'Arial ExtraBold']) {
+      expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf');
+      expect(resolveLastResortFace(family, false, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    }
+    expect(resolveLastResortFace('Calibri Heavy', false, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Calibri Heavy', false, true).file).toBe('Carlito-BoldItalic.ttf');
+  });
+
+  test('unknown heavy family names keep the normal fallback weight', () => {
+    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('LiberationSans-Regular.ttf');
+    expect(resolveLastResortFace('Archivo Black', false, true).file).toBe('LiberationSans-Italic.ttf');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('LiberationSans-Bold.ttf');
   });
 });
 

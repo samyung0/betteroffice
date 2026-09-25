@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import { noteYrsStoriesDirty } from './yrsToDocument';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
   CollaborationCursor,
@@ -27,6 +28,7 @@ import type {
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
@@ -157,6 +159,22 @@ export interface YrsParagraph {
   properties: Record<string, unknown>;
 }
 
+export interface YrsTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; unlimited by default. */
+  limit?: number;
+}
+
+/** Paragraph-local UTF-16 offsets. */
+export interface YrsTextMatch {
+  story: string;
+  paraId: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 /** One direct numbering reference (`w:numPr`) on a paragraph. */
 export interface YrsNumberingProperties {
   numId?: number;
@@ -206,6 +224,9 @@ export interface YrsParagraphAttrs {
   listMarkerHidden?: boolean | null;
   listMarkerFontFamily?: string | null;
   listMarkerFontSize?: number | null;
+  listMarkerBold?: boolean | null;
+  listMarkerItalic?: boolean | null;
+  listMarkerColor?: import('../types/colors').ColorValue | null;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing' | null;
   listLevelNumFmts?: readonly string[] | null;
   listAbstractNumId?: number | null;
@@ -377,6 +398,11 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  tocStyleIds?: string[];
+  paragraphSpacingLinePx?: number;
+  /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
+  docGridPitchPx?: number;
+  defaultParagraphStyleId?: string;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   /** The document default tab stop in twips. */
@@ -385,6 +411,8 @@ export interface YrsRenderEnv {
   pageContentHeight?: number | null;
   /** yrs revision/paragraph id → dense numeric layout id (list markers, revisions). */
   numericIds?: Record<string, number>;
+  /** Include hidden text in visible layout without changing the document. */
+  showHiddenText?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */
@@ -461,6 +489,17 @@ export interface YrsEngineApplyProfile {
  *
  * @internal
  */
+/**
+ * One resident font-store registration, in the order the main thread made it:
+ * raw bytes, or a measurement view of an earlier id. The worker replays the
+ * list to reproduce the same dense ids, so the order and the mix both matter.
+ *
+ * @internal
+ */
+export type YrsResidentFontRegistration =
+  | Uint8Array
+  | { substituteOf: number; family: string };
+
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
   /** Full document state, or a state-vector diff when the caller supplied
@@ -469,7 +508,7 @@ export interface YrsResidentWorkerSnapshot {
   selection: YrsSelection | null;
   /** Empty when the caller declared the worker's fonts current
    * (`knownFontsRevision` matches); the worker then keeps its registrations. */
-  fonts: Uint8Array[];
+  fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
@@ -644,6 +683,9 @@ export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
+/** Undo grouping for tracked local transactions. */
+export type YrsUndoCaptureMode = 'auto' | 'manual';
+
 /**
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
@@ -656,6 +698,12 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Register raw sfnt bytes in the session's measurement/display font store. */
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Register a measurement view of `base` carrying the vertical metrics Word
+   * measures `family` with, for a face the host substituted; `base` when the
+   * engine knows no metrics for the family.
+   */
+  registerSubstituteFont(base: number, family: string): number;
   /** Clear the session's registered measurement/display fonts. */
   clearFonts(): void;
   /** Measure one paragraph through the session's resident text engine. */
@@ -666,6 +714,11 @@ export interface YrsSession extends CollaborationReplica {
   layoutFontRequirementsJson(input: string): string;
   /** Paginate and compose section/page regions in the resident engine. */
   layoutDocumentWithRegionsJson(input: string): string;
+  /** Same pass, but the reply omits the measured arena (fetch it on demand
+   * through {@link YrsSession.retainedKernelInputsJson}). */
+  layoutDocumentWithRegionsRetainedJson(input: string): string;
+  /** Retained `{ measured, options }` for the main-thread display fallback. */
+  retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -697,7 +750,11 @@ export interface YrsSession extends CollaborationReplica {
   residentWorkerProbe(): { layoutRevision: number } | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
-  displayVerticalMoveJson(position: number, direction: 'up' | 'down', goalX: number): string;
+  displayVerticalMoveJson(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -729,12 +786,14 @@ export interface YrsSession extends CollaborationReplica {
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
-  applyLocalUpdate(update: Uint8Array, story: string): void;
+  applyLocalUpdate(update: Uint8Array): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
    */
-  onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
+  onUpdate(
+    listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  ): () => void;
 
   // -- local input state --
 
@@ -754,20 +813,21 @@ export interface YrsSession extends CollaborationReplica {
   setCellSelection(range: YrsTableRange): void;
   /** Resolve the current sticky cell selection, or null before initialization. */
   cellSelection(): YrsTableRange | null;
-  /** Lazily begin local-origin undo capture after import/seeding has completed. */
-  beginUndoCapture(story: string, includeTableStories?: boolean): void;
-  /** Story owned by the current undo/redo scope, or null before the first local edit. */
-  historyStory(): string | null;
-  /** Coalesce the stack entries added since `startDepth` into one host undo intent. */
-  markUndoGroup(startDepth: number): void;
+  /** Begin local-origin undo capture once import/seeding has completed. */
+  beginUndoCapture(): void;
+  /** Separates subsequent local edits from the current undo step; safe before capture starts. */
+  addUndoBoundary(): void;
+  /** Changes grouping policy, closing the current group while retaining history. */
+  setUndoCaptureMode(mode: YrsUndoCaptureMode): void;
+  /** Current grouping policy; defaults to auto. */
+  undoCaptureMode(): YrsUndoCaptureMode;
+  /** Stories changed by the latest undo or redo, sorted. */
+  historyStories(): string[];
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
   undo(): boolean;
   redo(): boolean;
   canUndo(): boolean;
   canRedo(): boolean;
-  /** Current local undo/redo stack sizes (zero before tracking starts). */
-  undoDepth(): number;
-  redoDepth(): number;
 
   /** Adds a story with one paragraph; the receipt carries its paraId. */
   createStory(
@@ -911,6 +971,8 @@ export interface YrsSession extends CollaborationReplica {
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];
+  /** Literal search in document order. */
+  searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
   /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
@@ -1015,12 +1077,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let nextListenerId = 0;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
-  let undoStory: string | null = null;
+  let undoTracked = false;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
-  const undoGroups = new Map<number, number>();
-  const redoGroups = new Map<number, number>();
-  const residentFonts: Uint8Array[] = [];
+  const residentFonts: YrsResidentFontRegistration[] = [];
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
   let residentLayoutInput: string | null = null;
@@ -1075,44 +1135,33 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         }
       : null;
 
-  const ensureUndo = (story: string): void => {
-    if (undoStory === story) return;
-    session.track_undo(story);
-    undoStory = story;
-  };
-
-  const ensureTableUndo = (story: string): void => {
-    const scope = `table:${story}`;
-    if (undoStory === scope) return;
-    session.track_table_undo(story);
-    undoStory = scope;
-  };
-
-  const storyForEmbedId = (embedId: string): string | null => {
-    const matches = (value: unknown): boolean =>
-      (typeof value === 'string' && value === embedId) ||
-      (typeof value === 'number' && Number.isFinite(value) && String(value) === embedId);
-    for (const story of session.story_ids()) {
-      const segments = JSON.parse(session.story_segments(story)) as YrsStorySegment[];
-      if (
-        segments.some(
-          (segment) =>
-            segment.kind === 'embed' &&
-            (matches(segment.payload.embedId) ||
-              matches(segment.payload.id) ||
-              matches(segment.payload.rId))
-        )
-      ) {
-        return story;
-      }
+  const ensureUndo = (targetStory?: string): void => {
+    if (!undoTracked) {
+      session.track_undo();
+      undoTracked = true;
     }
-    return null;
+    if (targetStory !== undefined) {
+      session.select_story(targetStory);
+      markDirty(targetStory);
+    }
   };
 
-  const ensureEmbedUndo = (embedId: string): void => {
-    const story = storyForEmbedId(embedId);
-    if (story) ensureUndo(story);
+  const markDirty = (stories: 'all' | string | Iterable<string>): void => {
+    noteYrsStoriesDirty(facade, stories);
   };
+
+  const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
+    markDirty(receipt.createdStoryIds);
+    markDirty(receipt.deletedStoryIds);
+    return receipt;
+  };
+
+  const selectionStory = (): 'all' | string =>
+    (
+      (cachedSelection !== undefined
+        ? cachedSelection
+        : (JSON.parse(session.selection()) as YrsSelection | null))?.head.story ?? 'all'
+    );
 
   const ensureObserver = () => {
     if (observing) return;
@@ -1136,13 +1185,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
     const source = bytes.slice();
+    markDirty('all');
     const json = mutate(() => session.open_docx(source, seedStories));
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;
   };
 
-  return {
+  const facade: YrsSession = {
     clientId,
 
     registerFont: (bytes) => {
@@ -1156,6 +1206,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       const id = session.register_measure_font(bytes);
       residentFonts.push(bytes.slice());
+      residentFontsRevision += 1;
+      return id;
+    },
+    registerSubstituteFont: (base, family) => {
+      const id = session.register_substitute_measure_font(base, family);
+      if (id === base) return id;
+      residentFonts.push({ substituteOf: base, family });
       residentFontsRevision += 1;
       return id;
     },
@@ -1186,31 +1243,46 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutRevision += 1;
       return output;
     },
+    layoutDocumentWithRegionsRetainedJson: (input) => {
+      const output = session.layout_document_with_regions_retained_json(input);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      return output;
+    },
+    retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (expectedLayoutRevision !== residentLayoutRevision) {
+        throw new Error(
+          `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
+        );
+      }
+      return session.retained_kernel_inputs_json();
+    },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
+      markDirty(selectionStory());
       return mutate(() => session.apply_input(text, expectedFrameEpoch));
     },
     applyDelete: (direction, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
+      markDirty(selectionStory());
       return mutate(() => session.apply_delete(direction, expectedFrameEpoch));
     },
     applyInputProfiled: (text, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
+      markDirty(selectionStory());
       const frame = mutate(() => session.apply_input_profiled(text, expectedFrameEpoch));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
     applyDeleteProfiled: (direction, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
+      markDirty(selectionStory());
       const frame = mutate(() => session.apply_delete_profiled(direction, expectedFrameEpoch));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
@@ -1232,7 +1304,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         clientId,
         state: state ?? session.encode_state(),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: fontsCurrent ? [] : residentFonts.map((bytes) => bytes.slice()),
+        fonts: fontsCurrent
+          ? []
+          : residentFonts.map((font) =>
+              font instanceof Uint8Array ? font.slice() : { ...font }
+            ),
         fontsRevision: residentFontsRevision,
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,
@@ -1258,7 +1334,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.display_range_rects_region_json(region, rId, from, to),
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
 
-    loadState: (update) => mutate(() => session.load(update)),
+    loadState: (update) => {
+      markDirty('all');
+      mutate(() => session.load(update));
+    },
     seedFromDocx: (bytes) => openDocx(bytes, true),
     openDocx,
     materializeDocx: () => {
@@ -1267,25 +1346,30 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (!source || json === undefined) return null;
       return decodeS9Envelope(json, docxSourceBuffer(source)).document;
     },
-    loadStories: (stories) =>
-      mutate(
+    loadStories: (stories) => {
+      markDirty(stories.map((seed) => seed.storyId));
+      return mutate(
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>
-      ),
+      );
+    },
     encodeState: () => session.encode_state(),
     encodeStateVector: () => session.encode_state_vector(),
     encodeStateAsUpdate: (remoteStateVector) =>
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
-    applyUpdate: (update) =>
-      mutate(
+    applyUpdate: (update) => {
+      markDirty('all');
+      return mutate(
         () =>
           JSON.parse(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
-      ),
-    applyLocalUpdate: (update, story) => {
-      ensureUndo(story);
+      );
+    },
+    applyLocalUpdate: (update) => {
+      ensureUndo();
+      markDirty('all');
       mutate(() => session.apply_local_update(update));
     },
     onUpdate: (listener) => {
@@ -1354,163 +1438,167 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
-    beginUndoCapture: (story, includeTableStories = false) =>
-      includeTableStories ? ensureTableUndo(story) : ensureUndo(story),
-    historyStory: () =>
-      undoStory?.startsWith('table:') ? undoStory.slice('table:'.length) : undoStory,
-    markUndoGroup: (startDepth) => {
-      const endDepth = session.undo_depth();
-      const size = Math.max(0, endDepth - startDepth);
-      if (size > 1) undoGroups.set(endDepth, size);
-      redoGroups.clear();
-    },
+    beginUndoCapture: ensureUndo,
+    addUndoBoundary: () => session.add_undo_boundary(),
+    setUndoCaptureMode: (mode) => session.set_undo_capture_mode(mode),
+    undoCaptureMode: () => session.undo_capture_mode() as YrsUndoCaptureMode,
+    historyStories: () => session.history_stories(),
     undo: () =>
       mutate(() => {
-        const depth = session.undo_depth();
-        const count = undoGroups.get(depth) ?? 1;
-        let changed = false;
-        for (let index = 0; index < count; index += 1) changed = session.undo() || changed;
-        if (changed && count > 1) {
-          undoGroups.delete(depth);
-          redoGroups.set(session.redo_depth(), count);
-        }
-        return changed;
+        const applied = session.undo();
+        if (applied) markDirty(session.history_stories());
+        return applied;
       }),
     redo: () =>
       mutate(() => {
-        const depth = session.redo_depth();
-        const count = redoGroups.get(depth) ?? 1;
-        let changed = false;
-        for (let index = 0; index < count; index += 1) changed = session.redo() || changed;
-        if (changed && count > 1) {
-          redoGroups.delete(depth);
-          undoGroups.set(session.undo_depth(), count);
-        }
-        return changed;
+        const applied = session.redo();
+        if (applied) markDirty(session.history_stories());
+        return applied;
       }),
     canUndo: () => session.can_undo(),
     canRedo: () => session.can_redo(),
-    undoDepth: () => session.undo_depth(),
-    redoDepth: () => session.redo_depth(),
 
-    createStory: (storyId, initialText, pStyle = 'Normal', alignment = 'left') =>
-      mutate(
+    createStory: (storyId, initialText, pStyle = 'Normal', alignment = 'left') => {
+      markDirty(storyId);
+      return mutate(
         () =>
           JSON.parse(session.create_story(storyId, initialText, pStyle, alignment)) as {
             paraId: string;
           }
-      ),
-    deleteStory: (storyId) => mutate(() => session.delete_story(storyId)),
+      );
+    },
+    deleteStory: (storyId) => {
+      markDirty(storyId);
+      return mutate(() => session.delete_story(storyId));
+    },
     insertTable: (at, rows, columns, suggesting) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.insert_table(
-              at.story,
-              at.paraId,
-              at.offset,
-              rows,
-              columns,
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.insert_table(
+                at.story,
+                at.paraId,
+                at.offset,
+                rows,
+                columns,
+                suggesting?.name,
+                suggesting?.date
+              )
+            ) as YrsTableReceipt
+          )
       );
     },
     insertRow: (at, side, suggesting) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.insert_row(
-              JSON.stringify(at),
-              side === 'below',
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.insert_row(
+                JSON.stringify(at),
+                side === 'below',
+                suggesting?.name,
+                suggesting?.date
+              )
+            ) as YrsTableReceipt
+          )
       );
     },
     insertColumn: (at, side) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
-          JSON.parse(session.insert_column(JSON.stringify(at), side === 'right')) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(session.insert_column(JSON.stringify(at), side === 'right')) as YrsTableReceipt
+          )
       );
     },
     deleteRow: (range, suggesting) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.delete_row(JSON.stringify(range), suggesting?.name, suggesting?.date)
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.delete_row(JSON.stringify(range), suggesting?.name, suggesting?.date)
+            ) as YrsTableReceipt
+          )
       );
     },
     deleteColumn: (range) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
-        () => JSON.parse(session.delete_column(JSON.stringify(range))) as YrsTableReceipt
+        () => markReceiptStories(JSON.parse(session.delete_column(JSON.stringify(range))) as YrsTableReceipt)
       );
     },
     deleteTable: (table) => {
-      ensureTableUndo(table.story);
+      ensureUndo(table.story);
       return mutate(
-        () => JSON.parse(session.delete_table(JSON.stringify(table))) as YrsTableReceipt
+        () => markReceiptStories(JSON.parse(session.delete_table(JSON.stringify(table))) as YrsTableReceipt)
       );
     },
     mergeCells: (range) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
-        () => JSON.parse(session.merge_cells(JSON.stringify(range))) as YrsTableReceipt
+        () => markReceiptStories(JSON.parse(session.merge_cells(JSON.stringify(range))) as YrsTableReceipt)
       );
     },
     splitCell: (at, rows, columns) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
-        () => JSON.parse(session.split_cell(JSON.stringify(at), rows, columns)) as YrsTableReceipt
+        () => markReceiptStories(JSON.parse(session.split_cell(JSON.stringify(at), rows, columns)) as YrsTableReceipt)
       );
     },
     setCellShading: (range, color) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.set_cell_shading(JSON.stringify(range), color ?? undefined)
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.set_cell_shading(JSON.stringify(range), color ?? undefined)
+            ) as YrsTableReceipt
+          )
       );
     },
     setCellTextFormat: (range, patch) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.set_cell_text_format(JSON.stringify(range), JSON.stringify(patch))
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.set_cell_text_format(JSON.stringify(range), JSON.stringify(patch))
+            ) as YrsTableReceipt
+          )
       );
     },
     setCellBorders: (range, borders) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
-          JSON.parse(
-            session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders))
-          ) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(
+              session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders))
+            ) as YrsTableReceipt
+          )
       );
     },
     setColumnWidth: (at, widthTwips) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
-          JSON.parse(session.set_column_width(JSON.stringify(at), widthTwips)) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(session.set_column_width(JSON.stringify(at), widthTwips)) as YrsTableReceipt
+          )
       );
     },
     setTableWidth: (table, widthTwips) => {
-      ensureTableUndo(table.story);
+      ensureUndo(table.story);
       return mutate(
         () =>
-          JSON.parse(session.set_table_width(JSON.stringify(table), widthTwips)) as YrsTableReceipt
+          markReceiptStories(
+            JSON.parse(session.set_table_width(JSON.stringify(table), widthTwips)) as YrsTableReceipt
+          )
       );
     },
     insertText: (at, text, suggesting) => {
@@ -1686,7 +1774,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     setContentControlValue: (embedId, value) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
+      markDirty('all');
       mutate(() => session.set_content_control_value(embedId, JSON.stringify(value)));
     },
     setContentControlValueAt: (at, value) => {
@@ -1696,11 +1785,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     clearContentControlValue: (embedId) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
+      markDirty('all');
       mutate(() => session.clear_content_control_value(embedId));
     },
     setImageGeometry: (embedId, geometry) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
+      markDirty('all');
       mutate(() => session.set_image_geometry(embedId, JSON.stringify(geometry)));
     },
     insertPageBreak: (at) => {
@@ -1717,13 +1808,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.insert_watermark(at.story, at.paraId, at.offset, JSON.stringify(watermark))
       );
     },
-    applyRawOps: (story, ops) => mutate(() => session.apply_raw_ops(story, JSON.stringify(ops))),
-    applySeedRawOps: (story, ops) =>
-      mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops))),
-    setParagraphAttr: (paraId, key, value) =>
-      mutate(() => session.set_paragraph_attr(paraId, key, JSON.stringify(value ?? null))),
-    addComment: (ranges, commentAuthor, date, body) =>
-      mutate(
+    applyRawOps: (story, ops) => {
+      markDirty(story);
+      mutate(() => session.apply_raw_ops(story, JSON.stringify(ops)));
+    },
+    applySeedRawOps: (story, ops) => {
+      markDirty(story);
+      mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops)));
+    },
+    setParagraphAttr: (paraId, key, value) => {
+      markDirty('all');
+      mutate(() => session.set_paragraph_attr(paraId, key, JSON.stringify(value ?? null)));
+    },
+    addComment: (ranges, commentAuthor, date, body) => {
+      markDirty(ranges.map((range) => range.story));
+      return mutate(
         () =>
           JSON.parse(
             session.add_comment(
@@ -1733,15 +1832,20 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               JSON.stringify(body ?? null)
             )
           ) as YrsCommentReceipt
-      ),
-    acceptChange: (target) =>
-      mutate(
+      );
+    },
+    acceptChange: (target) => {
+      markDirty('all');
+      return mutate(
         () => JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt
-      ),
-    rejectChange: (target) =>
-      mutate(
+      );
+    },
+    rejectChange: (target) => {
+      markDirty('all');
+      return mutate(
         () => JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt
-      ),
+      );
+    },
 
     selectionContext: (range) => {
       const key = JSON.stringify(range);
@@ -1773,6 +1877,20 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    searchText: (query, options = {}) => {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return JSON.parse(
+        session.search_text(
+          query,
+          options.caseSensitive ?? false,
+          Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined
+        )
+      ) as YrsTextMatch[];
+    },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     storyObjectIds: (story) => JSON.parse(session.story_object_ids(story)) as string[],
@@ -1788,6 +1906,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.free();
     },
   };
+
+  return facade;
 }
 
 /**

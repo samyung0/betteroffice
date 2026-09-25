@@ -1,6 +1,5 @@
 import type {
   YrsEngineApplyProfile,
-  YrsLoc,
   YrsResidentCaretSnapshot,
   YrsSelection,
   YrsSession,
@@ -24,12 +23,13 @@ export type ResidentEngineSession = Pick<
   | 'encodeStateVector'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
-  | 'layoutDocumentWithRegionsJson'
+  | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadState'
   | 'measureParagraphJson'
   | 'onUpdate'
   | 'outlineGlyphJson'
   | 'registerFont'
+  | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'selection'
   | 'setSelection'
@@ -44,13 +44,12 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
   >();
   let observing = false;
   let destroyed = false;
-  let undoStory: string | null = null;
-  let selectionHead: YrsLoc | null = null;
+  let undoTracked = false;
 
-  const ensureUndo = (story: string): void => {
-    if (undoStory === story) return;
-    session.track_undo(story);
-    undoStory = story;
+  const ensureUndo = (): void => {
+    if (undoTracked) return;
+    session.track_undo();
+    undoTracked = true;
   };
 
   const ensureObserver = (): void => {
@@ -66,33 +65,36 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
 
   return {
     registerFont: (bytes) => session.register_measure_font(bytes),
+    registerSubstituteFont: (base, family) =>
+      session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
-    layoutDocumentWithRegionsJson: (input) => session.layout_document_with_regions_json(input),
+    layoutDocumentWithRegionsRetainedJson: (input) =>
+      session.layout_document_with_regions_retained_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
     applyInput: (text, expectedFrameEpoch) => {
-      ensureUndo(selectionHead?.story ?? 'body');
+      ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);
     },
     applyDelete: (direction, expectedFrameEpoch) => {
-      ensureUndo(selectionHead?.story ?? 'body');
+      ensureUndo();
       return session.apply_delete(direction, expectedFrameEpoch);
     },
     applyInputProfiled: (text, expectedFrameEpoch) => {
-      ensureUndo(selectionHead?.story ?? 'body');
+      ensureUndo();
       const frame = session.apply_input_profiled(text, expectedFrameEpoch);
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
     applyDeleteProfiled: (direction, expectedFrameEpoch) => {
-      ensureUndo(selectionHead?.story ?? 'body');
+      ensureUndo();
       const frame = session.apply_delete_profiled(direction, expectedFrameEpoch);
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
@@ -111,7 +113,6 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     setSelection: (anchor, head = anchor) => {
       if (anchor.story !== head.story) throw new Error('yrs selection must stay inside one story');
       session.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
-      selectionHead = { ...head };
     },
     yrsBlocksForStory: (story, env = {}) =>
       JSON.parse(session.yrs_blocks_for_story(story, JSON.stringify(env))) as unknown[],

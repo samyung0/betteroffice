@@ -190,10 +190,7 @@ export function computeAnchorPositionsFromYrs(
   for (const revision of revisions) {
     register(
       `revision-${yrsIdToNumericId(revision.revisionId)}`,
-      projection.locToDisplayPoint({
-        story: revision.story,
-        ...revision.range.start,
-      })
+      projection.locToDisplayPoint({ story: revision.story, ...revision.range.start })
     );
   }
 

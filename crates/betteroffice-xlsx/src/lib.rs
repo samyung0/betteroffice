@@ -8,21 +8,24 @@ mod workbook;
 
 pub use error::Error;
 pub use types::{
-    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, HistoryState,
-    MutationResult, NumberFormatKind, ProposalAcceptance, ProposalEditInput, ProposalRequest,
-    RenderOptions, RenderedPng, SelectionFormatting, SheetInfo, UpdateEvent, UpdateOrigin,
+    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
+    EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
+    ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
+    TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
 pub use workbook::rebase::RebasedCheckpoint;
 pub use workbook::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, UpdateSubscription, Workbook,
+    DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS,
+    UpdateSubscription, Workbook,
 };
 
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ChartRefKind, ColId, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetId, Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ChartRefKind, ColId, ColStyle, DateSystem, DefinedName, ErrorValue,
+    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetFormat, SheetId,
+    Stylesheet, Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -31,7 +34,7 @@ pub use xlsx_ops::{
 };
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
-    HyperlinkRegion, PathStroke, Rect, RenderError, Viewport, viewport_for_range,
+    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,
     viewport_for_used_range, viewport_for_used_range_within,
 };
 

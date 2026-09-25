@@ -126,6 +126,10 @@ export interface DocxEditorProps {
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
+  /** Whether Save also downloads a copy. Defaults to true. */
+  downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
@@ -169,6 +173,8 @@ export interface DocxEditorProps {
   rulerUnit?: 'inch' | 'cm';
   /** Initial zoom level (default: 1.0) */
   initialZoom?: number;
+  /** Whether to show hidden (vanished) text in the layout (default: false) */
+  showHiddenText?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
@@ -319,6 +325,8 @@ export interface DocxEditorRef {
   getDocument: () => Document | null;
   /** Get the editor ref */
   getEditorRef: () => PagedEditorRef | null;
+  /** Commits accepted input and selection; waits for active IME composition. */
+  flushPendingInput: () => Promise<void>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -558,6 +566,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    onSaveRequest,
+    downloadOnSave = true,
     collaboration,
     onOpen,
     author = 'User',
@@ -576,6 +586,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showRuler = false,
     rulerUnit = 'inch',
     initialZoom = 1.0,
+    showHiddenText = false,
     readOnly: readOnlyProp = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
@@ -740,15 +751,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const history = useDocumentHistory<Document | null>(initialDocument || null, {
     maxEntries: 100,
     groupingInterval: 500,
-    enableKeyboardShortcuts: true,
   });
-  const [yrsHistoryState, setYrsHistoryState] = useState({
-    canUndo: false,
-    canRedo: false,
-  });
+  const [yrsHistoryState, setYrsHistoryState] = useState({ canUndo: false, canRedo: false });
   const handleYrsHistoryChange = useCallback((canUndo: boolean, canRedo: boolean) => {
     setYrsHistoryState((previous) =>
-      previous.canUndo === canUndo && previous.canRedo === canRedo ? previous : { canUndo, canRedo }
+      previous.canUndo === canUndo && previous.canRedo === canRedo
+        ? previous
+        : { canUndo, canRedo }
     );
   }, []);
 
@@ -777,11 +786,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const historyStateRef = useRef(history.state);
   historyStateRef.current = history.state;
   // Track current border color/width for border presets (like Google Docs)
-  const borderSpecRef = useRef({
-    style: 'single',
-    size: 4,
-    color: { rgb: '000000' },
-  });
+  const borderSpecRef = useRef({ style: 'single', size: 4, color: { rgb: '000000' } });
   // Cache style resolver to avoid recreating on every selection change
   const styleResolverCacheRef = useRef<{
     styles: unknown;
@@ -845,6 +850,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
+    reportLayoutError,
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
@@ -852,11 +858,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     history,
     pagedEditorRef,
     setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
-      setState((prev) => ({
-        ...prev,
-        isLoading: s.isLoading,
-        parseError: s.parseError,
-      }));
+      setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
     }, []),
     setComments,
     setShowCommentsSidebar,
@@ -906,6 +908,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     resolveImage: canvasRenderer.resolveImage,
     documentName,
     onSave,
+    onSaveRequest,
+    downloadOnSave,
     onOpen,
     onError,
     onPrint,
@@ -1071,6 +1075,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   useKeyboardShortcuts({
     pagedEditorRef,
+    containerRef,
+    onSaveDocument: handleDownloadDocument,
     disableFindReplaceShortcuts,
     showFileOpen,
     onOpenDocument: handleOpenDocument,
@@ -1309,11 +1315,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const tc = trackedChanges.find((c) => String(c.revisionId) === revId);
       if (!tc || (tc as { hfRid?: string }).hfRid) return null;
       const isDeletion = /deletion|deleted/i.test(tc.type);
-      return {
-        from: tc.from,
-        to: tc.to,
-        variant: isDeletion ? 'deletion' : 'insertion',
-      };
+      return { from: tc.from, to: tc.to, variant: isDeletion ? 'deletion' : 'insertion' };
     }
     return null;
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
@@ -1345,21 +1347,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => getInitialSectionProperties(history.state),
     [history.state]
   );
-  const finalSectionProperties = history.state?.package.document?.finalSectionProperties;
-
   const {
     headerContent,
     footerContent,
     firstPageHeaderContent,
     firstPageFooterContent,
+    finalSectionProperties,
     handleHeaderFooterDoubleClick,
     handleBodyClick,
     handleRemoveHeaderFooter,
   } = useHeaderFooterEditing({
     document: history.state,
     pushDocument,
-    initialSectionProperties,
-    finalSectionProperties,
     partEditTarget,
     setPartEditTarget,
   });
@@ -1645,12 +1644,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!cursorSidebarItem) {
       for (const revision of session.listRevisions()) {
         if (revision.range.story !== head.story) continue;
-        const start =
-          session.locateParagraph(head.story, revision.range.start.paraId).start +
-          revision.range.start.offset;
-        const end =
-          session.locateParagraph(head.story, revision.range.end.paraId).start +
-          revision.range.end.offset;
+        const start = session.locateParagraph(head.story, revision.range.start.paraId).start + revision.range.start.offset;
+        const end = session.locateParagraph(head.story, revision.range.end.paraId).start + revision.range.end.offset;
         if (start <= offset && offset <= end) {
           const revId = String(yrsIdToNumericId(revision.revisionId));
           const prefix = `tc-${revId}-`;
@@ -1668,13 +1663,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setShowCommentsSidebar(true);
     }
     setExpandedSidebarItem(cursorSidebarItem);
-  }, [
-    comments,
-    resolvedCommentIds,
-    commentSidebarItems,
-    revisionIdAliases,
-    setShowCommentsSidebar,
-  ]);
+  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, setShowCommentsSidebar]);
 
   const handleYrsToolbarSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {
@@ -1894,6 +1883,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           >
             <DocxEditorPagedArea
               yrsCore={yrsCore}
+              onError={reportLayoutError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
@@ -1914,6 +1904,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
               author={author}
               measurementFontProvider={measurementFontProvider}

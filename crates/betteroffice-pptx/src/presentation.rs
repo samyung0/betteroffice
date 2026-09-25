@@ -1,27 +1,67 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    CaretAnchor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt,
-    ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
-    StorySnapshot, TextReceipt, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
-    UpdateSubscription,
+    CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
+    EditCtx, EditError, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
+    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
+    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
     SlideMaster, ThemePart,
 };
-use pptx_render::{RenderedSlide, SlideRenderer};
+use pptx_render::{RenderError, RenderedSlide, SlideRenderer};
 
 use crate::Result;
 
 const STANDALONE_CLIENT_ID: u64 = 1;
 
+fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> {
+    session
+        .slide_scope(slide_index)
+        .map_err(|error| match error {
+            EditError::OutOfBounds { .. } => RenderError::SlideNotFound(slide_index).into(),
+            error => error.into(),
+        })
+}
+
 pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
+    #[cfg(feature = "raster")]
+    caches: crate::render::RenderCaches,
 }
 
 impl Presentation {
+    pub fn propose(&self, request: crate::ProposalRequest) -> Result<crate::Proposal> {
+        Ok(self.session.propose(request)?)
+    }
+
+    pub fn proposals(&self) -> Result<Vec<crate::Proposal>> {
+        Ok(self.session.proposals()?)
+    }
+
+    pub fn preview_proposal(&self, id: &str) -> Result<crate::ProposalPreview> {
+        Ok(self.session.preview_proposal(id)?)
+    }
+
+    pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
+        let preview = self.session.proposal_preview_session(id)?;
+        let scope = slide_scope(&preview, slide_index)?;
+        Ok(self
+            .renderer
+            .layout_scoped_slide(preview.package(), &scope)?)
+    }
+
+    pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
+        Ok(self.session.accept_proposal(id, force)?)
+    }
+
+    pub fn reject_proposal(&self, id: &str) -> bool {
+        self.session.reject_proposal(id)
+    }
+
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), STANDALONE_CLIENT_ID)
     }
@@ -52,6 +92,8 @@ impl Presentation {
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            caches: crate::render::RenderCaches::default(),
         })
     }
 
@@ -87,8 +129,27 @@ impl Presentation {
         &self.package().media
     }
 
+    /// Resolves a display-list image asset, including unsaved pictures.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        Ok(self.session.media_bytes(asset_id)?)
+    }
+
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<TextSearchMatch>> {
+        Ok(self.session.search_text(query, case_sensitive, limit)?)
+    }
+
     pub fn snapshot(&self) -> Result<DeckSnapshot> {
         Ok(self.session.snapshot()?)
+    }
+
+    /// Slide ids in deck order, without serializing a full [`DeckSnapshot`].
+    pub fn slide_ids(&self) -> Result<Vec<String>> {
+        Ok(self.session.slide_ids()?)
     }
 
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
@@ -125,6 +186,11 @@ impl Presentation {
         to_index: u32,
     ) -> Result<SlideReceipt> {
         Ok(self.session.move_slide(context, slide_id, to_index)?)
+    }
+
+    /// Sets a slide's speaker notes; empty text clears them.
+    pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
+        Ok(self.session.set_slide_notes(context, slide_id, text)?)
     }
 
     pub fn add_text_box(
@@ -214,6 +280,18 @@ impl Presentation {
             .resize_shape(context, slide_id, shape_id, width, height)?)
     }
 
+    pub fn set_shape_rect(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        rect: ShapeRect,
+    ) -> Result<TransformReceipt> {
+        Ok(self
+            .session
+            .set_shape_rect(context, slide_id, shape_id, rect)?)
+    }
+
     pub fn insert_text(
         &self,
         context: &EditCtx,
@@ -250,6 +328,81 @@ impl Presentation {
             .format_text(context, story_id, start, end, patch)?)
     }
 
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .set_paragraph_alignment(context, story_id, start, end, alignment)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_comment(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> Result<CommentReceipt> {
+        Ok(self.session.add_comment(
+            context, slide_id, author, initials, text, created, x_emu, y_emu,
+        )?)
+    }
+
+    pub fn reply_to_comment(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .reply_to_comment(context, comment_id, author, initials, text, created)?)
+    }
+
+    pub fn set_comment_status(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        resolved: bool,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .set_comment_status(context, comment_id, resolved)?)
+    }
+
+    pub fn remove_comment(&self, context: &EditCtx, comment_id: &str) -> Result<CommentReceipt> {
+        Ok(self.session.remove_comment(context, comment_id)?)
+    }
+
+    pub fn set_comment_flavor(
+        &self,
+        context: &EditCtx,
+        flavor: CommentFlavor,
+    ) -> Result<CommentFlavor> {
+        Ok(self.session.set_comment_flavor(context, flavor)?)
+    }
+
+    pub fn comments(&self) -> Result<Vec<CommentSnapshot>> {
+        Ok(self.session.comments()?)
+    }
+
+    pub fn comment_flavor(&self) -> Result<CommentFlavor> {
+        Ok(self.session.comment_flavor()?)
+    }
+
     pub fn insert_paragraph_break(
         &self,
         context: &EditCtx,
@@ -282,11 +435,21 @@ impl Presentation {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
     }
 
+    #[cfg(feature = "raster")]
+    pub(crate) fn renderer(&self) -> &SlideRenderer {
+        &self.renderer
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn caches(&self) -> &crate::render::RenderCaches {
+        &self.caches
+    }
+
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
-        let snapshot = self.session.snapshot()?;
+        let scope = slide_scope(&self.session, slide_index)?;
         Ok(self
             .renderer
-            .layout_slide(self.session.package(), &snapshot, slide_index)?)
+            .layout_scoped_slide(self.session.package(), &scope)?)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their

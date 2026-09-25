@@ -1,12 +1,15 @@
 //! Embedded media table and image-resolution aliases.
 
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::relationships::RelationshipMap;
 
-pub type MediaMap = IndexMap<String, MediaFile>;
+pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,27 +34,35 @@ pub struct ResolvedImageData {
 }
 
 pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
+    build_media_map_with_warnings(parts).0
+}
+
+/// Media map plus one warning per part that could not be transcoded for display.
+pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
+    let mut warnings = Vec::new();
     for (path, data) in parts {
         if !path.to_ascii_lowercase().starts_with("word/media/") {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let mime_type = media_mime_type(path).to_owned();
-        let base64 = base64::engine::general_purpose::STANDARD.encode(data);
-        let file = MediaFile {
+        let (data, mime_type, warning) = display_form(data, media_mime_type(path), path);
+        warnings.extend(warning);
+        let mime_type = mime_type.to_owned();
+        let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        let file = Arc::new(MediaFile {
             path: path.clone(),
             filename: Some(filename),
             mime_type: mime_type.clone(),
             data_url: format!("data:{mime_type};base64,{base64}"),
             base64,
-        };
-        media.insert(path.clone(), file.clone());
+        });
+        media.insert(path.clone(), Arc::clone(&file));
         if let Some(normalized) = path.strip_prefix("word/") {
             media.insert(normalized.to_owned(), file);
         }
     }
-    media
+    (media, warnings)
 }
 
 pub fn resolve_image_data(
@@ -97,6 +108,45 @@ pub fn resolve_image_data(
     }
 }
 
+/// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.
+/// Save reads the untouched package part, so the original bytes still round-trip.
+/// An encoding the decoder does not support keeps the TIFF source — decoders that
+/// do handle it still render — and reports why the transcode was skipped.
+#[cfg(feature = "tiff")]
+pub(crate) fn display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
+    if !is_tiff(data) {
+        return (Cow::Borrowed(data), mime_type, None);
+    }
+    match ooxml_drawingml::media::decode_tiff_png(data) {
+        Ok(png) => (Cow::Owned(png), "image/png", None),
+        Err(error) => (
+            Cow::Borrowed(data),
+            mime_type,
+            Some(format!(
+                "TIFF image {path} could not be decoded for display: {error}"
+            )),
+        ),
+    }
+}
+
+#[cfg(not(feature = "tiff"))]
+pub(crate) fn display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    _path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
+    (Cow::Borrowed(data), mime_type, None)
+}
+
+#[cfg(feature = "tiff")]
+fn is_tiff(data: &[u8]) -> bool {
+    matches!(data.first_chunk::<4>(), Some(b"II\x2a\x00" | b"MM\x00\x2a"))
+}
+
 pub fn media_mime_type(path: &str) -> &'static str {
     match path
         .rsplit('.')
@@ -133,7 +183,7 @@ fn find_case_insensitive<'a>(media: &'a MediaMap, path: &str) -> Option<&'a Medi
     media
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
-        .map(|(_, file)| file)
+        .map(|(_, file)| &**file)
 }
 
 #[cfg(test)]
@@ -164,6 +214,16 @@ mod tests {
         assert_eq!(resolved.mime_type.as_deref(), Some("image/png"));
         assert_eq!(resolved.filename.as_deref(), Some("image.png"));
         assert_eq!(resolved.src.as_deref(), Some("data:image/png;base64,AP8Q"));
+    }
+
+    #[test]
+    fn alias_keys_share_one_allocation() {
+        let parts = vec![("word/media/a.png".to_owned(), vec![1, 2, 3])];
+        let media = build_media_map(&parts);
+        assert!(Arc::ptr_eq(
+            &media["word/media/a.png"],
+            &media["media/a.png"]
+        ));
     }
 
     #[test]

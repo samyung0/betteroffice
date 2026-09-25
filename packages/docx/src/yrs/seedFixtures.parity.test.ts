@@ -210,9 +210,7 @@ describe('DOCX seeding across document features', () => {
   for (const name of fixtures) {
     it(`preserves ${name} stories, comments, and save output`, async () => {
       const bytes = buildFixtureDocx(name);
-      const parsed = await parseDocx(bytes.buffer as ArrayBuffer, {
-        preloadFonts: false,
-      });
+      const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
 
       const kinds = nodeKinds(parsed.package.document);
       for (const required of REQUIRED_NODES[name] ?? []) expect([...kinds]).toContain(required);
