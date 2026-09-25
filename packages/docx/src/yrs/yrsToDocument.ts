@@ -2113,9 +2113,15 @@ class SaveContext {
           segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
             ? ''
             : segment.paraId;
-        const baseParagraph =
-          this.baseParagraphs.get(segment.paraId) ??
-          (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
+        // A rebased paragraph is bound to its paragraph in the new source;
+        // the binding counts only for the pilcrow it was written for.
+        const sourceBinding = asObject(segment.properties.sourceBinding);
+        const boundParaId =
+          sourceBinding?.ownerParaId === segment.paraId ? asString(sourceBinding.paraId) : '';
+        const baseParagraph = boundParaId
+          ? this.baseParagraphs.get(boundParaId)
+          : this.baseParagraphs.get(segment.paraId) ??
+            (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
         const boundaries = paragraphCommentBoundaries(storyOffset);
         const inputs = [
           segment.paraId,
@@ -2142,7 +2148,7 @@ class SaveContext {
           );
           paragraph = paragraphFromStory(
             savedParaId,
-            asObject(segment.properties.sourceBinding)?.ownerParaId === segment.paraId
+            sourceBinding?.ownerParaId === segment.paraId
               ? segment.properties
               : { ...segment.properties, sourceBinding: undefined },
             items,

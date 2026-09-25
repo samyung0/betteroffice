@@ -153,7 +153,8 @@ function authored(document: Document): string {
       endnotes: pkg.endnotes,
     },
     (key, value: unknown) => {
-      if (key === 'rId' || key === 'verbatimXml') return undefined;
+      // Root namespace bindings are package metadata the writer normalizes.
+      if (key === 'rId' || key === 'verbatimXml' || key === 'customRootBindings') return undefined;
       if (value && typeof value === 'object' && !Array.isArray(value))
         return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)));
       return value;

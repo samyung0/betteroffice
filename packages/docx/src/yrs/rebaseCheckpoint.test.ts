@@ -7,6 +7,7 @@ import { preloadOpcWasm, rezipContainer, unzipContainer } from '../wasm/opc';
 import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { createYrsSession, type YrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
+import type { Paragraph } from '../types/document';
 import { rebaseDocxCheckpoint } from './rebaseCheckpoint';
 
 const png =
@@ -28,7 +29,9 @@ beforeAll(async () => {
   ]);
 });
 
-function source(): Uint8Array {
+function source(
+  paragraph = '<w:p w14:paraId="1234ABCD" w14:textId="87654321"><w:r><w:t>Anchor</w:t></w:r></w:p>'
+): Uint8Array {
   return rezipContainer(
     Object.fromEntries(
       Object.entries({
@@ -37,7 +40,7 @@ function source(): Uint8Array {
         '_rels/.rels':
           '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
         'word/document.xml':
-          '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="1234ABCD" w14:textId="87654321"><w:r><w:t>Anchor</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>',
+          `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${paragraph}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
       }).map(([path, xml]) => [path, encoder.encode(xml)])
     )
   );
@@ -307,5 +310,53 @@ it('carries legacy opaque blocks by their native embed when later structure chan
   } finally {
     session.destroy();
     current?.destroy();
+  }
+});
+
+it('restores raw inline markup of a paragraph bound to a differently numbered source paragraph', async () => {
+  const session = await createYrsSession();
+  try {
+    session.openDocx(
+      source(
+        '<w:p w14:paraId="1234ABCD"><w:r><w:t>Anchor</w:t></w:r><x:mark xmlns:x="urn:raw-inline"/></w:p>'
+      ),
+      true
+    );
+    const base = session.materializeDocx();
+    if (!base) throw new Error('missing base');
+    const paragraph = base.package.document.content[0] as Paragraph;
+    expect(paragraph.content.some((child) => child.type === 'rawXml')).toBe(true);
+    const rebound = {
+      ...base,
+      package: {
+        ...base.package,
+        document: { ...base.package.document, content: [{ ...paragraph, paraId: '0000BEEF' }] },
+      },
+    };
+    let offset = 0;
+    for (const segment of session.storySegments('body')) {
+      if (segment.kind === 'pilcrow') {
+        session.applyRawOps('body', [
+          {
+            op: 'setEmbedAttr',
+            index: offset,
+            key: 'sourceBinding',
+            value: {
+              ownerParaId: segment.paraId,
+              paraId: '0000BEEF',
+              textId: null,
+              renderedPageBreakBefore: false,
+            },
+          },
+        ]);
+        break;
+      }
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+    }
+    const projected = yrsToDocument(session, rebound).package.document.content[0] as Paragraph;
+    expect(projected.paraId).toBe('0000BEEF');
+    expect(projected.content.some((child) => child.type === 'rawXml')).toBe(true);
+  } finally {
+    session.destroy();
   }
 });
