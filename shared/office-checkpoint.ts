@@ -20,6 +20,35 @@ import type {
 } from "../packages/pptx/src/types";
 
 export type OfficeFormat = "docx" | "xlsx" | "pptx";
+/**
+ * Top-level Yjs roots each engine's state may hold, Capy's contributor map
+ * included. PPTX and XLSX engines reject any other root; `xlsx:rebase` exists
+ * only after a publication rebased later edits.
+ */
+export const OFFICE_DOCUMENT_ROOTS: Readonly<
+  Record<OfficeFormat, readonly string[]>
+> = {
+  docx: ["stories", "comments", "__capy_pending_contributors"],
+  xlsx: [
+    "xlsx",
+    "xlsx:cell-formats",
+    "xlsx:sheet-order",
+    "xlsx:sheets",
+    "xlsx:axis-catalog",
+    "xlsx:defined-names",
+    "xlsx:rebase",
+    "__capy_pending_contributors",
+  ],
+  pptx: [
+    "pptx:meta",
+    "pptx:slide-order",
+    "pptx:slides",
+    "pptx:shapes",
+    "pptx:stories",
+    "pptx:comments",
+    "__capy_pending_contributors",
+  ],
+};
 export interface OfficeCheckpoint {
   format: OfficeFormat;
   schemaVersion: 1;

@@ -1,4 +1,8 @@
 export type OfficeFormat = "docx" | "xlsx" | "pptx";
+/** Top-level Yjs roots each engine's state may hold, Capy's contributor map included. */
+export declare const OFFICE_DOCUMENT_ROOTS: Readonly<
+  Record<OfficeFormat, readonly string[]>
+>;
 export interface OfficeCheckpoint {
   format: OfficeFormat;
   schemaVersion: 1;

@@ -1029,6 +1029,14 @@ impl DeckSession {
 /// Schema and fingerprint checks that need no package.
 pub(crate) fn validate_meta(doc: &Doc) -> EditResult<()> {
     let txn = doc.transact();
+    if let Some((root, _)) = txn
+        .root_refs()
+        .find(|(root, _)| !crate::DOCUMENT_ROOTS.contains(root))
+    {
+        return Err(EditError::InvalidState(format!(
+            "unknown document root {root}"
+        )));
+    }
     let meta = required_map(&txn, META)?;
     if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
         return Err(EditError::InvalidState(
@@ -1907,6 +1915,39 @@ mod tests {
             Err(EditError::InvalidUpdate(message)) if message.contains("deck metadata")
         ));
         assert_eq!(local.encode_state_as_update_v1(), before);
+    }
+
+    #[test]
+    fn remote_updates_may_not_add_roots_beyond_the_deck_and_contributors() {
+        let local = DeckSession::open(FIXTURE, 107).unwrap();
+        let peer = DeckSession::open(FIXTURE, 108).unwrap();
+        {
+            let mut txn = peer.doc.transact_mut();
+            txn.get_or_insert_map("__capy_pending_contributors")
+                .insert(&mut txn, "108", "marker");
+        }
+        local
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        {
+            let mut txn = peer.doc.transact_mut();
+            txn.get_or_insert_map("stray")
+                .insert(&mut txn, "key", "value");
+        }
+        let before = local.encode_state_as_update_v1();
+        assert!(matches!(
+            local.apply_update_v1(&peer.encode_state_as_update_v1()),
+            Err(EditError::InvalidState(message)) if message.contains("unknown document root stray")
+        ));
+        assert_eq!(local.encode_state_as_update_v1(), before);
+        assert!(
+            DeckSession::open_from_update_with_source(
+                &peer.encode_state_as_update_v1(),
+                FIXTURE,
+                109
+            )
+            .is_err()
+        );
     }
 
     #[test]

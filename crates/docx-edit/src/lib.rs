@@ -112,6 +112,8 @@ pub mod wasm;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";
+/// Largest yrs update a replica accepts, as in PPTX.
+pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const PILCROW_KIND: &str = "pilcrow";
 const KIND_KEY: &str = "_kind";
 const PARA_ID: &str = "paraId";
@@ -723,8 +725,7 @@ impl EditingDoc {
     }
 
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
-        let update = Update::decode_v1(bytes)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let update = decode_update_v1(bytes)?;
         self.doc
             .transact_mut()
             .apply_update(update)
@@ -737,8 +738,7 @@ impl EditingDoc {
     /// of this document. Ordinary collaboration updates must continue through
     /// [`Self::apply_update_v1`] so local undo never captures remote work.
     pub fn apply_local_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
-        let update = Update::decode_v1(bytes)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let update = decode_update_v1(bytes)?;
         self.doc
             .transact_mut_with(self.client_id)
             .apply_update(update)
@@ -749,6 +749,15 @@ impl EditingDoc {
         let counter = self.id_counter.fetch_add(1, Ordering::Relaxed);
         format!("{}:{counter}", self.client_id)
     }
+}
+
+pub(crate) fn decode_update_v1(bytes: &[u8]) -> EditResult<Update> {
+    if bytes.len() > MAX_UPDATE_BYTES {
+        return Err(EditError::InvalidUpdate(format!(
+            "update exceeds {MAX_UPDATE_BYTES} bytes"
+        )));
+    }
+    Update::decode_v1(bytes).map_err(|error| EditError::InvalidUpdate(error.to_string()))
 }
 
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
@@ -957,6 +966,22 @@ mod tests {
         doc.create_story("header:rId7", "Header", "Header", "center")
             .unwrap();
         doc
+    }
+
+    #[test]
+    fn updates_above_the_size_cap_are_rejected_before_decoding() {
+        let doc = seed("Kept");
+        let state = doc.encode_state_as_update_v1();
+        let oversized = vec![0; MAX_UPDATE_BYTES + 1];
+        for result in [
+            doc.apply_update_v1(&oversized),
+            doc.apply_local_update_v1(&oversized),
+        ] {
+            assert!(
+                matches!(result, Err(EditError::InvalidUpdate(message)) if message.contains("exceeds"))
+            );
+        }
+        assert_eq!(doc.encode_state_as_update_v1(), state);
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {

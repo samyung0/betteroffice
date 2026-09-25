@@ -42,6 +42,16 @@ pub(crate) const SLIDES: &str = "pptx:slides";
 pub(crate) const SHAPES: &str = "pptx:shapes";
 pub(crate) const STORIES: &str = "pptx:stories";
 pub(crate) const COMMENTS: &str = "pptx:comments";
+/// The deck roots plus Capy's server-owned contributor map; any other root is rejected.
+pub(crate) const DOCUMENT_ROOTS: [&str; 7] = [
+    META,
+    SLIDE_ORDER,
+    SLIDES,
+    SHAPES,
+    STORIES,
+    COMMENTS,
+    "__capy_pending_contributors",
+];
 pub(crate) const REMOTE_ORIGIN: &str = "pptx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "pptx:hydrate";
 pub(crate) const PILCROW_KIND: &str = "pilcrow";
