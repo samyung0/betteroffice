@@ -13,6 +13,7 @@ import { preloadParseWasm } from '../wasm/parse';
 import { createYrsSession, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
 import { yrsToDocument } from './yrsToDocument';
+import { resolveImageRefs } from './imageRefs.testing';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE_ROOT = resolve(import.meta.dir, '__fixtures__/seed-parity');
@@ -177,10 +178,12 @@ function nodeKinds(node: unknown, kinds = new Set<string>(), depth = 0): Set<str
   return kinds;
 }
 
-function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
+function expectEquivalentStories(left: YrsSession, right: YrsSession, document: Document): void {
   expect(left.storyIds()).toEqual(right.storyIds());
   for (const storyId of left.storyIds()) {
-    expect(left.storySegments(storyId)).toEqual(right.storySegments(storyId));
+    expect(resolveImageRefs(left.storySegments(storyId), document.package.media)).toEqual(
+      right.storySegments(storyId)
+    );
   }
 }
 
@@ -224,12 +227,14 @@ describe('DOCX seeding across document features', () => {
         documentToYrs(projected, parsed);
         engine.seedFromDocx(bytes);
 
-        expectEquivalentStories(engine, projected);
+        expectEquivalentStories(engine, projected, parsed);
         for (const comment of parsed.package.document.comments ?? []) {
           const id = String(comment.id);
           expect(engine.resolveComment(id)).toEqual(projected.resolveComment(id));
         }
-        expect(yrsToDocument(engine, parsed)).toEqual(yrsToDocument(projected, parsed));
+        expect(resolveImageRefs(yrsToDocument(engine, parsed), parsed.package.media)).toEqual(
+          yrsToDocument(projected, parsed)
+        );
       } finally {
         projected.destroy();
         engine.destroy();

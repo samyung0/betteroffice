@@ -10,6 +10,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
+import { resolveImageRefs } from './imageRefs.testing';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 
@@ -43,7 +44,9 @@ test.each([
   try {
     native.seedFromDocx(bytes);
     documentToYrs(projected, parsed);
-    expect(native.storySegments('body')).toEqual(projected.storySegments('body'));
+    expect(resolveImageRefs(native.storySegments('body'), parsed.package.media)).toEqual(
+      projected.storySegments('body')
+    );
     for (const session of [native, projected]) {
       const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
       const image = blocks.flatMap((block) => block.kind === 'paragraph' ? block.runs : [])

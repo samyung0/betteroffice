@@ -231,6 +231,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   if (!session) throw new Error('Resident engine worker is not initialized');
+  if (snapshot.media !== undefined) session.setMedia(snapshot.media);
   session.loadState(snapshot.state);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only

@@ -511,6 +511,9 @@ export interface YrsResidentWorkerSnapshot {
   fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
+  /** Source package media JSON that `media:<part>` images resolve against;
+   * only in full snapshots, since the media never changes within a session. */
+  media?: string;
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
   measureInputs: string[];
   layoutInput: string;
@@ -1310,6 +1313,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               font instanceof Uint8Array ? font.slice() : { ...font }
             ),
         fontsRevision: residentFontsRevision,
+        ...(state ? {} : { media: session.media_json() }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,
           env: structuredClone(env),

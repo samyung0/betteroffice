@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -3502,12 +3502,51 @@ fn units_to_raw_ops(
     Ok(ops)
 }
 
-fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+/// Image embeds name a media part of the fingerprinted source as `media:<part>`
+/// instead of carrying its bytes; lowering and the baseline resolve the part.
+pub use docx_parse::media::MEDIA_REF_PREFIX;
+
+/// Display data URL of every media part (a TIFF shows as PNG), by part path.
+pub fn package_media(envelope: &docx_parse::S9WireEnvelope) -> HashMap<String, String> {
+    envelope
+        .document
+        .package
+        .media_entries
+        .iter()
+        .map(|(_, file)| (file.path.clone(), file.data_url.clone()))
+        .collect()
+}
+
+/// Points source images at their media part. Parts with equal bytes share a
+/// display URL; the first in package order wins, and the serializer keeps an
+/// image's relationship to any part with the same bytes.
+fn reference_media(units: &mut [InlineUnit], media: &HashMap<&str, &str>) {
+    for unit in units {
+        if let UnitContent::Embed { kind, payload } = &mut unit.content
+            && kind == "image"
+            && let Some(path) = payload
+                .get("src")
+                .and_then(Value::as_str)
+                .and_then(|src| media.get(src).copied())
+        {
+            payload.insert(
+                "src".to_owned(),
+                Value::String(format!("{MEDIA_REF_PREFIX}{path}")),
+            );
+        }
+    }
+}
+
+fn seed_plan(
+    plan: StoryPlan,
+    media: &HashMap<&str, &str>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
-        units,
+        mut units,
         comment_coverage,
     } = plan;
+    reference_media(&mut units, media);
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
     if !comment_coverage.is_empty() {
@@ -3551,7 +3590,13 @@ pub fn seed_parsed_docx(
     document: &EditingDoc,
     mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
-    envelope.document.package.media_entries.clear();
+    let media = std::mem::take(&mut envelope.document.package.media_entries);
+    let mut media_parts = HashMap::new();
+    for (_, file) in &media {
+        media_parts
+            .entry(file.data_url.as_str())
+            .or_insert(file.path.as_str());
+    }
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -3675,7 +3720,7 @@ pub fn seed_parsed_docx(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan)?;
+        let (story_id, ops, fonts) = seed_plan(plan, &media_parts)?;
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
     }
@@ -3725,7 +3770,7 @@ mod tests {
             .plans
             .into_iter()
             .map(|plan| {
-                let (story_id, ops, _) = seed_plan(plan).unwrap();
+                let (story_id, ops, _) = seed_plan(plan, &HashMap::new()).unwrap();
                 (story_id, ops)
             })
             .collect();
@@ -4226,7 +4271,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolved_images_and_fonts_survive_media_projection() {
+    fn source_images_reference_their_part_and_resolve_at_lowering() {
         let src = "data:image/png;base64,AQID";
         for with_field in [false, true] {
             let mut envelope = parse_docx_for_edit(include_bytes!(
@@ -4262,33 +4307,36 @@ mod tests {
                     data_url: src.to_owned(),
                 }),
             )];
-            let mut without_media = envelope.clone();
-            without_media.document.package.media_entries.clear();
-            let with_media_doc = EditingDoc::new(7);
-            let without_media_doc = EditingDoc::new(7);
-            let fonts = seed_parsed_docx(&with_media_doc, envelope).unwrap();
-            assert_eq!(
-                fonts,
-                seed_parsed_docx(&without_media_doc, without_media).unwrap()
-            );
+            let media = package_media(&envelope);
+            let engine = crate::EngineSession::new(7);
+            let fonts = seed_parsed_docx(engine.doc(), envelope).unwrap();
             assert!(fonts.iter().any(|font| font == "Image Caption"));
-            assert_eq!(
-                with_media_doc.encode_state_as_update_v1(),
-                without_media_doc.encode_state_as_update_v1()
-            );
-            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
-                &with_media_doc,
-                "body",
-                &crate::bridge::RenderEnv::default(),
-            )
-            .unwrap();
-            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
-                panic!("image paragraph must remain a paragraph");
+            let state = engine.doc().encode_state_as_update_v1();
+            let contains =
+                |needle: &[u8]| state.windows(needle.len()).any(|window| window == needle);
+            assert!(contains(b"media:word/media/image.png") && !contains(b"AQID"));
+            let image_src = |engine: &crate::EngineSession| {
+                engine
+                    .with_lowered_story("body", &crate::bridge::RenderEnv::default(), |blocks| {
+                        let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0]
+                        else {
+                            panic!("image paragraph must remain a paragraph");
+                        };
+                        paragraph.runs.iter().find_map(|run| match run {
+                            docx_layout::types::Run::Image(image) => {
+                                assert_eq!((image.width, image.height), (96.0, 48.0));
+                                Some(image.src.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap()
+                    .unwrap()
             };
-            assert!(paragraph.runs.iter().any(|run| {
-                matches!(run, docx_layout::types::Run::Image(image)
-                    if image.src == src && image.width == 96.0 && image.height == 48.0)
-            }));
+            // Without the package the reference stays unresolved and paints nothing.
+            assert_eq!(image_src(&engine), "media:word/media/image.png");
+            engine.set_media(media);
+            assert_eq!(image_src(&engine), src);
         }
     }
 

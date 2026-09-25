@@ -1,4 +1,4 @@
-use docx_edit::{EngineSession, parse_docx_for_edit, seed_parsed_docx};
+use docx_edit::{EngineSession, package_media, parse_docx_for_edit, seed_parsed_docx};
 use docx_parse::S9PackageWire;
 use docx_parse::section::SectionProperties;
 use serde_json::{Value, json};
@@ -21,6 +21,7 @@ impl DocxViewDocument {
         let envelope = parse_docx_for_edit(bytes).map_err(js_error)?;
         let request = layout_request(&envelope.document.package).to_string();
         let engine = EngineSession::new(1);
+        engine.set_media(package_media(&envelope));
         seed_parsed_docx(engine.doc(), envelope).map_err(js_error)?;
         Ok(Self {
             engine: Some(engine),
