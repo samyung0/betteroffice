@@ -564,6 +564,30 @@ function checkReplacement(
     );
   return command.text;
 }
+/** The span of `before` that `after` changes, in UTF-16 offsets, never splitting a surrogate pair. */
+function changedSpan(
+  before: string,
+  after: string
+): { start: number; end: number; text: string } {
+  const limit = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < limit && before[prefix] === after[prefix]) prefix++;
+  const high = before.charCodeAt(prefix - 1);
+  if (high >= 0xd800 && high <= 0xdbff) prefix--;
+  let suffix = 0;
+  while (
+    suffix < limit - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  )
+    suffix++;
+  const low = before.charCodeAt(before.length - suffix);
+  if (suffix > 0 && low >= 0xdc00 && low <= 0xdfff) suffix--;
+  return {
+    start: prefix,
+    end: before.length - suffix,
+    text: after.slice(prefix, after.length - suffix),
+  };
+}
 interface DocxParagraph {
   paraId: string;
   start: number;
@@ -588,7 +612,7 @@ function docxParagraphs(
   let plain = true;
   for (const segment of segments) {
     if (segment.kind === "text") {
-      if (segment.attributes.del) plain = false;
+      if (segment.attributes.del || segment.attributes.ins) plain = false;
       text += segment.text;
       cursor += segment.text.length;
       continue;
@@ -636,12 +660,25 @@ function docxParagraph(session: YrsSession, id: string) {
     );
   return { story, paragraph };
 }
+type PptxRun = StorySnapshot["paragraphs"][number]["runs"][number];
 interface PptxParagraph {
   id: string;
   start: number;
   length: number;
   text: string;
-  style: StorySnapshot["paragraphs"][number]["runs"][number]["style"];
+  runs: PptxRun[];
+}
+/** Style of the run holding the character at `offset`, else of the last run. */
+function pptxStyleAt(
+  runs: PptxRun[],
+  offset: number
+): Partial<PptxRun["style"]> {
+  let end = 0;
+  for (const run of runs) {
+    end += run.text.length;
+    if (offset < end) return run.style;
+  }
+  return runs.at(-1)?.style ?? {};
 }
 function pptxStoryParagraphs(
   doc: PptxDocument,
@@ -658,7 +695,7 @@ function pptxStoryParagraphs(
       start: cursor,
       length: text.length,
       text,
-      style: paragraph.runs[0]?.style ?? {},
+      runs: paragraph.runs,
     };
     cursor += text.length + 1;
     return item;
@@ -688,22 +725,22 @@ function pptxTextEntries(
   });
   return entries;
 }
-function pptxParagraph(doc: PptxDocument, id: string) {
-  const entry = pptxTextEntries(doc).find((item) => item.id === id);
-  if (!entry)
+function pptxParagraph(
+  doc: PptxDocument,
+  storyOf: Map<string, string>,
+  id: string
+) {
+  const storyId = storyOf.get(id);
+  const paragraph =
+    storyId === undefined
+      ? undefined
+      : pptxStoryParagraphs(doc, storyId).find((item) => item.id === id);
+  if (storyId === undefined || !paragraph)
     throw new OfficeEditError(
       "unavailable_target",
       "the paragraph is no longer in the deck"
     );
-  const paragraph = pptxStoryParagraphs(doc, entry.storyId).find(
-    (item) => item.id === id
-  );
-  if (!paragraph)
-    throw new OfficeEditError(
-      "unavailable_target",
-      "the paragraph is no longer in the deck"
-    );
-  return { storyId: entry.storyId, paragraph };
+  return { storyId, paragraph };
 }
 function xlsxCellValue(cell: XlsxProjection["sheets"][number]["cells"][number]) {
   if (cell.formula !== null) return `=${cell.formula}`;
@@ -818,17 +855,16 @@ async function open(
             );
           const text = checkReplacement(paragraph.text, command, "DOCX");
           const paraId = paragraph.paraId;
-          if (text)
-            session.insertText(
-              { story, paraId, offset: paragraph.length },
-              text
+          const span = changedSpan(paragraph.text, text);
+          if (span.start < span.end || span.text)
+            session.replaceRange(
+              {
+                story,
+                start: { paraId, offset: span.start },
+                end: { paraId, offset: span.end },
+              },
+              span.text
             );
-          if (paragraph.length)
-            session.deleteRange({
-              story,
-              start: { paraId, offset: 0 },
-              end: { paraId, offset: paragraph.length },
-            });
           projected = undefined;
           return {
             id: command.targetId,
@@ -968,6 +1004,12 @@ async function open(
         baseBytes
       )
     : PptxDocument.openCollaborative(baseBytes, clientId);
+  // A session serves one call, and replace_text never moves a paragraph to another story.
+  let stories: Map<string, string> | undefined;
+  const storyOf = () =>
+    (stories ??= new Map(
+      pptxTextEntries(doc).map((entry) => [entry.id, entry.storyId])
+    ));
   return {
     state: () => doc.encodeStateAsUpdate(),
     entries: () => pptxEntries(doc),
@@ -979,16 +1021,26 @@ async function open(
           "unsupported_operation",
           "PPTX sources support replace_text only"
         );
-      const { storyId, paragraph } = pptxParagraph(doc, command.targetId);
+      const { storyId, paragraph } = pptxParagraph(
+        doc,
+        storyOf(),
+        command.targetId
+      );
       const text = checkReplacement(paragraph.text, command, "PPTX");
-      const end = paragraph.start + paragraph.length;
-      if (text)
-        doc.insertTextJson(
-          JSON.stringify({ storyId, index: end, text, style: paragraph.style })
-        );
-      if (paragraph.length)
+      const span = changedSpan(paragraph.text, text);
+      // A pure insertion replaces nothing; it takes the style of the character before it.
+      const style = pptxStyleAt(
+        paragraph.runs,
+        span.start < span.end ? span.start : Math.max(span.start - 1, 0)
+      );
+      const start = paragraph.start + span.start;
+      if (span.start < span.end)
         doc.deleteTextJson(
-          JSON.stringify({ storyId, start: paragraph.start, end })
+          JSON.stringify({ storyId, start, end: paragraph.start + span.end })
+        );
+      if (span.text)
+        doc.insertTextJson(
+          JSON.stringify({ storyId, index: start, text: span.text, style })
         );
       return {
         id: command.targetId,
@@ -1001,7 +1053,7 @@ async function open(
       };
     },
     locate: (id) => {
-      const { storyId, paragraph } = pptxParagraph(doc, id);
+      const { storyId, paragraph } = pptxParagraph(doc, storyOf(), id);
       return {
         id,
         path: ["pptx:stories", storyId],

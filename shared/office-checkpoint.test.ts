@@ -622,6 +622,64 @@ test("agent edits replace one DOCX paragraph, locate it for guards and undo thro
   ).toBe(target.value);
 });
 
+test("agent replace_text rewrites only the changed DOCX span and refuses tracked insertions", async () => {
+  const source = await fixture("betteroffice-demo.docx");
+  await seedOffice("docx", source);
+  const parts = unzipContainer(source);
+  const run = (text: string, bold = false) =>
+    `<w:r>${
+      bold ? "<w:rPr><w:b/></w:rPr>" : ""
+    }<w:t xml:space="preserve">${text}</w:t></w:r>`;
+  parts["word/document.xml"] = new TextEncoder().encode(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>` +
+      `<w:p w14:paraId="0000000A">${run("I like ")}${run("cats", true)}${run(
+        " a lot"
+      )}</w:p>` +
+      `<w:p w14:paraId="0000000B">${run(
+        "Kept "
+      )}<w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">${run(
+        "inserted"
+      )}</w:ins></w:p>` +
+      `<w:sectPr/></w:body></w:document>`
+  );
+  const bytes = rezipContainer(parts);
+  const before = await seedOffice("docx", bytes);
+  const entries = await inspectOffice(bytes, before);
+  const liked = entries.find((entry) => entry.value === "I like cats a lot")!;
+  expect(entries.some((entry) => entry.value.includes("inserted"))).toBe(false);
+  const edit = await applyOfficeCommands(bytes, before, [
+    {
+      type: "replace_text",
+      targetId: liked.id,
+      expectedText: liked.value,
+      text: "I like dogs a lot",
+    },
+  ]);
+  const xml = new TextDecoder().decode(
+    unzipContainer(
+      await exportOffice(bytes, { ...before, state: edit.state }, fixed)
+    )["word/document.xml"]
+  );
+  const runs = [...xml.matchAll(/<w:r>(.*?)<\/w:r>/g)].map(([, body]) => ({
+    bold: body.includes("<w:b/>"),
+    text: body.replace(/<[^>]+>/g, ""),
+  }));
+  expect(runs.filter((item) => item.bold).map((item) => item.text)).toEqual([
+    "dogs",
+  ]);
+  expect(runs.map((item) => item.text).join("")).toContain("I like dogs a lot");
+  await expect(
+    applyOfficeCommands(bytes, before, [
+      {
+        type: "replace_text",
+        targetId: liked.id.replace(/:paragraph:.*/, ":paragraph:0000000B"),
+        expectedText: "Kept inserted",
+        text: "Kept",
+      },
+    ])
+  ).rejects.toThrow("unavailable_target");
+});
+
 test("agent edits set XLSX cells by sheet name and address and clear them through the inverse", async () => {
   const bytes = await fixture("sample.xlsx");
   const before = await seedOffice("xlsx", bytes);
@@ -705,6 +763,86 @@ test("agent edits replace one PPTX paragraph and keep the paragraph identity for
       },
     ])
   ).rejects.toThrow("invalid_input");
+});
+
+test("agent replace_text keeps PPTX runs outside the changed span and styles it from the first replaced character", async () => {
+  const bytes = await fixture("betteroffice-demo.pptx");
+  const seeded = await seedOffice("pptx", bytes);
+  const target = (await inspectOffice(bytes, seeded)).find(
+    (entry) => entry.value.length > 0
+  )!;
+  const storyId = target.position.slice(0, target.position.lastIndexOf(":"));
+  const runsOf = (state: Uint8Array) => {
+    const doc = PptxDocument.openCollaborativeFromUpdate(state, 9997, bytes);
+    try {
+      const story = JSON.parse(doc.storyJson(JSON.stringify({ storyId }))) as {
+        paragraphs: Array<{
+          id: string;
+          runs: Array<{ text: string; style: { bold?: boolean | null } }>;
+        }>;
+      };
+      return story.paragraphs
+        .find((paragraph) => paragraph.id === target.id)!
+        .runs.map((run) => ({ text: run.text, bold: run.style.bold === true }));
+    } finally {
+      doc.free();
+    }
+  };
+  const doc = PptxDocument.openCollaborativeFromUpdate(
+    seeded.state,
+    9998,
+    bytes
+  );
+  let mixed: Uint8Array;
+  try {
+    const story = JSON.parse(doc.storyJson(JSON.stringify({ storyId }))) as {
+      paragraphs: Array<{ id: string; runs: Array<{ text: string }> }>;
+    };
+    let start = 0;
+    for (const paragraph of story.paragraphs) {
+      if (paragraph.id === target.id) break;
+      start += paragraph.runs.map((run) => run.text).join("").length + 1;
+    }
+    doc.deleteTextJson(
+      JSON.stringify({ storyId, start, end: start + target.value.length })
+    );
+    doc.insertTextJson(
+      JSON.stringify({ storyId, index: start, text: "Plain " })
+    );
+    doc.insertTextJson(
+      JSON.stringify({
+        storyId,
+        index: start + 6,
+        text: "Bold",
+        style: { bold: true },
+      })
+    );
+    mixed = doc.encodeStateAsUpdate();
+  } finally {
+    doc.free();
+  }
+  expect(runsOf(mixed)).toEqual([
+    { text: "Plain ", bold: false },
+    { text: "Bold", bold: true },
+  ]);
+  const edit = await applyOfficeCommands(bytes, { ...seeded, state: mixed }, [
+    {
+      type: "replace_text",
+      targetId: target.id,
+      expectedText: "Plain Bold",
+      text: "Plain Cold",
+    },
+    {
+      type: "replace_text",
+      targetId: target.id,
+      expectedText: "Plain Cold",
+      text: "Plainly Cold",
+    },
+  ]);
+  expect(runsOf(edit.state)).toEqual([
+    { text: "Plainly ", bold: false },
+    { text: "Cold", bold: true },
+  ]);
 });
 
 test("agent edit targets re-locate by stable id after earlier paragraphs move and count astral characters in UTF-16", async () => {
