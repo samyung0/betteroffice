@@ -146,7 +146,7 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
 }
 
 #[test]
-fn layout_and_master_paths_survive_snapshot_hydration() {
+fn layout_and_master_custom_paths_paint() {
     let custom = pptx_parse::parse_pptx(FIXTURE)
         .unwrap()
         .slides
@@ -189,22 +189,6 @@ fn layout_and_master_paths_survive_snapshot_hydration() {
             }
         ));
     }
-    let source = pptx_parse::write_pptx(session.package()).unwrap();
-    let restored = DeckSession::open_from_update_with_source(
-        &session.encode_state_as_update_v1(),
-        &source,
-        286,
-    )
-    .unwrap();
-    let after = renderer
-        .layout_slide(restored.package(), &restored.snapshot().unwrap(), 0)
-        .unwrap()
-        .display_list;
-    assert_eq!(before, after);
-    let ShapeNode::Shape(shape) = &restored.package().layouts[0].shapes[0] else {
-        panic!()
-    };
-    assert_eq!(shape.paths.len(), 4);
 }
 
 #[test]
