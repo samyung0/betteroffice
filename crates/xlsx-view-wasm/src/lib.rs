@@ -67,7 +67,7 @@ struct MergedRanges {
 impl XlsxViewDocument {
     pub fn open(bytes: &[u8]) -> Result<XlsxViewDocument, JsValue> {
         let parts = ooxml_opc::unzip_parts(bytes).map_err(js_error)?;
-        let parsed = xlsx_parse::parse_workbook_with_package(&parts).map_err(js_error)?;
+        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts).map_err(js_error)?;
         let active_sheet = if (parsed.active_sheet.0 as usize) < parsed.workbook.sheets.len() {
             parsed.active_sheet
         } else {
