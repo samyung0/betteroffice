@@ -2270,7 +2270,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.retain_array_formulas(&mut model);
-            self.install_model(model)?;
+            self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -2325,7 +2325,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.retain_array_formulas(&mut model);
-            self.install_model(model)?;
+            self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -2959,8 +2959,20 @@ impl Workbook {
     /// `invalidate_sheet_info` instead — there is no op list that explains
     /// what changed.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
+        self.install_model_with(model, None)
+    }
+
+    /// [`Self::install_model`] reusing a structure the caller already derived.
+    fn install_model_with(
+        &mut self,
+        model: WorkbookModel,
+        known: Option<WorkbookStructure>,
+    ) -> Result<()> {
         if self.is_collaborative() && self.authority.supports_structure() {
-            let structure = self.authority.structure().map_err(authority_error)?;
+            let structure = match known {
+                Some(structure) => structure,
+                None => self.authority.structure().map_err(authority_error)?,
+            };
             self.preserved.origins = structure
                 .sheet_keys
                 .iter()

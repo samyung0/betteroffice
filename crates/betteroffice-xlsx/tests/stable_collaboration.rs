@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRange, CellRef, CellValue, ColStyle, DefinedName, Op, Sheet,
-    SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellRange, CellRef, CellState, CellValue, ColStyle, DefinedName, Op,
+    Sheet, SheetId, StylePatch, Workbook, WorkbookModel,
 };
 fn at(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -1253,4 +1253,67 @@ fn source_column_styles_tables_and_array_formulas_follow_structural_edits() {
     assert_eq!(b.model().sheets[0].array_formulas().count(), 0);
     apply(&mut b, Op::RemoveSheet { index: 0 });
     assert!(b.model().tables.is_empty());
+}
+
+#[test]
+fn a_batch_sets_a_cell_to_a_style_an_earlier_op_of_the_batch_interned() {
+    let mut a = peer(1);
+    let mut b = peer(2);
+    // C1 first, so the batch interns bold before the styles a row-major read meets first.
+    let mut ops = [
+        (
+            "C1",
+            StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        ),
+        (
+            "A1",
+            StylePatch {
+                italic: Some(true),
+                ..StylePatch::default()
+            },
+        ),
+        (
+            "B1",
+            StylePatch {
+                strikethrough: Some(true),
+                ..StylePatch::default()
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(cell, patch)| Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range: CellRange::new(at(cell), at(cell)),
+        patch,
+    })
+    .collect::<Vec<_>>();
+    let mut preview = a.model().clone();
+    for op in &ops {
+        xlsx_ops::apply_in_place(&mut preview, op).unwrap();
+    }
+    let bold = preview.sheets[0].cell(at("C1")).unwrap().style;
+    ops.push(Op::SetCell {
+        sheet: SheetId(0),
+        at: at("D1"),
+        cell: CellState {
+            value: CellValue::Number { value: 1.0 },
+            formula: None,
+            style: bold,
+        },
+    });
+    a.apply_ops(ops, CalculationOptions::default()).unwrap();
+    sync(&mut a, &mut b);
+    for book in [&a, &b] {
+        let model = book.model();
+        let format = |cell: &str| {
+            model
+                .styles
+                .cell_format(model.sheets[0].cell(at(cell)).unwrap().style)
+        };
+        assert_eq!(format("D1"), format("C1"));
+        assert_ne!(format("D1"), format("A1"));
+    }
 }

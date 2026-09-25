@@ -1264,8 +1264,8 @@ pub(super) fn apply(
     ops: &[Op],
     origin: SyncOrigin,
 ) -> Result<(), String> {
+    let mut before = materialize(&doc.transact(), base)?.0;
     for op in ops {
-        let before = materialize(&doc.transact(), base)?.0;
         if let Op::SetChartAnchor {
             sheet, frame, to, ..
         } = op
@@ -1504,6 +1504,8 @@ pub(super) fn apply(
                 }
             }
         }
+        drop(txn);
+        before = after;
     }
     Ok(())
 }
