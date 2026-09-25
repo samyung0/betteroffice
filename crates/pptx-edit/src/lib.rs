@@ -244,6 +244,7 @@ impl DeckSession {
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let snapshot = deck::validated_snapshot(&staged, &self.package)?;
+        deck::validate_remote_meta(&self.doc, &staged)?;
 
         let diff = staged
             .transact()

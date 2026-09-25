@@ -2409,6 +2409,39 @@ fn concurrent_shape_arrangement_and_deletion_converge() {
 }
 
 #[test]
+fn inserted_picture_bytes_stay_binary_and_out_of_the_snapshot() {
+    use yrs::{Any, Map, Out, ReadTxn, Transact};
+
+    let session = open();
+    let slide = session.snapshot().unwrap().slides.remove(0);
+    let receipt = session
+        .add_picture(&context(), &slide.id, &picture_draft())
+        .unwrap();
+    {
+        let txn = session.yrs_doc().transact();
+        let shape = txn
+            .get_map("pptx:shapes")
+            .unwrap()
+            .get(&txn, &receipt.shape_id)
+            .unwrap()
+            .cast::<yrs::MapRef>()
+            .unwrap();
+        assert!(matches!(
+            shape.get(&txn, "pendingMedia"),
+            Some(Out::Any(Any::Buffer(bytes))) if *bytes == *picture_draft().media_bytes
+        ));
+    }
+    let json = serde_json::to_string(&session.snapshot().unwrap()).unwrap();
+    assert!(json.contains(r#""pendingMedia":{"contentType":"image/png"}"#));
+    assert_eq!(
+        session
+            .media_bytes(&format!("pending-media:{}", receipt.shape_id))
+            .unwrap(),
+        picture_draft().media_bytes
+    );
+}
+
+#[test]
 fn inserted_picture_preserves_conflicting_content_type_defaults() {
     let mut source = fixture_parts(256);
     source[0].1 = source[0].1.replace(

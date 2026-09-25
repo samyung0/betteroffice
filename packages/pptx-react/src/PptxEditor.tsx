@@ -897,16 +897,9 @@ function PptxEditorContent({
         selection.focus,
         initialStyle
       );
-      if (
-        textStyle.bold !== next.bold ||
-        textStyle.italic !== next.italic ||
-        textStyle.underline !== next.underline ||
-        textStyle.fontSizePt !== next.fontSizePt ||
-        textStyle.color !== next.color ||
-        textStyle.fontFamily !== next.fontFamily
-      ) {
-        setTextStyle(next);
-      }
+      // Compare every key so a new style field cannot trigger render loops.
+      const keys = Object.keys(next) as Array<keyof EffectiveTextStyle>;
+      if (keys.some((key) => textStyle[key] !== next[key])) setTextStyle(next);
     } catch (value) {
       reportError(value);
     }

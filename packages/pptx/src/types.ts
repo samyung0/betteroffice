@@ -117,7 +117,7 @@ export interface ShapeSnapshot {
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
   /** Image data added to this session, retained across saves. */
-  pendingMedia?: { contentType: string; base64: string } | null;
+  pendingMedia?: { contentType: string } | null;
   blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];

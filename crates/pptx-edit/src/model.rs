@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
@@ -141,12 +142,14 @@ pub struct ShapeSnapshot {
     pub children: Vec<ShapeSnapshot>,
 }
 
-/// Image data shared by editing peers.
+/// Image data shared by editing peers. The bytes stay out of snapshot JSON;
+/// hosts read them through `media_bytes("pending-media:<shape id>")`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingMedia {
     pub content_type: String,
-    pub base64: String,
+    #[serde(skip)]
+    pub bytes: Arc<[u8]>,
 }
 
 fn is_false(value: &bool) -> bool {

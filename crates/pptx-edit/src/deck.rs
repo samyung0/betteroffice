@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use base64::Engine as _;
 use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
@@ -34,7 +33,7 @@ const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
 const MAX_ADJUSTMENTS: usize = 32;
 const MAX_ADJUSTMENT_INDEX: usize = 32;
-/// Stays well under the 16 MiB collaboration frame cap once base64-encoded.
+/// Stays well under the 16 MiB collaboration frame cap.
 const MAX_PENDING_PICTURE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
@@ -123,6 +122,9 @@ pub(crate) fn seed_snapshot(doc: &Doc, snapshot: &DeckSnapshot) -> EditResult<()
                 map.insert(&mut txn, key, value.as_str());
             }
         }
+        if !slide.notes.is_empty() {
+            map.insert(&mut txn, "notes", slide.notes.as_str());
+        }
         let shape_order = map.insert(&mut txn, "shapes", ArrayPrelim::default());
         for shape in &slide.shapes {
             seed_snapshot_shape(&shapes, &stories, &mut txn, shape)?;
@@ -167,8 +169,14 @@ fn seed_snapshot_shape(
     }
     map.insert(txn, "flipH", shape.flip_h);
     map.insert(txn, "flipV", shape.flip_v);
+    if shape.hidden {
+        map.insert(txn, "hidden", true);
+    }
     if let Some(path) = &shape.media_part_path {
         map.insert(txn, "mediaPartPath", path.as_str());
+    }
+    if !shape.blip_effects.is_empty() {
+        insert_json(&map, txn, "blipEffectsJson", Some(&shape.blip_effects))?;
     }
     insert_json(&map, txn, "placeholderJson", shape.placeholder.as_ref())?;
     insert_json(&map, txn, "adjustValuesJson", Some(&shape.adjust_values))?;
@@ -604,13 +612,9 @@ impl DeckSession {
         if let Some(shape_id) = asset_id.strip_prefix("pending-media:") {
             let txn = self.doc.transact();
             let shape = shape_ref(&txn, shape_id)?;
-            let encoded = map_string(&shape, &txn, "pendingMediaBase64")
-                .ok_or_else(|| EditError::InvalidState("pending media was not found".to_owned()))?;
-            return base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| {
-                    EditError::InvalidState(format!("invalid pending image data: {error}"))
-                });
+            return pending_media_bytes(&shape, &txn)
+                .map(|bytes| bytes.to_vec())
+                .ok_or_else(|| EditError::InvalidState("pending media was not found".to_owned()));
         }
         self.package()
             .media
@@ -667,8 +671,8 @@ impl DeckSession {
         shape.insert(&mut txn, "geometry", "rect");
         shape.insert(
             &mut txn,
-            "pendingMediaBase64",
-            base64::engine::general_purpose::STANDARD.encode(&draft.media_bytes),
+            "pendingMedia",
+            Any::Buffer(Arc::from(draft.media_bytes.as_slice())),
         );
         shape.insert(
             &mut txn,
@@ -1028,6 +1032,26 @@ pub(crate) fn validated_snapshot(doc: &Doc, package: &PptxPackage) -> EditResult
     Ok(snapshot)
 }
 
+/// Remote peers may change only the comment flavour in `pptx:meta`; seeding
+/// and rebases write every other key.
+pub(crate) fn validate_remote_meta(current: &Doc, staged: &Doc) -> EditResult<()> {
+    let meta = |doc: &Doc| -> EditResult<Any> {
+        use yrs::types::ToJson;
+        let txn = doc.transact();
+        let mut meta = required_map(&txn, META)?.to_json(&txn);
+        if let Any::Map(entries) = &mut meta {
+            Arc::make_mut(entries).remove("commentFlavor");
+        }
+        Ok(meta)
+    };
+    if meta(current)? != meta(staged)? {
+        return Err(EditError::InvalidUpdate(
+            "remote updates may not change deck metadata".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -1229,12 +1253,12 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         resolved_outline_color,
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
         pending_media: match (
-            map_string(&shape, txn, "pendingMediaBase64"),
+            pending_media_bytes(&shape, txn),
             map_string(&shape, txn, "pendingMediaContentType"),
         ) {
-            (Some(base64), Some(content_type)) => Some(PendingMedia {
+            (Some(bytes), Some(content_type)) => Some(PendingMedia {
                 content_type,
-                base64,
+                bytes,
             }),
             _ => None,
         },
@@ -1742,6 +1766,14 @@ fn required_i64<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<i64>
     Ok(number as i64)
 }
 
+/// An inserted picture's bytes, stored binary on its shape.
+fn pending_media_bytes<T: ReadTxn>(shape: &MapRef, txn: &T) -> Option<Arc<[u8]>> {
+    match shape.get(txn, "pendingMedia") {
+        Some(Out::Any(Any::Buffer(bytes))) => Some(bytes),
+        _ => None,
+    }
+}
+
 pub(crate) fn map_number<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<f64> {
     match map.get(txn, key) {
         Some(Out::Any(Any::Number(value))) if value.is_finite() => Some(value),
@@ -1799,6 +1831,52 @@ mod tests {
             Err(EditError::InvalidState(message))
                 if message == "unsupported deck schema version"
         ));
+    }
+
+    #[test]
+    fn seeding_a_snapshot_reproduces_hidden_shapes_effects_and_notes() {
+        for (bytes, client) in [
+            (HIDDEN_FIXTURE, 103),
+            (
+                include_bytes!("../tests/fixtures/blip-shadow.pptx").as_slice(),
+                104,
+            ),
+        ] {
+            let session = DeckSession::open(bytes, client).unwrap();
+            let slide = session.snapshot().unwrap().slides[0].id.clone();
+            session
+                .set_slide_notes(&EditCtx::local("test"), &slide, "Speaker notes")
+                .unwrap();
+            let snapshot = session.snapshot().unwrap();
+            seed_snapshot(&session.doc, &snapshot).unwrap();
+            assert_eq!(session.snapshot().unwrap(), snapshot);
+        }
+    }
+
+    #[test]
+    fn remote_updates_change_only_the_comment_flavour_in_metadata() {
+        let local = DeckSession::open(FIXTURE, 105).unwrap();
+        let peer = DeckSession::open(FIXTURE, 106).unwrap();
+        peer.set_comment_flavor(&EditCtx::local("test"), pptx_parse::CommentFlavor::Legacy)
+            .unwrap();
+        local
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(
+            local.comment_flavor().unwrap(),
+            pptx_parse::CommentFlavor::Legacy
+        );
+        {
+            let mut txn = peer.doc.transact_mut();
+            let meta = required_map(&txn, META).unwrap();
+            meta.insert(&mut txn, "widthEmu", 1_f64);
+        }
+        let before = local.encode_state_as_update_v1();
+        assert!(matches!(
+            local.apply_update_v1(&peer.encode_state_as_update_v1()),
+            Err(EditError::InvalidUpdate(message)) if message.contains("deck metadata")
+        ));
+        assert_eq!(local.encode_state_as_update_v1(), before);
     }
 
     #[test]

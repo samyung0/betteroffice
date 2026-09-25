@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use base64::Engine as _;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
@@ -718,9 +717,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
             shape.id
         ))
     })?;
-    let media_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&pending.base64)
-        .map_err(|error| EditError::Write(format!("invalid pending image data: {error}")))?;
+    let media_bytes = pending.bytes.to_vec();
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: "rect".to_owned(),
