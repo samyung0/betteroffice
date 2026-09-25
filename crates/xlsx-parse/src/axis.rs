@@ -31,6 +31,27 @@ impl AxisMap {
         }
     }
 
+    /// A map from `(source, len, current)` runs, in increasing order on both.
+    pub fn from_runs(limit: u32, runs: impl IntoIterator<Item = (u32, u32, u32)>) -> Self {
+        let mut map = Self {
+            segments: Vec::new(),
+            limit,
+        };
+        let mut segments = Vec::new();
+        for (source, len, current) in runs {
+            map.push(
+                &mut segments,
+                Segment {
+                    source,
+                    len,
+                    current,
+                },
+            );
+        }
+        map.segments = segments;
+        map
+    }
+
     pub fn is_identity(&self) -> bool {
         self.segments
             == [Segment {
@@ -250,6 +271,15 @@ mod tests {
         assert_eq!(map.current(10), None);
         assert_eq!(map.current(14), Some(14));
         assert_eq!(map.source(12), None);
+    }
+
+    #[test]
+    fn runs_build_the_map_an_edit_sequence_would() {
+        let mut edited = AxisMap::identity(100);
+        edited.delete(3, 2);
+        edited.insert(10, 4);
+        let runs = AxisMap::from_runs(100, [(0, 3, 0), (5, 7, 3), (12, 88, 14)]);
+        assert_eq!(runs, edited);
     }
 
     #[test]

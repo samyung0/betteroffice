@@ -9,7 +9,9 @@ import {
   compare,
   exportOffice,
   inspectOffice,
+  rebaseOffice,
   resolveAsset,
+  xlsxPendingEffects,
 } from "./office-checkpoint";
 import { createYrsSession } from "../packages/docx/src/yrs";
 import { XlsxDocument } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
@@ -29,11 +31,12 @@ test("XLSX checkpoints restore sparse edits, cancel net effects after undo, and 
       JSON.stringify({ sheet: 0, row: 0, col: 0, input: "checkpoint value" })
     );
     const after = { ...before, state: doc.encodeStateAsUpdate() };
-    expect(
-      (await compare(bytes, before, after)).some((effect) =>
-        effect.after?.includes("checkpoint value")
-      )
-    ).toBe(true);
+    expect(await xlsxPendingEffects(bytes, after)).toEqual([
+      expect.objectContaining({
+        kind: "text",
+        after: '{"kind":"text","value":"checkpoint value"}',
+      }),
+    ]);
     const exported = await exportOffice(bytes, after, fixed);
     expect(await exportOffice(bytes, after, fixed)).toEqual(exported);
     const reopened = XlsxDocument.open(exported);
@@ -46,7 +49,7 @@ test("XLSX checkpoints restore sparse edits, cancel net effects after undo, and 
     }
     doc.undoJson();
     expect(
-      await compare(bytes, before, {
+      await xlsxPendingEffects(bytes, {
         ...before,
         state: doc.encodeStateAsUpdate(),
       })
@@ -56,6 +59,44 @@ test("XLSX checkpoints restore sparse edits, cancel net effects after undo, and 
     await expect(exportOffice(changedBase, after, fixed)).rejects.toThrow(
       "exact base"
     );
+  } finally {
+    doc.free();
+  }
+});
+
+test("XLSX publications rebase later edits as overrides and report them as effects", async () => {
+  const bytes = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", bytes);
+  const doc = XlsxDocument.openCollaborative(bytes, 9990);
+  const edit = (row: number, input: string) =>
+    doc.editCellJson(JSON.stringify({ sheet: 0, row, col: 0, input }));
+  try {
+    doc.applyUpdateJson(seeded.state);
+    edit(0, "captured");
+    const captured = { ...seeded, state: doc.encodeStateAsUpdate() };
+    const published = await exportOffice(bytes, captured, fixed);
+    edit(1, "later");
+    const latest = { ...seeded, state: doc.encodeStateAsUpdate() };
+    const rebased = await rebaseOffice(bytes, captured, latest, published);
+    expect(rebased.baseline).toEqual([]);
+    expect(rebased.effects).toEqual([
+      expect.objectContaining({ after: '{"kind":"text","value":"later"}' }),
+    ]);
+    const base = await seedOffice("xlsx", published);
+    const reopened = XlsxDocument.open(
+      await exportOffice(published, { ...base, state: rebased.state }, fixed)
+    );
+    try {
+      for (const [row, input] of [
+        [0, "captured"],
+        [1, "later"],
+      ] as const)
+        expect(
+          reopened.cellJson(JSON.stringify({ sheet: 0, row, col: 0 }))
+        ).toContain(input);
+    } finally {
+      reopened.free();
+    }
   } finally {
     doc.free();
   }

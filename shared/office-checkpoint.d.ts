@@ -84,6 +84,11 @@ export declare function compare(
   fromCheckpoint: OfficeCheckpoint,
   toCheckpoint: OfficeCheckpoint
 ): Promise<NetEffect[]>;
+/** Pending XLSX effects read off the checkpoint's overrides; XLSX keeps no stored baseline. */
+export declare function xlsxPendingEffects(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint
+): Promise<NetEffect[]>;
 export declare function resolveAsset(
   baseBytes: Uint8Array,
   checkpoint: OfficeCheckpoint,

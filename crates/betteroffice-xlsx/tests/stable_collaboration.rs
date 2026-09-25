@@ -810,7 +810,7 @@ fn reopen_rebased(source: &[u8], state: &[u8], client: u64) -> Workbook {
 }
 
 #[test]
-fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source() {
+fn a_rebase_replays_inserts_and_deletes_made_after_the_capture() {
     let source = Workbook::from_model(base()).unwrap().save().unwrap();
     let mut book = Workbook::open_collaborative(&source, 7011).unwrap();
     apply(
@@ -853,6 +853,21 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
     );
     apply(
         &mut book,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 2,
+            count: 2,
+        },
+    );
+    book.edit_cell(
+        SheetId(0),
+        at("B4"),
+        "inserted",
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    apply(
+        &mut book,
         Op::RenameSheet {
             sheet: SheetId(0),
             name: "Renamed".into(),
@@ -868,7 +883,7 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
     book.edit_cell(SheetId(1), at("C2"), "=B3", CalculationOptions::default())
         .unwrap();
     let expected = Workbook::open(&book.save().unwrap()).unwrap().into_model();
-    let result = Workbook::rebase_checkpoint(
+    let state = Workbook::rebase_checkpoint(
         &source,
         &captured,
         &book.encode_state_as_update_v1(),
@@ -877,24 +892,26 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
     )
     .unwrap();
     drop(source);
-    let mut reopened = reopen_rebased(&published, &result.state, 7013);
-    let indexed = reopen_rebased(&published, &result.indexed_state, 7014);
+    let mut reopened = reopen_rebased(&published, &state, 7013);
     assert_eq!(reopened.model(), &expected);
+    let effects: Vec<serde_json::Value> =
+        serde_json::from_str(&reopened.pending_effects_json().unwrap()).unwrap();
+    let mut labels = effects
+        .iter()
+        .map(|effect| effect["label"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    labels.sort();
     assert_eq!(
-        indexed.checkpoint_sheet_ids().unwrap(),
-        vec!["sheet:1", "sheet:2"]
-    );
-    assert_eq!(
-        indexed
-            .checkpoint_cell_identities([(SheetId(0), at("A3"))])
-            .unwrap()[0],
-        reopened.cell_identity(SheetId(1), at("B2")).unwrap()
-    );
-    assert_ne!(
-        indexed
-            .checkpoint_cell_identities([(SheetId(0), at("A2"))])
-            .unwrap()[0],
-        reopened.cell_identity(SheetId(1), at("B2")).unwrap()
+        labels,
+        [
+            "Renamed!B4",
+            "Renamed!C2",
+            "Renamed: 1 columns inserted",
+            "Renamed: 1 rows deleted",
+            "Renamed: 2 rows inserted",
+            "Sheet New",
+            "Sheet Renamed",
+        ]
     );
     assert_eq!(
         reopened.model().sheets[2]
@@ -902,7 +919,7 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
             .unwrap()
             .formula
             .as_deref(),
-        Some("'Renamed'!B3")
+        Some("'Renamed'!B5")
     );
     apply(
         &mut reopened,
@@ -918,7 +935,7 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
             .unwrap()
             .formula
             .as_deref(),
-        Some("'Renamed'!B4")
+        Some("'Renamed'!B6")
     );
     let peer = reopen_rebased(&published, &reopened.encode_state_as_update_v1(), 7015);
     assert_eq!(peer.model(), reopened.model());
@@ -929,7 +946,7 @@ fn rebase_preserves_saved_structure_and_indexed_cell_identity_without_old_source
 }
 
 #[test]
-fn second_rebase_releases_previous_overlay_and_preserves_later_edits() {
+fn a_second_rebase_over_a_rebased_state_keeps_later_edits() {
     let source = Workbook::from_model(base()).unwrap().save().unwrap();
     let mut book = Workbook::open_collaborative(&source, 7021).unwrap();
     let captured = book.encode_state_as_update_v1();
@@ -944,7 +961,7 @@ fn second_rebase_releases_previous_overlay_and_preserves_later_edits() {
         7022,
     )
     .unwrap();
-    let mut book = reopen_rebased(&published, &first.state, 7023);
+    let mut book = reopen_rebased(&published, &first, 7023);
     let captured = book.encode_state_as_update_v1();
     let next_published = book.save().unwrap();
     apply(
@@ -970,111 +987,21 @@ fn second_rebase_releases_previous_overlay_and_preserves_later_edits() {
         7024,
     )
     .unwrap();
-    let mut rebased = reopen_rebased(&next_published, &second.state, 7025);
+    let mut rebased = reopen_rebased(&next_published, &second, 7025);
     assert_eq!(rebased.model(), book.model());
     let mut wrong_source = Workbook::open_collaborative(&source, 7026).unwrap();
     assert!(
         wrong_source
-            .apply_update_v1(&second.state, CalculationOptions::default())
+            .apply_update_v1(&second, CalculationOptions::default())
             .is_err()
     );
-    let mut peer = reopen_rebased(&next_published, &second.state, 7027);
+    let mut peer = reopen_rebased(&next_published, &second, 7027);
     rebased
         .edit_cell(SheetId(0), at("C3"), "left", CalculationOptions::default())
         .unwrap();
     peer.edit_cell(SheetId(0), at("D3"), "right", CalculationOptions::default())
         .unwrap();
     sync(&mut rebased, &mut peer);
-}
-
-#[test]
-fn rebase_overlay_is_sparse_binary_and_immutable_after_bootstrap() {
-    use yrs::updates::decoder::Decode;
-    use yrs::{Doc, Map, Out, ReadTxn, StateVector, Transact, WriteTxn};
-    let source = Workbook::from_model(base()).unwrap().save().unwrap();
-    let mut book = Workbook::open_collaborative(&source, 7031).unwrap();
-    let captured = book.encode_state_as_update_v1();
-    let published = book.save().unwrap();
-    book.edit_cell(SheetId(0), at("C5"), "saved", CalculationOptions::default())
-        .unwrap();
-    book.recalculate_all(CalculationOptions::default());
-    let current = book.save().unwrap();
-    let result = Workbook::rebase_checkpoint(
-        &source,
-        &captured,
-        &book.encode_state_as_update_v1(),
-        &published,
-        7032,
-    )
-    .unwrap();
-    let snapshot = Doc::with_client_id(7033);
-    snapshot
-        .transact_mut()
-        .apply_update(yrs::Update::decode_v1(&result.state).unwrap())
-        .unwrap();
-    let before = ooxml_opc::unzip_parts(&published)
-        .unwrap()
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let after = ooxml_opc::unzip_parts(&current)
-        .unwrap()
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-    {
-        let txn = snapshot.transact();
-        let root = txn.get_map("xlsx:rebase").unwrap();
-        let mut copied = 0;
-        for (key, value) in root.iter(&txn) {
-            if key == "$manifest" {
-                continue;
-            }
-            let path = key.strip_prefix("part:").unwrap();
-            let Out::Any(yrs::Any::Buffer(bytes)) = value else {
-                panic!("part was not stored as bytes")
-            };
-            assert_eq!(bytes.as_ref(), after[path]);
-            assert!(
-                before.get(path).is_none_or(|old| old != &after[path]),
-                "copied an unchanged part"
-            );
-            copied += 1;
-        }
-        assert_eq!(
-            copied,
-            after
-                .iter()
-                .filter(|(path, bytes)| before.get(*path).is_none_or(|old| old != *bytes))
-                .count()
-        );
-    }
-    let mut target = reopen_rebased(&published, &result.state, 7034);
-    let previous = target.encode_state_as_update_v1();
-    {
-        let mut txn = snapshot.transact_mut();
-        let root = txn.get_or_insert_map("xlsx:rebase");
-        root.insert(
-            &mut txn,
-            "part:xl/worksheets/sheet1.xml",
-            yrs::Any::Buffer(vec![0].into()),
-        );
-    }
-    let corrupt = snapshot
-        .transact()
-        .encode_state_as_update_v1(&StateVector::default());
-    assert!(
-        target
-            .apply_update_v1(&corrupt, CalculationOptions::default())
-            .is_err()
-    );
-    assert_eq!(target.encode_state_as_update_v1(), previous);
-    assert!(
-        target
-            .apply_update_v1(
-                &book.encode_state_as_update_v1(),
-                CalculationOptions::default()
-            )
-            .is_err()
-    );
 }
 
 #[test]
@@ -1158,7 +1085,7 @@ fn capy_contributor_metadata_survives_native_live_and_durable_updates() {
     )
     .unwrap();
     assert_eq!(
-        reopen_rebased(&published, &rebased.state, 7045).model(),
+        reopen_rebased(&published, &rebased, 7045).model(),
         restored.model()
     );
     let previous = native.encode_state_as_update_v1();
@@ -1316,4 +1243,195 @@ fn a_batch_sets_a_cell_to_a_style_an_earlier_op_of_the_batch_interned() {
         assert_eq!(format("D1"), format("C1"));
         assert_ne!(format("D1"), format("A1"));
     }
+}
+
+fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, MapRef, ReadTxn, Transact};
+    let doc = Doc::new();
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&book.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    let sheet = txn
+        .get_map("xlsx:sheets")
+        .unwrap()
+        .get(&txn, sheet)
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    let contents = sheet
+        .get(&txn, "contents")
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    let mut entries = contents
+        .iter(&txn)
+        .map(|(key, value)| (key.to_owned(), value.to_string(&txn)))
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
+#[test]
+fn source_cells_are_overridden_cleared_reverted_and_undone() {
+    let options = CalculationOptions::default();
+    let mut book = peer(3001);
+    assert!(overrides(&book, "sheet:0").is_empty());
+    book.edit_cell(SheetId(0), at("A1"), "", options).unwrap();
+    assert!(book.model().sheets[0].cell(at("A1")).is_none());
+    assert_eq!(
+        overrides(&book, "sheet:0"),
+        [(
+            r#"[{"run":"base","offset":0},{"run":"base","offset":0}]"#.to_owned(),
+            r#"{"value":{"kind":"empty"},"formula":null}"#.to_owned()
+        )]
+    );
+    book.edit_cell(SheetId(0), at("A1"), "10", options).unwrap();
+    assert!(
+        overrides(&book, "sheet:0").is_empty(),
+        "the source value reverts"
+    );
+    book.edit_cell(SheetId(0), at("A2"), "25", options).unwrap();
+    assert_eq!(overrides(&book, "sheet:0").len(), 1);
+    book.undo(options).unwrap();
+    assert!(overrides(&book, "sheet:0").is_empty());
+    assert_eq!(
+        book.model().sheets[0].cell(at("A2")).unwrap().value,
+        CellValue::Number { value: 20.0 }
+    );
+    let mut fresh = peer(3002);
+    fresh
+        .apply_update_v1(&book.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(fresh.model(), book.model());
+}
+
+#[test]
+fn a_concurrent_clear_and_set_of_a_source_cell_resolve_by_client_order() {
+    let options = CalculationOptions::default();
+    for (clearing, setting) in [(3011, 3012), (3022, 3021)] {
+        let mut clear = peer(clearing);
+        let mut set = peer(setting);
+        clear.edit_cell(SheetId(0), at("A1"), "", options).unwrap();
+        set.edit_cell(SheetId(0), at("A1"), "set", options).unwrap();
+        sync(&mut clear, &mut set);
+        let expected = (setting > clearing).then(|| CellValue::Text {
+            value: "set".into(),
+        });
+        assert_eq!(
+            clear.model().sheets[0]
+                .cell(at("A1"))
+                .map(|cell| cell.value.clone()),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_hidden_source_sheet_still_validates_its_formulas() {
+    let mut model = base();
+    model.sheets[1].set_cell(
+        at("B1"),
+        Cell {
+            formula: Some("SUM(Values[Value])".into()),
+            ..Cell::default()
+        },
+    );
+    let mut book = Workbook::from_model_collaborative(model, 3031).unwrap();
+    let state = book.encode_state_as_update_v1();
+    assert!(
+        book.apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default()
+        )
+        .is_err()
+    );
+    assert_eq!(book.encode_state_as_update_v1(), state);
+}
+
+#[test]
+fn pending_effects_come_from_the_overrides() {
+    let options = CalculationOptions::default();
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 3041).unwrap();
+    let effects = |book: &Workbook| {
+        let effects: Vec<serde_json::Value> =
+            serde_json::from_str(&book.pending_effects_json().unwrap()).unwrap();
+        effects
+            .iter()
+            .map(|effect| {
+                let field = |name: &str| effect[name].as_str().unwrap_or_default().to_owned();
+                [
+                    field("kind"),
+                    field("operation"),
+                    field("label"),
+                    field("before"),
+                    field("after"),
+                ]
+                .join("|")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(effects(&book).is_empty());
+    book.edit_cell(SheetId(0), at("A1"), "15", options).unwrap();
+    book.edit_cell(SheetId(0), at("C1"), "new", options)
+        .unwrap();
+    apply(
+        &mut book,
+        Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::new(at("A1"), at("B2")),
+            patch: StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    );
+    apply(
+        &mut book,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+    );
+    apply(
+        &mut book,
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 3,
+            count: 1,
+        },
+    );
+    apply(
+        &mut book,
+        Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "Totals".into(),
+        },
+    );
+    let mut listed = effects(&book);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            r#"text|add|Data!C3||{"kind":"text","value":"new"}"#,
+            "text|add|Data: 2 rows inserted||",
+            r#"text|remove|Data: 1 rows deleted|{"kind":"number","value":20.0}|"#,
+            r#"text|replace|Data!A3|{"kind":"number","value":10.0}|{"kind":"number","value":15.0}"#,
+            "text|replace|Sheet Totals|Summary|Totals",
+            "visual|replace|Data!A3:B3 formatting||",
+        ]
+    );
+    let json: Vec<serde_json::Value> =
+        serde_json::from_str(&book.pending_effects_json().unwrap()).unwrap();
+    let identity = book.cell_identity(SheetId(0), at("A3")).unwrap();
+    assert!(json.iter().any(|effect| effect["id"] == identity.as_str()));
+    book.edit_cell(SheetId(0), at("C3"), "", options).unwrap();
+    assert_eq!(effects(&book).len(), 5);
+    for _ in 0..7 {
+        book.undo(options).unwrap();
+    }
+    assert!(effects(&book).is_empty());
 }

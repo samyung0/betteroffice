@@ -280,7 +280,6 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
-    source_sha: Option<String>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -465,14 +464,7 @@ impl Workbook {
                 shared_string_cells: (0..model.sheets.len())
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
-                // Deliberate stopgap, revisit in F3: schema 7 sessions skip
-                // upstream's preserved row, column and cell markup on save
-                // (their row and column edits do not move these maps) until the
-                // lazy-cell overlay maps it through the live axes.
-                axes: vec![
-                    (!authority.supports_structure()).then(xlsx_parse::SheetAxes::default);
-                    model.sheets.len()
-                ],
+                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
@@ -491,7 +483,6 @@ impl Workbook {
                 .collect(),
             model,
             source_package,
-            source_sha: source_sha.map(str::to_owned),
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -549,9 +540,6 @@ impl Workbook {
         };
         validate_collaboration_size(update)?;
         let before = self.model.clone();
-        if self.restore_rebase(update, options)? {
-            return Ok(self.remote_mutation_result(&before, true));
-        }
         if let Some(index) = self
             .pending_remote_updates
             .iter()
@@ -897,12 +885,22 @@ impl Workbook {
         };
         match &self.source_package {
             Some(package) => {
+                let live;
+                let (axes, shared_string_cells) = if self.is_collaborative() {
+                    live = self.source_layout(package)?;
+                    (live.0.as_slice(), live.1.as_slice())
+                } else {
+                    (
+                        self.preserved.axes.as_slice(),
+                        self.preserved.shared_string_cells.as_slice(),
+                    )
+                };
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
-                    &self.preserved.shared_string_cells,
-                    &self.preserved.axes,
+                    shared_string_cells,
+                    axes,
                     xlsx_parse::SaveEdits {
                         changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
@@ -916,6 +914,35 @@ impl Workbook {
                 active_sheet,
             )?),
         }
+    }
+
+    /// Each source sheet's live row and column axes with the shared-string
+    /// entries its cells were authored against, moved along them.
+    fn source_layout(
+        &self,
+        package: &xlsx_parse::PreservedPackage,
+    ) -> Result<(
+        Vec<Option<xlsx_parse::SheetAxes>>,
+        Vec<xlsx_parse::SharedStringCells>,
+    )> {
+        let axes = self.authority.source_axes().map_err(authority_error)?;
+        let cells = self
+            .preserved
+            .origins
+            .iter()
+            .zip(&axes)
+            .map(|(origin, axes)| match (origin, axes) {
+                (Some(origin), Some(axes)) => package
+                    .source_shared_string_cells(*origin)
+                    .into_iter()
+                    .filter_map(|((row, col), index)| {
+                        Some(((axes.rows.current(row)?, axes.cols.current(col)?), index))
+                    })
+                    .collect(),
+                _ => xlsx_parse::SharedStringCells::new(),
+            })
+            .collect();
+        Ok((axes, cells))
     }
 
     pub fn embedded_images(&self, sheet: SheetId) -> Result<Vec<xlsx_parse::EmbeddedImage>> {
@@ -953,6 +980,20 @@ impl Workbook {
 
     pub fn model(&self) -> &WorkbookModel {
         &self.model
+    }
+
+    /// Net effects of the edits against the source package as a JSON array of
+    /// `{id, kind, operation, label, before?, after?}`, read off the overrides.
+    pub fn pending_effects_json(&self) -> Result<String> {
+        if !self.is_collaborative() {
+            return Err(Error::NotCollaborative);
+        }
+        let effects = self
+            .authority
+            .pending_effects(&self.model)
+            .map_err(authority_error)?;
+        serde_json::to_string(&effects)
+            .map_err(|error| Error::CollaborativeState(error.to_string()))
     }
 
     pub fn into_model(self) -> WorkbookModel {
@@ -2839,7 +2880,7 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
 /// the collaboration document carries cells, not the rectangle a `t="array"`
 /// formula fills, so each projection re-adopts the anchors it still holds.
 impl Workbook {
-    /// Schema 7 projects array formulas through its row and column identities.
+    /// Stable sessions project array formulas through their row and column identities.
     fn retain_array_formulas(&self, projected: &mut WorkbookModel) {
         if !self.authority.supports_structure() {
             retain_array_formulas(&self.model, projected);

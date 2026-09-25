@@ -39,24 +39,6 @@ pub struct XlsxDocument {
     update_observer: Option<UpdateObserver>,
 }
 
-#[wasm_bindgen]
-pub struct XlsxRebaseResult {
-    state: Vec<u8>,
-    indexed_state: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl XlsxRebaseResult {
-    #[wasm_bindgen(getter)]
-    pub fn state(&self) -> Vec<u8> {
-        self.state.clone()
-    }
-    #[wasm_bindgen(getter, js_name = indexedState)]
-    pub fn indexed_state(&self) -> Vec<u8> {
-        self.indexed_state.clone()
-    }
-}
-
 struct UpdateObserver {
     pending: Arc<Mutex<PendingUpdateEvents>>,
     _subscription: UpdateSubscription,
@@ -93,6 +75,7 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// The latest state re-expressed as overrides over the published source.
     #[wasm_bindgen(js_name = rebaseCheckpoint)]
     pub fn rebase_checkpoint(
         old_source: &[u8],
@@ -100,19 +83,15 @@ impl XlsxDocument {
         latest: &[u8],
         new_source: &[u8],
         client_id: f64,
-    ) -> Result<XlsxRebaseResult, JsValue> {
-        let result = betteroffice_xlsx::Workbook::rebase_checkpoint(
+    ) -> Result<Vec<u8>, JsValue> {
+        betteroffice_xlsx::Workbook::rebase_checkpoint(
             old_source,
             captured,
             latest,
             new_source,
             parse_client_id(client_id)?,
         )
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        Ok(XlsxRebaseResult {
-            state: result.state,
-            indexed_state: result.indexed_state,
-        })
+        .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]
@@ -286,6 +265,14 @@ impl XlsxDocument {
     pub fn checkpoint_projection_json(&self) -> Result<String, JsValue> {
         self.session
             .checkpoint_projection_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Net effects of the edits against the source package, as a JSON array.
+    #[wasm_bindgen(js_name = pendingEffectsJson)]
+    pub fn pending_effects_json(&self) -> Result<String, JsValue> {
+        self.session
+            .pending_effects_json()
             .map_err(|error| JsValue::from_str(&error))
     }
 

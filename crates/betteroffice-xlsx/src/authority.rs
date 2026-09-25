@@ -41,7 +41,7 @@ const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
 const CHARTS_SCHEMA_VERSION: i64 = 6;
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
@@ -96,7 +96,6 @@ pub(crate) enum AuthorityError {
 
 #[derive(Clone)]
 struct WorkbookBase {
-    rebase: Option<crate::workbook::rebase::RebaseData>,
     bootstrap_client_id: u64,
     date_system: DateSystem,
     defined_names: Vec<DefinedName>,
@@ -112,9 +111,12 @@ struct WorkbookBase {
     styles: Stylesheet,
     /// table parts; read-only reference data, not shared state.
     tables: Vec<Table>,
-    /// Schema 7 only: each source sheet's array formulas with the contents
-    /// their anchors were seeded with.
-    array_anchors: Vec<Vec<stable::ArrayAnchor>>,
+    /// The parsed source cells that unedited cells project from.
+    sheets: Arc<Vec<Sheet>>,
+    /// Source formulas bound once per session against the bootstrap topology.
+    bindings: Arc<std::sync::OnceLock<Result<stable::BaseBindings, String>>>,
+    /// The seed, which pending effects compare shared records against.
+    bootstrap: Vec<u8>,
 }
 
 impl WorkbookBase {
@@ -213,7 +215,6 @@ impl WorkbookBase {
             }
         }
         Ok(Self {
-            rebase: None,
             bootstrap_client_id,
             date_system: model.date_system,
             defined_names: model.defined_names.clone(),
@@ -240,7 +241,9 @@ impl WorkbookBase {
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
             tables: model.tables.clone(),
-            array_anchors: Vec::new(),
+            sheets: Arc::default(),
+            bindings: Arc::default(),
+            bootstrap: Vec::new(),
         })
     }
 
@@ -506,19 +509,19 @@ impl WorkbookAuthority {
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
         if client_id.is_some() {
+            base.sheets = Arc::new(model.sheets.clone());
             seed(&bootstrap, &base, model, &keys)
         } else {
             seed_legacy(&bootstrap, &base, model, &keys)
         }
         .map_err(AuthorityError::InvalidState)?;
-        if client_id.is_some() {
-            base.array_anchors = stable::seeded_array_anchors(&bootstrap, model)
-                .map_err(AuthorityError::InvalidState)?;
-        }
         let bootstrap_snapshot = bootstrap.transact().snapshot();
         let bootstrap_update = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
+        if client_id.is_some() {
+            base.bootstrap.clone_from(&bootstrap_update);
+        }
 
         let doc = match client_id {
             Some(client_id) => Doc::with_client_id(client_id),
@@ -545,30 +548,26 @@ impl WorkbookAuthority {
         Ok(authority)
     }
 
-    pub(crate) fn attach_rebase(
-        &mut self,
-        data: crate::workbook::rebase::RebaseData,
-    ) -> Result<(), AuthorityError> {
-        data.write(&self.doc);
-        Arc::make_mut(&mut self.base).rebase = Some(data);
-        self.strict_materialize()
-            .map_err(AuthorityError::InvalidState)?;
-        Ok(())
-    }
-    pub(crate) fn expect_rebase(&mut self, data: crate::workbook::rebase::RebaseData) {
-        Arc::make_mut(&mut self.base).rebase = Some(data);
-    }
-    pub(crate) fn has_rebase(&self) -> bool {
-        self.base.rebase.is_some()
-    }
-    pub(crate) fn rebase_alias_projection(&self) -> Option<&[crate::workbook::rebase::SheetAlias]> {
-        self.base.rebase.as_ref().and_then(|data| data.aliases())
-    }
-    pub(crate) fn rebase_aliases(
+    /// Writes `latest`'s projection into this fresh publication of `captured`.
+    pub(crate) fn rebase(
         &self,
+        captured: &Self,
         latest: &Self,
-    ) -> Result<Vec<crate::workbook::rebase::SheetAlias>, AuthorityError> {
-        stable::rebase_aliases(&self.doc, &latest.doc).map_err(AuthorityError::InvalidState)
+        model: &WorkbookModel,
+    ) -> Result<(), AuthorityError> {
+        stable::rebase(&self.doc, &self.base, &captured.doc, &latest.doc, model)
+            .map_err(AuthorityError::InvalidState)
+    }
+
+    pub(crate) fn source_axes(&self) -> Result<Vec<Option<xlsx_parse::SheetAxes>>, AuthorityError> {
+        stable::source_axes(&self.doc).map_err(AuthorityError::InvalidState)
+    }
+
+    pub(crate) fn pending_effects(
+        &self,
+        model: &WorkbookModel,
+    ) -> Result<Vec<serde_json::Value>, AuthorityError> {
+        stable::pending_effects(&self.doc, &self.base, model).map_err(AuthorityError::InvalidState)
     }
 
     pub(crate) fn supports_structure(&self) -> bool {
@@ -716,7 +715,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let mut candidate = Self {
+        let candidate = Self {
             doc,
             bootstrap_snapshot: self.bootstrap_snapshot.clone(),
             base: self.base.clone(),
@@ -738,12 +737,7 @@ impl WorkbookAuthority {
         }
         match candidate.strict_materialize() {
             Err(error) => SnapshotAdoption::Incompatible(error),
-            Ok(_) => {
-                if let Some(data) = &mut Arc::make_mut(&mut candidate.base).rebase {
-                    data.bind_values(&candidate.doc);
-                }
-                SnapshotAdoption::Replacement(Box::new(candidate))
-            }
+            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
         }
     }
 
@@ -3661,7 +3655,7 @@ fn fingerprint_model_with_schema(
         4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
         5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
         6 => b"betteroffice-xlsx-yrs-v6".as_slice(),
-        _ => b"betteroffice-xlsx-yrs-v7".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v8".as_slice(),
     };
     hasher.update(domain);
     let base = if include_defined_names {
@@ -4304,7 +4298,7 @@ mod legacy_tests {
         };
         assert_eq!(
             error,
-            "unsupported schema version 8; supported versions are 3 through 7"
+            "unsupported schema version 9; supported versions are 3 through 8"
         );
     }
 
