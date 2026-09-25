@@ -220,6 +220,90 @@ it('preserves a saved restore of an image removed at capture, and refuses missin
   }
 });
 
+/** 1x1 grayscale uncompressed TIFF; the engine displays it as a PNG transcode. */
+function tiff(): Uint8Array {
+  const entries = [
+    [256, 3, 1],
+    [257, 3, 1],
+    [258, 3, 8],
+    [259, 3, 1],
+    [262, 3, 1],
+    [273, 4, 122],
+    [277, 3, 1],
+    [278, 4, 1],
+    [279, 4, 1],
+  ];
+  const bytes = new Uint8Array(123);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0, 0x4949, true);
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+  view.setUint16(8, entries.length, true);
+  entries.forEach(([tag, type, value], index) => {
+    view.setUint16(10 + index * 12, tag, true);
+    view.setUint16(12 + index * 12, type, true);
+    view.setUint32(14 + index * 12, 1, true);
+    view.setUint32(18 + index * 12, value, true);
+  });
+  bytes[122] = 200;
+  return bytes;
+}
+
+it('binds a re-inserted TIFF image to its source part by the displayed form', async () => {
+  const seed = await createYrsSession();
+  const session = await createYrsSession();
+  let current: YrsSession | undefined;
+  try {
+    const blank = source();
+    const bytes = tiff();
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    seed.openDocx(blank, true);
+    seed.applyRawOps('body', [
+      {
+        op: 'insertEmbed',
+        index: 0,
+        kind: 'image',
+        payload: { src: `data:image/tiff;base64,${btoa(binary)}`, width: 12, height: 12 },
+      },
+    ]);
+    const a = await save(seed, blank);
+    session.openDocx(a, true);
+    const original = session.storySegments('body')[0];
+    if (original.kind !== 'embed') throw new Error('missing image');
+    expect(original.payload.src).toStartWith('data:image/png;base64,');
+    session.applyRawOps('body', [{ op: 'delete', index: 0, len: 1 }]);
+    const captured = session.encodeState();
+    const b = await save(session, a);
+    session.applyRawOps('body', [
+      {
+        op: 'insertEmbed',
+        index: 0,
+        kind: 'image',
+        payload: { src: original.payload.src, width: 12, height: 12 },
+      },
+    ]);
+    const result = await rebaseDocxCheckpoint({
+      oldSource: a,
+      capturedState: captured,
+      latestState: session.encodeState(),
+      exportedSource: b,
+    });
+    current = await reopen(b, result.state);
+    const parts = unzipContainer(await save(current, b));
+    expect(new TextDecoder().decode(parts['word/document.xml'])).toContain(
+      `r:embed="${original.payload.rId}"`
+    );
+    expect(Object.keys(parts).filter((path) => path.startsWith('word/media/'))).toEqual([
+      'word/media/image1.tiff',
+    ]);
+  } finally {
+    seed.destroy();
+    session.destroy();
+    current?.destroy();
+  }
+});
+
 it('rebinds a feature-rich package with saved header and body edits', async () => {
   const a = new Uint8Array(
     readFileSync(resolve(import.meta.dir, '../../../../poc/fixtures/feature-rich.docx'))

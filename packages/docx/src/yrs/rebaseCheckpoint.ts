@@ -1,4 +1,5 @@
 import type { Document } from '../types/document';
+import type { MediaFile } from '../types/styles';
 import { parseRelationshipsXmlWithRust } from '../docx/rustParseFacade';
 import { serializeDocxS10Wire } from '../wasm/parse';
 import { unzipContainer } from '../wasm/opc';
@@ -110,7 +111,12 @@ function storyOwner(story: string, base: Document): string {
   throw new Error(`DOCX rebase cannot resolve story owner ${story}`);
 }
 
-function imageBindings(parts: Parts, owner: string): Map<string, string> {
+/** Keys are the parsed media's display base64, which seeded image sources carry (TIFF shows as PNG). */
+function imageBindings(
+  parts: Parts,
+  owner: string,
+  media: Map<string, MediaFile> | undefined
+): Map<string, string> {
   const slash = owner.lastIndexOf('/');
   const relsPath = `${owner.slice(0, slash + 1)}_rels/${owner.slice(slash + 1)}.rels`;
   const bytes = parts[relsPath];
@@ -118,11 +124,10 @@ function imageBindings(parts: Parts, owner: string): Map<string, string> {
   if (!bytes) return result;
   for (const [id, relationship] of parseRelationshipsXmlWithRust(decoder.decode(bytes), relsPath)) {
     if (!relationship.type.endsWith('/image') || relationship.targetMode === 'External') continue;
-    const data = parts[targetPath(owner, relationship.target)];
-    if (!data) throw new Error(`DOCX rebase image target missing for ${relsPath}:${id}`);
-    let binary = '';
-    for (const byte of data) binary += String.fromCharCode(byte);
-    result.set(btoa(binary), id);
+    const path = targetPath(owner, relationship.target);
+    if (!parts[path]) throw new Error(`DOCX rebase image target missing for ${relsPath}:${id}`);
+    const src = media?.get(path)?.dataUrl;
+    if (src) result.set(src.slice(src.indexOf(',') + 1), id);
   }
   return result;
 }
@@ -214,12 +219,15 @@ function rebase(
       }
     },
   });
+  // Attach B before binding images so they match B's parsed media.
+  session.openDocx(input.exportedSource, false);
+  const exported = packageDocument(session);
   const bindings = new Map<string, Map<string, string>>();
   for (const story of reachable) {
     const owner = storyOwner(story, base);
     let images = bindings.get(owner);
     if (!images) {
-      images = imageBindings(parts, owner);
+      images = imageBindings(parts, owner, exported.package.media);
       bindings.set(owner, images);
     }
     let offset = 0;
@@ -261,8 +269,7 @@ function rebase(
     });
   }
   for (const [story, batch] of ops) session.applyRawOps(story, batch);
-  session.openDocx(input.exportedSource, false);
-  const after = yrsToDocument(session, packageDocument(session));
+  const after = yrsToDocument(session, exported);
   if (authored(before) !== authored(after))
     throw new Error('DOCX rebase changed authored content or package-owned story metadata');
   return session.encodeState();
