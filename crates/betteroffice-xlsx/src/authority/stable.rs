@@ -11,7 +11,9 @@ const ROWS: &str = "rows";
 const COLS: &str = "cols";
 
 /// A source array formula and the contents its anchor was seeded with. The
-/// array survives only while the anchor still holds that seeded item.
+/// array keeps its `t="array"` range only while the anchor still holds that
+/// seeded item; otherwise it saves as a single-cell formula. Deliberate
+/// stopgap, revisit in F3 (lazy-cell overrides).
 #[derive(Clone)]
 pub(super) struct ArrayAnchor {
     at: CellRef,

@@ -464,9 +464,10 @@ impl Workbook {
                 shared_string_cells: (0..model.sheets.len())
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
-                // ponytail: schema 7 row and column edits do not move these
-                // maps yet, so its sessions rewrite edited sheets' row and column
-                // markup; derive them from the stable axes to keep it.
+                // Deliberate stopgap, revisit in F3: schema 7 sessions skip
+                // upstream's preserved row, column and cell markup on save
+                // (their row and column edits do not move these maps) until the
+                // lazy-cell overlay maps it through the live axes.
                 axes: vec![
                     (!authority.supports_structure()).then(xlsx_parse::SheetAxes::default);
                     model.sheets.len()
