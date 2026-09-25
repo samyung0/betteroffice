@@ -3612,7 +3612,7 @@ pub fn seed_parsed_docx(
     use yrs::Transact;
     use yrs::updates::decoder::Decode;
     let seed = EditingDoc::new(SEED_CLIENT_ID);
-    let fonts = seed_into(&seed, envelope)?;
+    let fonts = seed_parsed_docx_in_place(&seed, envelope)?;
     let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())
         .map_err(|error| error.to_string())?;
     document
@@ -3623,7 +3623,9 @@ pub fn seed_parsed_docx(
     Ok(fonts)
 }
 
-fn seed_into(
+/// Seeds under `document`'s own client, for a view that never stores its
+/// state; keeps update decoding out of the viewer build.
+pub fn seed_parsed_docx_in_place(
     document: &EditingDoc,
     mut envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
