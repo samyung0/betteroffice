@@ -438,7 +438,9 @@ impl Workbook {
             validate_collaboration_state_entries(authority.state_vector_entries())?;
         }
         let mut projected = authority.materialize().map_err(authority_error)?;
-        retain_array_formulas(&model, &mut projected);
+        if !authority.supports_structure() {
+            retain_array_formulas(&model, &mut projected);
+        }
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -462,7 +464,13 @@ impl Workbook {
                 shared_string_cells: (0..model.sheets.len())
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
-                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
+                // ponytail: schema 7 row and column edits do not move these
+                // maps yet, so its sessions rewrite edited sheets' row and column
+                // markup; derive them from the stable axes to keep it.
+                axes: vec![
+                    (!authority.supports_structure()).then(xlsx_parse::SheetAxes::default);
+                    model.sheets.len()
+                ],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
@@ -601,7 +609,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
-        retain_array_formulas(&self.model, &mut model);
+        self.retain_array_formulas(&mut model);
         self.gate_incoming(&model, &structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
@@ -795,7 +803,7 @@ impl Workbook {
 
         let commit_update = staged.commit_update;
         let mut model = staged.model;
-        retain_array_formulas(&self.model, &mut model);
+        self.retain_array_formulas(&mut model);
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
@@ -1650,7 +1658,7 @@ impl Workbook {
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         let mut restored = history.model;
-        retain_array_formulas(&self.model, &mut restored);
+        self.retain_array_formulas(&mut restored);
         self.install_model(restored)?;
         self.invalidate_sheet_info();
         self.edited_since_open = true;
@@ -2259,7 +2267,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
-            retain_array_formulas(&self.model, &mut model);
+            self.retain_array_formulas(&mut model);
             self.install_model(model)?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2314,7 +2322,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
-            retain_array_formulas(&self.model, &mut model);
+            self.retain_array_formulas(&mut model);
             self.install_model(model)?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2828,6 +2836,15 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
 
 /// the collaboration document carries cells, not the rectangle a `t="array"`
 /// formula fills, so each projection re-adopts the anchors it still holds.
+impl Workbook {
+    /// Schema 7 projects array formulas through its row and column identities.
+    fn retain_array_formulas(&self, projected: &mut WorkbookModel) {
+        if !self.authority.supports_structure() {
+            retain_array_formulas(&self.model, projected);
+        }
+    }
+}
+
 fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel) {
     for (index, sheet) in projected.sheets.iter_mut().enumerate() {
         let Some(source) = current.sheets.get(index) else {

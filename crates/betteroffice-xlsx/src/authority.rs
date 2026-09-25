@@ -112,6 +112,9 @@ struct WorkbookBase {
     styles: Stylesheet,
     /// table parts; read-only reference data, not shared state.
     tables: Vec<Table>,
+    /// Schema 7 only: each source sheet's array formulas with the contents
+    /// their anchors were seeded with.
+    array_anchors: Vec<Vec<stable::ArrayAnchor>>,
 }
 
 impl WorkbookBase {
@@ -237,6 +240,7 @@ impl WorkbookBase {
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
             tables: model.tables.clone(),
+            array_anchors: Vec::new(),
         })
     }
 
@@ -507,6 +511,10 @@ impl WorkbookAuthority {
             seed_legacy(&bootstrap, &base, model, &keys)
         }
         .map_err(AuthorityError::InvalidState)?;
+        if client_id.is_some() {
+            base.array_anchors = stable::seeded_array_anchors(&bootstrap, model)
+                .map_err(AuthorityError::InvalidState)?;
+        }
         let bootstrap_snapshot = bootstrap.transact().snapshot();
         let bootstrap_update = bootstrap
             .transact()

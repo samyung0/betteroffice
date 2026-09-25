@@ -10,6 +10,98 @@ pub(super) const DEFINED_NAMES: &str = "xlsx:defined-names";
 const ROWS: &str = "rows";
 const COLS: &str = "cols";
 
+/// A source array formula and the contents its anchor was seeded with. The
+/// array survives only while the anchor still holds that seeded item.
+#[derive(Clone)]
+pub(super) struct ArrayAnchor {
+    at: CellRef,
+    range: CellRange,
+    content: String,
+}
+
+fn source_point(offset: u32) -> Point {
+    Point {
+        run: "base".into(),
+        offset: offset.into(),
+    }
+}
+
+/// Where a source range sits now; `None` once every row or column is gone.
+fn source_range(range: CellRange, rows: &Axis, cols: &Axis) -> Option<CellRange> {
+    let span = |start: u32, end: u32| {
+        [Span {
+            run: "base".into(),
+            start: start.into(),
+            len: u64::from(end - start) + 1,
+        }]
+    };
+    let (row, end_row) = rows.resolve_range(&span(range.start.row, range.end.row))?;
+    let (col, end_col) = cols.resolve_range(&span(range.start.col, range.end.col))?;
+    Some(CellRange::new(
+        CellRef {
+            row,
+            col,
+            ..range.start
+        },
+        CellRef {
+            row: end_row,
+            col: end_col,
+            ..range.end
+        },
+    ))
+}
+
+/// Source column styles mapped onto the live columns; a deleted column drops
+/// out and an inserted one splits its run.
+fn source_col_styles(styles: &[ColStyle], cols: &Axis) -> Vec<ColStyle> {
+    let mut mapped: Vec<ColStyle> = Vec::new();
+    for style in styles {
+        let first = mapped.len();
+        for col in style.first..=style.last {
+            let Some(at) = cols.index(&source_point(col)) else {
+                continue;
+            };
+            let own = mapped.len() > first;
+            match mapped.last_mut() {
+                Some(last) if own && last.last + 1 == at => last.last = at,
+                _ => mapped.push(ColStyle {
+                    first: at,
+                    last: at,
+                    xf: style.xf,
+                }),
+            }
+        }
+    }
+    mapped
+}
+
+pub(super) fn seeded_array_anchors(
+    doc: &Doc,
+    model: &WorkbookModel,
+) -> Result<Vec<Vec<ArrayAnchor>>, String> {
+    let txn = doc.transact();
+    model
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let contents =
+                nested_map(&sheet_map(&txn, &format!("sheet:{index}"))?, &txn, CONTENTS)?;
+            sheet
+                .array_formulas()
+                .map(|(at, range)| {
+                    let key = json(&(source_point(at.row), source_point(at.col)))?;
+                    let content = contents
+                        .get(&txn, &key)
+                        .and_then(|value| value.cast::<String>().ok())
+                        .ok_or("array formula anchor was not seeded")?;
+                    Ok(ArrayAnchor { at, range, content })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct Context {
     keys: Vec<String>,
@@ -928,6 +1020,9 @@ pub(super) fn materialize<T: ReadTxn>(
     for (index, key) in context.keys.iter().enumerate() {
         let source = sheet_map(txn, key)?;
         let mut sheet = Sheet::new(context.names[index].clone());
+        let source_index = key
+            .strip_prefix("sheet:")
+            .and_then(|index| index.parse::<usize>().ok());
         for (cell_key, value) in nested_map(&source, txn, CONTENTS)?.iter(txn) {
             let content: Content = decode(value)?;
             let Some(at) = context.at(key, cell_key)? else {
@@ -959,6 +1054,34 @@ pub(super) fn materialize<T: ReadTxn>(
             sheet.set_cell(at, cell);
         }
         let (rows, cols) = context.axes(key)?;
+        if let Some(source_index) = source_index {
+            sheet.format = base.formats.get(source_index).copied().unwrap_or_default();
+            sheet.col_styles = source_col_styles(
+                base.col_styles
+                    .get(source_index)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                cols,
+            );
+            let contents = nested_map(&source, txn, CONTENTS)?;
+            for anchor in base.array_anchors.get(source_index).into_iter().flatten() {
+                let seeded = json(&(source_point(anchor.at.row), source_point(anchor.at.col)))?;
+                if contents
+                    .get(txn, &seeded)
+                    .and_then(|value| value.cast::<String>().ok())
+                    .as_deref()
+                    != Some(anchor.content.as_str())
+                {
+                    continue;
+                }
+                if let (Some(at), Some(range)) = (
+                    context.at(key, &seeded)?,
+                    source_range(anchor.range, rows, cols),
+                ) {
+                    sheet.set_array_formula(at, range);
+                }
+            }
+        }
         for (name, axis, values) in [
             (ROW_HEIGHTS, rows, &mut sheet.row_heights),
             (COL_WIDTHS, cols, &mut sheet.col_widths),
@@ -1081,6 +1204,20 @@ pub(super) fn materialize<T: ReadTxn>(
         (left.local_sheet.map(|id| id.0), &left.name)
             .cmp(&(right.local_sheet.map(|id| id.0), &right.name))
     });
+    model.tables = base
+        .tables
+        .iter()
+        .filter_map(|table| {
+            let key = format!("sheet:{}", table.sheet.0);
+            let sheet = context.index(&key)?;
+            let (rows, cols) = context.axes.get(&key)?;
+            Some(Table {
+                sheet: SheetId(sheet as u32),
+                range: source_range(table.range, rows, cols)?,
+                ..table.clone()
+            })
+        })
+        .collect();
     project_shared_frame_anchors(&mut model.sheets);
     let axis_changes = context
         .axes

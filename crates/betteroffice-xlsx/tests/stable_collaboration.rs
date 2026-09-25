@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRef, CellValue, DefinedName, Op, Sheet, SheetId, Workbook,
-    WorkbookModel,
+    CalculationOptions, Cell, CellRange, CellRef, CellValue, ColStyle, DefinedName, Op, Sheet,
+    SheetId, Workbook, WorkbookModel,
 };
 fn at(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -1176,4 +1176,81 @@ fn capy_contributor_metadata_survives_native_live_and_durable_updates() {
             .is_err()
     );
     assert_eq!(native.encode_state_as_update_v1(), previous);
+}
+
+#[test]
+fn source_column_styles_tables_and_array_formulas_follow_structural_edits() {
+    let range = |address: &str| CellRange::parse_a1(address).unwrap();
+    let mut model = base();
+    let data = &mut model.sheets[0];
+    data.col_styles = vec![ColStyle {
+        first: 0,
+        last: 1,
+        xf: 0,
+    }];
+    data.format.default_row_height_pt = Some(20.0);
+    data.set_cell(
+        at("B1"),
+        Cell {
+            value: CellValue::Number { value: 20.0 },
+            formula: Some("A1:A2*2".into()),
+            ..Cell::default()
+        },
+    );
+    data.set_array_formula(at("B1"), range("B1:B2"));
+    model.tables = vec![xlsx_model::Table {
+        name: "Values".into(),
+        sheet: SheetId(0),
+        range: range("A1:A2"),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: vec!["Value".into()],
+    }];
+    let mut a = Workbook::from_model_collaborative(model.clone(), 2101).unwrap();
+    let mut b = Workbook::from_model_collaborative(model, 2102).unwrap();
+    apply(
+        &mut a,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    );
+    apply(
+        &mut a,
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+    );
+    sync(&mut a, &mut b);
+    let sheet = &b.model().sheets[0];
+    assert_eq!(sheet.format.default_row_height_pt, Some(20.0));
+    assert_eq!(
+        sheet.col_styles,
+        [
+            ColStyle {
+                first: 0,
+                last: 0,
+                xf: 0
+            },
+            ColStyle {
+                first: 2,
+                last: 2,
+                xf: 0
+            }
+        ]
+    );
+    assert_eq!(
+        sheet.array_formulas().collect::<Vec<_>>(),
+        [(at("C2"), range("C2:C3"))]
+    );
+    assert_eq!(b.model().tables[0].range, range("A2:A3"));
+
+    b.edit_cell(SheetId(0), at("C2"), "5", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(b.model().sheets[0].array_formulas().count(), 0);
+    apply(&mut b, Op::RemoveSheet { index: 0 });
+    assert!(b.model().tables.is_empty());
 }
