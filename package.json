@@ -52,6 +52,7 @@
     "typecheck:packages": "bun run --filter './packages/*' typecheck",
     "pretypecheck": "bun run build:packages",
     "typecheck": "bun run --filter '*' typecheck",
+    "test:golden": "bun scripts/build-office-checkpoint.ts && bun test --isolate ./shared && cargo test -p betteroffice-xlsx --test storage",
     "test:poc": "bun poc/scripts/run-roundtrip.ts && bun poc/scripts/check-viewer-split.ts && bun poc/scripts/check-viewer-memory.ts",
     "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cargo test -p betteroffice-docx-edit --features wasm",
     "bench:vsdx": "bun scripts/vsdx-bench.ts",
