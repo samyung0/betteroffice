@@ -227,6 +227,8 @@ struct Package<'a> {
     overrides: HashMap<usize, Vec<u8>>,
     /// Maps a part path to an index into `original` followed by `appended`.
     positions: HashMap<String, usize>,
+    /// Indices of removed parts, left out of the archive.
+    removed: HashSet<usize>,
     document_path: String,
     document_relationships_path: String,
 }
@@ -245,6 +247,7 @@ impl<'a> Package<'a> {
             appended: Vec::new(),
             overrides: HashMap::new(),
             positions,
+            removed: HashSet::new(),
             document_path,
             document_relationships_path,
         }
@@ -298,11 +301,21 @@ impl<'a> Package<'a> {
         self.set(path, xml.into_bytes());
     }
 
+    fn remove(&mut self, path: &str) {
+        let path = self.resolve_path(path).to_owned();
+        if let Some(index) = self.positions.remove(&path) {
+            self.removed.insert(index);
+        }
+    }
+
     fn paths(&self) -> impl Iterator<Item = &str> {
         self.original
             .iter()
             .map(|(path, _)| path.as_str())
             .chain(self.appended.iter().map(|(path, _)| path.as_str()))
+            .enumerate()
+            .filter(|(index, _)| !self.removed.contains(index))
+            .map(|(_, path)| path)
     }
 
     /// Effective `(path, bytes)` entries in archive order: originals with
@@ -310,6 +323,9 @@ impl<'a> Package<'a> {
     fn refs(&self) -> Vec<(String, &[u8])> {
         let mut entries = Vec::with_capacity(self.original.len() + self.appended.len());
         for (index, (path, bytes)) in self.original.iter().enumerate() {
+            if self.removed.contains(&index) {
+                continue;
+            }
             let bytes = self
                 .overrides
                 .get(&index)
@@ -319,7 +335,9 @@ impl<'a> Package<'a> {
         entries.extend(
             self.appended
                 .iter()
-                .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
+                .enumerate()
+                .filter(|(offset, _)| !self.removed.contains(&(self.original.len() + offset)))
+                .map(|(_, (path, bytes))| (path.clone(), bytes.as_slice())),
         );
         entries
     }
@@ -490,38 +508,14 @@ fn serialize_comment_parts(
     let Some(comments) = document.comments.as_ref() else {
         return;
     };
-    let (comments_xml, infos) = serialize_comments_with_info(comments, context);
-    package.set_text("word/comments.xml", comments_xml);
     if comments.is_empty() {
-        // An explicit empty projection owns comment deletion. Clear companion
-        // thread metadata too; leaving source parts would resurrect it on open.
-        for (path, root, namespace) in [
-            (
-                "word/commentsExtended.xml",
-                "commentsEx",
-                "http://schemas.microsoft.com/office/word/2012/wordml",
-            ),
-            (
-                "word/commentsIds.xml",
-                "commentsIds",
-                "http://schemas.microsoft.com/office/word/2016/wordml/cid",
-            ),
-            (
-                "word/commentsExtensible.xml",
-                "commentsExtensible",
-                "http://schemas.microsoft.com/office/word/2018/wordml/cex",
-            ),
-        ] {
-            package.set_text(
-                path,
-                format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><c:{root} xmlns:c=\"{namespace}\"/>"
-                ),
-            );
-        }
-        ensure_comment_parts(package);
+        // An explicit empty projection owns comment deletion: drop the source's
+        // comment parts, whose thread metadata would otherwise resurrect them on open.
+        remove_comment_parts(package);
         return;
     }
+    let (comments_xml, infos) = serialize_comments_with_info(comments, context);
+    package.set_text("word/comments.xml", comments_xml);
 
     let companions = [
         (
@@ -542,37 +536,77 @@ fn serialize_comment_parts(
     ensure_comment_parts(package);
 }
 
-fn ensure_comment_parts(package: &mut Package) {
-    let parts = [
-        (
-            "/word/comments.xml",
-            COMMENTS_CONTENT_TYPE,
-            "comments.xml",
-            relationship_types::COMMENTS,
-        ),
-        (
-            "/word/commentsExtended.xml",
-            COMMENTS_EXTENDED_CONTENT_TYPE,
-            "commentsExtended.xml",
-            relationship_types::COMMENTS_EXTENDED,
-        ),
-        (
-            "/word/commentsIds.xml",
-            COMMENTS_IDS_CONTENT_TYPE,
-            "commentsIds.xml",
-            relationship_types::COMMENTS_IDS,
-        ),
-        (
-            "/word/commentsExtensible.xml",
-            COMMENTS_EXTENSIBLE_CONTENT_TYPE,
-            "commentsExtensible.xml",
-            relationship_types::COMMENTS_EXTENSIBLE,
-        ),
-    ];
+/// Part name, content type, document relationship target and type.
+const COMMENT_PARTS: [(&str, &str, &str, &str); 4] = [
+    (
+        "/word/comments.xml",
+        COMMENTS_CONTENT_TYPE,
+        "comments.xml",
+        relationship_types::COMMENTS,
+    ),
+    (
+        "/word/commentsExtended.xml",
+        COMMENTS_EXTENDED_CONTENT_TYPE,
+        "commentsExtended.xml",
+        relationship_types::COMMENTS_EXTENDED,
+    ),
+    (
+        "/word/commentsIds.xml",
+        COMMENTS_IDS_CONTENT_TYPE,
+        "commentsIds.xml",
+        relationship_types::COMMENTS_IDS,
+    ),
+    (
+        "/word/commentsExtensible.xml",
+        COMMENTS_EXTENSIBLE_CONTENT_TYPE,
+        "commentsExtensible.xml",
+        relationship_types::COMMENTS_EXTENSIBLE,
+    ),
+];
 
+fn remove_comment_parts(package: &mut Package) {
+    for (part_name, ..) in COMMENT_PARTS {
+        let path = &part_name[1..];
+        package.remove(path);
+        package.remove(&crate::relationships::relationship_part_path(path));
+    }
+    for (path, tag, attribute, values) in [
+        (
+            "[Content_Types].xml",
+            "Override",
+            "PartName",
+            COMMENT_PARTS.map(|(part_name, ..)| part_name),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            "Relationship",
+            "Type",
+            COMMENT_PARTS.map(|(.., relationship_type)| relationship_type),
+        ),
+    ] {
+        let Some(xml) = package.text(path) else {
+            continue;
+        };
+        let mut kept = String::with_capacity(xml.len());
+        let mut cursor = 0;
+        for found in XmlTagIter::new(&xml, tag).filter(|found| {
+            xml_attribute(found, attribute).is_some_and(|value| values.contains(&value))
+        }) {
+            let start = found.as_ptr() as usize - xml.as_ptr() as usize;
+            kept.push_str(&xml[cursor..start]);
+            cursor = start + found.len();
+        }
+        if cursor > 0 {
+            kept.push_str(&xml[cursor..]);
+            package.set_text(path, kept);
+        }
+    }
+}
+
+fn ensure_comment_parts(package: &mut Package) {
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
-        for (part_name, content_type, _, _) in parts {
+        for (part_name, content_type, _, _) in COMMENT_PARTS {
             if content_types.contains(part_name) {
                 continue;
             }
@@ -593,7 +627,7 @@ fn ensure_comment_parts(package: &mut Package) {
         return;
     };
     let mut relationships = RelationshipsIndex::parse(relationships_xml);
-    for (_, _, target, relationship_type) in parts {
+    for (_, _, target, relationship_type) in COMMENT_PARTS {
         if relationships.xml_contains(target) {
             continue;
         }
@@ -2555,30 +2589,34 @@ mod tests {
             ]}, "options": {"updateModifiedDate": false}
         })).unwrap();
         let source = write_docx_s13(create, &original).unwrap();
-        for comments in [None, Some(json!([]))] {
+        let save = |comments: Option<serde_json::Value>, package: &[u8]| {
             let mut document = json!({"content": []});
-            if let Some(comments) = comments.clone() {
+            if let Some(comments) = comments {
                 document["comments"] = comments;
             }
             let request = serde_json::from_value(json!({"determinism": determinism(), "document": document, "options": {"updateModifiedDate": false}})).unwrap();
-            let output = part_map(&write_docx_s13(request, &source).unwrap());
-            for path in [
-                "word/comments.xml",
-                "word/commentsExtended.xml",
-                "word/commentsIds.xml",
-                "word/commentsExtensible.xml",
-            ] {
-                let xml = String::from_utf8_lossy(&output[path]);
-                if comments.is_none() {
-                    assert_eq!(output[path], part_map(&source)[path]);
-                } else {
-                    assert!(!xml.contains("Original comment"));
-                    assert!(!xml.contains("Original reply"));
-                    assert!(!xml.contains("paraId="));
-                    assert!(!xml.contains("durableId="));
-                    assert!(!xml.contains("w:id="));
-                }
-            }
+            part_map(&write_docx_s13(request, package).unwrap())
+        };
+        let packaging = ["[Content_Types].xml", "word/_rels/document.xml.rels"];
+        let paths = [
+            "word/comments.xml",
+            "word/commentsExtended.xml",
+            "word/commentsIds.xml",
+            "word/commentsExtensible.xml",
+        ];
+        let kept = save(None, &source);
+        for path in paths.iter().chain(&packaging) {
+            assert_eq!(kept[*path], part_map(&source)[*path]);
+        }
+        let cleared = save(Some(json!([])), &source);
+        let untouched = save(Some(json!([])), &original);
+        for path in paths {
+            assert!(!cleared.contains_key(path), "{path}");
+            assert!(!untouched.contains_key(path), "{path}");
+        }
+        for path in packaging {
+            assert!(!String::from_utf8_lossy(&cleared[path]).contains("comments"));
+            assert_eq!(untouched[path], part_map(&original)[path]);
         }
     }
 

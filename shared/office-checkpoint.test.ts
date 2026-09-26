@@ -17,6 +17,7 @@ import { createYrsSession } from "../packages/docx/src/yrs";
 import { XlsxDocument } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
 import { PptxDocument } from "../packages/pptx/src/wasm/generated/pptx_wasm.js";
 import { unzipContainer, rezipContainer } from "../packages/docx/src/wasm/opc";
+import { Window } from "happy-dom";
 const fixed = { seed: "0".repeat(64), now: "2026-09-06T00:00:00.000Z" };
 const fixture = (name: string) =>
   readFile(new URL(`../apps/demo/public/${name}`, import.meta.url));
@@ -418,18 +419,7 @@ test("deleting every DOCX comment clears source and reply parts across export an
       )
     ).toHaveLength(comments.length);
     const output = await exportOffice(bytes, after, fixed);
-    const parts = unzipContainer(output);
-    for (const part of [
-      "comments.xml",
-      "commentsExtended.xml",
-      "commentsIds.xml",
-      "commentsExtensible.xml",
-    ]) {
-      const xml = new TextDecoder().decode(parts[`word/${part}`]);
-      expect(xml).not.toContain("paraId=");
-      expect(xml).not.toContain("durableId=");
-      expect(xml).not.toContain("w:id=");
-    }
+    expectWellFormedWithoutComments(output);
     const reseeded = await seedOffice("docx", output);
     fresh.openDocx(output, false);
     fresh.loadState(reseeded.state);
@@ -437,6 +427,41 @@ test("deleting every DOCX comment clears source and reply parts across export an
   } finally {
     doc.destroy();
     fresh.destroy();
+  }
+});
+
+const xmlParser = new new Window().DOMParser();
+/** Every XML part parses, and no comment part, relationship or override is left. */
+function expectWellFormedWithoutComments(docx: Uint8Array) {
+  const parts = unzipContainer(docx);
+  const text = (path: string) => new TextDecoder().decode(parts[path]);
+  for (const path of Object.keys(parts).filter((path) => /\.(xml|rels)$/.test(path))) {
+    // happy-dom rejects a valid single-quoted XML declaration; the elements are what is checked.
+    const xml = text(path).replace(/^<\?xml[^?]*\?>/, "");
+    const parsed = xmlParser.parseFromString(xml, "application/xml");
+    expect([path, parsed.getElementsByTagName("parsererror").length]).toEqual([path, 0]);
+  }
+  expect(Object.keys(parts).filter((path) => path.startsWith("word/comments"))).toEqual([]);
+  expect(text("[Content_Types].xml")).not.toContain("comments");
+  expect(text("word/_rels/document.xml.rels")).not.toContain("comments");
+}
+
+test("an edited DOCX without comments exports no comment parts and only well-formed XML", async () => {
+  const bytes = new Uint8Array(
+    await readFile(new URL("../poc/fixtures/feature-rich.docx", import.meta.url))
+  );
+  const before = await seedOffice("docx", bytes);
+  const doc = await createYrsSession({ clientId: 10003 });
+  try {
+    doc.openDocx(bytes, false);
+    doc.loadState(before.state);
+    const [first] = doc.paragraphs("body");
+    doc.insertText({ story: "body", paraId: first.paraId, offset: 0 }, "Edited ");
+    expectWellFormedWithoutComments(
+      await exportOffice(bytes, { ...before, state: doc.encodeState() }, fixed)
+    );
+  } finally {
+    doc.destroy();
   }
 });
 
