@@ -183,7 +183,7 @@ pub fn write_docx_s13_parts(
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
-    serialize_comment_parts(&request.document, &mut package, &mut context);
+    serialize_comment_parts(&request.document, &mut package, &mut context)?;
 
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
@@ -508,15 +508,14 @@ fn serialize_comment_parts(
     document: &DocumentBody,
     package: &mut Package,
     context: &mut SerializerContext,
-) {
+) -> Result<(), ParseError> {
     let Some(comments) = document.comments.as_ref() else {
-        return;
+        return Ok(());
     };
     if comments.is_empty() {
         // An explicit empty projection owns comment deletion: drop the source's
         // comment parts, whose thread metadata would otherwise resurrect them on open.
-        remove_comment_parts(package);
-        return;
+        return remove_comment_parts(package);
     }
     let (comments_xml, infos) = serialize_comments_with_info(comments, context);
     package.set_text("word/comments.xml", comments_xml);
@@ -538,6 +537,7 @@ fn serialize_comment_parts(
         }
     }
     ensure_comment_parts(package);
+    Ok(())
 }
 
 /// Part name, content type, document relationship target and type.
@@ -568,13 +568,13 @@ const COMMENT_PARTS: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
-fn remove_comment_parts(package: &mut Package) {
+fn remove_comment_parts(package: &mut Package) -> Result<(), ParseError> {
     for (part_name, ..) in COMMENT_PARTS {
         let path = &part_name[1..];
         package.remove(path);
         package.remove(&crate::relationships::relationship_part_path(path));
     }
-    for (path, tag, attribute, values) in [
+    for (path, element, attribute, values) in [
         (
             "[Content_Types].xml",
             "Override",
@@ -591,20 +591,54 @@ fn remove_comment_parts(package: &mut Package) {
         let Some(xml) = package.text(path) else {
             continue;
         };
-        let mut kept = String::with_capacity(xml.len());
-        let mut cursor = 0;
-        for found in XmlTagIter::new(&xml, tag).filter(|found| {
-            xml_attribute(found, attribute).is_some_and(|value| values.contains(&value))
-        }) {
-            let start = found.as_ptr() as usize - xml.as_ptr() as usize;
-            kept.push_str(&xml[cursor..start]);
-            cursor = start + found.len();
-        }
-        if cursor > 0 {
-            kept.push_str(&xml[cursor..]);
+        if let Some(kept) = without_elements(&xml, element, attribute, &values)
+            .map_err(|error| save_error(format!("{path}: {error}")))?
+        {
             package.set_text(path, kept);
         }
     }
+    Ok(())
+}
+
+/// `xml` without every `element` whose `attribute` is one of `values`, end tag
+/// and content included; every other byte is kept. `None` when none matched.
+fn without_elements(
+    xml: &str,
+    element: &str,
+    attribute: &str,
+    values: &[&str],
+) -> Result<Option<String>, quick_xml::Error> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut kept = String::with_capacity(xml.len());
+    let mut cursor = 0;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let (tag, empty) = match reader.read_event()? {
+            quick_xml::events::Event::Start(tag) => (tag, false),
+            quick_xml::events::Event::Empty(tag) => (tag, true),
+            quick_xml::events::Event::Eof => break,
+            _ => continue,
+        };
+        let matched = tag.local_name().as_ref() == element.as_bytes()
+            && tag
+                .try_get_attribute(attribute)?
+                .map(|value| value.normalized_value(quick_xml::XmlVersion::Implicit1_0))
+                .transpose()?
+                .is_some_and(|value| values.contains(&value.as_ref()));
+        if !matched {
+            continue;
+        }
+        if !empty {
+            reader.read_to_end(tag.name())?;
+        }
+        kept.push_str(&xml[cursor..start]);
+        cursor = reader.buffer_position() as usize;
+    }
+    if cursor == 0 {
+        return Ok(None);
+    }
+    kept.push_str(&xml[cursor..]);
+    Ok(Some(kept))
 }
 
 fn ensure_comment_parts(package: &mut Package) {
@@ -2612,14 +2646,45 @@ mod tests {
         for path in paths.iter().chain(&packaging) {
             assert_eq!(kept[*path], part_map(&source)[*path]);
         }
-        let cleared = save(Some(json!([])), &source);
+        // Explicit end tags are valid OPC; a removed entry takes its end tag along.
+        let mut explicit = ooxml_opc::unzip_parts(&source).unwrap();
+        for (path, bytes) in &mut explicit {
+            let tag = match path.as_str() {
+                "[Content_Types].xml" => "Override",
+                "word/_rels/document.xml.rels" => "Relationship",
+                _ => continue,
+            };
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            let (mut output, mut rest) = (String::new(), xml.as_str());
+            while let Some(at) = rest.find(&format!("<{tag} ")) {
+                let end = at + rest[at..].find("/>").unwrap();
+                output.push_str(&rest[..end]);
+                output.push_str(&format!(">\n</{tag}>"));
+                rest = &rest[end + 2..];
+            }
+            output.push_str(rest);
+            *bytes = output.into_bytes();
+        }
+        let explicit = ooxml_opc::rezip_parts(&explicit).unwrap();
+        assert!(
+            String::from_utf8_lossy(&part_map(&explicit)[packaging[1]]).contains("</Relationship>")
+        );
         let untouched = save(Some(json!([])), &original);
+        for source in [&source, &explicit] {
+            let cleared = save(Some(json!([])), source);
+            for path in paths {
+                assert!(!cleared.contains_key(path), "{path}");
+            }
+            for path in packaging {
+                assert!(!String::from_utf8_lossy(&cleared[path]).contains("comments"));
+                let mut reader = quick_xml::Reader::from_reader(cleared[path].as_slice());
+                while !matches!(reader.read_event().unwrap(), quick_xml::events::Event::Eof) {}
+            }
+        }
         for path in paths {
-            assert!(!cleared.contains_key(path), "{path}");
             assert!(!untouched.contains_key(path), "{path}");
         }
         for path in packaging {
-            assert!(!String::from_utf8_lossy(&cleared[path]).contains("comments"));
             assert_eq!(untouched[path], part_map(&original)[path]);
         }
     }
