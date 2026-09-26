@@ -74,6 +74,7 @@ fn serialize_paragraph_inner(
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
         if let ParagraphContent::CommentRange(marker) = content
             && marker.node_type == "commentRangeEnd"
+            && context.keeps_comment(marker.id)
             && !generated_comment_references.contains(&marker.id)
             && !paragraph.content.iter().any(|content| match content {
                 ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
@@ -217,6 +218,9 @@ pub fn serialize_paragraph_content(
         ParagraphContent::Tracked(change) => serialize_tracked_change(change, context),
         ParagraphContent::RangeStart(marker) => serialize_range_start(marker),
         ParagraphContent::RangeEnd(marker) => serialize_range_end(marker),
+        ParagraphContent::CommentRange(marker) if !context.keeps_comment(marker.id) => {
+            Ok(String::new())
+        }
         ParagraphContent::CommentRange(marker) => serialize_comment_range(marker),
     }
 }

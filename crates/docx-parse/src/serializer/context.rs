@@ -1,5 +1,7 @@
 //! Deterministic recursive serializer state.
 
+use std::collections::HashSet;
+
 use crate::paragraph::HexIdAllocator;
 use crate::xml::ParseError;
 
@@ -12,6 +14,8 @@ pub struct SerializerContext {
     ids: HexIdAllocator,
     now: String,
     rendered_page_breaks: Vec<bool>,
+    /// Ids of the comments the package keeps; `None` keeps every comment marker.
+    comments: Option<HashSet<u64>>,
 }
 
 impl SerializerContext {
@@ -21,7 +25,20 @@ impl SerializerContext {
             ids: HexIdAllocator::from_sha256(&determinism.seed)?,
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
+            comments: None,
         })
+    }
+
+    /// Limits comment anchors and references to these comments.
+    pub(crate) fn keep_comments(&mut self, ids: impl IntoIterator<Item = f64>) {
+        self.comments = Some(ids.into_iter().map(f64::to_bits).collect());
+    }
+
+    /// Whether a comment anchor or reference with this id is written.
+    pub(crate) fn keeps_comment(&self, id: f64) -> bool {
+        self.comments
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&id.to_bits()))
     }
 
     pub fn allocate_hex_id(&mut self) -> String {

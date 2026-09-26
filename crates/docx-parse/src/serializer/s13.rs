@@ -144,6 +144,10 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
+    // Deleted comments must leave no anchor or reference behind.
+    if let Some(comments) = &request.document.comments {
+        context.keep_comments(comments.iter().map(|comment| comment.id));
+    }
     let document_xml = if let Some(selective) = request.selective.as_ref() {
         let original = package
             .text("word/document.xml")

@@ -149,6 +149,14 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
 
 /// Serialize one run, consuming any active rendered-page-break markers.
 pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
+    // A run that only references deleted comments is left out whole.
+    let dropped = |content: &RunContent| match content {
+        RunContent::CommentReference { id: Some(id) } => !context.keeps_comment(*id),
+        _ => false,
+    };
+    if !run.content.is_empty() && run.content.iter().all(dropped) {
+        return Ok(String::new());
+    }
     let mut output = String::from("<w:r>");
     for _ in 0..context.take_rendered_page_breaks() {
         output.push_str("<w:lastRenderedPageBreak/>");
@@ -349,6 +357,9 @@ fn serialize_run_content(
             return Ok(rule.xml.clone());
         }
         RunContent::CommentReference { id } => {
+            if id.is_some_and(|id| !context.keeps_comment(id)) {
+                return Ok(String::new());
+            }
             writer.start_element("w:commentReference");
             if let Some(id) = id {
                 writer.attribute("w:id", &js_number(*id));

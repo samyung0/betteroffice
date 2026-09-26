@@ -420,6 +420,7 @@ test("deleting every DOCX comment clears source and reply parts across export an
     ).toHaveLength(comments.length);
     const output = await exportOffice(bytes, after, fixed);
     expectWellFormedWithoutComments(output);
+    expect(commentMarkers(output)).toEqual({ kept: [], dangling: [] });
     const reseeded = await seedOffice("docx", output);
     fresh.openDocx(output, false);
     fresh.loadState(reseeded.state);
@@ -427,6 +428,57 @@ test("deleting every DOCX comment clears source and reply parts across export an
   } finally {
     doc.destroy();
     fresh.destroy();
+  }
+});
+
+/** Comment ids anchored or referenced in the stories, split by whether comments.xml keeps them. */
+function commentMarkers(docx: Uint8Array) {
+  const parts = unzipContainer(docx);
+  const text = (path: string) => new TextDecoder().decode(parts[path] ?? new Uint8Array());
+  const comments = new Set(
+    [...text("word/comments.xml").matchAll(/<w:comment\b[^>]*\bw:id="(\d+)"/g)].map(([, id]) => id)
+  );
+  const ids = Object.keys(parts)
+    .filter((path) => /^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/.test(path))
+    .flatMap((path) => [
+      ...text(path).matchAll(/<w:comment(?:RangeStart|RangeEnd|Reference)\b[^>]*\bw:id="(\d+)"/g),
+    ])
+    .map(([, id]) => id!);
+  return {
+    kept: [...new Set(ids.filter((id) => comments.has(id)))].sort(),
+    dangling: [...new Set(ids.filter((id) => !comments.has(id)))].sort(),
+  };
+}
+
+test("deleting one or every DOCX comment of the file drops its anchors and references", async () => {
+  const bytes = new Uint8Array(
+    await readFile(
+      new URL(
+        "../crates/betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx",
+        import.meta.url
+      )
+    )
+  );
+  expect(commentMarkers(bytes)).toEqual({ kept: ["0", "1"], dangling: [] });
+  const before = await seedOffice("docx", bytes);
+  for (const deleted of [["0"], ["0", "1"]]) {
+    const doc = await createYrsSession({ clientId: 10004 });
+    try {
+      doc.openDocx(bytes, false);
+      doc.loadState(before.state);
+      doc.applyRawOps(
+        "body",
+        deleted.map((id) => ({ op: "removeComment" as const, id }))
+      );
+      const output = await exportOffice(bytes, { ...before, state: doc.encodeState() }, fixed);
+      expect(commentMarkers(output)).toEqual({
+        kept: ["0", "1"].filter((id) => !deleted.includes(id)),
+        dangling: [],
+      });
+      if (deleted.length === 2) expectWellFormedWithoutComments(output);
+    } finally {
+      doc.destroy();
+    }
   }
 });
 
