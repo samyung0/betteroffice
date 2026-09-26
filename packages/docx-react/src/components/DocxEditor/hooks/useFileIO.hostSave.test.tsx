@@ -150,11 +150,26 @@ test('built-in export waits for input and aborts if the document changes', async
   const state = setup({ flush: () => gate });
   const saved = state.hook.result.current.handleSave();
   expect(state.events).toEqual(['flush']);
-  state.pagedEditorRef.current = { ...state.editor };
+  state.pagedEditorRef.current = { ...state.editor, getYrsSession: () => ({}) as never };
   release();
   expect(await saved).toBeNull();
   expect(state.events).toEqual(['flush']);
   expect(state.errors[0].message).toContain('document changed');
+});
+
+test('a repaint during export keeps the save', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const state = setup({ flush: () => gate });
+  const saved = state.hook.result.current.handleSave();
+  // PagedEditor rebuilds its ref object on every repaint, same session.
+  state.pagedEditorRef.current = { ...state.editor };
+  release();
+  expect(await saved).not.toBeNull();
+  expect(state.events).toEqual(['flush', 'snapshot', 'saved']);
+  expect(state.errors).toEqual([]);
 });
 
 test('failed input flush prevents serialization', async () => {

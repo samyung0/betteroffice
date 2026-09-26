@@ -140,8 +140,9 @@ export function useFileIO({
         if (!editor) return null;
         const session = editor.getYrsSession();
         await editor.flushPendingInput();
+        // The ref object is rebuilt on every repaint; the session is the document.
         const assertCurrent = () => {
-          if (editor !== pagedEditorRef.current || session !== editor.getYrsSession()) {
+          if (session !== pagedEditorRef.current?.getYrsSession()) {
             throw new Error('The document changed while saving');
           }
         };
@@ -189,7 +190,7 @@ export function useFileIO({
       const editor = pagedEditorRef.current;
       const session = editor?.getYrsSession();
       if (onSaveRequest && (await onSaveRequest()) !== true) return;
-      if (editor !== pagedEditorRef.current || session !== editor?.getYrsSession()) {
+      if (session !== pagedEditorRef.current?.getYrsSession()) {
         throw new Error('The document changed during the save request');
       }
       const buffer = await handleSave();

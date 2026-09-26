@@ -180,8 +180,10 @@ export function useDocxEditorRefApi({
       flushPendingInput: async () => {
         const editor = pagedEditorRef.current;
         if (!editor) throw new Error('The editor input is unavailable');
+        const session = editor.getYrsSession();
         await editor.flushPendingInput();
-        if (editor !== pagedEditorRef.current) {
+        // The ref object is rebuilt on every repaint; the session is the document.
+        if (session !== pagedEditorRef.current?.getYrsSession()) {
           throw new Error('The document changed while flushing input');
         }
       },

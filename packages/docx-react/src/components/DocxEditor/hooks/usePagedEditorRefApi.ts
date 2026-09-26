@@ -146,7 +146,8 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
       await input.flushPendingInput();
-      if (input !== yrsInputRef.current || session !== yrsSessionRef.current) {
+      // The input's ref object is rebuilt on selection changes; the session is the document.
+      if (session !== yrsSessionRef.current) {
         throw new Error('The document changed while flushing input');
       }
     },
