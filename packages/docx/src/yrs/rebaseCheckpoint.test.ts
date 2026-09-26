@@ -342,6 +342,43 @@ it('rebinds a feature-rich package with saved header and body edits', async () =
   }
 });
 
+it('rebases a later edit over comments whose source has no commentsIds or commentsExtended', async () => {
+  const a = new Uint8Array(
+    readFileSync(
+      resolve(
+        import.meta.dir,
+        '../../../../crates/betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx'
+      )
+    )
+  );
+  const commentParts = Object.keys(unzipContainer(a)).filter((path) =>
+    path.startsWith('word/comments')
+  );
+  expect(commentParts).toEqual(['word/comments.xml']);
+  const session = await createYrsSession();
+  let current: YrsSession | undefined;
+  try {
+    session.openDocx(a, true);
+    expect(session.listComments().length).toBeGreaterThan(0);
+    const captured = session.encodeState();
+    const b = await save(session, a);
+    const paragraph = session.paragraphs('body')[0];
+    session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'later ');
+    const result = await rebaseDocxCheckpoint({
+      oldSource: a,
+      capturedState: captured,
+      latestState: session.encodeState(),
+      exportedSource: b,
+    });
+    current = await reopen(b, result.state);
+    expect(current.paragraphs('body')[0].text.startsWith('later ')).toBe(true);
+    expect(current.listComments().length).toBe(session.listComments().length);
+  } finally {
+    session.destroy();
+    current?.destroy();
+  }
+});
+
 it('carries legacy opaque blocks by their native embed when later structure changes their source position', async () => {
   const parts = unzipContainer(source());
   parts['word/document.xml'] = encoder.encode(

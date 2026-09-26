@@ -167,6 +167,13 @@ function authored(document: Document): string {
     (key, value: unknown) => {
       // Root namespace bindings are package metadata the writer normalizes.
       if (key === 'rId' || key === 'verbatimXml' || key === 'customRootBindings') return undefined;
+      // The export generates comment thread ids a source without commentsIds/commentsExtended lacks.
+      if (key === 'comments' && value)
+        return JSON.parse(
+          JSON.stringify(value, (inner, item: unknown) =>
+            inner === 'paraId' || inner === 'durableId' ? undefined : item
+          )
+        ) as unknown;
       // The rebase turns inserted images into references to their exported part.
       if (key === 'src' && typeof value === 'string') return imageBase64(value, media);
       if (value && typeof value === 'object' && !Array.isArray(value))
