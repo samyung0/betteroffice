@@ -52,6 +52,11 @@ fn save_request(original: &[u8]) -> S13SaveRequest {
 }
 
 fn comment_package(content: Value) -> Vec<u8> {
+    comment_package_with(content, &[7])
+}
+
+/// A package whose comments part holds a comment for each of `ids`.
+fn comment_package_with(content: Value, ids: &[u64]) -> Vec<u8> {
     let original = ooxml_opc::rezip_parts(&[
         (
             "[Content_Types].xml".to_owned(),
@@ -70,13 +75,13 @@ fn comment_package(content: Value) -> Vec<u8> {
     let mut request = save_request(&original);
     request.document = serde_json::from_value(json!({
         "content": [{ "type": "paragraph", "paraId": "11111111", "content": content }],
-        "comments": [{
-            "id": 7, "author": "Reviewer", "initials": "R",
+        "comments": ids.iter().map(|id| json!({
+            "id": id, "author": "Reviewer", "initials": "R",
             "date": "2026-01-01T00:00:00Z", "status": "active", "paletteIndex": 0,
             "content": [{ "type": "paragraph", "content": [
                 { "type": "run", "content": [{ "type": "text", "text": "New comment" }] }
             ] }]
-        }]
+        })).collect::<Vec<_>>()
     }))
     .unwrap();
     write_docx_s13(request, &original).unwrap()
@@ -177,7 +182,8 @@ fn another_comments_reference_does_not_suppress_a_new_reference() {
     content.as_array_mut().unwrap().push(json!({
         "type": "run", "content": [{ "type": "commentReference", "id": 9 }]
     }));
-    let saved = comment_package(content);
+    // Comment 9 exists: export drops references to comments that do not.
+    let saved = comment_package_with(content, &[7, 9]);
     assert_eq!(
         element_ids(&saved, "word/document.xml", b"w:commentReference"),
         ["7", "9"]
