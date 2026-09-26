@@ -184,6 +184,52 @@ test("a DOCX image reference to a missing part fails the baseline and the export
   }
 });
 
+test("a DOCX state above the 64 MiB update cap loads and exports but is refused as one update", async () => {
+  const bytes = await fixture("feature-rich.docx");
+  const seed = await seedOffice("docx", bytes);
+  const doc = await openState(bytes, seed.state);
+  let state: Uint8Array;
+  try {
+    const [first] = doc.paragraphs("body");
+    const photo = Buffer.alloc(9 * 1024 * 1024, 7);
+    for (let index = 0; index < 6; index += 1)
+      doc.insertImage(
+        { story: "body", paraId: first.paraId, offset: 0 },
+        {
+          src: `data:image/png;base64,${photo.toString("base64")}`,
+          rId: `rId_img_photo${index}`,
+          width: 20,
+          height: 20,
+        }
+      );
+    state = doc.encodeState();
+  } finally {
+    doc.destroy();
+  }
+  expect(state.length).toBeGreaterThan(64 * 1024 * 1024);
+  const exported = unzipContainer(await exportOffice(bytes, { ...seed, state }, fixed));
+  expect(
+    Object.entries(exported).some(
+      ([path, data]) => path.startsWith("word/media/") && data.length === 9 * 1024 * 1024
+    )
+  ).toBe(true);
+
+  const peer = await createYrsSession({ clientId: 9102 });
+  try {
+    peer.openDocx(bytes, false);
+    let refusal: unknown;
+    try {
+      peer.applyUpdate(state);
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("update exceeds 67108864 bytes");
+  } finally {
+    peer.destroy();
+  }
+}, 120_000);
+
 test("Word-like DOCX runs merge on export and keep per-character formatting and tracked changes", async () => {
   const run = (text: string, rsid: string, properties = "") =>
     `<w:r w:rsidR="${rsid}">${properties && `<w:rPr>${properties}</w:rPr>`}` +

@@ -1516,6 +1516,42 @@ fn a_state_reopens_only_with_its_fingerprinted_source() {
 }
 
 #[test]
+fn a_stored_state_above_the_update_cap_opens_but_is_refused_as_one_update() {
+    let source = fixture(256);
+    let session = DeckSession::open(&source, 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    for index in 0..9 {
+        session
+            .add_picture(
+                &context(),
+                &slide_id,
+                &pptx_edit::PictureDraft {
+                    name: format!("Photo {index}"),
+                    rect: ShapeRect {
+                        x: 0,
+                        y: 0,
+                        width: 100,
+                        height: 100,
+                    },
+                    content_type: "image/png".to_owned(),
+                    media_bytes: vec![index; 8 * 1024 * 1024],
+                },
+            )
+            .unwrap();
+    }
+    let state = session.encode_state_as_update_v1();
+    assert!(state.len() > pptx_edit::MAX_UPDATE_BYTES);
+
+    let reopened = DeckSession::open_from_update_with_source(&state, &source, 13).unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap().slides[0].shapes.len(),
+        session.snapshot().unwrap().slides[0].shapes.len()
+    );
+    let peer = DeckSession::open(&source, 14).unwrap();
+    assert!(peer.apply_update_v1(&state).is_err());
+}
+
+#[test]
 fn a_rebased_indexed_state_keeps_comments_on_their_remapped_slides() {
     let source = commented_fixture(CommentFlavor::Modern);
     let session = DeckSession::open(&source, 11).unwrap();

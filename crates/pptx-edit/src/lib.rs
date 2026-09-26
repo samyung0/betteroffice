@@ -155,18 +155,14 @@ impl DeckSession {
 
     /// Opens a stored state. The package (layouts, masters, themes, media) is
     /// parsed from the fingerprinted source plus any rebase overlay; the state
-    /// carries none of it.
+    /// carries none of it. Only incoming updates are size-capped; the host caps
+    /// the stored state.
     pub fn open_from_update_with_source(
         update: &[u8],
         source: &[u8],
         client_id: u64,
     ) -> EditResult<Self> {
         validate_client_id(client_id)?;
-        if update.len() > MAX_UPDATE_BYTES {
-            return Err(EditError::InvalidUpdate(format!(
-                "update exceeds {MAX_UPDATE_BYTES} bytes"
-            )));
-        }
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
         deck::validate_meta(&doc)?;

@@ -737,6 +737,17 @@ impl EditingDoc {
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))
     }
 
+    /// Loads a stored state. Only incoming updates are size-capped; the host
+    /// caps the stored state.
+    pub fn load_state_v1(&self, bytes: &[u8]) -> EditResult<()> {
+        let update = Update::decode_v1(bytes)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.doc
+            .transact_mut()
+            .apply_update(update)
+            .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+    }
+
     /// Applies a v1 update using this replica's local transaction origin.
     ///
     /// This is reserved for a local worker replica executing an edit on behalf

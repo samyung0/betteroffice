@@ -85,7 +85,7 @@ struct ApplyInputProfile {
 }
 
 fn js_err(error: impl std::fmt::Display) -> JsValue {
-    JsValue::from_str(&error.to_string())
+    js_sys::Error::new(&error.to_string()).into()
 }
 /// Builds the op [`EditCtx`]. Suggesting mode crosses the boundary as an
 /// optional `(name, date)` pair — both-or-neither; a plain local edit uses an
@@ -1633,12 +1633,12 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
-    /// Hydrates this replica from an encoded yrs v1 update, typically another
-    /// replica's [`EditSession::encode_state`] output. Identical to
-    /// [`EditSession::apply_update`]; the separate name marks the initial-load
-    /// call site. Errors on a malformed update.
+    /// Hydrates this replica from a stored state, typically another replica's
+    /// [`EditSession::encode_state`] output. Unlike [`EditSession::apply_update`]
+    /// it accepts a state above the incoming-update size cap. Errors on a
+    /// malformed update.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
-        self.engine.doc().apply_update_v1(update).map_err(js_err)
+        self.engine.doc().load_state_v1(update).map_err(js_err)
     }
 
     /// [`EditSession::open_docx`] with seeding always on.

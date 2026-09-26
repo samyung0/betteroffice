@@ -424,10 +424,10 @@ export class EditSession {
      */
     list_revisions(): string;
     /**
-     * Hydrates this replica from an encoded yrs v1 update, typically another
-     * replica's [`EditSession::encode_state`] output. Identical to
-     * [`EditSession::apply_update`]; the separate name marks the initial-load
-     * call site. Errors on a malformed update.
+     * Hydrates this replica from a stored state, typically another replica's
+     * [`EditSession::encode_state`] output. Unlike [`EditSession::apply_update`]
+     * it accepts a state above the incoming-update size cap. Errors on a
+     * malformed update.
      */
     load(update: Uint8Array): void;
     /**
@@ -1053,6 +1053,7 @@ export interface InitOutput {
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
+    readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
@@ -1109,7 +1110,6 @@ export interface InitOutput {
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
