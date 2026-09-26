@@ -1296,6 +1296,7 @@ pub(super) fn materialize<T: ReadTxn>(
         }
         model.sheets.push(sheet);
     }
+    let mut names = Vec::new();
     for (id, value) in map(txn, DEFINED_NAMES)?.iter(txn) {
         if id == "$schema" {
             if value != Out::Any(Any::BigInt(VERSION)) {
@@ -1304,6 +1305,11 @@ pub(super) fn materialize<T: ReadTxn>(
             continue;
         }
         let mut name: Name = decode(value)?;
+        let scope = name.sheet.as_deref().map(base_sheet_index);
+        let source = base.defined_names.iter().position(|source| {
+            source.local_sheet.map(|sheet| Some(sheet.0 as usize)) == scope
+                && source.name == name.value.name
+        });
         if let Some(sheet) = &name.sheet {
             let Some(index) = context.index(sheet) else {
                 continue;
@@ -1311,12 +1317,17 @@ pub(super) fn materialize<T: ReadTxn>(
             name.value.local_sheet = Some(SheetId(index as u32));
         }
         name.value.formula = name.formula.resolve(&context)?;
-        model.defined_names.push(name.value);
+        names.push((source.unwrap_or(usize::MAX), name.value));
     }
-    model.defined_names.sort_by(|left, right| {
-        (left.local_sheet.map(|id| id.0), &left.name)
-            .cmp(&(right.local_sheet.map(|id| id.0), &right.name))
+    // Source order first: the workbook.xml patcher pairs names with the source's in order.
+    names.sort_by(|(left_at, left), (right_at, right)| {
+        (left_at, left.local_sheet.map(|id| id.0), &left.name).cmp(&(
+            right_at,
+            right.local_sheet.map(|id| id.0),
+            &right.name,
+        ))
     });
+    model.defined_names = names.into_iter().map(|(_, name)| name).collect();
     model.tables = base
         .tables
         .iter()

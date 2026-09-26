@@ -1004,6 +1004,74 @@ fn a_second_rebase_over_a_rebased_state_keeps_later_edits() {
     sync(&mut rebased, &mut peer);
 }
 
+/// `sample.xlsx` with names in Excel's order: sheet-local built-ins, then globals.
+fn excel_ordered_names() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(include_bytes!(
+        "../../../packages/xlsx/test-fixtures/sample.xlsx"
+    ))
+    .unwrap();
+    let (_, workbook) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/workbook.xml")
+        .unwrap();
+    *workbook = String::from_utf8(workbook.clone())
+        .unwrap()
+        .replace(
+            "</sheets>",
+            r#"</sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Budget!$A$1:$C$5</definedName><definedName name="_xlnm.Print_Area" localSheetId="0">Budget!$A$1:$D$20</definedName><definedName name="Rate">Budget!$B$2</definedName><definedName name="taxRate">0.2</definedName></definedNames>"#,
+        )
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn a_collaborative_export_and_its_rebase_keep_every_source_defined_name() {
+    let options = CalculationOptions::default();
+    let fixtures = [
+        (
+            include_bytes!("../../../packages/xlsx/test-fixtures/defined-names.xlsx").to_vec(),
+            "Data",
+        ),
+        (excel_ordered_names(), "Budget"),
+    ];
+    for (source, sheet) in fixtures {
+        let names = Workbook::open(&source)
+            .unwrap()
+            .model()
+            .defined_names
+            .clone();
+        assert!(names.len() >= 4, "{sheet}");
+        let mut book = Workbook::open_collaborative(&source, 7031).unwrap();
+        book.edit_cell(SheetId(0), at("Z1"), "captured", options)
+            .unwrap();
+        let captured = book.encode_state_as_update_v1();
+        let published = book.save().unwrap();
+        assert_eq!(
+            Workbook::open(&published).unwrap().model().defined_names,
+            names,
+            "{sheet}"
+        );
+        book.edit_cell(SheetId(0), at("Z2"), "later", options)
+            .unwrap();
+        let state = Workbook::rebase_checkpoint(
+            &source,
+            &captured,
+            &book.encode_state_as_update_v1(),
+            &published,
+            7032,
+        )
+        .unwrap();
+        let rebased = reopen_rebased(&published, &state, 7033);
+        let effects: Vec<serde_json::Value> =
+            serde_json::from_str(&rebased.pending_effects_json().unwrap()).unwrap();
+        let labels = effects
+            .iter()
+            .map(|effect| effect["label"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, [format!("{sheet}!Z2")]);
+    }
+}
+
 #[test]
 fn capy_contributor_metadata_survives_native_live_and_durable_updates() {
     use yrs::updates::decoder::Decode;
