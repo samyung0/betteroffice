@@ -60,6 +60,27 @@ print(json.dumps(result,sort_keys=True))`], { input: Buffer.from(bytes), encodin
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
 
 for (const seeder of ['native', 'projected']) {
+  it(`${seeder} preserves all run language slots through seed, edit and export`, async () => {
+    const bytes = fixture('<w:p><w:r><w:rPr><w:lang w:val="en-GB" w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr><w:t>Language</w:t></w:r></w:p>');
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 74006 });
+    const language = { latin: 'en-GB', eastAsia: 'ja-JP', bidi: 'ar-SA' };
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      expect(session.storySegments('body').find((segment) => segment.kind === 'text')?.attributes.language).toEqual(language);
+      for (const edited of [false, true]) {
+        if (edited) session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 1 }, '!');
+        const reopened = await parseDocx(await repackDocx(yrsToDocument(session, parsed)), { preloadFonts: false });
+        const paragraph = reopened.package.document.content[0]!;
+        if (paragraph.type !== 'paragraph') throw new Error('missing paragraph');
+        expect(paragraph.content.filter((item) => item.type === 'run').map((run) => run.formatting?.language)).toEqual([language]);
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
   it(`${seeder} preserves opaque blocks in body, header, footer, cells, controls and notes`, async () => {
     const table = `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${raw}${paragraph}</w:tc></w:tr></w:tbl>`;
     const sdt = `<w:sdt><w:sdtPr><w:tag w:val="test"/></w:sdtPr><w:sdtContent>${raw}${paragraph}</w:sdtContent></w:sdt>`;

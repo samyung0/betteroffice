@@ -73,6 +73,7 @@ function stableOptions(): (overrides?: Partial<UsePagesPointerOptions>) => UsePa
   const yrsInputRef = {
     current: {
       focus: () => {},
+      beginPointerSelection: () => {},
       setSelectionFromDisplay: (anchor: number, head = anchor, story?: string) => {
         selections.push({ anchor, head, story });
       },
@@ -531,6 +532,25 @@ describe('clicking a note', () => {
     expect(selections).toEqual([]);
   });
 
+  test('a click during missing geometry is observed and requires a fresh click', () => {
+    const options = stableOptions();
+    let attempts = 0;
+    const input = options().yrsInputRef.current!;
+    input.beginPointerSelection = () => { attempts++; };
+    const { rerender } = renderHook(({ queries }) => usePagesPointer(options({ displayListQueries: queries })), {
+      initialProps: { queries: fakeQueries() as DisplayListQueries | null },
+    });
+    rerender({ queries: null });
+    mouse('mousedown', 400, 200, canvasOf());
+    expect(attempts).toBe(1);
+    expect(selections).toEqual([]);
+    rerender({ queries: fakeQueries() });
+    expect(selections).toEqual([]);
+    mouse('mousedown', 400, 200, canvasOf());
+    expect(attempts).toBe(2);
+    expect(selections).toEqual([{ anchor: 1, head: 1, story: 'body' }]);
+  });
+
   test('a read-only document never opens a note', () => {
     const opened: PartEdit[] = [];
     const options = stableOptions();
@@ -549,7 +569,8 @@ describe('clicking a note', () => {
     const yrsInputRef = {
       current: {
         focus: () => {},
-        setSelectionFromDisplay: () => {},
+        beginPointerSelection: () => {},
+      setSelectionFromDisplay: () => {},
         displaySelection: () => ({ anchor: 3, head: 4 }),
       } as unknown as YrsInputRef,
     };

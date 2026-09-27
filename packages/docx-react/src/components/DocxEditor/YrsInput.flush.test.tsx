@@ -49,11 +49,11 @@ async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
       }))
     );
   const input = createRef<YrsInputRef>();
-  const view = render(
+  const component = (readOnly = false) => (
     <YrsInput
       ref={input}
       enabled
-      readOnly={false}
+      readOnly={readOnly}
       session={session}
       inputPositionMap={map}
       displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
@@ -63,7 +63,8 @@ async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
       applyResidentInput={applyResidentInput}
     />
   );
-  return { session, input, view };
+  const view = render(component());
+  return { session, input, view, setReadOnly: () => view.rerender(component(true)) };
 }
 
 test('flush waits for resident input and publishes the latest selection', async () => {
@@ -108,11 +109,35 @@ test('flush seals a queued text batch before subsequent input', async () => {
   expect(session.paragraphs('body')[0].text).toBe('SeedAB');
 });
 
+test('an unresolved pointer placement blocks input until a valid fresh placement', async () => {
+  const { session, input, view } = await mount();
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  act(() => {
+    input.current!.beginPointerSelection();
+    input.current!.insertText(' wrong');
+  });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  fireEvent.paste(textarea, { clipboardData: { getData: () => 'wrong paste' } });
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(session.paragraphs('body')[0].text).toBe('Seed');
+  expect(textarea.readOnly).toBe(true);
+  expect(textarea.dataset.pointerPlacement).toBe('pending');
+  act(() => input.current!.setSelectionFromDisplay(1));
+  act(() => input.current!.insertText('Right '));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(session.paragraphs('body')[0].text).toBe('Right Seed');
+  expect(textarea.dataset.pointerPlacement).toBe('ready');
+});
+
 test('flush includes a completed IME composition exactly once', async () => {
   const { session, input, view } = await mount();
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
   fireEvent.compositionStart(textarea);
   textarea.value = '日本';
+  act(() => {
+    expect(input.current!.beginPointerSelection()).toBe(false);
+    input.current!.setSelectionFromDisplay(1);
+  });
   fireEvent.compositionEnd(textarea, { data: '日本' });
   await act(async () => {
     await input.current!.flushPendingInput();
@@ -124,6 +149,37 @@ test('flush includes a completed IME composition exactly once', async () => {
   expect(session.paragraphs('body')[0].text).toBe('Seed日本');
   expect(session.selection()?.head.offset).toBe(6);
 });
+
+for (const inFlight of [false, true]) {
+  test(`pointer placement preserves ${inFlight ? 'in-flight' : 'queued'} accepted input at its original caret`, async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const { session, input, view } = await mount(async () => { await blocked; return null; });
+    const text = () => session.paragraphs('body').map((p) => p.text).join('\n');
+    const textarea = view.getByTestId('yrs-input');
+    act(() => input.current!.insertText(' accepted'));
+    if (inFlight) await Promise.resolve();
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    act(() => input.current!.insertText('😀Z'));
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    act(() => {
+      expect(input.current!.beginPointerSelection()).toBe(false);
+      input.current!.setSelectionFromDisplay(1);
+      input.current!.insertText(' wrong');
+    });
+    expect(textarea.getAttribute('data-pointer-placement')).toBe('pending');
+    await act(async () => { release(); await input.current!.flushPendingInput(); });
+    expect(text()).toBe('Seed accepted\n😀');
+    expect(textarea.getAttribute('data-pointer-placement')).toBe('pending');
+    act(() => {
+      expect(input.current!.beginPointerSelection()).toBe(true);
+      input.current!.setSelectionFromDisplay(1);
+      input.current!.insertText('Right ');
+    });
+    await act(async () => { await input.current!.flushPendingInput(); });
+    expect(text()).toBe('Right Seed accepted\n😀');
+  });
+}
 
 test('flush waits for an active composition and rejects if the input is removed', async () => {
   const { input, view } = await mount();
@@ -146,4 +202,18 @@ test('flush rejects failed resident input instead of claiming it was committed',
   act(() => input.current!.insertText('lost'));
   await expect(input.current!.flushPendingInput()).rejects.toBe(failure);
   expect(session.paragraphs('body')[0].text).toBe('Seed');
+});
+
+test('read-only interrupts active composition and rejects flush without waiting for compositionend', async () => {
+  const { session, input, view, setReadOnly } = await mount();
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  const flush = input.current!.flushPendingInput();
+  setReadOnly();
+  await expect(flush).rejects.toThrow('Composition interrupted');
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  expect(textarea.value).toBe('');
+  expect(session.paragraphs('body')[0].text).toBe('Seed');
+  await expect(input.current!.flushPendingInput()).rejects.toThrow('Composition interrupted');
 });

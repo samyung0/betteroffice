@@ -832,6 +832,16 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    if let Some(language) = object(formatting.get("language")) {
+        marks.push(mark(
+            "language",
+            ordered_object([
+                ("latin", nullish(language.get("latin"))),
+                ("eastAsia", nullish(language.get("eastAsia"))),
+                ("bidi", nullish(language.get("bidi"))),
+            ]),
+        ));
+    }
     match string(formatting.get("vertAlign")) {
         Some("superscript") => marks.push(mark("superscript", vec![])),
         Some("subscript") => marks.push(mark("subscript", vec![])),

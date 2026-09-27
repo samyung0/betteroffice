@@ -272,10 +272,10 @@ test("Word-like DOCX runs merge on export and keep per-character formatting and 
 // A seed change fails here and needs a maintenance window (record 23); the
 // budget is the measured size plus 2%, so an updated hash cannot hide growth.
 const goldenSeeds: Array<[string, string, number]> = [
-  ["exchange-plan.docx", "595d4a2b6469f7e6d27ef1947b5a16f822209539e1a23e7658ddf08ea099731e", 301_100],
-  ["opaque-objects.docx", "675194d3d0f387d294337fa4c15353953452afb29e9d99cee24697de80b4cd18", 47_300],
-  ["book-30p.docx", "a31ad9336c4356c003c7851c6f91211057376e4863f8a1a5ac540e485f442546", 248_600],
-  ["images-10.docx", "e73f3f87accec1052ce911256c09ca15f3e4662f9086e379f802221d1ac9cc00", 64_900],
+  ["exchange-plan.docx", "d876034fb284331957f50fe90d0fbc6f46662e9746678aa5393ee1ce732d09da", 319_300],
+  ["opaque-objects.docx", "eb05e432b8ed65821f8fd25f74c95ec0d59b1473f2ab498e6a589483758e4d5b", 48_900],
+  ["book-30p.docx", "0a3dc43928c896635127a4f1b0760ae9dc8a3ef331a94cd1a8b7e823999d9095", 264_500],
+  ["images-10.docx", "1a23a77334fa4372b546362c7763047c254ab7f418a980279ab2317a32203a17", 68_700],
   ["lecture.pptx", "62cdeb13ca369f0bd510a8fd32a10e5c3067922459551d7720dc25519d2cf2e8", 111_300],
   ["deck-50.pptx", "02d15d15807bf30eb01e862fc707951d8ed5e94dcd6855da69d457d558951928", 164_500],
 ];

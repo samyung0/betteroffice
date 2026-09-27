@@ -351,6 +351,15 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
     if (sizeCs !== undefined) formatting.fontSizeCs = sizeCs;
   }
 
+  const language = asObject(attributes.language);
+  if (language) {
+    formatting.language = {
+      latin: asString(language.latin),
+      eastAsia: asString(language.eastAsia),
+      bidi: asString(language.bidi),
+    };
+  }
+
   const fontFamily = asObject(attributes.fontFamily);
   if (fontFamily) {
     const ascii = asString(fontFamily.ascii);

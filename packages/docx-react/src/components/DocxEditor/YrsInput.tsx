@@ -55,6 +55,7 @@ export interface YrsInputRef {
   blur(): void;
   isFocused(): boolean;
   flushPendingInput(): Promise<void>;
+  beginPointerSelection(): boolean;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -223,10 +224,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   ref
 ) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pointerSelectionBlockedRef = useRef(false);
+  const [pointerSelectionBlocked, setPointerSelectionBlocked] = useState(false);
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
   const compositionWaitersRef = useRef(new Set<() => void>());
+  const compositionFailureRef = useRef<Error | null>(null);
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
@@ -351,7 +355,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
-    if (!session || readOnly) return;
+    if (!session || readOnly || pointerSelectionBlockedRef.current) return;
     if (session.selection()?.head.story !== 'body') return;
     onCaretInputDispatched?.();
   }, [onCaretInputDispatched, readOnly, session]);
@@ -420,9 +424,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, inputPositionMap, session, suggestingAuthor]);
 
   const insertText = useCallback(
-    (text: string): void => {
+    (text: string, acceptedComposition = false): void => {
       verticalCaretGoalRef.current.reset();
-      if (!session || readOnly || text.length === 0) return;
+      if (!session || readOnly || (pointerSelectionBlockedRef.current && !acceptedComposition) || text.length === 0) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -538,6 +542,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
+      if (pointerSelectionBlockedRef.current) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       enqueueInputOperation(async () => {
@@ -632,6 +637,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
+    if (pointerSelectionBlockedRef.current) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
@@ -690,6 +696,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const toggleMark = useCallback(
     (mark: YrsRunMark): void => {
+      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         const current = ensureSelection();
@@ -731,6 +738,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const undoRedo = useCallback(
     (redo: boolean): void => {
+      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         const result = performYrsHistoryAction(session, redo);
@@ -742,6 +750,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const setAlignment = useCallback(
     (alignment: 'left' | 'center' | 'right' | 'both'): void => {
+      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         const current = ensureSelection();
@@ -983,6 +992,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+      if (pointerSelectionBlockedRef.current) {
+        event.preventDefault();
+        return;
+      }
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
@@ -1050,6 +1063,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCompositionStart = useCallback(
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
+      if (readOnly || pointerSelectionBlockedRef.current) return;
       verticalCaretGoalRef.current.reset();
       composingRef.current = true;
       compositionPendingRef.current = false;
@@ -1057,7 +1071,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       event.currentTarget.value = '';
       onCaretInterrupt?.();
     },
-    [onCaretInterrupt]
+    [onCaretInterrupt, readOnly]
   );
 
   const handleCompositionUpdate = useCallback(
@@ -1069,6 +1083,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCompositionEnd = useCallback(
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
+      if (!composingRef.current && !compositionPendingRef.current) return;
       composingRef.current = false;
       compositionPendingRef.current = true;
       compositionCommitRef.current =
@@ -1082,7 +1097,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (textareaRef.current) textareaRef.current.value = '';
         compositionPendingRef.current = false;
         compositionCommitRef.current = '';
-        insertText(text);
+        insertText(text, true);
         for (const resolve of compositionWaitersRef.current) resolve();
         compositionWaitersRef.current.clear();
       });
@@ -1115,6 +1130,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const flushPendingInput = useCallback(async (): Promise<void> => {
     const queue = inputOperationQueueRef.current;
     const assertCurrent = () => {
+      if (compositionFailureRef.current) throw compositionFailureRef.current;
       const current = inputLifetimeRef.current;
       if (!session || !current.mounted || !current.enabled || current.session !== session) {
         throw new Error('The editor input changed or is unavailable while flushing');
@@ -1140,13 +1156,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, []);
 
   useEffect(() => {
+    pointerSelectionBlockedRef.current = false;
+    setPointerSelectionBlocked(false);
     composingRef.current = false;
     compositionPendingRef.current = false;
     compositionCommitRef.current = '';
+    compositionFailureRef.current = null;
     pendingResidentTextRef.current = null;
     for (const resolve of compositionWaitersRef.current) resolve();
     compositionWaitersRef.current.clear();
   }, [session, enabled]);
+
+  useEffect(() => {
+    if (!readOnly || (!composingRef.current && !compositionPendingRef.current)) return;
+    compositionFailureRef.current = new Error('Composition interrupted by read-only input');
+    composingRef.current = false;
+    compositionPendingRef.current = false;
+    compositionCommitRef.current = '';
+    if (textareaRef.current) textareaRef.current.value = '';
+    for (const resolve of compositionWaitersRef.current) resolve();
+    compositionWaitersRef.current.clear();
+  }, [readOnly]);
 
   useImperativeHandle(
     ref,
@@ -1155,16 +1185,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
       flushPendingInput,
+      beginPointerSelection() {
+        advanceInteractionEpoch();
+        pendingResidentTextRef.current = null;
+        pointerSelectionBlockedRef.current = true;
+        setPointerSelectionBlocked(true);
+        return !inputOperationQueueRef.current?.hasPending() && !composingRef.current && !compositionPendingRef.current;
+      },
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
+        if (pointerSelectionBlockedRef.current && (inputOperationQueueRef.current?.hasPending() || composingRef.current || compositionPendingRef.current)) return;
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
         if (session && anchorLoc && headLoc) {
           advanceInteractionEpoch();
           verticalCaretGoalRef.current.reset();
           setSelection(anchorLoc, headLoc);
+          pointerSelectionBlockedRef.current = false;
+          setPointerSelectionBlocked(false);
         }
       },
       selectWordAtDisplay(position, targetStory = story) {
+        if (pointerSelectionBlockedRef.current) return;
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1180,6 +1221,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       },
       selectParagraphAtDisplay(position, targetStory = story) {
+        if (pointerSelectionBlockedRef.current) return;
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1204,12 +1246,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && deleteSelected()) {
+        if (!readOnly && !pointerSelectionBlockedRef.current && deleteSelected()) {
           advanceInteractionEpoch();
           finishMutation();
         }
       },
       selectAll() {
+        if (pointerSelectionBlockedRef.current) return;
         advanceInteractionEpoch();
         selectAll();
       },
@@ -1332,11 +1375,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       className="paged-editor__yrs-input paged-editor__hidden-pm ProseMirror"
       data-testid="yrs-input"
       data-yrs-story={story}
+      data-pointer-placement={pointerSelectionBlocked ? 'pending' : 'ready'}
+      data-selection-head={displaySelection()?.head}
       aria-label="Document input"
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
-      readOnly={readOnly || !session}
+      readOnly={readOnly || pointerSelectionBlocked || !session}
       rows={1}
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}

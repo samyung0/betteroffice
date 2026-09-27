@@ -137,6 +137,13 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     }
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
+    if let Some(language) = &formatting.language {
+        body.start_element("w:lang");
+        optional_nonempty_attr(&mut body, "w:val", language.latin.as_deref());
+        optional_nonempty_attr(&mut body, "w:eastAsia", language.east_asia.as_deref());
+        optional_nonempty_attr(&mut body, "w:bidi", language.bidi.as_deref());
+        body.end_element();
+    }
     on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
 
     let body = body.finish();

@@ -348,6 +348,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearTableInsertTimer();
       e.preventDefault();
       if (readOnly) return;
+      if (yrsInputRef.current?.beginPointerSelection() === false) return;
+      if (!displayListQueries) return;
 
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const hit = point?.hit ?? null;
@@ -440,6 +442,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTextSelection,
       yrsRootStory,
       yrsSession,
+      yrsInputRef,
     ]
   );
 
@@ -848,7 +851,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   };
 
   useEffect(() => {
-    if (!displayListQueries) return;
     const asReactEvent = (e: MouseEvent) => e as unknown as React.MouseEvent;
     const onCurrentCanvas = (e: MouseEvent): boolean => {
       const target = e.target instanceof Element ? e.target.closest('.canvas-pages') : null;
@@ -882,7 +884,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       document.removeEventListener('click', onClick);
       document.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [canvasHostRef, displayListQueries]);
+  }, [canvasHostRef]);
 
   return {
     handlePagesMouseDown,

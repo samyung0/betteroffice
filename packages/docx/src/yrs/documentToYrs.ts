@@ -221,6 +221,13 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
       csTheme: formatting.fontFamily.csTheme ?? null,
     });
   }
+  if (formatting.language) {
+    add('language', {
+      latin: formatting.language.latin ?? null,
+      eastAsia: formatting.language.eastAsia ?? null,
+      bidi: formatting.language.bidi ?? null,
+    });
+  }
   if (formatting.vertAlign === 'superscript') add('superscript');
   else if (formatting.vertAlign === 'subscript') add('subscript');
   if (formatting.allCaps) add('allCaps');
