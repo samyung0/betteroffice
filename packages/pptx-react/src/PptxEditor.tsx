@@ -160,6 +160,7 @@ export interface PptxEditorProps {
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
+  onPendingChange?: (pending: boolean) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
   /** Return true for built-in saving; false or void handles/cancels the request. */
@@ -337,6 +338,7 @@ function PptxEditorContent({
   onReady,
   onChange,
   onError,
+  onPendingChange,
   onSave,
   onSaveRequest,
   readOnly = false,
@@ -381,6 +383,8 @@ function PptxEditorContent({
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
+  const onPendingChangeRef = useRef(onPendingChange);
+  onPendingChangeRef.current = onPendingChange;
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -691,6 +695,7 @@ function PptxEditorContent({
     recentClickRef.current = null;
     setError(null);
     pendingInputRef.current = new Set();
+    onPendingChangeRef.current?.(false);
     inputFailureRef.current = null;
     pendingSaveRef.current = null;
     imageCacheRef.current.clear();
@@ -754,6 +759,8 @@ function PptxEditorContent({
     );
     return () => {
       disposed = true;
+      pendingInputRef.current = new Set();
+      onPendingChangeRef.current?.(false);
       compositionRef.current?.finish();
       compositionRef.current = null;
       if (textInputRef.current) textInputRef.current.value = '';
@@ -2193,9 +2200,15 @@ function PptxEditorContent({
             event.currentTarget.value = '';
             if (file) {
               const pending = pendingInputRef.current;
+              onPendingChangeRef.current?.(true);
               const operation = insertPicture(file);
               pending.add(operation);
-              void operation.catch(() => {}).finally(() => pending.delete(operation));
+              void operation.catch(() => {}).finally(() => {
+                pending.delete(operation);
+                if (pendingInputRef.current === pending && !pending.size) {
+                  onPendingChangeRef.current?.(false);
+                }
+              });
             }
           }}
         />

@@ -35,7 +35,10 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
+async function mount(
+  applyResidentInput?: YrsInputProps['applyResidentInput'],
+  onPendingChange?: YrsInputProps['onPendingChange'],
+) {
   const session = await createYrsSession();
   sessions.push(session);
   const { paraId } = session.createStory('body', 'Seed');
@@ -60,6 +63,7 @@ async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
       locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(), loc)}
       onStateChange={() => {}}
       onDirectInput={() => {}}
+      onPendingChange={onPendingChange}
       applyResidentInput={applyResidentInput}
     />
   );
@@ -68,6 +72,7 @@ async function mount(applyResidentInput?: YrsInputProps['applyResidentInput']) {
 }
 
 test('flush waits for resident input and publishes the latest selection', async () => {
+  const pending: boolean[] = [];
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => {
     release = resolve;
@@ -75,8 +80,9 @@ test('flush waits for resident input and publishes the latest selection', async 
   const { session, input } = await mount(async () => {
     await blocked;
     return null;
-  });
+  }, (value) => pending.push(value));
   act(() => input.current!.insertText(' accepted'));
+  expect(pending).toEqual([true]);
   let done = false;
   const flush = input.current!.flushPendingInput().then(() => {
     done = true;
@@ -90,6 +96,7 @@ test('flush waits for resident input and publishes the latest selection', async 
   });
   expect(session.paragraphs('body')[0].text).toBe('Seed accepted');
   expect(session.selection()?.head.offset).toBe(13);
+  expect(pending).toEqual([true, false]);
 });
 
 test('flush seals a queued text batch before subsequent input', async () => {

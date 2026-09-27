@@ -109,6 +109,7 @@ export interface YrsInputProps {
     residentCaretReady?: boolean
   ): void;
   onDirectInput(story?: string): void;
+  onPendingChange?: (pending: boolean) => void;
   /** One-owner body text path; false until the resident frame is initialized. */
   applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
@@ -214,6 +215,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     canvasHostRef,
     onStateChange,
     onDirectInput,
+    onPendingChange,
     applyResidentInput,
     applyResidentDelete,
     onFocusChange,
@@ -236,12 +238,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   inputLifetimeRef.current.enabled = enabled;
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
+  const onPendingChangeRef = useRef(onPendingChange);
+  onPendingChangeRef.current = onPendingChange;
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
     queuedSessionRef.current = session;
-    inputOperationQueueRef.current = new InputOperationQueue((error) => {
-      console.error('[YrsInput] queued input operation failed', error);
-    });
+    const queue = new InputOperationQueue(
+      (error) => {
+        console.error('[YrsInput] queued input operation failed', error);
+      },
+      (pending) => {
+        if (inputOperationQueueRef.current === queue && inputLifetimeRef.current.mounted) {
+          onPendingChangeRef.current?.(pending);
+        }
+      },
+    );
+    inputOperationQueueRef.current = queue;
   }
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
@@ -1154,6 +1166,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionWaitersRef.current.clear();
     };
   }, []);
+
+  useEffect(() => () => onPendingChangeRef.current?.(false), [session]);
 
   useEffect(() => {
     pointerSelectionBlockedRef.current = false;

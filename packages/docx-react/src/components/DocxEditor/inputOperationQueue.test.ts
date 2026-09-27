@@ -5,7 +5,8 @@ import { VerticalCaretGoal } from './verticalCaretGoal';
 describe('InputOperationQueue', () => {
   test('flush waits for accepted operations and reports earlier failures', async () => {
     const errors: unknown[] = [];
-    const queue = new InputOperationQueue((error) => errors.push(error));
+    const pending: boolean[] = [];
+    const queue = new InputOperationQueue((error) => errors.push(error), (value) => pending.push(value));
     let release!: () => void;
     let applied = false;
     queue.enqueue(async () => {
@@ -14,20 +15,25 @@ describe('InputOperationQueue', () => {
       });
       applied = true;
     });
+    queue.enqueue(() => {});
+    expect(pending).toEqual([true]);
     const flushed = queue.flush();
     await Promise.resolve();
     expect(applied).toBe(false);
     release();
     await flushed;
     expect(applied).toBe(true);
+    expect(pending).toEqual([true, false]);
     const failure = new Error('input failed');
     queue.enqueue(() => {
       throw failure;
     });
     await expect(queue.flush()).rejects.toBe(failure);
     expect(errors).toEqual([failure]);
+    expect(pending.at(-1)).toBe(true);
     queue.enqueue(() => {});
     await expect(queue.flush()).rejects.toBe(failure);
+    expect(pending.at(-1)).toBe(true);
   });
 
   test('orders a horizontal goal reset after an in-flight vertical move', async () => {

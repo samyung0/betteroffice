@@ -146,6 +146,7 @@ export interface DocxEditorProps {
   onSelectionChange?: (state: SelectionState | null) => void;
   /** Callback on error */
   onError?: (error: Error) => void;
+  onPendingChange?: (pending: boolean) => void;
   /** Callback when fonts are loaded */
   onFontsLoaded?: () => void;
   /** Color theme mode for UI styling. `'system'` follows the OS preference. */
@@ -574,6 +575,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onChange,
     onSelectionChange,
     onError,
+    onPendingChange,
     onFontsLoaded: onFontsLoadedCallback,
     colorMode = 'light',
     theme,
@@ -1884,6 +1886,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             <DocxEditorPagedArea
               yrsCore={yrsCore}
               onError={reportLayoutError}
+              onPendingChange={onPendingChange}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}

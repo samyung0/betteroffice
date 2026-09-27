@@ -288,6 +288,7 @@ export interface PagedEditorProps {
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
   onError?: (error: Error) => void;
+  onPendingChange?: (pending: boolean) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
@@ -480,6 +481,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onTotalPagesChange,
       onLayoutComputed,
       onError,
+      onPendingChange,
       applyResidentInput,
       applyResidentDelete,
       hyperlinkPopupData,
@@ -1758,6 +1760,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}
+          onPendingChange={onPendingChange}
           applyResidentInput={applyResidentInput}
           applyResidentDelete={applyResidentDelete}
           onFocusChange={setIsFocused}

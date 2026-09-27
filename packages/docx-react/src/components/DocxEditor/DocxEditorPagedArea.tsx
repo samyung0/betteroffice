@@ -107,6 +107,7 @@ export function DocxEditorPagedArea({
   onTotalPagesChange,
   onLayoutComputed,
   onError,
+  onPendingChange,
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
@@ -194,6 +195,7 @@ export function DocxEditorPagedArea({
   onTotalPagesChange: (totalPages: number) => void;
   /** Receives each computed layout. */
   onError?: (error: Error) => void;
+  onPendingChange?: (pending: boolean) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
@@ -459,6 +461,7 @@ export function DocxEditorPagedArea({
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
         onError={onError}
+        onPendingChange={onPendingChange}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}

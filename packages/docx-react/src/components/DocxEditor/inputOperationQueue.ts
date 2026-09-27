@@ -4,16 +4,21 @@ export class InputOperationQueue {
   private failure: { error: unknown } | null = null;
   private pendingCount = 0;
 
-  constructor(private readonly reportError: (error: unknown) => void) {}
+  constructor(
+    private readonly reportError: (error: unknown) => void,
+    private readonly reportPending?: (pending: boolean) => void,
+  ) {}
 
   enqueue(operation: () => void | Promise<void>): void {
     this.pendingCount += 1;
+    if (this.pendingCount === 1) this.reportPending?.(true);
     const pending = this.pending.then(operation, operation);
     this.pending = pending.catch((error) => {
       this.failure ??= { error };
       this.reportError(error);
     }).finally(() => {
       this.pendingCount -= 1;
+      if (!this.pendingCount && !this.failure) this.reportPending?.(false);
     });
   }
 
