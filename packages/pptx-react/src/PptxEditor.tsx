@@ -351,9 +351,24 @@ function PptxEditorContent({
   const modelRef = useRef<EditorModel | null>(null);
   const pendingInputRef = useRef(new Set<Promise<void>>());
   const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const textInputRef = useRef<HTMLTextAreaElement>(null);
+  const inputFailureRef = useRef<Error | null>(null);
+  const compositionRef = useRef<{
+    handle: PresentationHandle | null;
+    selection: PptxTextSelection;
+    done: Promise<void>;
+    finish: () => void;
+    ending: boolean;
+  } | null>(null);
   const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
   const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
     if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+    if (inputFailureRef.current) throw inputFailureRef.current;
+    while (compositionRef.current) {
+      await compositionRef.current.done;
+      if (handleRef.current !== opened) throw new Error('Presentation changed while composing');
+    }
+    if (inputFailureRef.current) throw inputFailureRef.current;
     while (pendingInputRef.current.size) {
       await Promise.all([...pendingInputRef.current]);
       if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
@@ -392,6 +407,11 @@ function PptxEditorContent({
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  useEffect(() => {
+    if (selection && document.activeElement === stageRef.current) textInputRef.current?.focus({ preventScroll: true });
+  }, [selection]);
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
@@ -442,6 +462,15 @@ function PptxEditorContent({
     setDragPreview(null);
     setTextBoxPreview(null);
   }, [readOnly]);
+
+  useEffect(() => {
+    const pending = compositionRef.current;
+    if (!pending || (!readOnly && !canvasReview.reviewing && selection === pending.selection)) return;
+    inputFailureRef.current = new Error('Composition interrupted by an unavailable text selection');
+    compositionRef.current = null;
+    if (textInputRef.current) textInputRef.current.value = '';
+    pending.finish();
+  }, [readOnly, canvasReview.reviewing, selection]);
 
   onReadyRef.current = onReady;
   initialSlideRef.current = initialSlide;
@@ -662,6 +691,7 @@ function PptxEditorContent({
     recentClickRef.current = null;
     setError(null);
     pendingInputRef.current = new Set();
+    inputFailureRef.current = null;
     pendingSaveRef.current = null;
     imageCacheRef.current.clear();
     if (!file) return;
@@ -702,7 +732,8 @@ function PptxEditorContent({
             getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
             save: () => {
               if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
-              if (pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
+              if (inputFailureRef.current) throw inputFailureRef.current;
+              if (compositionRef.current || pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
                 throw new Error('Await flushPendingInput before saving pending input');
               }
               return opened.save();
@@ -723,6 +754,9 @@ function PptxEditorContent({
     );
     return () => {
       disposed = true;
+      compositionRef.current?.finish();
+      compositionRef.current = null;
+      if (textInputRef.current) textInputRef.current.value = '';
       unsubscribeUpdates();
       handle?.dispose();
       if (handleRef.current === handle) handleRef.current = null;
@@ -1507,13 +1541,38 @@ function PptxEditorContent({
 
   const commit = (nextSelection: PptxTextSelection | null) => {
     if (readOnly) return;
-    setSelection(nextSelection ? { ...nextSelection, focusLine: undefined } : null);
+    selectionRef.current = nextSelection ? { ...nextSelection, focusLine: undefined } : null;
+    setSelection(selectionRef.current);
     setShapeSelection(null);
     recentClickRef.current = null;
     refreshAt(undefined, true);
   };
 
+  const insertSlideText = (text: string) => {
+    const handle = handleRef.current;
+    const current = selectionRef.current;
+    if (!handle || !current || readOnly || canvasReview.reviewing || !text) return;
+    try {
+      let position = Math.min(current.anchor, current.focus);
+      const end = Math.max(current.anchor, current.focus);
+      if (position !== end) handle.deleteText(current.storyId, position, end);
+      const lines = text.replace(/\r\n?/g, '\n').split('\n');
+      for (const [index, line] of lines.entries()) {
+        if (index > 0) handle.insertParagraphBreak(current.storyId, position++);
+        if (line) handle.insertText(current.storyId, position, line, textStyle);
+        position += line.length;
+      }
+      commit({ ...current, anchor: position, focus: position });
+    } catch (value) {
+      inputFailureRef.current = value instanceof Error ? value : new Error(String(value));
+      reportError(value);
+    }
+  };
+  const insertSlideTextRef = useRef(insertSlideText);
+  insertSlideTextRef.current = insertSlideText;
+
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (compositionRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
     const handle = handleRef.current;
     if (!handle) return;
     const modifier = event.metaKey || event.ctrlKey;
@@ -1616,19 +1675,6 @@ function PptxEditorContent({
         handle.insertParagraphBreak(selection.storyId, start);
         commit({ ...selection, anchor: start + 1, focus: start + 1 });
         return;
-      }
-      if (
-        event.key.length > 0 &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        Array.from(event.key).length === 1
-      ) {
-        event.preventDefault();
-        if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertText(selection.storyId, start, event.key, textStyle);
-        const next = start + event.key.length;
-        commit({ ...selection, anchor: next, focus: next });
       }
     } catch (value) {
       reportError(value);
@@ -2225,7 +2271,10 @@ function PptxEditorContent({
           role="application"
           aria-label={t('editor.appLabel')}
           onKeyDown={keyDown}
-          onFocus={() => setStageFocused(true)}
+          onFocus={(event) => {
+            setStageFocused(true);
+            if (event.target === event.currentTarget && selectionRef.current) textInputRef.current?.focus({ preventScroll: true });
+          }}
           onBlur={() => setStageFocused(false)}
         >
           {!readOnly && (
@@ -2241,6 +2290,45 @@ function PptxEditorContent({
                   height: model.frame.height * scale,
                 }}
               >
+                <textarea
+                  ref={textInputRef}
+                  data-testid="pptx-text-input"
+                  aria-label={t('editor.appLabel')}
+                  readOnly={readOnly || !selection || canvasReview.reviewing}
+                  tabIndex={-1}
+                  style={{ position: 'absolute', opacity: 0, width: 1, padding: 0, border: 0, resize: 'none', pointerEvents: 'none', ...inputCaretStyle(model.frame, selection, scale) }}
+                  onInput={(event) => {
+                    if (compositionRef.current) return;
+                    const text = event.currentTarget.value;
+                    event.currentTarget.value = '';
+                    insertSlideText(text);
+                  }}
+                  onPaste={(event) => {
+                    event.preventDefault();
+                    if (!compositionRef.current) insertSlideText(event.clipboardData.getData('text/plain'));
+                  }}
+                  onCompositionStart={() => {
+                    if (!handleRef.current || !selectionRef.current || readOnly || canvasReview.reviewing || compositionRef.current) return;
+                    let finish!: () => void;
+                    const done = new Promise<void>((resolve) => { finish = resolve; });
+                    compositionRef.current = { handle: handleRef.current, selection: selectionRef.current, done, finish, ending: false };
+                  }}
+                  onCompositionEnd={(event) => {
+                    const pending = compositionRef.current;
+                    if (!pending || pending.ending) return;
+                    pending.ending = true;
+                    const input = event.currentTarget;
+                    const committed = event.data;
+                    queueMicrotask(() => {
+                      if (compositionRef.current !== pending) return;
+                      const text = input.value || committed;
+                      input.value = '';
+                      compositionRef.current = null;
+                      if (handleRef.current === pending.handle) insertSlideTextRef.current(text);
+                      pending.finish();
+                    });
+                  }}
+                />
                 <canvas
                   ref={canvasRef}
                   data-testid="pptx-slide-canvas"
@@ -2788,6 +2876,15 @@ export function paintSelection(
     }
   }
   ctx.restore();
+}
+
+function inputCaretStyle(frame: SlideDisplayList, selection: PptxTextSelection | null, scale: number): CSSProperties {
+  const box = selection && frame.primitives.find((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox' && primitive.storyId === selection.storyId && primitive.shapeId === selection.shapeId);
+  const lines = box ? box.lines : [];
+  const line = selection ? lines[caretLineIndex(lines, { position: selection.focus, lineIndex: selection.focusLine })] : null;
+  return line && selection
+    ? { left: caretX(line, selection.focus) * scale, top: line.y * scale, height: line.height * scale }
+    : { left: 0, top: 0, height: 1 };
 }
 
 function caretX(line: TextBoxPrimitive['lines'][number], position: number): number {

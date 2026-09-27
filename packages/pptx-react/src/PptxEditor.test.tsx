@@ -41,6 +41,71 @@ afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
 });
 
+describe('PptxEditor native text input', () => {
+  for (const interruption of ['readOnly', 'selection'] as const) {
+    it(`rejects an active composition flush when ${interruption} invalidates input`, async () => {
+      const opened: PptxEditorApi[] = [];
+      const props = { file: fixture, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], onReady: (api: PptxEditorApi) => opened.push(api) };
+      const view = render(<PptxEditor {...props} />);
+      await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+      const api = opened[0];
+      const shape = api.handle.snapshot().slides[0].shapes.find((item) => item.textStories.length > 0)!;
+      const story = shape.textStories[0];
+      await act(async () => { api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 }); });
+      const original = api.handle.story(story.id);
+      const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+      fireEvent.compositionStart(input);
+      input.value = '日本';
+      const pending = api.flushPendingInput();
+      if (interruption === 'readOnly') view.rerender(<PptxEditor {...props} readOnly />);
+      else act(() => { api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 1, end: 1 }); });
+      await expect(pending).rejects.toThrow('Composition interrupted');
+      fireEvent.compositionEnd(input, { data: '日本' });
+      expect(input.value).toBe('');
+      expect(api.handle.story(story.id)).toEqual(original);
+      expect(() => api.save()).toThrow('Composition interrupted');
+    }, 60_000);
+  }
+
+  it('persists paste, direct input and composition exactly once and flush waits for composition', async () => {
+    const opened: PptxEditorApi[] = [];
+    const errors: Error[] = [];
+    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(api) => opened.push(api)} onError={(error) => errors.push(error)} />);
+    await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+    const api = opened[0];
+    const shape = api.handle.snapshot().slides[0].shapes.find((item) => item.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    const text = () => api.handle.story(story.id).paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n');
+    const original = text();
+    await act(async () => { expect(api.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 2 })).toBe(true); });
+    const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+    fireEvent.paste(input, { clipboardData: { getData: () => 'Pasted\r\nline ' } });
+    fireEvent.input(input, { target: { value: '😀 ' } });
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent.input(input, { target: { value: '日本' }, isComposing: true });
+    let flushed = false;
+    const pending = api.flushPendingInput().then(() => { flushed = true; });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+    expect(() => api.save()).toThrow('flushPendingInput');
+    fireEvent.compositionEnd(input, { data: '日本' });
+    fireEvent.input(input);
+    await act(async () => { await pending; });
+    fireEvent.input(input);
+    expect(text()).toBe('Pasted\nline 😀 日本' + original.slice(2));
+    const reopened = pptx.openPresentation(api.save(), { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+    try {
+      expect(reopened.story(story.id).paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n')).toBe(text());
+    } finally { reopened.dispose(); }
+    expect(errors).toEqual([]);
+    fireEvent.compositionStart(input);
+    const abandoned = api.flushPendingInput();
+    view.unmount();
+    await expect(abandoned).rejects.toThrow('changed while composing');
+  }, 60_000);
+});
+
 describe('PptxEditor PNG export', () => {
   const cases = [
     ['download', 'downloads the current slide'],
@@ -467,7 +532,7 @@ describe('PptxEditor viewing transitions', () => {
         })
       ).toBe(true);
     });
-    fireEvent.keyDown(view.getByRole('application'), { key: 'x' });
+    fireEvent.input(view.getByTestId('pptx-text-input'), { target: { value: 'x' } });
     expect(api.handle.story(story.id).paragraphs[0].runs[0].text).toStartWith('x');
     await act(async () => {
       view.rerender(<PptxEditor {...props} readOnly />);
