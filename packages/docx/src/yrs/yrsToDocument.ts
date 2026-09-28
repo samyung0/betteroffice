@@ -944,11 +944,6 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'flowBreak':
       return unitBreakRun(item.payload.breakType as FlowBreak);
-    // Page and column breaks in a story without flow breaks (a cell, a header).
-    case 'pageBreak':
-      return unitBreakRun('page');
-    case 'columnBreak':
-      return unitBreakRun('column');
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
@@ -1578,6 +1573,29 @@ function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefi
   );
 }
 
+/**
+ * `boundaries` moved back past the page and column breaks a story without flow
+ * breaks (a cell, a header) holds: story units the export drops.
+ */
+function withoutDroppedBreaks(
+  boundaries: CommentBoundary[],
+  items: InlineItem[]
+): CommentBoundary[] {
+  const dropped: number[] = [];
+  let unit = 0;
+  for (const item of items) {
+    const flowBreak =
+      item.kind === 'embed' && (item.embedKind === 'pageBreak' || item.embedKind === 'columnBreak');
+    if (flowBreak) dropped.push(unit);
+    unit += item.kind === 'text' ? item.text.length : 1;
+  }
+  if (dropped.length === 0) return boundaries;
+  return boundaries.map((boundary) => ({
+    ...boundary,
+    offset: boundary.offset - dropped.filter((at) => at < boundary.offset).length,
+  }));
+}
+
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   const attrs = { ...PARAGRAPH_ATTR_DEFAULTS, ...properties } as Attrs;
   attrs.styleId = properties.pStyle ?? null;
@@ -1604,7 +1622,7 @@ function paragraphFromStory(
       : undefined
   );
   content = restoreRawInlines(content, baseParagraph);
-  content = insertBoundaries(content, commentBoundaries, storyUnits);
+  content = insertBoundaries(content, withoutDroppedBreaks(commentBoundaries, items), storyUnits);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
     ...boundary,
@@ -2514,15 +2532,15 @@ class SaveContext {
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
-        // A leading page break the seed kept as an attribute, not a unit.
-        const tokens = flowTokens(paragraph.content);
-        if (
-          segment.properties.pageBreakBeforeRun === true &&
-          tokens.some((token) => token.kind === 'visible') &&
-          !splitFlow(tokens).pageFirst
-        )
-          paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
         if (flowUnits) {
+          // A leading page break the seed kept as an attribute, not a unit.
+          const tokens = flowTokens(paragraph.content);
+          if (
+            segment.properties.pageBreakBeforeRun === true &&
+            tokens.some((token) => token.kind === 'visible') &&
+            !splitFlow(tokens).pageFirst
+          )
+            paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
           paragraph = settle(paragraph) ?? paragraph;
           carried = slotInlineBreaks;
           slotInlineBreaks = [];
@@ -2645,10 +2663,7 @@ class SaveContext {
         }
       } else {
         items.push(segment as EmbedItem);
-        // A cell's or header's break seeds as no unit, so it carries no effects entry.
-        const flowBreak = segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak';
-        if (this.onEmbed && !flowBreak)
-          projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
+        if (this.onEmbed) projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
       }
       if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
