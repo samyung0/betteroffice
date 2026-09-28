@@ -61,7 +61,7 @@ export const DOCX_LINEAGE: Lineage = {
         const [first, last] = [resolve(start), resolve(end)];
         // Both stories hold the later edits, so they differ only where the
         // export wrote the text its own way; an anchor there cannot land.
-        const f = align(units(source as Y.Text), units(target as Y.Text));
+        const f = aligned(source as Y.Text, target as Y.Text);
         let [startAt, endAt] = [
           pointAt(f, first.index),
           pointAt(f, last.index),
@@ -70,12 +70,15 @@ export const DOCX_LINEAGE: Lineage = {
           const covered = f.map.subarray(first.index, last.index);
           if (
             covered[0] < 0 ||
-            covered.some((unit, index) => unit !== covered[0] + index)
+            covered.some(
+              (unit, index) =>
+                index > 0 && unit !== past(f, covered[index - 1] + 1)
+            )
           )
             fail(
               "a comment anchor covers content the export wrote differently"
             );
-          [startAt, endAt] = [covered[0], covered[0] + covered.length];
+          [startAt, endAt] = [covered[0], covered[covered.length - 1] + 1];
         }
         if (startAt === undefined || endAt === undefined)
           fail(
@@ -177,12 +180,33 @@ function units(text: Y.Text): Units {
       found.keys.push(
         plain
           ? unit
+          : unit instanceof Y.Map &&
+            unit.get("modelKind") === "commentReference"
+          ? COMMENT_REFERENCE
           : `\u0000${unit instanceof Y.Map ? unit.get("_kind") : "embed"}`
       );
       found.ids.push(`${item.id.client}:${item.id.clock + i}`);
     });
   }
   return found;
+}
+
+/**
+ * The unit of the reference field a save writes at the end of a DOCX comment
+ * made in the editor. The later edits never hold one the seed added, so such
+ * a seed unit is transparent: content beside it lands beside it.
+ */
+const COMMENT_REFERENCE = "\u0000commentReference";
+
+/** The seed unit at or after `s` that is not a comment reference only the seed holds. */
+function past(f: Alignment, s: number): number {
+  while (
+    s < f.to.keys.length &&
+    f.to.keys[s] === COMMENT_REFERENCE &&
+    !f.matched[s]
+  )
+    s++;
+  return s;
 }
 
 /** Embedded maps of a text with their positions. */
@@ -207,8 +231,16 @@ interface Alignment {
   from: Units;
   to: Units;
   map: Int32Array;
+  /** Seed units some captured unit maps to. */
+  matched: Uint8Array;
 }
 function align(from: Units, to: Units): Alignment {
+  const f = myers(from, to);
+  const matched = new Uint8Array(to.keys.length);
+  for (const target of f.map) if (target >= 0) matched[target] = 1;
+  return { ...f, matched };
+}
+function myers(from: Units, to: Units): Omit<Alignment, "matched"> {
   const a = from.keys;
   const b = to.keys;
   const map = new Int32Array(a.length).fill(-1);
@@ -263,13 +295,26 @@ function align(from: Units, to: Units): Alignment {
   return fail("the export wrote a text too differently");
 }
 
+/**
+ * A story's alignment with its rebased counterpart, made once: comment
+ * anchors are rewritten after every text has landed, so the rebased story no
+ * longer changes, and each transplant's stories are new objects.
+ */
+const anchorAlignments = new WeakMap<Y.Text, Alignment>();
+function aligned(source: Y.Text, target: Y.Text): Alignment {
+  let f = anchorAlignments.get(target);
+  if (!f)
+    anchorAlignments.set(target, (f = align(units(source), units(target))));
+  return f;
+}
+
 /** The seed position of an insertion before captured position `c`. */
 function pointAt(f: Alignment, c: number): number | undefined {
   const left = c === 0 ? -1 : f.map[c - 1];
   const right = c === f.map.length ? f.to.keys.length : f.map[c];
   if (left >= 0 || c === 0)
     return right >= 0 || c === f.map.length
-      ? right === left + 1
+      ? right === past(f, left + 1)
         ? right
         : undefined
       : left + 1;

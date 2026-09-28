@@ -784,6 +784,73 @@ test("a DOCX comment made before the capture can be changed and removed after it
   }
 });
 
+test("edits around a DOCX comment made before the capture land beside the reference mark the export adds", async () => {
+  const base = docx(
+    `${paragraph("11111111", "Intro paragraph")}${paragraph(
+      "22222222",
+      "alpha beta gamma"
+    )}`
+  );
+  const edits: Array<[string, (session: YrsSession) => void]> = [
+    [
+      "typing in an earlier paragraph",
+      (session) =>
+        session.insertText(
+          { story: "body", paraId: "11111111", offset: 0 },
+          "New "
+        ),
+    ],
+    [
+      "typing at the start of the commented text",
+      (session) =>
+        session.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "X"
+        ),
+    ],
+    [
+      "typing right after the commented text",
+      (session) =>
+        session.insertText(
+          { story: "body", paraId: "22222222", offset: 5 },
+          "X"
+        ),
+    ],
+    [
+      "a delete across the comment's end",
+      (session) =>
+        session.deleteRange({
+          story: "body",
+          start: { paraId: "22222222", offset: 3 },
+          end: { paraId: "22222222", offset: 8 },
+        }),
+    ],
+    [
+      "a comment over the old one's end",
+      (session) => comment(session, "22222222", 2, 10),
+    ],
+  ];
+  for (const [name, edit] of edits) {
+    const { exported, latest, rebase } = await publishDocx(
+      base,
+      (session) => comment(session, "22222222", 0, 5),
+      edit
+    );
+    const seeded = await docxSession(exported);
+    // The export writes the comment's reference mark after "alpha".
+    expect(units(seeded)).toContain("alpha[field] beta");
+    seeded.destroy();
+    const current = await docxSession(exported, (await rebase()).state);
+    const later = await docxSession(base, latest);
+    try {
+      expect(text(current), name).toEqual(text(later));
+    } finally {
+      current.destroy();
+      later.destroy();
+    }
+  }
+});
+
 test("a DOCX edit inside a run with a complex-script theme font rebases with that font", async () => {
   const base = docx(
     `${paragraph(

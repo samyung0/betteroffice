@@ -128,6 +128,23 @@ test("an XLSX publication rebase the engine refuses is an Office rebase refusal"
   }
 });
 
+test("an XLSX rebase that fails with an Error is not a refusal and stays unwrapped", async () => {
+  const bytes = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", bytes);
+  const trap = new Error("unreachable executed");
+  const rebase = XlsxDocument.rebaseCheckpoint;
+  XlsxDocument.rebaseCheckpoint = () => {
+    throw trap;
+  };
+  try {
+    await expect(rebaseOffice(bytes, seeded, seeded, bytes)).rejects.toBe(
+      trap
+    );
+  } finally {
+    XlsxDocument.rebaseCheckpoint = rebase;
+  }
+});
+
 test("PPTX checkpoint exports preserve opaque parts and mismatched source restoration fails immediately", async () => {
   const bytes = await fixture("betteroffice-demo.pptx");
   const before = await seedOffice("pptx", bytes);

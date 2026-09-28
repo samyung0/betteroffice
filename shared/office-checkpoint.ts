@@ -363,6 +363,8 @@ function docxEntries(
         entries.push(
           visual(`${id}:format`, `${storyId}, image formatting`, geometry)
         );
+      } else if (segment.payload.modelKind === "commentReference") {
+        // A comment's reference mark: its comment entry carries the change.
       } else {
         const id = `${storyId}:object:${stableId}`;
         const payload = segment.payload;
