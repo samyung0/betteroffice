@@ -1,12 +1,22 @@
 import { createHash, randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
-import { rebaseDocxCheckpoint } from "../packages/docx/src/yrs/rebaseCheckpoint";
 import { yrsToDocument } from "../packages/docx/src/yrs/yrsToDocument";
 import { preloadEditWasm } from "../packages/docx/src/wasm/edit";
 import { preloadParseWasm } from "../packages/docx/src/wasm/parse";
-import { preloadOpcWasm } from "../packages/docx/src/wasm/opc";
+import { preloadOpcWasm, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { writeDocumentWithRust } from "../packages/docx/src/docx/rustSaveFacade";
+import { parseRelationshipsXmlWithRust } from "../packages/docx/src/docx/rustParseFacade";
+import {
+  DOCX_LINEAGE,
+  PPTX_LINEAGE,
+  RebaseError,
+  assertPptxRestorations,
+  docxIds,
+  docxWrittenParagraphs,
+  pptxIds,
+  transplant,
+} from "./office-rebase";
 import initXlsx, {
   XlsxDocument,
 } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
@@ -1198,15 +1208,19 @@ export async function compare(
     await officeBaseline(baseBytes, toCheckpoint),
   );
 }
-/** Rebind both projections to the new package; keep only the compact indexed baseline. XLSX keeps none: its effects come from the overrides. */
+/**
+ * Lands the edits saved after the capture on seed(export) and returns that
+ * state with its effects against the export's derived baseline. Fails when the
+ * rebased state does not carry the same changes as latest − captured, or when
+ * it would need content the export dropped.
+ */
 export async function rebaseOffice(
   baseBytes: Uint8Array,
   captured: OfficeCheckpoint,
   latest: OfficeCheckpoint,
-  exportedSource: Uint8Array,
+  exportedSource: Uint8Array
 ): Promise<{
   state: Uint8Array;
-  baseline: OfficeBaselineEntry[];
   effects: NetEffect[];
 }> {
   const format = captured.format;
@@ -1218,7 +1232,7 @@ export async function rebaseOffice(
     !exportedSource.length
   )
     throw new TypeError(
-      "Expected supported Office format and nonempty source bytes",
+      "Expected supported Office format and nonempty source bytes"
     );
   for (const checkpoint of [captured, latest]) {
     if (
@@ -1229,7 +1243,7 @@ export async function rebaseOffice(
       !checkpoint.state.length
     )
       throw new Error(
-        "Office checkpoint does not match the exact base package and schema",
+        "Office checkpoint does not match the exact base package and schema"
       );
   }
   await initialize(format);
@@ -1239,7 +1253,7 @@ export async function rebaseOffice(
       captured.state,
       latest.state,
       exportedSource,
-      randomInt(1, 0x1fffffffffff),
+      randomInt(1, 0x1fffffffffff)
     );
     const checkpoint = {
       format,
@@ -1249,50 +1263,222 @@ export async function rebaseOffice(
     };
     return {
       state,
-      baseline: [],
       effects: await xlsxPendingEffects(exportedSource, checkpoint),
     };
   }
-  let rebased: { state: Uint8Array; indexedState: Uint8Array };
-  if (format === "docx") {
-    rebased = await rebaseDocxCheckpoint({
-      oldSource: baseBytes,
-      capturedState: captured.state,
-      latestState: latest.state,
-      exportedSource,
-    });
-  } else {
-    const result = PptxDocument.rebaseCheckpoint(
-      baseBytes,
-      captured.state,
-      latest.state,
-      exportedSource,
-      randomInt(1, 0x1fffffffffff),
-    );
-    try {
-      rebased = { state: result.state, indexedState: result.indexedState };
-    } finally {
-      result.free();
-    }
-  }
-  const checkpoint = {
+  const exported = {
     format,
     schemaVersion: 1 as const,
     baseSha256: hash(exportedSource),
   };
-  const baseline = await officeBaseline(exportedSource, {
-    ...checkpoint,
-    state: rebased.indexedState,
-  });
-  const current = await officeBaseline(exportedSource, {
-    ...checkpoint,
-    state: rebased.state,
-  });
-  return {
-    state: rebased.state,
-    baseline,
-    effects: compareBaselines(baseline, current),
+  const seed = (await seedOffice(format, exportedSource)).state;
+  let ids: Map<string, string>;
+  if (format === "docx") {
+    validateExportBacking(
+      unzipContainer(baseBytes),
+      unzipContainer(exportedSource)
+    );
+    ids = docxIds(captured.state, seed);
+  } else {
+    const deck = (bytes: Uint8Array, state?: Uint8Array) => {
+      const doc = state
+        ? PptxDocument.openCollaborativeFromUpdate(
+            state,
+            randomInt(1, 0x1fffffffffff),
+            bytes
+          )
+        : PptxDocument.openCollaborative(bytes, randomInt(1, 0x1fffffffffff));
+      try {
+        return JSON.parse(doc.snapshotJson()) as DeckSnapshot;
+      } finally {
+        doc.free();
+      }
+    };
+    ids = pptxIds(deck(baseBytes, captured.state), deck(exportedSource));
+  }
+  const clientId = randomInt(1, 0x1fffffffffff);
+  const rebased = transplant(
+    format === "docx" ? DOCX_LINEAGE : PPTX_LINEAGE,
+    captured.state,
+    latest.state,
+    seed,
+    ids,
+    clientId
+  );
+  const state = rebased.state;
+  if (format === "docx")
+    await assertDocxRestorations(
+      baseBytes,
+      latest.state,
+      exportedSource,
+      state,
+      clientId,
+      rebased.ids
+    );
+  else assertPptxRestorations(seed, state);
+  const effects = compareBaselines(
+    await officeBaseline(exportedSource, { ...exported, state: seed }),
+    await officeBaseline(exportedSource, { ...exported, state })
+  );
+  const saved = compareBaselines(
+    await officeBaseline(baseBytes, captured),
+    await officeBaseline(baseBytes, latest)
+  );
+  // DOCX formatting passes through an export as its own representation, so
+  // unchanged formatting may read differently; text and images may not.
+  const change = (list: NetEffect[]) =>
+    list
+      .filter((effect) => format === "pptx" || effect.kind !== "visual")
+      .map((effect) =>
+        JSON.stringify([
+          effect.operation,
+          effect.kind,
+          effect.before,
+          effect.after,
+          effect.imageSHA256,
+        ])
+      )
+      .sort();
+  if (JSON.stringify(change(saved)) !== JSON.stringify(change(effects)))
+    throw new RebaseError(
+      "Office rebase: the rebased state does not carry the saved edits"
+    );
+  return { state, effects };
+}
+
+/** The export keeps every package part a later edit may still name: it rewrites owned XML only. */
+function validateExportBacking(
+  oldParts: Record<string, Uint8Array>,
+  newParts: Record<string, Uint8Array>
+): void {
+  const decoder = new TextDecoder();
+  const targetPath = (owner: string, target: string) => {
+    const url = new URL(target, `https://docx.invalid/${owner}`);
+    if (url.origin !== "https://docx.invalid" || url.search || url.hash)
+      throw new RebaseError(
+        "Office rebase: DOCX needs an internal package target"
+      );
+    return decodeURIComponent(url.pathname.slice(1));
   };
+  const owned = new Set([
+    "[Content_Types].xml",
+    "word/document.xml",
+    "word/footnotes.xml",
+    "word/endnotes.xml",
+    "word/comments.xml",
+    "word/commentsExtended.xml",
+    "word/commentsIds.xml",
+    "word/commentsExtensible.xml",
+    "word/numbering.xml",
+    "docProps/core.xml",
+  ]);
+  for (const [path, bytes] of Object.entries(oldParts)) {
+    if (!path.endsWith(".rels")) continue;
+    const next = newParts[path];
+    if (!next)
+      throw new RebaseError(
+        `Office rebase: the export lost relationship part ${path}`
+      );
+    const previous = parseRelationshipsXmlWithRust(decoder.decode(bytes), path);
+    const current = parseRelationshipsXmlWithRust(decoder.decode(next), path);
+    for (const [id, relationship] of previous) {
+      const replacement = current.get(id);
+      if (
+        !replacement ||
+        replacement.type !== relationship.type ||
+        replacement.target !== relationship.target ||
+        replacement.targetMode !== relationship.targetMode
+      )
+        throw new RebaseError(
+          `Office rebase: the export changed source relationship ${path}:${id}`
+        );
+      if (
+        relationship.type.endsWith("/header") ||
+        relationship.type.endsWith("/footer")
+      )
+        owned.add(
+          targetPath(
+            path.replace("/_rels/", "/").replace(/\.rels$/, ""),
+            relationship.target
+          )
+        );
+    }
+  }
+  for (const [path, bytes] of Object.entries(oldParts)) {
+    if (owned.has(path) || path.endsWith(".rels")) continue;
+    const next = newParts[path];
+    if (
+      !next ||
+      next.length !== bytes.length ||
+      !next.every((byte, i) => byte === bytes[i])
+    )
+      throw new RebaseError(
+        `Office rebase: the export changed or lost unmodeled source part ${path}`
+      );
+  }
+}
+
+/** The raw inline markup each projected DOCX paragraph takes from its source paragraph, by story and paragraph id. */
+async function docxRawInlines(
+  base: Uint8Array,
+  state: Uint8Array
+): Promise<Map<string, string>> {
+  const session = await createYrsSession({
+    clientId: randomInt(1, 0x1fffffffffff),
+  });
+  try {
+    session.openDocx(base, false);
+    session.loadState(state);
+    const document = session.materializeDocx();
+    if (!document) throw new Error("DOCX source package was not attached");
+    const paragraphs = new Map<string, string>();
+    yrsToDocument(session, document, {
+      onParagraph: (story, _offset, paragraph, id) => {
+        const key = `${story}\u0000${id}`;
+        // A repeated id cannot name one source paragraph.
+        paragraphs.set(
+          key,
+          paragraphs.has(key)
+            ? "repeated"
+            : JSON.stringify(
+                paragraph.content.filter((child) => child.type === "rawXml")
+              )
+        );
+      },
+    });
+    return paragraphs;
+  } finally {
+    session.destroy();
+  }
+}
+
+/**
+ * Every paragraph mark the rebase wrote takes the same raw inline markup from
+ * the export as it took from the old source. One the later edits brought back
+ * (an Undo of a deletion made before the capture) takes it from a source
+ * paragraph the export dropped.
+ */
+async function assertDocxRestorations(
+  baseBytes: Uint8Array,
+  latest: Uint8Array,
+  exportedSource: Uint8Array,
+  state: Uint8Array,
+  clientId: number,
+  ids: Map<string, string>
+): Promise<void> {
+  const written = docxWrittenParagraphs(state, clientId);
+  if (!written.length) return;
+  const back = new Map([...ids].map(([from, to]) => [to, from]));
+  const before = await docxRawInlines(baseBytes, latest);
+  const after = await docxRawInlines(exportedSource, state);
+  for (const [story, id] of written)
+    if (
+      before.get(`${back.get(story) ?? story}\u0000${back.get(id) ?? id}`) !==
+      after.get(`${story}\u0000${id}`)
+    )
+      throw new RebaseError(
+        `Office rebase: DOCX paragraph ${id} needs content the export dropped`
+      );
 }
 
 /** Pending XLSX effects against the base, read off the checkpoint's overrides; XLSX keeps no stored baseline. */

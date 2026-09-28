@@ -26,7 +26,7 @@ use crate::{
 
 /// The only deck schema this engine reads. Parsed package data (layouts,
 /// masters, themes, relationships, media) is never stored in the document; it is
-/// derived from the fingerprinted source package, plus any rebase overlay.
+/// derived from the fingerprinted source package.
 const SCHEMA_VERSION: f64 = 5.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
@@ -92,145 +92,6 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
     seed_comments(&mut txn, package, &|part| {
         slide_id_by_part.get(part).cloned()
     })?;
-    Ok(())
-}
-
-pub(crate) fn seed_snapshot(doc: &Doc, snapshot: &DeckSnapshot) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with("pptx:rebase");
-    let meta = txn.get_or_insert_map(META);
-    meta.insert(&mut txn, "widthEmu", snapshot.width_emu as f64);
-    meta.insert(&mut txn, "heightEmu", snapshot.height_emu as f64);
-    let order = txn.get_or_insert_array(SLIDE_ORDER);
-    let length = order.len(&txn);
-    order.remove_range(&mut txn, 0, length);
-    let slides = txn.get_or_insert_map(SLIDES);
-    let shapes = txn.get_or_insert_map(SHAPES);
-    let stories = txn.get_or_insert_map(STORIES);
-    slides.clear(&mut txn);
-    shapes.clear(&mut txn);
-    stories.clear(&mut txn);
-    for slide in &snapshot.slides {
-        order.push_back(&mut txn, slide.id.as_str());
-        let map = slides.insert(&mut txn, slide.id.as_str(), MapPrelim::default());
-        map.insert(&mut txn, "id", slide.id.as_str());
-        for (key, value) in [
-            ("sourcePartPath", &slide.source_part_path),
-            ("layoutPartPath", &slide.layout_part_path),
-            ("name", &slide.name),
-        ] {
-            if let Some(value) = value {
-                map.insert(&mut txn, key, value.as_str());
-            }
-        }
-        if !slide.notes.is_empty() {
-            map.insert(&mut txn, "notes", slide.notes.as_str());
-        }
-        let shape_order = map.insert(&mut txn, "shapes", ArrayPrelim::default());
-        for shape in &slide.shapes {
-            seed_snapshot_shape(&shapes, &stories, &mut txn, shape)?;
-            shape_order.push_back(&mut txn, shape.id.as_str());
-        }
-    }
-    meta.insert(
-        &mut txn,
-        "commentFlavor",
-        flavor_key(snapshot.comment_flavor),
-    );
-    let comments = txn.get_or_insert_map(crate::COMMENTS);
-    comments.clear(&mut txn);
-    for comment in &snapshot.comments {
-        let entry = comments.insert(&mut txn, comment.id.as_str(), MapPrelim::default());
-        for (key, value) in [
-            ("id", &comment.id),
-            ("slideId", &comment.slide_id),
-            ("author", &comment.author),
-            ("initials", &comment.initials),
-            ("text", &comment.text),
-        ] {
-            entry.insert(&mut txn, key, value.as_str());
-        }
-        for (key, value) in [
-            ("created", &comment.created),
-            ("parentId", &comment.parent_id),
-        ] {
-            if let Some(value) = value {
-                entry.insert(&mut txn, key, value.as_str());
-            }
-        }
-        entry.insert(&mut txn, "x", comment.x_emu as f64);
-        entry.insert(&mut txn, "y", comment.y_emu as f64);
-        entry.insert(&mut txn, "resolved", comment.resolved);
-    }
-    Ok(())
-}
-
-fn seed_snapshot_shape(
-    shapes: &MapRef,
-    stories: &MapRef,
-    txn: &mut TransactionMut<'_>,
-    shape: &ShapeSnapshot,
-) -> EditResult<()> {
-    let map = shapes.insert(txn, shape.id.as_str(), MapPrelim::default());
-    for (key, value) in [
-        ("id", shape.id.as_str()),
-        ("name", shape.name.as_str()),
-        ("geometry", shape.geometry.as_str()),
-        (
-            "kind",
-            match shape.kind {
-                ShapeKind::Shape => "shape",
-                ShapeKind::Picture => "picture",
-                ShapeKind::GraphicFrame => "graphicFrame",
-                ShapeKind::Group => "group",
-            },
-        ),
-    ] {
-        map.insert(txn, key, value);
-    }
-    for (key, value) in [
-        ("sourceId", shape.source_id as f64),
-        ("x", shape.x as f64),
-        ("y", shape.y as f64),
-        ("width", shape.width as f64),
-        ("height", shape.height as f64),
-        ("rotationDeg", shape.rotation_deg),
-    ] {
-        map.insert(txn, key, value);
-    }
-    map.insert(txn, "flipH", shape.flip_h);
-    map.insert(txn, "flipV", shape.flip_v);
-    if shape.hidden {
-        map.insert(txn, "hidden", true);
-    }
-    if let Some(path) = &shape.media_part_path {
-        map.insert(txn, "mediaPartPath", path.as_str());
-    }
-    if !shape.blip_effects.is_empty() {
-        insert_json(&map, txn, "blipEffectsJson", Some(&shape.blip_effects))?;
-    }
-    insert_json(&map, txn, "placeholderJson", shape.placeholder.as_ref())?;
-    insert_json(&map, txn, "adjustValuesJson", Some(&shape.adjust_values))?;
-    insert_json(&map, txn, "fillJson", shape.fill.as_ref())?;
-    insert_json(&map, txn, "outlineJson", shape.outline.as_ref())?;
-    insert_json(&map, txn, "graphicJson", shape.graphic.as_ref())?;
-    let story_ids = shape
-        .text_stories
-        .iter()
-        .map(|story| story.id.clone())
-        .collect::<Vec<_>>();
-    map.insert(txn, "textStories", string_array(&story_ids));
-    for story in &shape.text_stories {
-        crate::story::seed_snapshot_story(stories, txn, story);
-    }
-    let child_ids = shape
-        .children
-        .iter()
-        .map(|child| child.id.clone())
-        .collect::<Vec<_>>();
-    map.insert(txn, "children", string_array(&child_ids));
-    for child in &shape.children {
-        seed_snapshot_shape(shapes, stories, txn, child)?;
-    }
     Ok(())
 }
 
@@ -1869,26 +1730,6 @@ mod tests {
             Err(EditError::InvalidState(message))
                 if message == "unsupported deck schema version"
         ));
-    }
-
-    #[test]
-    fn seeding_a_snapshot_reproduces_hidden_shapes_effects_and_notes() {
-        for (bytes, client) in [
-            (HIDDEN_FIXTURE, 103),
-            (
-                include_bytes!("../tests/fixtures/blip-shadow.pptx").as_slice(),
-                104,
-            ),
-        ] {
-            let session = DeckSession::open(bytes, client).unwrap();
-            let slide = session.snapshot().unwrap().slides[0].id.clone();
-            session
-                .set_slide_notes(&EditCtx::local("test"), &slide, "Speaker notes")
-                .unwrap();
-            let snapshot = session.snapshot().unwrap();
-            seed_snapshot(&session.doc, &snapshot).unwrap();
-            assert_eq!(session.snapshot().unwrap(), snapshot);
-        }
     }
 
     #[test]

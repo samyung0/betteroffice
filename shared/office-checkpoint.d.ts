@@ -129,6 +129,7 @@ export declare function compareBaselines(
   to: OfficeBaselineEntry[],
 ): NetEffect[];
 
+/** The edits saved after the capture landed on seed(export), with their effects against the export. */
 export declare function rebaseOffice(
   baseBytes: Uint8Array,
   captured: OfficeCheckpoint,
@@ -136,6 +137,5 @@ export declare function rebaseOffice(
   exportedSource: Uint8Array,
 ): Promise<{
   state: Uint8Array;
-  baseline: OfficeBaselineEntry[];
   effects: NetEffect[];
 }>;

@@ -82,6 +82,7 @@
     "happy-dom": "^20.10.6",
     "jszip": "3.10.1",
     "vite": "8.1.4",
-    "playwright": "1.61.1"
+    "playwright": "1.61.1",
+    "yjs": "13.6.31"
   }
 }

@@ -19,7 +19,6 @@ mod deck;
 mod model;
 mod proposal_diff;
 mod proposals;
-mod rebase;
 mod save;
 mod search;
 mod story;
@@ -29,7 +28,6 @@ pub use deck::baseline_snapshot;
 pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
-pub use rebase::CheckpointRebase;
 pub use search::TextSearchMatch;
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
@@ -154,9 +152,8 @@ impl DeckSession {
     }
 
     /// Opens a stored state. The package (layouts, masters, themes, media) is
-    /// parsed from the fingerprinted source plus any rebase overlay; the state
-    /// carries none of it. Only incoming updates are size-capped; the host caps
-    /// the stored state.
+    /// parsed from the fingerprinted source; the state carries none of it.
+    /// Only incoming updates are size-capped; the host caps the stored state.
     pub fn open_from_update_with_source(
         update: &[u8],
         source: &[u8],
@@ -173,7 +170,8 @@ impl DeckSession {
                 "source bytes do not match the fingerprint recorded in the update".to_owned(),
             ));
         }
-        let package = rebase::source_package(&doc, source)?;
+        let package =
+            pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
         deck::validated_snapshot(&doc, &package)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
         let (epoch, _epoch_observer) = watch_epoch(&doc)?;

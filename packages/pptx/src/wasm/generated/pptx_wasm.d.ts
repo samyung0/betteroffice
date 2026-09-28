@@ -1,14 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 
-export class PptxCheckpointRebase {
-    private constructor();
-    free(): void;
-    [Symbol.dispose](): void;
-    readonly indexedState: Uint8Array;
-    readonly state: Uint8Array;
-}
-
 export class PptxDocument {
     private constructor();
     free(): void;
@@ -52,7 +44,6 @@ export class PptxDocument {
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source: Uint8Array): PptxDocument;
     previewProposalJson(args: string): string;
     proposeJson(args: string): string;
-    static rebaseCheckpoint(old_source: Uint8Array, captured_state: Uint8Array, latest_state: Uint8Array, new_source: Uint8Array, client_id: number): PptxCheckpointRebase;
     redoJson(): string;
     rejectProposalJson(args: string): string;
     removeCommentJson(args: string): string;
@@ -130,10 +121,7 @@ export interface InitOutput {
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
-    readonly __wbg_pptxcheckpointrebase_free: (a: number, b: number) => void;
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
-    readonly pptxcheckpointrebase_indexedState: (a: number) => [number, number];
-    readonly pptxcheckpointrebase_state: (a: number) => [number, number];
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addPictureJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -171,7 +159,6 @@ export interface InitOutput {
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly pptxdocument_rebaseCheckpoint: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];

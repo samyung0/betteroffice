@@ -25,22 +25,6 @@ media) never enters Yjs: `open_from_update_with_source` derives it from the
 fingerprinted source package, so every open needs that package. Collaborators
 must run the same engine.
 
-`DeckSession::rebase_checkpoint(A, captured, latest, B, client_id)` promotes a
-captured export B while preserving later saved edits. It exports the latest
-state transiently, seeds a fresh graph, and retains only OPC parts differing
-from B, media included, as a binary `sourceOverlay`. Reopening with B restores
-these current source templates, including opaque XML and relationships needed
-by a saved Undo. Unchanged parts and full prior source archives are not
-retained. The next rebase replaces the overlay rather than accumulating
-previous ones.
-
-The rebase returns `state` plus a transient `indexed_state` whose object
-identities match the new current graph while its content and positions describe
-B. Project that indexed state to the compact retrieval baseline, then discard
-it. Install the returned state with a new collaboration epoch; old updates and
-Undo history must not cross that boundary. WASM exposes the same operation as
-`PptxDocument.rebaseCheckpoint`, returning `state` and `indexedState` getters.
-
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
 `wasm` feature exposes the JavaScript surface consumed by
 [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx).

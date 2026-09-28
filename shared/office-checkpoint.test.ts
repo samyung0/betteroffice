@@ -79,7 +79,6 @@ test("XLSX publications rebase later edits as overrides and report them as effec
     edit(1, "later");
     const latest = { ...seeded, state: doc.encodeStateAsUpdate() };
     const rebased = await rebaseOffice(bytes, captured, latest, published);
-    expect(rebased.baseline).toEqual([]);
     expect(rebased.effects).toEqual([
       expect.objectContaining({ after: '{"kind":"text","value":"later"}' }),
     ]);
