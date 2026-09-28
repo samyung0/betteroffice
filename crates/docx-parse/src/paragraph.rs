@@ -445,6 +445,8 @@ fn parse_paragraph_contents(
     };
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
+    // Range ends met inside a complex field go after it, as starts go before it.
+    let mut field_ends = Vec::new();
     for child in transparent_children(element, false) {
         match child.local_name() {
             "r" => {
@@ -465,6 +467,9 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                 )?;
                 process_field_run(run, &mut fields, &mut output, part)?;
+                if fields.is_empty() {
+                    output.append(&mut field_ends);
+                }
             }
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
@@ -495,7 +500,11 @@ fn parse_paragraph_contents(
                         hyperlink,
                     ))));
                 }
-                output.extend(ends);
+                if fields.is_empty() {
+                    output.extend(ends);
+                } else {
+                    field_ends.extend(ends);
+                }
             }
             "bookmarkStart" => {
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
@@ -617,11 +626,16 @@ fn parse_paragraph_contents(
                 }));
             }
             "commentRangeStart" | "commentRangeEnd" => {
-                output.push(ParagraphContent::CommentRange(CommentRange {
+                let marker = ParagraphContent::CommentRange(CommentRange {
                     node_type: child.local_name().to_owned(),
                     id: parse_range_id(child),
                     offset: None,
-                }));
+                });
+                if child.local_name() == "commentRangeEnd" && !fields.is_empty() {
+                    field_ends.push(marker);
+                } else {
+                    output.push(marker);
+                }
             }
             "oMath" | "oMathPara" => output.push(ParagraphContent::Inline(InlineNode::Math(
                 parse_math(child),
@@ -645,6 +659,7 @@ fn parse_paragraph_contents(
             )));
         }
     }
+    output.append(&mut field_ends);
     assign_marker_offsets(&mut output);
     Ok(output)
 }
@@ -934,7 +949,7 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
 
 /// Comment range markers inside a hyperlink, tracked change or inline content
 /// control, which cannot hold them: starts go before it and ends after it, so
-/// the range holds the container whole.
+/// the range holds the container whole (complex fields: `field_ends`).
 fn nested_comment_ranges(container: &XmlElement) -> (Vec<ParagraphContent>, Vec<ParagraphContent>) {
     let (mut starts, mut ends) = (Vec::new(), Vec::new());
     for child in transparent_children(container, true) {
@@ -1733,6 +1748,33 @@ mod tests {
                 "sdt",
                 "E3"
             ]
+        );
+    }
+
+    #[test]
+    fn comment_markers_inside_a_field_result_move_to_its_edges() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText> DATE </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>20</w:t></w:r><w:commentRangeStart w:id="1"/><w:r><w:t>26</w:t></w:r><w:commentRangeEnd w:id="1"/>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+              <w:r><w:t> tail</w:t></w:r>
+            </w:p>"#,
+        );
+        let layout: Vec<&str> = paragraph
+            .content
+            .iter()
+            .map(|content| match content {
+                ParagraphContent::CommentRange(marker) => marker.node_type.as_str(),
+                ParagraphContent::Inline(InlineNode::ComplexField(_)) => "field",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            ["commentRangeStart", "field", "commentRangeEnd", "other"]
         );
     }
 

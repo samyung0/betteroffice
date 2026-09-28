@@ -23,6 +23,8 @@ const table = (...cells: string[]) =>
   `<w:tbl><w:tr>${cells
     .map((cell) => `<w:tc>${cell}</w:tc>`)
     .join("")}</w:tr></w:tbl>`;
+const field = (result: string) =>
+  `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
 const range = (id: number, xml: string) =>
   `<w:commentRangeStart w:id="${id}"/>${xml}<w:commentRangeEnd w:id="${id}"/>${ref(
     id
@@ -350,8 +352,14 @@ test("Word's comment layouts seed exactly", async () => {
           11
         )}`
       ) +
+      p(
+        "CCCCCCCC",
+        `${run("f ")}${field(`${run("20")}${S(12)}${run("26")}${E(12)}`)}${ref(
+          12
+        )}`
+      ) +
       tail,
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
   );
   const seed = await seedOffice("docx", bytes);
   const session = await open(bytes);
@@ -368,11 +376,12 @@ test("Word's comment layouts seed exactly", async () => {
     c9: "inserted",
     c10: "deleted",
     c11: "[sdt] e",
+    c12: "[field]",
   });
   session.destroy();
   // A changed hash means the seed changed: the pin bump needs a maintenance window.
   expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
-    "e10952b37eb25612b825c1e923c06a3f53cd5281960d02bf5e4d02f02d8bfda3"
+    "bfffae2178380812a1df8c546b15b85d731c7e8d7827c16724b182658e9eb572"
   );
 });
 
@@ -424,6 +433,31 @@ test.each([
     expect(seen[1]).toEqual(seen[0]);
   }
 );
+
+test("a Word range inside a field result covers the whole field across publications", async () => {
+  let bytes = docx(
+    p(
+      "11111111",
+      `${run("a ")}${field(`${run("20")}${S(5)}${run("26")}${E(5)}`)}${ref(
+        5
+      )}${run(" b")}`
+    ) + tail,
+    [5]
+  );
+  const seen: Array<Record<string, string>> = [];
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    seen.push(covered(session));
+    bytes = await publish(bytes, session);
+    session.destroy();
+    expect(marks(bytes).sort()).toEqual(["E5", "R5", "S5"]);
+  }
+  expect(seen).toEqual([
+    { c5: "[field]" },
+    { c5: "[field]" },
+    { c5: "[field]" },
+  ]);
+});
 
 test("a bookmark after a line break keeps its text across publications", async () => {
   const { bytes } = await publications(
