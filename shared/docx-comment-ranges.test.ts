@@ -320,6 +320,63 @@ test.each(breakStories)(
   }
 );
 
+// An emptied range keeps its start before its end, then saves as its reference mark alone.
+test.each<
+  [string, string, string, (session: YrsSession, story: string) => void]
+>([
+  [
+    "its text deleted",
+    body,
+    p("44444444", run("abcdef")) + tail,
+    (session, story) => {
+      comment(session, "a", [story, "44444444", 2, 4]);
+      session.deleteRange({
+        story,
+        start: { paraId: "44444444", offset: 2 },
+        end: { paraId: "44444444", offset: 4 },
+      });
+    },
+  ],
+  ...breakStories
+    .slice(0, 2)
+    .map(
+      ([where, story, xml]): [
+        string,
+        string,
+        string,
+        (session: YrsSession, story: string) => void
+      ] => [
+        `only a page break in ${where}`,
+        story,
+        xml,
+        (session) => {
+          const next = pageBreak(session, story, "44444444", 2);
+          comment(session, "a", [story, next, 0, 1]);
+        },
+      ]
+    ),
+])(
+  "a comment over %s stays empty across publications",
+  async (where, story, xml, edit) => {
+    const header = where.endsWith("a header")
+      ? p("44444444", run("abcdef"))
+      : "";
+    const { seen, bytes } = await publications(
+      docx(xml, [], header),
+      (session) => edit(session, story)
+    );
+    expect(seen.slice(1)).toEqual([{ a: "" }, { a: "" }]);
+    const part =
+      story === "hf:rId20" ? "word/header1.xml" : "word/document.xml";
+    const order = [
+      ...new TextDecoder()
+        .decode(unzipContainer(bytes)[part])
+        .matchAll(/<w:comment(RangeStart|RangeEnd|Reference) /g),
+    ].map(([, kind]) => kind);
+    expect(order).toEqual(["Reference"]);
+  }
+);
+
 test.each(breakStories.slice(0, 2))(
   "typing above a page break in %s after a publication's capture rebases",
   async (_, story, xml, header) => {

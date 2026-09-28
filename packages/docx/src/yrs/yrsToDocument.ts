@@ -1494,7 +1494,16 @@ function insertBoundaries(
   const sorted = [...boundaries].sort(
     (left, right) =>
       left.offset - right.offset ||
-      (left.kind === right.kind ? left.id - right.id : left.kind === 'end' ? -1 : 1)
+      (left.kind === right.kind
+        ? left.id - right.id
+        : // An empty range opens before it closes; ranges meeting there close first.
+          left.id === right.id
+          ? left.kind === 'start'
+            ? -1
+            : 1
+          : left.kind === 'end'
+            ? -1
+            : 1)
   );
   const result: ParagraphContent[] = [];
   let cursor = 0;
