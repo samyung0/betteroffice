@@ -208,6 +208,17 @@ export class EditSession {
      */
     create_story(story_id: string, initial_text: string, p_style: string, alignment: string): string;
     /**
+     * Backspace (`"backward"`) or Delete (`"forward"`) at `(story, para_id,
+     * offset)`, plainly or as the named author's suggestion: removes the
+     * character, inline object or page or column break next to it, or
+     * merges at the paragraph mark (see `merge_paragraphs`); a table or
+     * block content control next to it stays. The resident input's
+     * Backspace and Delete make the same edit. Receipt:
+     * `{"revisionId": string|null, "caret": {story, paraId, offset}}`.
+     * Errors when there is nothing in that direction.
+     */
+    delete_at(story: string, para_id: string, offset: number, direction: string, author_name?: string | null, author_date?: string | null): string;
+    /**
      * Deletes every column the [`TableRange`] `range_json` covers, along with
      * the stories of the cells removed. Always a plain local edit.
      */
@@ -1031,6 +1042,7 @@ export interface InitOutput {
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_delete_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
     readonly editsession_delete_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];

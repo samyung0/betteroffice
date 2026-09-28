@@ -571,66 +571,21 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const paragraphs = session.paragraphs(activeStory);
         const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
         if (index < 0) return;
-        const paragraph = paragraphs[index];
         const hasTarget =
           direction === 'backward'
             ? caret.offset > 0 || index > 0
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
-        if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
+        if (!hasTarget) return;
+        if (activeStory === 'body' && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction);
           if (applied) {
             finishResidentMutation(applied);
             return;
           }
         }
-        if (direction === 'backward') {
-          if (caret.offset > 0) {
-            const start = previousCodePointOffset(paragraph.text, caret.offset);
-            session.deleteRange(
-              {
-                story: activeStory,
-                start: { paraId: caret.paraId, offset: start },
-                end: { paraId: caret.paraId, offset: caret.offset },
-              },
-              suggestingAuthor()
-            );
-            session.setSelection({ ...caret, offset: start });
-          } else if (index > 0) {
-            const merged = session.mergeParagraphs(
-              activeStory,
-              caret.paraId,
-              'backward',
-              suggestingAuthor()
-            );
-            session.setSelection(merged.caret);
-          } else {
-            return;
-          }
-        } else {
-          const length = map.paragraphs.find((entry) => entry.paraId === caret.paraId)?.length ?? 0;
-          if (caret.offset < length) {
-            const end = nextCodePointOffset(paragraph.text, caret.offset);
-            session.deleteRange(
-              {
-                story: activeStory,
-                start: { paraId: caret.paraId, offset: caret.offset },
-                end: { paraId: caret.paraId, offset: end },
-              },
-              suggestingAuthor()
-            );
-            session.setSelection(caret);
-          } else if (index + 1 < paragraphs.length) {
-            const merged = session.mergeParagraphs(
-              activeStory,
-              caret.paraId,
-              'forward',
-              suggestingAuthor()
-            );
-            session.setSelection(merged.caret);
-          } else {
-            return;
-          }
-        }
+        // The engine makes the resident path's edit, suggested when suggesting.
+        const deleted = session.deleteAt(caret, direction, suggestingAuthor());
+        session.setSelection(deleted.caret);
         finishMutation();
       });
     },

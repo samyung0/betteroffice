@@ -29,7 +29,11 @@ pub(crate) struct ParaEntry {
 pub(crate) enum SegKind {
     Text(Arc<str>),
     Pilcrow,
-    Embed,
+    /// `container`: a table or block content control, which Delete and
+    /// Backspace never remove (the user selects it to delete it).
+    Embed {
+        container: bool,
+    },
 }
 
 pub(crate) struct Seg {
@@ -82,7 +86,9 @@ impl SegmentIndex {
                     if len == node_start && block {
                         node_start = len + 1;
                     }
-                    SegKind::Embed
+                    SegKind::Embed {
+                        container: matches!(kind.as_str(), "table" | "blockSdt"),
+                    }
                 }
             };
             if units == 0 {
@@ -187,7 +193,7 @@ mod tests {
             let actual = match seg.kind {
                 SegKind::Text(_) => "text",
                 SegKind::Pilcrow => "pilcrow",
-                SegKind::Embed => "embed",
+                SegKind::Embed { .. } => "embed",
             };
             assert_eq!(expected, Some(actual), "pos {pos}");
         }

@@ -28,6 +28,7 @@ export const editsession_clear_update_event_observation: (a: number) => void;
 export const editsession_clear_update_observer: (a: number) => void;
 export const editsession_client_id: (a: number) => number;
 export const editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+export const editsession_delete_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
 export const editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
 export const editsession_delete_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];

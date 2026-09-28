@@ -25,16 +25,37 @@ const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 const PACKAGE_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPkg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
 
-function fixture(body: string): Uint8Array {
+const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+/** A package whose body is `body`, with `header` as its one header part. */
+function fixture(body: string, header?: string): Uint8Array {
   const parts: PartsMap = new Map();
-  parts.set('[Content_Types].xml', toBytes(CONTENT_TYPES));
+  parts.set(
+    '[Content_Types].xml',
+    toBytes(
+      header
+        ? CONTENT_TYPES.replace(
+            '</Types>',
+            `<Override PartName="/word/header1.xml" ContentType="${OFFICE_DOC}.wordprocessingml.header+xml"/></Types>`
+          )
+        : CONTENT_TYPES
+    )
+  );
   parts.set('_rels/.rels', toBytes(PACKAGE_RELS));
   parts.set(
     'word/document.xml',
     toBytes(
-      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${W_NS}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`
     )
   );
+  if (header) {
+    parts.set('word/header1.xml', toBytes(`<w:hdr ${W_NS}>${header}</w:hdr>`));
+    parts.set(
+      'word/_rels/document.xml.rels',
+      toBytes(
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`
+      )
+    );
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
@@ -46,14 +67,14 @@ const TABLE = `${paragraph('Before')}${TBL}${paragraph('After')}`;
 const SUGGESTING = { name: 'Bob', date: '2026-09-29T00:00:00Z' };
 
 let clientId = 69100;
-async function open(body: string): Promise<YrsSession> {
+async function open(body: string, header?: string): Promise<YrsSession> {
   const session = await createYrsSession({ clientId: (clientId += 1) });
-  session.openDocx(fixture(body), true);
+  session.openDocx(fixture(body, header), true);
   return session;
 }
-const units = (session: YrsSession): string =>
+const units = (session: YrsSession, story = 'body'): string =>
   session
-    .storySegments('body')
+    .storySegments(story)
     .map((segment) =>
       segment.kind === 'text'
         ? segment.text
@@ -62,7 +83,8 @@ const units = (session: YrsSession): string =>
         : `[${segment.embedKind}]`
     )
     .join('');
-const paraId = (session: YrsSession, index: number) => session.paragraphs('body')[index]!.paraId;
+const paraId = (session: YrsSession, index: number, story = 'body') =>
+  session.paragraphs(story)[index]!.paraId;
 const caretAt = (paraId: string, offset: number) => ({ story: 'body', paraId, offset });
 
 describe('paragraph slots that open with a table or page break', () => {
@@ -124,6 +146,104 @@ describe('paragraph slots that open with a table or page break', () => {
       expect(units(session)).toBe('Before¶¶[table]After¶');
     } finally {
       session.destroy();
+    }
+  });
+
+  it('Delete or Backspace right next to a table never deletes it, while a break goes', async () => {
+    for (const author of [undefined, SUGGESTING]) {
+      const session = await open(TABLE);
+      try {
+        const slot = paraId(session, 1);
+        const before = session.encodeState();
+        // Backspace right after the table, Delete right before it.
+        expect(session.deleteAt(caretAt(slot, 1), 'backward', author)).toEqual({
+          caret: caretAt(slot, 1),
+          revisionId: null,
+        });
+        expect(session.deleteAt(caretAt(slot, 0), 'forward', author).caret).toEqual(
+          caretAt(slot, 0)
+        );
+        expect(session.encodeState()).toEqual(before);
+      } finally {
+        session.destroy();
+      }
+    }
+    const session = await open(PAGE_BREAK);
+    try {
+      const chapter = paraId(session, 2);
+      expect(session.deleteAt(caretAt(chapter, 1), 'backward').caret).toEqual(
+        caretAt(chapter, 0)
+      );
+      expect(units(session)).toBe('Before¶¶Chapter¶');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('a second Delete after the empty paragraph above a table went leaves the table', async () => {
+    const session = await open(`${paragraph('Before')}<w:p/>${TBL}${paragraph('After')}`);
+    try {
+      const { caret } = session.deleteAt(caretAt(paraId(session, 1), 0), 'forward');
+      expect(units(session)).toBe('Before¶[table]After¶');
+      expect(session.deleteAt(caret, 'forward').caret).toEqual(caret);
+      expect(units(session)).toBe('Before¶[table]After¶');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('Enter before a table, then Delete, leaves the table paragraph as it was', async () => {
+    const bordered = `<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr><w:jc w:val="center"/></w:pPr><w:r><w:t>After</w:t></w:r></w:p>`;
+    for (const author of [undefined, SUGGESTING]) {
+      const session = await open(`${paragraph('Before')}${TBL}${bordered}`);
+      try {
+        const before = session.storySegments('body');
+        const split = session.splitParagraph(caretAt(paraId(session, 1), 0), author);
+        expect(units(session)).toBe('Before¶¶[table]After¶');
+        session.mergeParagraphs('body', split.firstParaId, 'forward', author);
+        expect(session.storySegments('body')).toEqual(before);
+      } finally {
+        session.destroy();
+      }
+    }
+  });
+
+  it('accepting the deletion of an empty paragraph mark before a table keeps it once text went in', async () => {
+    const session = await open(`${paragraph('Before')}<w:p/>${TBL}${paragraph('After')}`);
+    try {
+      const { revisionId } = session.mergeParagraphs('body', paraId(session, 1), 'forward', SUGGESTING);
+      session.insertText(caretAt(paraId(session, 1), 0), 'typed');
+      session.acceptChange({ revisionId: revisionId! });
+      expect(units(session)).toBe('Before¶typed¶[table]After¶');
+      expect(() => session.yrsBlocksForStory('body')).not.toThrow();
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('type-over from a paragraph start to a table keeps the paragraph mark, in the body and a header', async () => {
+    const header = `<w:p/>${paragraph('Head')}${TBL}${paragraph('HAfter')}`;
+    for (const [story, first, end] of [
+      ['body', 0, 1],
+      ['hf:rIdH1', 0, 2],
+    ] as const) {
+      for (const author of [undefined, SUGGESTING]) {
+        const session = await open(TABLE, header);
+        try {
+          const range = {
+            story,
+            start: { paraId: paraId(session, first, story), offset: 0 },
+            end: { paraId: paraId(session, end, story), offset: 0 },
+          };
+          const { revisionId } = session.replaceRange(range, 'X', author);
+          if (revisionId) session.acceptChange({ revisionId });
+          expect(units(session, story)).toBe(
+            story === 'body' ? 'X¶[table]After¶' : 'X¶[table]HAfter¶'
+          );
+        } finally {
+          session.destroy();
+        }
+      }
     }
   });
 

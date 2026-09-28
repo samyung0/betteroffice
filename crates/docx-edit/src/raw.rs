@@ -479,13 +479,49 @@ fn apply_raw_op_absolute(
                 comment.insert(txn, key, value);
             }
         }
-        RawOp::RemoveComment { id } => {
-            let comments = txn
-                .get_map(COMMENTS)
-                .expect("comments root is declared by EditingDoc::new");
-            if comments.remove(txn, &id).is_none() {
-                return Err(OpError::UnknownComment(id));
-            }
+        RawOp::RemoveComment { id } => remove_comment(txn, id)?,
+    }
+    Ok(())
+}
+
+/// Removes comment `id` and the reference fields that name it in any story,
+/// which a save would drop with it.
+fn remove_comment(txn: &mut TransactionMut<'_>, id: String) -> OpResult<()> {
+    let comments = txn
+        .get_map(COMMENTS)
+        .expect("comments root is declared by EditingDoc::new");
+    if comments.remove(txn, &id).is_none() {
+        return Err(OpError::UnknownComment(id));
+    }
+    let stories: Vec<TextRef> = match txn.get_map(crate::STORIES) {
+        Some(stories) => stories
+            .iter(txn)
+            .filter_map(|(_, story)| match story {
+                Out::YText(story) => Some(story),
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    for story in stories {
+        let fields: Vec<u32> = crate::ops::snapshot(&story, txn)
+            .into_iter()
+            .filter(|chunk| match &chunk.kind {
+                crate::ops::ChunkKind::Embed(Some(map)) => {
+                    crate::map_string(map, txn, "modelKind").as_deref() == Some("commentReference")
+                        && match map.get(txn, "commentId") {
+                            Some(Out::Any(Any::String(value))) => *value == *id,
+                            Some(Out::Any(Any::Number(value))) => value.to_string() == id,
+                            Some(Out::Any(Any::BigInt(value))) => value.to_string() == id,
+                            _ => false,
+                        }
+                }
+                _ => false,
+            })
+            .map(|chunk| chunk.start)
+            .collect();
+        for index in fields.into_iter().rev() {
+            story.remove_range(txn, index, 1);
         }
     }
     Ok(())
@@ -665,14 +701,7 @@ mod tests {
                         comment.insert(txn, key, value);
                     }
                 }
-                RawOp::RemoveComment { id } => {
-                    let comments = txn
-                        .get_map(COMMENTS)
-                        .expect("comments root is declared by EditingDoc::new");
-                    if comments.remove(txn, &id).is_none() {
-                        return Err(OpError::UnknownComment(id));
-                    }
-                }
+                RawOp::RemoveComment { id } => super::remove_comment(txn, id)?,
             }
         }
         Ok(())

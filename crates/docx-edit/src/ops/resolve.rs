@@ -20,7 +20,10 @@
 //! delete, which models a user removing a paragraph mark rather than a
 //! revision being applied. A story's FINAL pilcrow is never removed, because a
 //! document always keeps its last paragraph mark; a join that would remove it
-//! clears the markers instead.
+//! clears the markers instead. Neither is an accepted deletion of a mark whose
+//! paragraph still holds content when the next paragraph opens with a table,
+//! block content control or break: the editor never puts content ahead of such
+//! a block in one paragraph, so the mark stays.
 //!
 //! Resolving APPLIES a revision, it does not author one: no new revision is
 //! ever stamped and the context's suggesting mode is ignored.
@@ -38,8 +41,9 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{ChunkKind, last_pilcrow, snapshot, snapshot_range};
+use crate::ops::{Chunk, ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
+use crate::segments::is_block_embed;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
     StoryRange, check_range, story_ref,
@@ -190,6 +194,40 @@ fn resolve_paragraph_property_changes(
     }
 }
 
+/// Whether the unit at `index` is a block embed that opens a paragraph slot.
+fn opens_with_block<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    snapshot_range(story, txn, index, index + 1)
+        .first()
+        .is_some_and(|chunk| match &chunk.kind {
+            ChunkKind::Embed(Some(map)) => {
+                crate::map_string(map, txn, KIND_KEY).is_some_and(|kind| is_block_embed(&kind))
+            }
+            _ => false,
+        })
+}
+
+/// Whether the paragraph ending after `before` keeps inline content once an
+/// accept under `filter` has removed its deleted units; `None` when `before`
+/// ends without reaching the paragraph's start.
+fn holds_content<T: ReadTxn>(before: &[Chunk], txn: &T, filter: Option<&str>) -> Option<bool> {
+    for chunk in before.iter().rev() {
+        match &chunk.kind {
+            ChunkKind::Pilcrow(_) => return Some(false),
+            ChunkKind::Embed(Some(map))
+                if crate::map_string(map, txn, KIND_KEY)
+                    .is_some_and(|kind| is_block_embed(&kind)) => {}
+            _ if active_stamp(chunk.attrs.get(DEL).cloned(), filter).is_none() => {
+                return Some(true);
+            }
+            _ => {}
+        }
+    }
+    before
+        .first()
+        .is_some_and(|chunk| chunk.start == 0)
+        .then_some(false)
+}
+
 /// Resolves one story's tracked changes in place. `span` limits the walk to a story range
 /// (`None` = the whole story, the by-id path); `filter` limits it to one revision id.
 /// Returns the number of units physically removed inside `span`.
@@ -217,7 +255,7 @@ fn resolve_story(
     };
     let mut removed = 0;
     // Reverse walk so physical removals never shift the indices still to be visited.
-    for chunk in chunks.iter().rev() {
+    for (position, chunk) in chunks.iter().enumerate().rev() {
         let overlap_start = chunk.start.max(span_start);
         let overlap_end = chunk.end().min(span_end);
         if overlap_end <= overlap_start {
@@ -249,8 +287,18 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    if Some(chunk.start) == final_pilcrow {
-                        // The final paragraph mark can never be removed — clear instead.
+                    let keep = mode == ResolveMode::Accept
+                        && opens_with_block(story, txn, chunk.start + 1)
+                        && holds_content(&chunks[..position], txn, filter).unwrap_or_else(|| {
+                            // The paragraph starts before a range resolve's span.
+                            span_start > 0
+                                && !snapshot_range(story, txn, span_start - 1, span_start)
+                                    .first()
+                                    .is_some_and(|unit| matches!(unit.kind, ChunkKind::Pilcrow(_)))
+                        });
+                    if Some(chunk.start) == final_pilcrow || keep {
+                        // The final paragraph mark can never be removed, nor one
+                        // that keeps content out of a block's slot — clear instead.
                         let (ppr_key, attr_key) = match mode {
                             ResolveMode::Accept => (PPR_DEL, DEL),
                             ResolveMode::Reject => (PPR_INS, INS),

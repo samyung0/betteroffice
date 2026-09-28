@@ -129,6 +129,8 @@ enum DeleteDirection {
 #[derive(Clone, Copy)]
 enum AdjacentStoryUnit {
     Content(u32),
+    /// A table or block content control, which Delete and Backspace leave.
+    Container,
     Pilcrow,
 }
 
@@ -225,7 +227,8 @@ fn adjacent_story_unit(
             AdjacentStoryUnit::Content(width)
         }
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
-        SegKind::Embed => AdjacentStoryUnit::Content(1),
+        SegKind::Embed { container: true } => AdjacentStoryUnit::Container,
+        SegKind::Embed { container: false } => AdjacentStoryUnit::Content(1),
     }))
 }
 
@@ -1115,33 +1118,59 @@ impl EditSession {
         selection: (String, String, u32),
     ) -> Result<String, JsValue> {
         let (story, para_id, head) = selection;
-        let direction = match direction {
-            "backward" => DeleteDirection::Backward,
-            "forward" => DeleteDirection::Forward,
-            _ => return Err(js_err("delete direction must be backward or forward")),
-        };
-        let adjacent = adjacent_story_unit(self.engine.doc(), &story, head, direction)?;
-        let ctx = EditCtx::local("", "");
+        self.delete_adjacent(
+            &EditCtx::local("", ""),
+            &story,
+            &para_id,
+            head,
+            delete_direction(direction)?,
+        )?;
+        Ok(story)
+    }
 
+    /// What Backspace (`Backward`) or Delete (`Forward`) at story index
+    /// `head` of `para_id` removes under `ctx`: the character, inline object
+    /// or page or column break next to it, or the paragraph mark between
+    /// two paragraphs (a merge, see [`EditingDoc::merge_paragraphs`]). A
+    /// table or block content control stays; the user selects it to delete
+    /// it. Returns the caret's story location afterwards and the revision id.
+    fn delete_adjacent(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+        head: u32,
+        direction: DeleteDirection,
+    ) -> Result<(crate::Loc, Option<String>), JsValue> {
+        let doc = self.engine.doc();
+        let caret_at = |index: u32| -> Result<crate::Loc, JsValue> {
+            let loc = index_loc(doc, story, index)?;
+            Ok(crate::Loc::new(story, loc.para_id, loc.offset))
+        };
+        let adjacent = adjacent_story_unit(doc, story, head, direction)?;
         match (direction, adjacent) {
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
-                self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head - width, head))
+                let receipt = doc
+                    .delete_range(ctx, StoryRange::new(story, head - width, head))
                     .map_err(js_err)?;
+                Ok((
+                    caret_at(head - width)?,
+                    receipt.revision_ids.into_iter().next(),
+                ))
             }
             (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
-                self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head, head + width))
+                let receipt = doc
+                    .delete_range(ctx, StoryRange::new(story, head, head + width))
                     .map_err(js_err)?;
+                Ok((caret_at(head)?, receipt.revision_ids.into_iter().next()))
             }
+            (_, Some(AdjacentStoryUnit::Container)) => Ok((caret_at(head)?, None)),
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
-                let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
+                let paragraphs = doc.paragraphs(story).map_err(js_err)?;
                 let paragraph_index = paragraphs
                     .iter()
                     .position(|paragraph| paragraph.para_id == para_id)
-                    .ok_or_else(|| js_err("resident input paragraph no longer resolves"))?;
+                    .ok_or_else(|| js_err("the caret's paragraph no longer resolves"))?;
                 let merge = match direction {
                     DeleteDirection::Backward if paragraph_index > 0 => {
                         Some(MergeDirection::Backward)
@@ -1152,19 +1181,35 @@ impl EditSession {
                     _ => None,
                 };
                 let Some(merge) = merge else {
-                    return Err(js_err("resident input has no character in that direction"));
+                    return Err(js_err("there is no character in that direction"));
                 };
-                self.engine
-                    .doc()
-                    .merge_paragraphs(&ctx, &para_id, merge)
-                    .map_err(js_err)?;
+                let receipt = doc.merge_paragraphs(ctx, para_id, merge).map_err(js_err)?;
+                let caret = match receipt.range {
+                    Some(range) => range.start,
+                    None => caret_at(head)?,
+                };
+                Ok((caret, receipt.revision_ids.into_iter().next()))
             }
-            (_, None) => {
-                return Err(js_err("resident input has no character in that direction"));
-            }
+            (_, None) => Err(js_err("there is no character in that direction")),
         }
-        Ok(story)
     }
+}
+
+fn delete_direction(direction: &str) -> Result<DeleteDirection, JsValue> {
+    match direction {
+        "backward" => Ok(DeleteDirection::Backward),
+        "forward" => Ok(DeleteDirection::Forward),
+        _ => Err(js_err("delete direction must be backward or forward")),
+    }
+}
+
+/// `{"revisionId", "caret": {story, paraId, offset}}` of an edit that moves the caret.
+fn caret_receipt(caret: crate::Loc, revision_id: Option<String>) -> String {
+    json!({
+        "revisionId": revision_id,
+        "caret": { "story": caret.story, "paraId": caret.para, "offset": caret.offset },
+    })
+    .to_string()
 }
 
 #[wasm_bindgen]
@@ -2616,13 +2661,38 @@ impl EditSession {
             .doc()
             .merge_paragraphs(&ctx, para_id, direction)
             .map_err(js_err)?;
-        let caret = receipt.range.map(|range| {
-            json!({ "story": range.start.story, "paraId": range.start.para, "offset": range.start.offset })
-        });
-        Ok(
-            json!({ "revisionId": receipt.revision_ids.into_iter().next(), "caret": caret })
-                .to_string(),
-        )
+        let caret = receipt
+            .range
+            .ok_or_else(|| js_err("a merge receipt names its caret"))?
+            .start;
+        Ok(caret_receipt(
+            caret,
+            receipt.revision_ids.into_iter().next(),
+        ))
+    }
+
+    /// Backspace (`"backward"`) or Delete (`"forward"`) at `(story, para_id,
+    /// offset)`, plainly or as the named author's suggestion: removes the
+    /// character, inline object or page or column break next to it, or
+    /// merges at the paragraph mark (see `merge_paragraphs`); a table or
+    /// block content control next to it stays. The resident input's
+    /// Backspace and Delete make the same edit. Receipt:
+    /// `{"revisionId": string|null, "caret": {story, paraId, offset}}`.
+    /// Errors when there is nothing in that direction.
+    pub fn delete_at(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        direction: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let direction = delete_direction(direction)?;
+        let head = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let (caret, revision_id) = self.delete_adjacent(&ctx, story, para_id, head, direction)?;
+        Ok(caret_receipt(caret, revision_id))
     }
 
     /// Applies one run mark over `[start, end)`. `mark_json`:
@@ -3662,6 +3732,44 @@ mod tests {
 
         let paragraphs = session.engine.doc().paragraphs("body").unwrap();
         assert_eq!(paragraphs[1].text, "ABCD");
+    }
+
+    #[test]
+    fn delete_and_backspace_next_to_a_table_or_content_control_leave_it() {
+        for kind in ["table", "blockSdt", "pageBreak"] {
+            let session = EditSession::new(22.0).unwrap();
+            let doc = session.engine.doc();
+            seed_paragraph_after_embeds(doc, &[kind], "ABCDE");
+            let before = doc.story_segments("body").unwrap();
+            // Backspace right after the block, resident and suggested.
+            session
+                .delete_resident_input("backward", ("body".into(), "p1".into(), 7))
+                .unwrap();
+            let suggested = session
+                .delete_at(
+                    "body",
+                    "p1",
+                    1,
+                    "backward",
+                    Some("Bob".into()),
+                    Some("2026-09-29T00:00:00Z".into()),
+                )
+                .unwrap();
+            if kind == "pageBreak" {
+                // A break goes, as any character would.
+                assert_eq!(doc.paragraphs("body").unwrap()[1].text, "ABCDE");
+                continue;
+            }
+            // Delete right before it.
+            session
+                .delete_resident_input("forward", ("body".into(), "p1".into(), 6))
+                .unwrap();
+            assert_eq!(doc.story_segments("body").unwrap(), before, "{kind}");
+            assert_eq!(
+                suggested,
+                r#"{"caret":{"offset":1,"paraId":"p1","story":"body"},"revisionId":null}"#
+            );
+        }
     }
 
     #[test]

@@ -31,7 +31,7 @@ use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::text::suggest_delete;
 use crate::ops::{
-    ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
+    Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, revision_id_in_range, snapshot_range,
 };
 use crate::segments::is_block_embed;
@@ -343,6 +343,12 @@ fn style_carry_dtf(value: &Any) -> Option<Any> {
     }
 }
 
+/// Whether `chunk` is the reference field of a comment, which shows nothing.
+fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
+    matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+        if map_string(map, txn, "modelKind").as_deref() == Some("commentReference"))
+}
+
 impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
@@ -363,6 +369,12 @@ impl EditingDoc {
     /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
     /// author when there is one.
     ///
+    /// At the start of a slot that opens with a table, block content control
+    /// or break, the split inserts an empty paragraph before the block
+    /// instead, as Word does: the new mark takes the fresh paraId and the
+    /// properties but borders, and the block's paragraph keeps its own, so
+    /// removing the new paragraph restores the document.
+    ///
     /// Errors when `next_style` is not known, before any mutation, and when
     /// `at` does not address a position inside a story.
     pub fn split_paragraph(
@@ -377,6 +389,10 @@ impl EditingDoc {
             return Err(OpError::UnknownStyle(projection.style_id.clone()));
         }
         let second_para_id = self.next_id();
+        let before_block = self
+            .segment_index(&at.story)?
+            .para_at(at.index)
+            .is_some_and(|para| para.start == at.index && para.node_start > at.index);
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
@@ -411,9 +427,16 @@ impl EditingDoc {
             insertion_attrs(ins, None),
         );
         new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
-        new_pilcrow.insert(&mut txn, PARA_ID, first_para_id.as_str());
+        let new_para_id = if before_block {
+            &second_para_id
+        } else {
+            &first_para_id
+        };
+        new_pilcrow.insert(&mut txn, PARA_ID, new_para_id.as_str());
         for (key, value) in &props {
-            new_pilcrow.insert(&mut txn, key.clone(), value.clone());
+            if !(before_block && key == BORDERS) {
+                new_pilcrow.insert(&mut txn, key.clone(), value.clone());
+            }
         }
         if let Some(id) = revision_id.as_ref() {
             new_pilcrow.insert(
@@ -421,6 +444,13 @@ impl EditingDoc {
                 PPR_INS,
                 revision_value(id, &ctx.revision_author()),
             );
+        }
+        if before_block {
+            return Ok(SplitReceipt {
+                first_para_id: second_para_id,
+                second_para_id: first_para_id,
+                revision_ids: revision_id.into_iter().collect(),
+            });
         }
 
         // The original pilcrow now terminates the second half: re-mint its identity, then apply
@@ -476,10 +506,12 @@ impl EditingDoc {
     /// column break is not merged into, so text never goes ahead of such a
     /// block in one paragraph slot. As in Word the op removes a leading page
     /// or column break instead, and before a table or content control it
-    /// removes the paragraph when that holds nothing but its mark (the
-    /// survivor keeps its own properties) and changes nothing otherwise. The
-    /// paragraph between two tables is never empty here: it belongs to the
-    /// first table's slot, so the tables are never joined.
+    /// removes the paragraph when that is empty (nothing but its mark and
+    /// comment reference fields, which show nothing; the survivor keeps its
+    /// own properties) and changes nothing otherwise. The paragraph between
+    /// two tables is never empty here: it belongs to the first table's slot,
+    /// so the tables are never joined. Suggesting mode marks what it removes
+    /// deleted, but for this author's own pending paragraph mark, which goes.
     ///
     /// The receipt's range is the caret position after the merge: where the
     /// caret was, unless the paragraph it was in is gone. Errors when
@@ -535,32 +567,51 @@ impl EditingDoc {
         if let Some(lead) = lead {
             // Text never goes ahead of a block in one slot, so as in Word the
             // merge takes out what separates the two paragraphs instead.
+            let start = boundary.bounds.start;
+            let chunks = snapshot_range(&story, &txn, start, pilcrow_index + 2);
             let stays = match direction {
                 MergeDirection::Forward => pilcrow_index,
                 MergeDirection::Backward => pilcrow_index + 1,
             };
-            let (removed, caret) = match lead.as_str() {
-                "pageBreak" | "columnBreak" => (Some(pilcrow_index + 1), stays),
+            let empty = chunks
+                .iter()
+                .filter(|chunk| chunk.start < pilcrow_index)
+                .all(|chunk| is_comment_reference(chunk, &txn));
+            let (from, to) = match lead.as_str() {
+                "pageBreak" | "columnBreak" => (pilcrow_index + 1, pilcrow_index + 2),
                 // An empty paragraph before a table or content control goes;
                 // one with content stays, and so do the paragraph and table
                 // between two tables, which are never joined.
-                _ if boundary.bounds.start == pilcrow_index => (Some(pilcrow_index), pilcrow_index),
-                _ => (None, stays),
+                _ if empty => (start, pilcrow_index + 1),
+                _ => (pilcrow_index, pilcrow_index),
             };
             let mut revision_id = None;
-            if let Some(at) = removed {
-                if own_insert.is_some() || !ctx.is_suggesting() {
-                    story.remove_range(&mut txn, at, 1);
-                } else {
-                    let chunks = snapshot_range(&story, &txn, pilcrow_index, pilcrow_index + 2);
-                    let id = adjacent_revision_id(&chunks, at, DEL, &ctx.author)
-                        .unwrap_or_else(|| self.next_id());
-                    let revision = revision_value(&id, &ctx.revision_author());
-                    let outcome =
-                        suggest_delete(&mut txn, &story, ctx, &revision, at, at + 1, &chunks);
-                    revision_id = (outcome.removed == 0).then_some(id);
+            // Units removed ahead of the paragraph mark: the caret shifts by them.
+            let mut removed = 0;
+            if from < to && !ctx.is_suggesting() {
+                story.remove_range(&mut txn, from, to - from);
+                removed = pilcrow_index.saturating_sub(from);
+            } else if from < to {
+                let id = adjacent_revision_id(&chunks, from, DEL, &ctx.author)
+                    .unwrap_or_else(|| self.next_id());
+                let revision = revision_value(&id, &ctx.revision_author());
+                let mut end = to;
+                if own_insert.is_some() && to == pilcrow_index + 1 {
+                    // Backspacing over this author's pending paragraph retracts it.
+                    story.remove_range(&mut txn, pilcrow_index, 1);
+                    end = pilcrow_index;
                 }
+                let outcome = suggest_delete(&mut txn, &story, ctx, &revision, from, end, &chunks);
+                if from < pilcrow_index {
+                    removed = outcome.removed;
+                }
+                revision_id = (outcome.removed < end - from).then_some(id);
             }
+            let caret = if from == start && from < to {
+                pilcrow_index - removed
+            } else {
+                stays
+            };
             let caret =
                 crate::op::loc_range_in_txn(&boundary.story_id, &story, &txn, caret, caret)?;
             return Ok(Receipt {

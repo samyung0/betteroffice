@@ -1681,3 +1681,197 @@ fn a_suggested_range_delete_or_replacement_keeps_the_mark_before_a_block() {
         .unwrap();
     assert_eq!(slot_units(&doc), "BefX¶[table]After¶");
 }
+
+#[test]
+fn a_replacement_from_a_paragraph_start_to_a_block_led_slot_keeps_the_mark() {
+    for kind in ["table", "blockSdt"] {
+        // Type-over and paste write their text in the paragraph before the block.
+        let (doc, first) = block_slot(kind);
+        doc.replace_range(&ctx(), StoryRange::new("body", 0, 7), "X")
+            .unwrap();
+        assert_eq!(slot_units(&doc), format!("X¶[{kind}]After¶"), "{kind}");
+        assert_eq!(para_ids(&doc)[0], first);
+        let (doc, _) = block_slot(kind);
+        let run = RichRun {
+            text: "X".into(),
+            attrs: BTreeMap::new(),
+        };
+        doc.replace_range_rich(&ctx(), StoryRange::new("body", 0, 7), &[run])
+            .unwrap();
+        assert_eq!(slot_units(&doc), format!("X¶[{kind}]After¶"));
+        let (doc, _) = block_slot(kind);
+        let receipt = doc
+            .replace_range(&sug("Bob"), StoryRange::new("body", 0, 7), "X")
+            .unwrap();
+        doc.accept_change(
+            &ctx(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(slot_units(&doc), format!("X¶[{kind}]After¶"));
+        // A delete from the paragraph's start takes the whole paragraph.
+        let (doc, _) = block_slot(kind);
+        doc.delete_range(&ctx(), StoryRange::new("body", 0, 7))
+            .unwrap();
+        assert_eq!(slot_units(&doc), format!("[{kind}]After¶"));
+    }
+}
+
+#[test]
+fn a_suggested_delete_in_an_own_paragraph_before_a_break_tracks_the_break() {
+    let (doc, _, _) = page_break_slot();
+    let split = doc
+        .split_paragraph(&sug("Bob"), Position::new("body", 7), None)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶¶[pageBreak]Chapter¶");
+    let receipt = merge(&doc, &sug("Bob"), &split.first_para_id, true);
+    // The break is the original's: its deletion is suggested, not carried out.
+    assert_eq!(slot_units(&doc), "Before¶¶[pageBreak]Chapter¶");
+    let marked = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find(|segment| matches!(segment.content, SegmentContent::OtherEmbed { .. }))
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    assert_eq!(
+        revision_id_of(&marked.attributes, "del"),
+        receipt.revision_ids.first().cloned()
+    );
+}
+
+#[test]
+fn accepting_a_deleted_mark_keeps_it_while_its_paragraph_holds_content_before_a_block() {
+    for typed in [true, false] {
+        let (doc, _) = block_slot("table");
+        doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+            .unwrap();
+        let receipt = merge(&doc, &sug("Bob"), &para_ids(&doc)[1], true);
+        if typed {
+            doc.insert_text(
+                &ctx(),
+                Position::new("body", 7),
+                "typed",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        }
+        doc.accept_change(
+            &ctx(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+        let expected = if typed {
+            "Before¶typed¶[table]After¶"
+        } else {
+            "Before¶[table]After¶"
+        };
+        assert_eq!(slot_units(&doc), expected);
+        assert!(doc.list_changes("body").unwrap().is_empty());
+    }
+}
+
+#[test]
+fn enter_then_delete_before_a_block_leaves_its_paragraph_as_it_was() {
+    for kind in ["table", "blockSdt"] {
+        for context in [ctx(), sug("Bob")] {
+            let (doc, _) = block_slot(kind);
+            // The paragraph after the block has borders, which a split drops.
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::SetEmbedAttr {
+                    index: 13,
+                    key: "borders".into(),
+                    value: Any::String("top".into()),
+                }],
+                &ctx(),
+            )
+            .unwrap();
+            let before = doc.story_segments("body").unwrap();
+            let split = doc
+                .split_paragraph(&context, Position::new("body", 7), None)
+                .unwrap();
+            assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
+            // Enter inserts an empty paragraph before the block.
+            assert_eq!(para_ids(&doc)[2], split.second_para_id);
+            assert_eq!(doc.story_segments("body").unwrap()[3..], before[2..]);
+            merge(&doc, &context, &split.first_para_id, true);
+            assert_eq!(doc.story_segments("body").unwrap(), before, "{kind}");
+        }
+    }
+}
+
+#[test]
+fn a_paragraph_holding_only_comment_reference_fields_is_empty_before_a_table() {
+    let (doc, _) = block_slot("table");
+    doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+        .unwrap();
+    let reference = vec![(
+        "modelKind".to_owned(),
+        Any::String("commentReference".into()),
+    )];
+    doc.insert_embed(&ctx(), Position::new("body", 7), "field", reference)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[field]¶[table]After¶");
+    let slot = para_ids(&doc)[2].clone();
+    let receipt = merge(&doc, &ctx(), &para_ids(&doc)[1], true);
+    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
+    assert_eq!(receipt.range.unwrap().start, Loc::new("body", slot, 0));
+}
+
+#[test]
+fn removing_a_comment_removes_its_reference_field() {
+    let (doc, _) = doc_with("alpha beta");
+    let comment = |id: &str, start: u32, end: u32| RawOp::SetComment {
+        id: id.into(),
+        ranges: vec![(start, end)],
+        author: "Ada".into(),
+        date: DATE.into(),
+        body: Any::Null,
+    };
+    let reference = |id: Any| {
+        vec![
+            (
+                "modelKind".to_owned(),
+                Any::String("commentReference".into()),
+            ),
+            ("commentId".to_owned(), id),
+        ]
+    };
+    doc.apply_raw_ops(
+        "body",
+        vec![comment("7", 0, 5), comment("8", 6, 10)],
+        &ctx(),
+    )
+    .unwrap();
+    // A seeded document names comments by string or numeric id.
+    doc.insert_embed(
+        &ctx(),
+        Position::new("body", 10),
+        "field",
+        reference(Any::Number(8.0)),
+    )
+    .unwrap();
+    doc.insert_embed(
+        &ctx(),
+        Position::new("body", 5),
+        "field",
+        reference(Any::String("7".into())),
+    )
+    .unwrap();
+    assert_eq!(slot_units(&doc), "alpha[field] beta[field]¶");
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::RemoveComment { id: "7".into() }],
+        &ctx(),
+    )
+    .unwrap();
+    assert_eq!(slot_units(&doc), "alpha beta[field]¶");
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::RemoveComment { id: "8".into() }],
+        &ctx(),
+    )
+    .unwrap();
+    assert_eq!(slot_units(&doc), "alpha beta¶");
+}

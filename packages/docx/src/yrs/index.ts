@@ -341,8 +341,8 @@ export interface YrsInsertReceipt extends YrsRevisionReceipt {
   range: YrsStoryRange;
 }
 
-/** Receipt of a paragraph merge: `caret` is where the merge leaves the caret. */
-export interface YrsMergeReceipt extends YrsRevisionReceipt {
+/** Receipt of a Backspace, Delete or paragraph merge: `caret` is where it leaves the caret. */
+export interface YrsCaretReceipt extends YrsRevisionReceipt {
   caret: YrsLoc;
 }
 
@@ -905,7 +905,9 @@ export interface YrsSession extends CollaborationReplica {
   replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsInsertReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
-   * original paraId; the SECOND half is re-minted (`secondParaId`).
+   * original paraId; the SECOND half is re-minted (`secondParaId`). At the
+   * start of a paragraph that opens with a table, content control or break it
+   * inserts an empty paragraph (`firstParaId`, new) before it instead.
    */
   splitParagraph(at: YrsLoc, suggesting?: YrsAuthor): YrsSplitReceipt;
   /**
@@ -920,7 +922,15 @@ export interface YrsSession extends CollaborationReplica {
     paraId: string,
     direction: 'forward' | 'backward',
     suggesting?: YrsAuthor
-  ): YrsMergeReceipt;
+  ): YrsCaretReceipt;
+  /**
+   * Backspace (`backward`) or Delete (`forward`) at `at`: removes the
+   * character, inline object or break next to it, or merges at the paragraph
+   * mark ({@link YrsSession.mergeParagraphs}); a table or content control next
+   * to it stays. The resident input makes the same edit. Errors when there is
+   * nothing in that direction.
+   */
+  deleteAt(at: YrsLoc, direction: 'forward' | 'backward', suggesting?: YrsAuthor): YrsCaretReceipt;
   /**
    * Toggles one run mark across a range: removes it when every unit already
    * carries it, otherwise adds it.
@@ -1706,7 +1716,23 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         () =>
           JSON.parse(
             session.merge_paragraphs(story, paraId, direction, suggesting?.name, suggesting?.date)
-          ) as YrsMergeReceipt
+          ) as YrsCaretReceipt
+      );
+    },
+    deleteAt: (at, direction, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          JSON.parse(
+            session.delete_at(
+              at.story,
+              at.paraId,
+              at.offset,
+              direction,
+              suggesting?.name,
+              suggesting?.date
+            )
+          ) as YrsCaretReceipt
       );
     },
     toggleMark: (range, mark) => {

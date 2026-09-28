@@ -290,13 +290,14 @@ impl EditingDoc {
 
     /// Deletes a range while preserving surviving paragraph properties. A
     /// range ending at a slot that opens with a table or break keeps the
-    /// paragraph mark before it ([`EditingDoc::kept_mark`]).
+    /// paragraph mark before it unless it starts at that paragraph's start
+    /// ([`EditingDoc::kept_mark`]).
     pub fn delete_range(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
         }
-        let kept = self.kept_mark(&range.story, range.start, range.end)?;
+        let kept = self.kept_mark(&range.story, range.start, range.end, false)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -349,7 +350,7 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let landing = self.replacement_landing(ctx, &range)?;
-        let kept = self.kept_mark(&range.story, range.start, range.end)?;
+        let kept = self.kept_mark(&range.story, range.start, range.end, !text.is_empty())?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -444,7 +445,7 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let landing = self.replacement_landing(ctx, &range)?;
-        let kept = self.kept_mark(&range.story, range.start, range.end)?;
+        let kept = self.kept_mark(&range.story, range.start, range.end, total > 0)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
