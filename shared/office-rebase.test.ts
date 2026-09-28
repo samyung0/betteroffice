@@ -496,72 +496,134 @@ test("a DOCX comment added after the capture keeps its range", async () => {
   }
 });
 
-test("a DOCX rebase lands edits beside content the export wrote its own way and refuses edits inside it", async () => {
-  const base = docx(
-    `${paragraph(
-      "11111111",
-      "Before"
-    )}<w:p w14:paraId="22222222"><w:r><w:br w:type="page"/></w:r></w:p><w:p w14:paraId="44444444"><w:r><w:t>Chapter</w:t></w:r></w:p>${paragraph(
-      "33333333",
-      "After"
-    )}`
-  );
+/** A capture, its export, the later edits and their rebase onto the export. */
+async function publishDocx(
+  base: Uint8Array,
+  before: (session: YrsSession) => void,
+  after: (session: YrsSession) => void
+) {
   const session = await docxSession(base);
   try {
-    // Text typed ahead of a leading page break exports after it.
-    const chapter = session
-      .paragraphs("body")
-      .find((p) => p.paraId === "44444444")!;
-    session.insertText(
-      { story: "body", paraId: chapter.paraId, offset: 0 },
-      "Typed "
-    );
+    before(session);
     const captured = session.encodeState();
     const exported = await exportOffice(
       base,
       checkpoint("docx", base, captured),
       fixed
     );
-    const [before] = session.paragraphs("body");
-    const after = session.paragraphs("body").at(-1)!;
-    session.insertText(
-      { story: "body", paraId: before.paraId, offset: 0 },
-      "Later "
-    );
-    session.insertText(
-      { story: "body", paraId: after.paraId, offset: 0 },
-      "Also "
-    );
-    const rebased = await rebaseOffice(
-      base,
-      checkpoint("docx", base, captured),
-      checkpoint("docx", base, session.encodeState()),
-      exported
-    );
-    const current = await docxSession(exported, rebased.state);
-    try {
-      expect(text(current)).toContain("Later Before");
-      expect(text(current)).toContain("Also After");
-    } finally {
-      current.destroy();
-    }
-    // The page break itself stands elsewhere in the export.
-    session.deleteRange({
-      story: "body",
-      start: { paraId: chapter.paraId, offset: 5 },
-      end: { paraId: chapter.paraId, offset: 8 },
-    });
-    await expect(
+    after(session);
+    const latest = session.encodeState();
+    const rebase = () =>
       rebaseOffice(
         base,
         checkpoint("docx", base, captured),
-        checkpoint("docx", base, session.encodeState()),
+        checkpoint("docx", base, latest),
         exported
-      )
-    ).rejects.toThrow("the export wrote differently");
+      );
+    return { exported, latest, rebase };
   } finally {
     session.destroy();
   }
+}
+/** Story units as text: `¶` a pilcrow, `[kind]` any other embed. */
+const units = (session: YrsSession, story = "body") =>
+  session
+    .storySegments(story)
+    .map((segment) =>
+      segment.kind === "text"
+        ? segment.text
+        : segment.kind === "pilcrow"
+        ? "¶"
+        : `[${segment.embedKind}]`
+    )
+    .join("");
+const pageBreakParagraphs = docx(
+  `${paragraph(
+    "11111111",
+    "Before"
+  )}<w:p w14:paraId="22222222"><w:r><w:br w:type="page"/></w:r></w:p>${paragraph(
+    "44444444",
+    "Chapter"
+  )}`
+);
+
+test("a DOCX page break whose paragraph was edited before the capture rebases exactly", async () => {
+  const { exported, latest, rebase } = await publishDocx(
+    pageBreakParagraphs,
+    // The export used to drop the break of an edited paragraph.
+    (session) =>
+      session.insertText(
+        { story: "body", paraId: "22222222", offset: 0 },
+        "Typed"
+      ),
+    // Backspace at the start of Chapter deletes the break.
+    (session) =>
+      session.deleteRange({
+        story: "body",
+        start: { paraId: "44444444", offset: 0 },
+        end: { paraId: "44444444", offset: 1 },
+      })
+  );
+  const current = await docxSession(exported, (await rebase()).state);
+  const later = await docxSession(pageBreakParagraphs, latest);
+  try {
+    expect(units(current)).toBe(units(later));
+    expect(units(current)).toBe("Before¶Typed¶Chapter¶");
+  } finally {
+    current.destroy();
+    later.destroy();
+  }
+});
+
+test("DOCX text typed ahead of a page break in its paragraph slot stays ahead of it, and edits to it rebase", async () => {
+  const { exported, latest, rebase } = await publishDocx(
+    pageBreakParagraphs,
+    // The page break opens Chapter's slot; offset 0 lands ahead of it.
+    (session) =>
+      session.insertText(
+        { story: "body", paraId: "44444444", offset: 0 },
+        "Typed "
+      ),
+    (session) =>
+      session.deleteRange({
+        story: "body",
+        start: { paraId: "44444444", offset: 1 },
+        end: { paraId: "44444444", offset: 3 },
+      })
+  );
+  const current = await docxSession(exported, (await rebase()).state);
+  const later = await docxSession(pageBreakParagraphs, latest);
+  try {
+    // The export keeps the break between the texts; seeded again it closes
+    // the paragraph, where the seed places every break after visible text.
+    expect(text(current)).toEqual(text(later));
+    expect(units(later)).toBe("Before¶¶Ted [pageBreak]Chapter¶");
+    expect(units(current)).toBe("Before¶¶Ted Chapter¶[pageBreak]");
+  } finally {
+    current.destroy();
+    later.destroy();
+  }
+});
+
+test("a DOCX table that text typed ahead of it in its paragraph slot follows in the export refuses later edits", async () => {
+  const base = docx(
+    `${paragraph("11111111", "Before")}${table([["cell"]])}${paragraph(
+      "22222222",
+      "After"
+    )}`
+  );
+  const { rebase } = await publishDocx(
+    base,
+    (session) =>
+      session.insertText(
+        { story: "body", paraId: "22222222", offset: 0 },
+        "Typed "
+      ),
+    // The export writes the text after the table, so the rebase lands edits
+    // to the text but not to the table it no longer matches.
+    (session) => session.deleteTable({ story: "body", tableIndex: 0 })
+  );
+  await expect(rebase()).rejects.toThrow("has no counterpart in the export");
 });
 
 test("a DOCX paragraph restored after the capture fails the rebase when its raw markup left with the export", async () => {

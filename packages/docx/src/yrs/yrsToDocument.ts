@@ -942,6 +942,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   switch (item.embedKind) {
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
+    case 'flowBreak':
+      return breakRun(item.payload.breakType as FlowBreak);
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
@@ -1771,6 +1773,132 @@ function pageBreakParagraph(): Paragraph {
   };
 }
 
+type FlowBreak = 'page' | 'column';
+interface FlowToken {
+  kind: FlowBreak | 'visible';
+  run?: Run;
+  index?: number;
+}
+
+const breakRun = (kind: FlowBreak): Run => ({
+  type: 'run',
+  content: [{ type: 'break', breakType: kind }],
+});
+
+/**
+ * A paragraph's page/column breaks and visible content in the order the seed
+ * reads them (`inline_tokens` in crates/docx-edit/src/seed.rs).
+ */
+function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
+  const tokens: FlowToken[] = [];
+  const run = (item: Run): void =>
+    item.content.forEach((entry, index) => {
+      if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column'))
+        tokens.push({ kind: entry.breakType, run: item, index });
+      else if (entry.type !== 'text' || entry.text !== '') tokens.push({ kind: 'visible' });
+    });
+  const runs = (items: readonly { type: string }[]): void => {
+    for (const item of items) if (item.type === 'run') run(item as Run);
+  };
+  const inline = (items: readonly ParagraphContent[]): void => {
+    for (const item of items) {
+      if (item.type === 'run') run(item);
+      else if (item.type === 'hyperlink') runs(item.children);
+      else if (item.type === 'simpleField') runs(item.content);
+      else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
+      else if (item.type === 'inlineSdt') inline(item.content);
+      else if (
+        item.type === 'insertion' ||
+        item.type === 'deletion' ||
+        item.type === 'moveFrom' ||
+        item.type === 'moveTo'
+      )
+        runs(item.content);
+      else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
+    }
+  };
+  inline(content);
+  return tokens;
+}
+
+/**
+ * Splits a paragraph's breaks as the seed places them (`paragraph_flow_breaks`):
+ * `leading` become units before its content, `trailing` units after its
+ * pilcrow, and `pageFirst` is a leading page break the seed keeps as the
+ * `pageBreakBeforeRun` attribute instead of a unit.
+ */
+function splitFlow(tokens: FlowToken[]): {
+  leading: FlowToken[];
+  trailing: FlowToken[];
+  pageFirst: boolean;
+} {
+  const breaks = tokens.filter((token) => token.kind !== 'visible');
+  if (!tokens.some((token) => token.kind === 'visible')) {
+    let split = 0;
+    breaks.forEach((token, index) => {
+      if (token.kind === 'column') split = index + 1;
+    });
+    return { leading: breaks.slice(0, split), trailing: breaks.slice(split), pageFirst: false };
+  }
+  let first: FlowToken | undefined;
+  let visible = false;
+  const trailing: FlowToken[] = [];
+  for (const token of tokens) {
+    if (token.kind === 'visible') visible = true;
+    else if (visible || first) trailing.push(token);
+    else first = token;
+  }
+  return {
+    leading: first?.kind === 'column' ? [first] : [],
+    trailing,
+    pageFirst: first?.kind === 'page',
+  };
+}
+
+/** `content` without the given break tokens; runs left empty are dropped. */
+function withoutBreaks(
+  content: readonly ParagraphContent[],
+  tokens: readonly FlowToken[]
+): ParagraphContent[] {
+  const drop = new Map<Run, Set<number>>();
+  for (const token of tokens) {
+    if (!token.run || token.index === undefined) continue;
+    const indexes = drop.get(token.run) ?? new Set<number>();
+    indexes.add(token.index);
+    drop.set(token.run, indexes);
+  }
+  const run = (item: Run): Run | null => {
+    const indexes = drop.get(item);
+    if (!indexes) return item;
+    const kept = item.content.filter((_, index) => !indexes.has(index));
+    return kept.length > 0 ? { ...item, content: kept } : null;
+  };
+  const runs = <T extends { type: string }>(items: readonly T[]): T[] =>
+    items.flatMap((item): T[] => {
+      if (item.type !== 'run') return [item];
+      const kept = run(item as unknown as Run);
+      return kept ? [kept as unknown as T] : [];
+    });
+  const inline = <T extends ParagraphContent>(items: readonly T[]): T[] =>
+    items.flatMap((item): T[] => {
+      if (item.type === 'run') return runs([item]);
+      if (item.type === 'hyperlink') return [{ ...item, children: runs(item.children) }];
+      if (item.type === 'simpleField') return [{ ...item, content: runs(item.content) }];
+      if (item.type === 'complexField')
+        return [{ ...item, fieldCode: runs(item.fieldCode), fieldResult: runs(item.fieldResult) }];
+      if (item.type === 'inlineSdt') return [{ ...item, content: inline(item.content) }];
+      if (
+        item.type === 'insertion' ||
+        item.type === 'deletion' ||
+        item.type === 'moveFrom' ||
+        item.type === 'moveTo'
+      )
+        return [{ ...item, content: runs(item.content) }];
+      return [item];
+    });
+  return drop.size === 0 ? [...content] : inline(content);
+}
+
 /** A note number mark run, or a tracked-change wrapper holding only those. */
 function isNoteMark(content: ParagraphContent): boolean {
   if (
@@ -2002,6 +2130,8 @@ class SaveContext {
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
+  /** Stories whose page and column breaks are story units (the seed's `include_page_breaks`). */
+  private readonly flowBreakStories = new Set(['body']);
   private readonly memo: SessionProjectionMemo;
   private readonly bypassMemo: boolean;
 
@@ -2117,6 +2247,51 @@ class SaveContext {
       return boundaries;
     };
 
+    // Break units opening a slot are where the seed put the trailing breaks of
+    // the paragraph before it (or the slot paragraph's leading column breaks).
+    // Paragraphs keep breaks that still match the units and are rewritten
+    // from the units otherwise.
+    const flowUnits = this.flowBreakStories.has(storyId);
+    let slotBreaks: FlowBreak[] = [];
+    let slotInlineBreaks: FlowBreak[] = [];
+    let carried: FlowBreak[] = [];
+    let previous = -1;
+    const settle = (next?: Paragraph): Paragraph | undefined => {
+      const expected = [...carried, ...slotBreaks];
+      carried = [];
+      slotBreaks = [];
+      const before = previous >= 0 ? (blocks[previous] as Paragraph) : undefined;
+      const beforeFlow = before && splitFlow(flowTokens(before.content));
+      const nextFlow = next && splitFlow(flowTokens(next.content));
+      const have = [...(beforeFlow?.trailing ?? []), ...(nextFlow?.leading ?? [])];
+      if (
+        have.length === expected.length &&
+        have.every((token, index) => token.kind === expected[index])
+      )
+        return next;
+      const rest =
+        next && nextFlow && nextFlow.leading.length > 0
+          ? { ...next, content: withoutBreaks(next.content, nextFlow.leading) }
+          : next;
+      if (before && beforeFlow) {
+        blocks[previous] = {
+          ...before,
+          content: [
+            ...withoutBreaks(before.content, beforeFlow.trailing),
+            ...expected.map(breakRun),
+          ],
+        };
+        return rest;
+      }
+      if (rest) return { ...rest, content: [...expected.map(breakRun), ...rest.content] };
+      if (expected.length > 0) blocks.push({ type: 'paragraph', content: expected.map(breakRun) });
+      return undefined;
+    };
+    const openBlock = (): void => {
+      if (flowUnits) settle();
+      previous = -1;
+    };
+
     const pushText = (text: string, attributes: Attrs): void => {
       let cursor = 0;
       for (let index = 0; index < text.length; index += 1) {
@@ -2177,7 +2352,21 @@ class SaveContext {
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
+        if (flowUnits) {
+          // A leading page break the seed kept as an attribute, not a unit.
+          const tokens = flowTokens(paragraph.content);
+          if (
+            segment.properties.pageBreakBeforeRun === true &&
+            tokens.some((token) => token.kind === 'visible') &&
+            !splitFlow(tokens).pageFirst
+          )
+            paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
+          paragraph = settle(paragraph) ?? paragraph;
+          carried = slotInlineBreaks;
+          slotInlineBreaks = [];
+        }
         blocks.push(paragraph);
+        previous = blocks.length - 1;
         this.onParagraph?.(storyId, storyOffset, paragraph, segment.paraId);
         items = [];
         paragraphIndex += 1;
@@ -2212,9 +2401,12 @@ class SaveContext {
           }
         }
         projectedEmbed = table;
+        openBlock();
         blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
+        if (flowUnits && childStory) this.flowBreakStories.add(childStory);
+        openBlock();
         const childContent =
           childStory && this.storyIds.has(childStory)
             ? this.storyToBlocks(childStory)
@@ -2259,17 +2451,35 @@ class SaveContext {
         const blob = asObject(segment.payload.blob);
         if (blob?.type === 'pageBreak') {
           projectedEmbed = pageBreakParagraph();
+          openBlock();
           blocks.push(projectedEmbed);
         } else {
           // Carry a same-position base block while block SDTs stay opaque.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
             projectedEmbed = baseBlock;
+            openBlock();
             blocks.push(baseBlock);
           }
           // Standalone text-box blobs do not have a one-to-one base block (the
           // base model stores them inside paragraph runs), so they remain the
           // documented opaque carry gap.
+        }
+      } else if (
+        flowUnits &&
+        (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak')
+      ) {
+        const kind = segment.embedKind === 'pageBreak' ? 'page' : 'column';
+        if (items.length === 0) slotBreaks.push(kind);
+        else {
+          // Inside paragraph content, which the seed never produces: kept in place.
+          items.push({
+            kind: 'embed',
+            embedKind: 'flowBreak',
+            payload: { breakType: kind },
+            attributes: segment.attributes,
+          });
+          slotInlineBreaks.push(kind);
         }
       } else {
         items.push(segment as EmbedItem);
@@ -2278,6 +2488,7 @@ class SaveContext {
       if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
     }
+    if (flowUnits) settle();
 
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
     // A story ending in a flow-break embed is well-formed, not a lost

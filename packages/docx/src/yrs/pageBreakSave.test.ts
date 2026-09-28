@@ -145,6 +145,96 @@ describe('page break save projection', () => {
     }
   });
 
+  describe('saves the break units the session holds', () => {
+    const units = (session: YrsSession): string =>
+      session
+        .storySegments('body')
+        .map((segment) =>
+          segment.kind === 'text'
+            ? segment.text
+            : segment.kind === 'pilcrow'
+              ? segment.properties.pageBreakBeforeRun
+                ? '[pageBreakBeforeRun]¶'
+                : '¶'
+              : `[${segment.embedKind}]`
+        )
+        .join('');
+    /** The edited body's units, and the units of its save seeded again. */
+    async function roundTrip(
+      body: string,
+      edit: (session: YrsSession) => void
+    ): Promise<[string, string]> {
+      const bytes = fixture(body);
+      const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+      const session = await createYrsSession({ clientId: (clientId += 1) });
+      const reseeded = await createYrsSession({ clientId: (clientId += 1) });
+      try {
+        session.seedFromDocx(bytes);
+        edit(session);
+        reseeded.seedFromDocx(new Uint8Array(await repackDocx(yrsToDocument(session, parsed))));
+        return [units(session), units(reseeded)];
+      } finally {
+        session.destroy();
+        reseeded.destroy();
+      }
+    }
+    const pageBreakParagraph = `<w:p><w:r><w:t>HEAD</w:t></w:r></w:p><w:p>${PAGE_BREAK}</w:p><w:p><w:r><w:t>TAIL</w:t></w:r></w:p>`;
+    const paraId = (session: YrsSession, index: number) =>
+      session.paragraphs('body')[index]!.paraId;
+    const cases: Array<[string, string, (session: YrsSession) => void]> = [
+      [
+        'a break inserted between paragraphs',
+        `<w:p><w:r><w:t>HEAD</w:t></w:r></w:p><w:p><w:r><w:t>TAIL</w:t></w:r></w:p>`,
+        (session) =>
+          session.insertPageBreak({ story: 'body', paraId: paraId(session, 1), offset: 0 }),
+      ],
+      [
+        'a deleted break',
+        pageBreakParagraph,
+        (session) =>
+          session.deleteRange({
+            story: 'body',
+            start: { paraId: paraId(session, 2), offset: 0 },
+            end: { paraId: paraId(session, 2), offset: 1 },
+          }),
+      ],
+      [
+        'text typed into the paragraph a break owns',
+        pageBreakParagraph,
+        (session) =>
+          session.insertText({ story: 'body', paraId: paraId(session, 1), offset: 0 }, 'typed'),
+      ],
+      [
+        'a paragraph merged into the paragraph a break owns',
+        pageBreakParagraph,
+        (session) => session.mergeParagraphs('body', paraId(session, 0)),
+      ],
+      [
+        'an edit to a paragraph a break closes',
+        `<w:p><w:r><w:t>HEAD</w:t></w:r>${PAGE_BREAK}<w:r><w:t>TARGET</w:t></w:r></w:p><w:p><w:r><w:t>TAIL</w:t></w:r></w:p>`,
+        (session) =>
+          session.insertText({ story: 'body', paraId: paraId(session, 0), offset: 1 }, 'x'),
+      ],
+      [
+        'an edit to a paragraph a break opens',
+        `<w:p><w:r><w:t>HEAD</w:t></w:r></w:p><w:p>${PAGE_BREAK}<w:r><w:t>TARGET</w:t></w:r></w:p>`,
+        (session) =>
+          session.insertText({ story: 'body', paraId: paraId(session, 1), offset: 6 }, ' typed'),
+      ],
+      [
+        'an unedited column break opening a paragraph',
+        `<w:p><w:r><w:t>HEAD</w:t></w:r></w:p><w:p><w:r><w:br w:type="column"/><w:t>TARGET</w:t></w:r></w:p>`,
+        () => {},
+      ],
+    ];
+    for (const [name, body, edit] of cases) {
+      it(name, async () => {
+        const [edited, saved] = await roundTrip(body, edit);
+        expect(saved).toBe(edited);
+      });
+    }
+  });
+
   it('does not open a paragraph the source never had', async () => {
     const [through, control] = await save(
       `<w:p><w:r><w:t>HEAD</w:t></w:r>${PAGE_BREAK}<w:r><w:t>TARGET</w:t></w:r></w:p>`
