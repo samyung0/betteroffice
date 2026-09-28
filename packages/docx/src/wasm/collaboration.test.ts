@@ -199,7 +199,7 @@ describe('docx wasm collaboration', () => {
       const splitAt = left.paragraphs('body')[0];
       left.splitParagraph({ story: 'body', paraId: splitAt.paraId, offset: 5 });
       expect(right.paragraphs('body')).toEqual(left.paragraphs('body'));
-      right.mergeParagraphs('body', right.paragraphs('body')[0].paraId);
+      right.mergeParagraphs('body', right.paragraphs('body')[0].paraId, 'forward');
       expect(right.paragraphs('body')).toEqual(left.paragraphs('body'));
 
       const tableAnchor = left.paragraphs('body')[0];

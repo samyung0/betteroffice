@@ -41,9 +41,9 @@ const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
 const PAGE_BREAK = `${paragraph('Before')}<w:p><w:r><w:br w:type="page"/></w:r></w:p>${paragraph(
   'Chapter'
 )}`;
-const TABLE = `${paragraph('Before')}<w:tbl><w:tr><w:tc>${paragraph(
-  'cell'
-)}</w:tc></w:tr></w:tbl>${paragraph('After')}`;
+const TBL = `<w:tbl><w:tr><w:tc>${paragraph('cell')}</w:tc></w:tr></w:tbl>`;
+const TABLE = `${paragraph('Before')}${TBL}${paragraph('After')}`;
+const SUGGESTING = { name: 'Bob', date: '2026-09-29T00:00:00Z' };
 
 let clientId = 69100;
 async function open(body: string): Promise<YrsSession> {
@@ -63,6 +63,7 @@ const units = (session: YrsSession): string =>
     )
     .join('');
 const paraId = (session: YrsSession, index: number) => session.paragraphs('body')[index]!.paraId;
+const caretAt = (paraId: string, offset: number) => ({ story: 'body', paraId, offset });
 
 describe('paragraph slots that open with a table or page break', () => {
   beforeAll(() =>
@@ -74,23 +75,70 @@ describe('paragraph slots that open with a table or page break', () => {
   );
 
   it.each([
-    ['page break', PAGE_BREAK, 1, 'Before¶¶[pageBreak]Chapter¶'],
-    ['table', TABLE, 0, 'Before¶[table]After¶'],
-  ])(
-    'Delete at the end of the paragraph before a %s changes nothing',
-    async (_, body, index, seeded) => {
-      const session = await open(body);
-      try {
-        expect(units(session)).toBe(seeded);
-        const before = session.encodeState();
-        session.mergeParagraphs('body', paraId(session, index));
-        expect(units(session)).toBe(seeded);
-        expect(session.encodeState()).toEqual(before);
-      } finally {
-        session.destroy();
-      }
+    ['Delete at the end of the paragraph before', 1, 'forward'],
+    ['Backspace at the start of the paragraph opened by', 2, 'backward'],
+  ] as const)('%s a page break removes the break', async (_, index, direction) => {
+    const session = await open(PAGE_BREAK);
+    try {
+      expect(units(session)).toBe('Before¶¶[pageBreak]Chapter¶');
+      const target = paraId(session, index);
+      const { caret } = session.mergeParagraphs('body', target, direction);
+      expect(units(session)).toBe('Before¶¶Chapter¶');
+      expect(caret).toEqual(caretAt(target, 0));
+      expect(session.undo()).toBe(true);
+      expect(units(session)).toBe('Before¶¶[pageBreak]Chapter¶');
+    } finally {
+      session.destroy();
     }
-  );
+  });
+
+  it('Delete or Backspace next to a table changes nothing when the paragraph before it has content', async () => {
+    const session = await open(TABLE);
+    try {
+      const [first, second] = [paraId(session, 0), paraId(session, 1)];
+      const before = session.encodeState();
+      expect(session.mergeParagraphs('body', first, 'forward').caret).toEqual(caretAt(first, 6));
+      expect(session.mergeParagraphs('body', second, 'backward', SUGGESTING).caret).toEqual(
+        caretAt(second, 0)
+      );
+      expect(units(session)).toBe('Before¶[table]After¶');
+      expect(session.encodeState()).toEqual(before);
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('Delete in an empty paragraph before a table removes it, and suggesting marks it', async () => {
+    const session = await open(`${paragraph('Before')}<w:p/>${TBL}${paragraph('After')}`);
+    try {
+      expect(units(session)).toBe('Before¶¶[table]After¶');
+      const [empty, slot] = [paraId(session, 1), paraId(session, 2)];
+      const plain = session.mergeParagraphs('body', empty, 'forward');
+      expect(units(session)).toBe('Before¶[table]After¶');
+      expect(plain.caret).toEqual(caretAt(slot, 0));
+      expect(session.undo()).toBe(true);
+      // Backspace in suggesting mode leaves the caret at the marked paragraph.
+      const suggested = session.mergeParagraphs('body', slot, 'backward', SUGGESTING);
+      expect(suggested.revisionId).not.toBeNull();
+      expect(suggested.caret).toEqual(caretAt(empty, 0));
+      expect(units(session)).toBe('Before¶¶[table]After¶');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('Delete or Backspace between two tables never joins them', async () => {
+    const session = await open(`${TBL}<w:p/>${TBL}${paragraph('After')}`);
+    try {
+      expect(units(session)).toBe('[table]¶[table]After¶');
+      const before = session.encodeState();
+      session.mergeParagraphs('body', paraId(session, 0), 'forward');
+      session.mergeParagraphs('body', paraId(session, 1), 'backward');
+      expect(session.encodeState()).toEqual(before);
+    } finally {
+      session.destroy();
+    }
+  });
 
   it.each([
     ['page break', PAGE_BREAK, 2, 'Before¶¶[pageBreak]Typed Chapter¶'],

@@ -1013,8 +1013,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
-            session.insertImage(at, command.image, structuralAuthor);
-            session.setSelection({ ...at, offset: at.offset + 1 });
+            const { range } = session.insertImage(at, command.image, structuralAuthor);
+            session.setSelection({ story: range.story, ...range.end });
           } else if (command.type === 'contentControlValue') {
             const node = positionProjection.nodeAt(command.pmPos);
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);

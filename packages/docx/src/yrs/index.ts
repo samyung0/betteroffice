@@ -341,6 +341,11 @@ export interface YrsInsertReceipt extends YrsRevisionReceipt {
   range: YrsStoryRange;
 }
 
+/** Receipt of a paragraph merge: `caret` is where the merge leaves the caret. */
+export interface YrsMergeReceipt extends YrsRevisionReceipt {
+  caret: YrsLoc;
+}
+
 /**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
@@ -903,8 +908,19 @@ export interface YrsSession extends CollaborationReplica {
    * original paraId; the SECOND half is re-minted (`secondParaId`).
    */
   splitParagraph(at: YrsLoc, suggesting?: YrsAuthor): YrsSplitReceipt;
-  /** Merges `paraId` with the FOLLOWING paragraph. Errors on the final paragraph. */
-  mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  /**
+   * Merges `paraId` with the following (`forward`, Delete) or previous
+   * (`backward`, Backspace) paragraph. Into a paragraph that opens with a
+   * block it removes a page or column break, or an empty paragraph before a
+   * table or content control, and otherwise changes nothing. Errors when
+   * there is no paragraph in that direction.
+   */
+  mergeParagraphs(
+    story: string,
+    paraId: string,
+    direction: 'forward' | 'backward',
+    suggesting?: YrsAuthor
+  ): YrsMergeReceipt;
   /**
    * Toggles one run mark across a range: removes it when every unit already
    * carries it, otherwise adds it.
@@ -925,7 +941,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsInsertReceipt;
   /** Sets the authored value on a content-control embed addressed by stable payload id. */
   setContentControlValue(embedId: string, value: YrsContentControlValue): void;
   /** Sets a content-control value at a paragraph-keyed embed position. */
@@ -1684,13 +1700,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
           ) as YrsSplitReceipt
       );
     },
-    mergeParagraphs: (story, paraId, suggesting) => {
+    mergeParagraphs: (story, paraId, direction, suggesting) => {
       ensureUndo(story);
       return mutate(
         () =>
           JSON.parse(
-            session.merge_paragraphs(story, paraId, suggesting?.name, suggesting?.date)
-          ) as YrsRevisionReceipt
+            session.merge_paragraphs(story, paraId, direction, suggesting?.name, suggesting?.date)
+          ) as YrsMergeReceipt
       );
     },
     toggleMark: (range, mark) => {
@@ -1787,7 +1803,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsInsertReceipt
       );
     },
     setContentControlValue: (embedId, value) => {

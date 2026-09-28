@@ -596,16 +596,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             );
             session.setSelection({ ...caret, offset: start });
           } else if (index > 0) {
-            const previous = paragraphs[index - 1];
-            const offset = inputPositionMap(activeStory)?.paragraphs.find(
-              (entry) => entry.paraId === previous.paraId
-            )?.length;
-            session.mergeParagraphs(activeStory, previous.paraId, suggestingAuthor());
-            session.setSelection({
-              story: activeStory,
-              paraId: previous.paraId,
-              offset: offset ?? previous.text.length,
-            });
+            const merged = session.mergeParagraphs(
+              activeStory,
+              caret.paraId,
+              'backward',
+              suggestingAuthor()
+            );
+            session.setSelection(merged.caret);
           } else {
             return;
           }
@@ -623,8 +620,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             );
             session.setSelection(caret);
           } else if (index + 1 < paragraphs.length) {
-            session.mergeParagraphs(activeStory, caret.paraId, suggestingAuthor());
-            session.setSelection(caret);
+            const merged = session.mergeParagraphs(
+              activeStory,
+              caret.paraId,
+              'forward',
+              suggestingAuthor()
+            );
+            session.setSelection(merged.caret);
           } else {
             return;
           }

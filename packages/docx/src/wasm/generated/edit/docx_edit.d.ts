@@ -344,11 +344,12 @@ export class EditSession {
      */
     insert_column(at_json: string, after: boolean): string;
     /**
-     * Inserts one inline image embed at `(story, para_id, offset)`.
-     * `payload_json` is the image's authored payload object, stored as given.
-     * The embed occupies one story unit. Receipt:
-     * `{"revisionId": string|null}`. Errors when the payload is not an
-     * object.
+     * Inserts one inline image embed at `(story, para_id, offset)`, or after
+     * the tables and breaks that open that paragraph slot when the location
+     * is ahead of them. `payload_json` is the image's authored payload object,
+     * stored as given. The embed occupies one story unit. Receipt:
+     * `{"revisionId": string|null, "range": YrsStoryRange}`, the range being
+     * where the image landed. Errors when the payload is not an object.
      */
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -477,14 +478,18 @@ export class EditSession {
      */
     merge_cells(range_json: string): string;
     /**
-     * Merges `para_id` with the FOLLOWING paragraph by deleting (plain) or
-     * `del`- and `pPrDel`-marking (suggesting) its pilcrow. On a plain merge
-     * the survivor adopts the deleted mark's properties and paraId, so the
-     * earlier paragraph's identity wins. Receipt:
-     * `{"revisionId": string|null}`. Errors on the story's final paragraph,
-     * which has no following paragraph to merge with.
+     * Merges `para_id` with the following (`"forward"`, Delete) or the
+     * previous (`"backward"`, Backspace) paragraph by deleting (plain) or
+     * `del`- and `pPrDel`-marking (suggesting) the pilcrow between them. On a
+     * plain merge the survivor adopts the deleted mark's properties and
+     * paraId, so the earlier paragraph's identity wins. A paragraph that
+     * opens with a block is not merged into (see
+     * [`EditingDoc::merge_paragraphs`]). Receipt:
+     * `{"revisionId": string|null, "caret": {story, paraId, offset}}`, the
+     * caret where the op leaves it. Errors on an unknown direction and when
+     * there is no paragraph in that direction.
      */
-    merge_paragraphs(story: string, para_id: string, author_name?: string | null, author_date?: string | null): string;
+    merge_paragraphs(story: string, para_id: string, direction: string, author_name?: string | null, author_date?: string | null): string;
     /**
      * Creates a replica. The host allocates `client_id` (a random 32-bit id
      * is fine) and must keep it unique across the replicas that will merge.
@@ -1064,7 +1069,7 @@ export interface InitOutput {
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_media_json: (a: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];

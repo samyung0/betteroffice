@@ -171,7 +171,7 @@ for (const seeder of ['native', 'projected']) {
       if (link?.type !== 'hyperlink') throw new Error('missing saved hyperlink');
       expect(link.anchor).toBe('_Toc1');
       expect(JSON.stringify(link)).toContain('H!eading');
-      session.mergeParagraphs('body', first.paraId);
+      session.mergeParagraphs('body', first.paraId, 'forward');
       const merged = yrsToDocument(session, parsed).package.document.content[0]!;
       if (merged.type !== 'paragraph') throw new Error('missing merged paragraph');
       expect(merged.content).toHaveLength(2);

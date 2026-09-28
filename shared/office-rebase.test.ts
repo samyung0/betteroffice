@@ -88,7 +88,8 @@ function editDocx(session: YrsSession, kind: string, rng: Random): boolean {
         { story, paraId: receipt.secondParaId, offset: 0 },
         `${rng.pick(WORDS)} ${rng.pick(WORDS)}.`
       );
-    } else if (kind === "merge") session.mergeParagraphs(story, p.paraId);
+    } else if (kind === "merge")
+      session.mergeParagraphs(story, p.paraId, "forward");
     else if (kind === "bold") {
       const start = rng.int(0, p.text.length - 1);
       session.toggleMark(
@@ -595,7 +596,7 @@ async function blockAfterText(
     right.loadState(left.encodeState());
     const [before, after] = left.paragraphs("body");
     block(left, { story: "body", paraId: after.paraId, offset: 0 });
-    right.mergeParagraphs("body", before.paraId);
+    right.mergeParagraphs("body", before.paraId, "forward");
     const merged = new Y.Doc();
     Y.applyUpdate(merged, left.encodeState());
     Y.applyUpdate(merged, right.encodeState());

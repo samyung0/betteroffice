@@ -207,7 +207,7 @@ describe('page break save projection', () => {
       [
         'a paragraph merged into the paragraph a break owns',
         pageBreakParagraph,
-        (session) => session.mergeParagraphs('body', paraId(session, 0)),
+        (session) => session.mergeParagraphs('body', paraId(session, 0), 'forward'),
       ],
       [
         'an edit to a paragraph a break closes',

@@ -1434,37 +1434,122 @@ fn page_break_slot() -> (EditingDoc, ParagraphId, ParagraphId) {
     (doc, split.first_para_id, split.second_para_id)
 }
 
-#[test]
-fn a_merge_into_a_slot_that_opens_with_a_page_break_changes_nothing() {
-    for suggesting in [false, true] {
-        let (doc, first, second) = page_break_slot();
-        let context = if suggesting { sug("Bob") } else { ctx() };
-        let before = doc.encode_state_as_update_v1();
-        let forward = doc
-            .merge_paragraphs(&context, &first, MergeDirection::Forward)
-            .unwrap();
-        doc.merge_paragraphs(&context, &second, MergeDirection::Backward)
-            .unwrap();
-        assert_eq!(slot_units(&doc), "Before¶[pageBreak]Chapter¶");
-        assert_eq!(doc.encode_state_as_update_v1(), before);
-        assert_eq!(forward.range.unwrap().start, Loc::new("body", first, 6));
-    }
+/// Merges `para` Delete-style (`forward`) or Backspace-style.
+fn merge(doc: &EditingDoc, context: &EditCtx, para: &ParagraphId, forward: bool) -> Receipt {
+    let direction = if forward {
+        MergeDirection::Forward
+    } else {
+        MergeDirection::Backward
+    };
+    doc.merge_paragraphs(context, para, direction).unwrap()
+}
+
+fn para_ids(doc: &EditingDoc) -> Vec<ParagraphId> {
+    doc.paragraphs("body")
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| paragraph.para_id)
+        .collect()
 }
 
 #[test]
-fn a_merge_into_a_slot_that_opens_with_a_table_changes_nothing() {
-    let (doc, _) = doc_with("BeforeAfter");
-    let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 6), None)
+fn a_merge_into_a_slot_that_opens_with_a_break_removes_the_break() {
+    for kind in ["pageBreak", "columnBreak"] {
+        for forward in [true, false] {
+            let (doc, first) = block_slot(kind);
+            let second = para_ids(&doc)[1].clone();
+            let receipt = merge(
+                &doc,
+                &ctx(),
+                if forward { &first } else { &second },
+                forward,
+            );
+            assert_eq!(slot_units(&doc), "Before¶After¶", "{kind}");
+            assert_eq!(para_ids(&doc), [first.clone(), second.clone()]);
+            // The caret stays where it was.
+            let caret = if forward {
+                Loc::new("body", first, 6)
+            } else {
+                Loc::new("body", second, 0)
+            };
+            assert_eq!(receipt.range.unwrap().start, caret);
+        }
+    }
+    // Suggesting marks the break deleted.
+    let (doc, _, second) = page_break_slot();
+    let receipt = merge(&doc, &sug("Bob"), &second, false);
+    assert_eq!(slot_units(&doc), "Before¶[pageBreak]Chapter¶");
+    let marked = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find(|segment| matches!(segment.content, SegmentContent::OtherEmbed { .. }))
         .unwrap();
-    doc.insert_table(&ctx(), Position::new("body", 7), 1, 1)
+    assert_eq!(
+        revision_id_of(&marked.attributes, "del"),
+        receipt.revision_ids.first().cloned()
+    );
+}
+
+#[test]
+fn a_merge_into_a_slot_that_opens_with_a_table_removes_only_an_empty_paragraph() {
+    for kind in ["table", "blockSdt"] {
+        // A paragraph with content stays, and so does the caret.
+        let (doc, first) = block_slot(kind);
+        let second = para_ids(&doc)[1].clone();
+        let before = doc.encode_state_as_update_v1();
+        let forward = merge(&doc, &ctx(), &first, true);
+        let backward = merge(&doc, &ctx(), &second, false);
+        assert_eq!(doc.encode_state_as_update_v1(), before, "{kind}");
+        assert_eq!(forward.range.unwrap().start, Loc::new("body", first, 6));
+        assert_eq!(backward.range.unwrap().start, Loc::new("body", second, 0));
+        // An empty one goes; the slot keeps its own paragraph.
+        for forward in [true, false] {
+            let (doc, _) = block_slot(kind);
+            doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+                .unwrap();
+            assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
+            let ids = para_ids(&doc);
+            let receipt = merge(&doc, &ctx(), &ids[if forward { 1 } else { 2 }], forward);
+            assert_eq!(slot_units(&doc), format!("Before¶[{kind}]After¶"));
+            assert_eq!(para_ids(&doc), [ids[0].clone(), ids[2].clone()]);
+            assert_eq!(
+                receipt.range.unwrap().start,
+                Loc::new("body", ids[2].clone(), 0)
+            );
+        }
+    }
+    // Suggesting marks the empty paragraph's mark deleted.
+    let (doc, _) = block_slot("table");
+    doc.split_paragraph(&ctx(), Position::new("body", 6), None)
         .unwrap();
-    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
-    doc.merge_paragraphs(&ctx(), &split.first_para_id, MergeDirection::Forward)
+    let receipt = merge(&doc, &sug("Bob"), &para_ids(&doc)[1], true);
+    assert_eq!(slot_units(&doc), "Before¶¶[table]After¶");
+    let marks: Vec<_> = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+        .map(|segment| revision_id_of(&segment.attributes, "del"))
+        .collect();
+    assert_eq!(marks, [None, receipt.revision_ids.first().cloned(), None]);
+}
+
+#[test]
+fn a_merge_never_joins_two_tables() {
+    // Before¶[table]¶[table]After¶: the paragraph between the tables belongs
+    // to the first table's slot.
+    let (doc, _) = block_slot("table");
+    doc.split_paragraph(&ctx(), Position::new("body", 8), None)
         .unwrap();
-    doc.merge_paragraphs(&ctx(), &split.second_para_id, MergeDirection::Backward)
+    doc.insert_table(&ctx(), Position::new("body", 9), 1, 1)
         .unwrap();
-    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
+    assert_eq!(slot_units(&doc), "Before¶[table]¶[table]After¶");
+    let ids = para_ids(&doc);
+    let before = doc.encode_state_as_update_v1();
+    merge(&doc, &ctx(), &ids[1], true);
+    merge(&doc, &ctx(), &ids[2], false);
+    assert_eq!(doc.encode_state_as_update_v1(), before);
 }
 
 #[test]

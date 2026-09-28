@@ -2585,28 +2585,44 @@ impl EditSession {
         .to_string())
     }
 
-    /// Merges `para_id` with the FOLLOWING paragraph by deleting (plain) or
-    /// `del`- and `pPrDel`-marking (suggesting) its pilcrow. On a plain merge
-    /// the survivor adopts the deleted mark's properties and paraId, so the
-    /// earlier paragraph's identity wins. Receipt:
-    /// `{"revisionId": string|null}`. Errors on the story's final paragraph,
-    /// which has no following paragraph to merge with.
+    /// Merges `para_id` with the following (`"forward"`, Delete) or the
+    /// previous (`"backward"`, Backspace) paragraph by deleting (plain) or
+    /// `del`- and `pPrDel`-marking (suggesting) the pilcrow between them. On a
+    /// plain merge the survivor adopts the deleted mark's properties and
+    /// paraId, so the earlier paragraph's identity wins. A paragraph that
+    /// opens with a block is not merged into (see
+    /// [`EditingDoc::merge_paragraphs`]). Receipt:
+    /// `{"revisionId": string|null, "caret": {story, paraId, offset}}`, the
+    /// caret where the op leaves it. Errors on an unknown direction and when
+    /// there is no paragraph in that direction.
     pub fn merge_paragraphs(
         &self,
         story: &str,
         para_id: &str,
+        direction: &str,
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<String, JsValue> {
+        let direction = match direction {
+            "forward" => MergeDirection::Forward,
+            "backward" => MergeDirection::Backward,
+            _ => return Err(js_err("merge direction must be forward or backward")),
+        };
         // Validate story membership (story-scoped "not found") before merging.
         find_para_span(self.engine.doc(), story, para_id)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
             .engine
             .doc()
-            .merge_paragraphs(&ctx, para_id, MergeDirection::Forward)
+            .merge_paragraphs(&ctx, para_id, direction)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        let caret = receipt.range.map(|range| {
+            json!({ "story": range.start.story, "paraId": range.start.para, "offset": range.start.offset })
+        });
+        Ok(
+            json!({ "revisionId": receipt.revision_ids.into_iter().next(), "caret": caret })
+                .to_string(),
+        )
     }
 
     /// Applies one run mark over `[start, end)`. `mark_json`:
@@ -2803,11 +2819,12 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Inserts one inline image embed at `(story, para_id, offset)`.
-    /// `payload_json` is the image's authored payload object, stored as given.
-    /// The embed occupies one story unit. Receipt:
-    /// `{"revisionId": string|null}`. Errors when the payload is not an
-    /// object.
+    /// Inserts one inline image embed at `(story, para_id, offset)`, or after
+    /// the tables and breaks that open that paragraph slot when the location
+    /// is ahead of them. `payload_json` is the image's authored payload object,
+    /// stored as given. The embed occupies one story unit. Receipt:
+    /// `{"revisionId": string|null, "range": YrsStoryRange}`, the range being
+    /// where the image landed. Errors when the payload is not an object.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_image(
         &self,
@@ -2836,7 +2853,7 @@ impl EditSession {
                     .collect(),
             )
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(landed_receipt(receipt).to_string())
     }
 
     /// Sets the authored `value` (any JSON) on the content-control embed

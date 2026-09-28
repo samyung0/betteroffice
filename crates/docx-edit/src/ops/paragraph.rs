@@ -29,6 +29,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionM
 
 use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
+use crate::ops::text::suggest_delete;
 use crate::ops::{
     ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, revision_id_in_range, snapshot_range,
@@ -472,10 +473,16 @@ impl EditingDoc {
     /// pilcrow rather than authoring a second, contradictory revision.
     ///
     /// A survivor that opens with a table, block content control or page or
-    /// column break is not merged into, as in Word: the op changes nothing,
-    /// so text never goes ahead of such a block in one paragraph slot.
+    /// column break is not merged into, so text never goes ahead of such a
+    /// block in one paragraph slot. As in Word the op removes a leading page
+    /// or column break instead, and before a table or content control it
+    /// removes the paragraph when that holds nothing but its mark (the
+    /// survivor keeps its own properties) and changes nothing otherwise. The
+    /// paragraph between two tables is never empty here: it belongs to the
+    /// first table's slot, so the tables are never joined.
     ///
-    /// The receipt's range is the caret position after the merge. Errors when
+    /// The receipt's range is the caret position after the merge: where the
+    /// caret was, unless the paragraph it was in is gone. Errors when
     /// the paragraph is unknown, when merging forward from a story's last
     /// paragraph, and when merging backward from its first.
     pub fn merge_paragraphs(
@@ -513,31 +520,55 @@ impl EditingDoc {
         let survivor = &targets[boundary_index + 1];
         let story = boundary.story.clone();
         let pilcrow_index = boundary.bounds.pilcrow;
-        let opens_with_block = snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
-            .first()
-            .is_some_and(|chunk| match &chunk.kind {
-                ChunkKind::Embed(Some(map)) => {
-                    is_block_embed(&map_string(map, &txn, KIND_KEY).unwrap_or_default())
-                }
-                _ => false,
-            });
-        if opens_with_block {
-            let caret = crate::op::loc_range_in_txn(
-                &boundary.story_id,
-                &story,
-                &txn,
-                pilcrow_index,
-                pilcrow_index,
-            )?;
-            return Ok(Receipt {
-                range: Some(caret),
-                ..Receipt::default()
-            });
-        }
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
             .flatten();
+        let lead = snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+            .first()
+            .and_then(|chunk| match &chunk.kind {
+                ChunkKind::Embed(Some(map)) => {
+                    map_string(map, &txn, KIND_KEY).filter(|kind| is_block_embed(kind))
+                }
+                _ => None,
+            });
+        if let Some(lead) = lead {
+            // Text never goes ahead of a block in one slot, so as in Word the
+            // merge takes out what separates the two paragraphs instead.
+            let stays = match direction {
+                MergeDirection::Forward => pilcrow_index,
+                MergeDirection::Backward => pilcrow_index + 1,
+            };
+            let (removed, caret) = match lead.as_str() {
+                "pageBreak" | "columnBreak" => (Some(pilcrow_index + 1), stays),
+                // An empty paragraph before a table or content control goes;
+                // one with content stays, and so do the paragraph and table
+                // between two tables, which are never joined.
+                _ if boundary.bounds.start == pilcrow_index => (Some(pilcrow_index), pilcrow_index),
+                _ => (None, stays),
+            };
+            let mut revision_id = None;
+            if let Some(at) = removed {
+                if own_insert.is_some() || !ctx.is_suggesting() {
+                    story.remove_range(&mut txn, at, 1);
+                } else {
+                    let chunks = snapshot_range(&story, &txn, pilcrow_index, pilcrow_index + 2);
+                    let id = adjacent_revision_id(&chunks, at, DEL, &ctx.author)
+                        .unwrap_or_else(|| self.next_id());
+                    let revision = revision_value(&id, &ctx.revision_author());
+                    let outcome =
+                        suggest_delete(&mut txn, &story, ctx, &revision, at, at + 1, &chunks);
+                    revision_id = (outcome.removed == 0).then_some(id);
+                }
+            }
+            let caret =
+                crate::op::loc_range_in_txn(&boundary.story_id, &story, &txn, caret, caret)?;
+            return Ok(Receipt {
+                new_para_ids: Vec::new(),
+                revision_ids: revision_id.into_iter().collect(),
+                range: Some(caret),
+            });
+        }
         let revision_id = (ctx.is_suggesting() && own_insert.is_none()).then(|| {
             let chunks = snapshot_range(
                 &story,
