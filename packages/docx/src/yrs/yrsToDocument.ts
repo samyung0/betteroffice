@@ -2122,10 +2122,17 @@ export function noteYrsStoriesDirty(
 
 const EMPTY_BLOCKS: BlockContent[] = [];
 
+/** `w14:paraId` is eight hex digits below this; docx-parse re-mints any other value. */
+const PARA_ID_LIMIT = 0x7fffffff;
+const isParaId = (id: string): boolean =>
+  /^[0-9A-Fa-f]{8}$/.test(id) && parseInt(id, 16) < PARA_ID_LIMIT;
+
 class SaveContext {
   readonly storyIds: Set<string>;
   readonly projectedComments: Comment[];
   private readonly baseParagraphs: Map<string, Paragraph>;
+  /** Every `w14:paraId` the base holds, then each one minted by {@link savedParaId}. */
+  private readonly paraIds: Set<number>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
@@ -2144,6 +2151,7 @@ class SaveContext {
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
+    this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
     this.baseStories = collectBaseStories(base);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
@@ -2151,6 +2159,23 @@ class SaveContext {
     // Hooked projections (checkpoint export, rebase) run once and must see
     // every block, so they neither read nor fill the session cache.
     this.bypassMemo = trackStories || onEmbed !== undefined || onParagraph !== undefined;
+  }
+
+  /**
+   * The `w14:paraId` a story paragraph saves with. A source id is kept. An
+   * editor id (`<client>:<clock>`, or a seeded `body:pN` that moved) is no
+   * ST_LongHexNumber, so it saves as a hex id hashed from it and probed past
+   * every id already taken; the same state always saves the same ids.
+   */
+  private savedParaId(id: string): string {
+    if (isParaId(id)) return id;
+    let hash = 2166136261;
+    for (let index = 0; index < id.length; index += 1)
+      hash = Math.imul(hash ^ id.charCodeAt(index), 16777619);
+    let value = ((hash >>> 0) % (PARA_ID_LIMIT - 1)) + 1;
+    while (this.paraIds.has(value)) value = (value % (PARA_ID_LIMIT - 1)) + 1;
+    this.paraIds.add(value);
+    return value.toString(16).toUpperCase().padStart(8, '0');
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -2315,7 +2340,7 @@ class SaveContext {
         const savedParaId =
           segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
             ? ''
-            : segment.paraId;
+            : this.savedParaId(segment.paraId);
         const baseParagraph =
           this.baseParagraphs.get(segment.paraId) ??
           (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
