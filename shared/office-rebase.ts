@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { commentOoxmlIds } from "../packages/docx/src/yrs/comments";
 
 /**
  * Lands the edits saved after a capture (latest − captured) on seed(export).
@@ -45,24 +46,54 @@ export const DOCX_LINEAGE: Lineage = {
       return (
         value as Array<{ story: string; start: Uint8Array; end: Uint8Array }>
       ).map(({ story, start, end }) => {
+        const source = from.getMap("stories").get(story);
         const target = to.getMap("stories").get(id(story));
-        if (!(target instanceof Y.Text))
+        if (!(source instanceof Y.Text) || !(target instanceof Y.Text))
           fail(`comment anchor story ${story} is missing`);
-        const at = (bytes: Uint8Array) => {
+        const resolve = (bytes: Uint8Array) => {
           const position = Y.createAbsolutePositionFromRelativePosition(
             Y.decodeRelativePosition(bytes),
             from
           );
           if (!position) fail("a comment anchor no longer resolves");
-          return Y.encodeRelativePosition(
+          return position!;
+        };
+        const [first, last] = [resolve(start), resolve(end)];
+        // Both stories hold the later edits, so they differ only where the
+        // export wrote the text its own way; an anchor there cannot land.
+        const f = align(units(source as Y.Text), units(target as Y.Text));
+        let [startAt, endAt] = [
+          pointAt(f, first.index),
+          pointAt(f, last.index),
+        ];
+        if (last.index > first.index) {
+          const covered = f.map.subarray(first.index, last.index);
+          if (
+            covered[0] < 0 ||
+            covered.some((unit, index) => unit !== covered[0] + index)
+          )
+            fail(
+              "a comment anchor covers content the export wrote differently"
+            );
+          [startAt, endAt] = [covered[0], covered[0] + covered.length];
+        }
+        if (startAt === undefined || endAt === undefined)
+          fail(
+            "a comment anchor lands in content the export wrote differently"
+          );
+        const at = (index: number, assoc: number) =>
+          Y.encodeRelativePosition(
             Y.createRelativePositionFromTypeIndex(
               target as Y.Text,
-              position!.index,
-              position!.assoc
+              index,
+              assoc
             )
           );
+        return {
+          story: id(story),
+          start: at(startAt!, first.assoc),
+          end: at(endAt!, last.assoc),
         };
-        return { story: id(story), start: at(start), end: at(end) };
       });
     },
   },
@@ -591,7 +622,8 @@ function childAtOffset(text: Y.Text, offset: number): unknown {
 /**
  * Captured DOCX story, paragraph and comment ids to seed(export)'s: stories by
  * their place, nested ones through their tables and content controls,
- * paragraphs by their marks' positions.
+ * paragraphs by their marks' positions, comments by the numeric id a save
+ * writes for them.
  */
 export function docxIds(
   captured: Uint8Array,
@@ -636,8 +668,11 @@ export function docxIds(
     for (const key of stories[0].keys())
       if (/^(body|(hf|fn|en):[^:]+)$/.test(key) && stories[1].has(key))
         pair(key, key);
-    for (const key of from.getMap("comments").keys())
-      if (to.getMap("comments").has(key)) ids.set(key, key);
+    const comments = [...from.getMap("comments").entries()]
+      .filter(([, comment]) => comment instanceof Y.Map)
+      .map(([key]) => key);
+    for (const [key, saved] of commentOoxmlIds(comments))
+      if (to.getMap("comments").has(String(saved))) ids.set(key, String(saved));
     return ids;
   } finally {
     from.destroy();

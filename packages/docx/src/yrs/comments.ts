@@ -12,27 +12,34 @@ export function commentNumericId(id: string): number {
   return hash >>> 1;
 }
 
+/** The collision-free OOXML numeric id a save writes for each shared comment key. */
+export function commentOoxmlIds(keys: Iterable<string>): Map<string, number> {
+  const sorted = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const ids = new Map<string, number>();
+  const used = new Set<number>();
+  for (const key of sorted) {
+    if (/^\d+$/.test(key) && Number(key) <= 0x7fffffff) {
+      ids.set(key, Number(key));
+      used.add(Number(key));
+    }
+  }
+  for (const key of sorted) {
+    if (ids.has(key)) continue;
+    let id = commentNumericId(key);
+    while (used.has(id)) id = (id + 1) & 0x7fffffff;
+    ids.set(key, id);
+    used.add(id);
+  }
+  return ids;
+}
+
 /** Projects stable shared keys into collision-free OOXML numeric IDs. */
 export function projectYrsComments(
   session: Pick<YrsSession, 'listComments'>,
   base: readonly Comment[] = []
 ): Comment[] {
   const records = session.listComments().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const ids = new Map<string, number>();
-  const used = new Set<number>();
-  for (const record of records) {
-    if (/^\d+$/.test(record.id) && Number(record.id) <= 0x7fffffff) {
-      ids.set(record.id, Number(record.id));
-      used.add(Number(record.id));
-    }
-  }
-  for (const record of records) {
-    if (ids.has(record.id)) continue;
-    let id = commentNumericId(record.id);
-    while (used.has(id)) id = (id + 1) & 0x7fffffff;
-    ids.set(record.id, id);
-    used.add(id);
-  }
+  const ids = commentOoxmlIds(records.map((record) => record.id));
   const originals = new Map(base.map((comment) => [commentSharedId(comment), comment]));
   return records
     .filter((record) => record.parentId === null || ids.has(record.parentId))

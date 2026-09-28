@@ -1258,10 +1258,10 @@ export async function rebaseOffice(
         randomInt(1, 0x1fffffffffff)
       );
     } catch (error) {
-      if (error instanceof WebAssembly.RuntimeError) throw error;
-      throw new RebaseError(
-        `Office rebase: ${error instanceof Error ? error.message : String(error)}`
-      );
+      // The engine reports a refusal as a thrown string; a trap or a glue
+      // error (an Error) is not a refusal and stays retryable.
+      if (typeof error !== "string") throw error;
+      throw new RebaseError(`Office rebase: ${error}`);
     }
     const checkpoint = {
       format,
@@ -1333,7 +1333,13 @@ export async function rebaseOffice(
     await officeBaseline(baseBytes, latest)
   );
   // DOCX formatting passes through an export as its own representation, so
-  // unchanged formatting may read differently; text and images may not.
+  // unchanged formatting may read differently, and so does the structure of
+  // a comment body (the export adds its reference run); text and images may
+  // not.
+  const docxComment = (effect: NetEffect, value: string | undefined) =>
+    format === "docx" && effect.id.startsWith("comment:") && value
+      ? commentText(value)
+      : value;
   const change = (list: NetEffect[]) =>
     list
       .filter((effect) => format === "pptx" || effect.kind !== "visual")
@@ -1341,8 +1347,8 @@ export async function rebaseOffice(
         JSON.stringify([
           effect.operation,
           effect.kind,
-          effect.before,
-          effect.after,
+          docxComment(effect, effect.before),
+          docxComment(effect, effect.after),
           effect.imageSHA256,
         ])
       )
@@ -1352,6 +1358,24 @@ export async function rebaseOffice(
       "Office rebase: the rebased state does not carry the saved edits"
     );
   return { state, effects };
+}
+
+/** A DOCX comment entry's author and visible text. */
+function commentText(value: string): string {
+  const texts: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) node.forEach(walk);
+    else if (node && typeof node === "object")
+      for (const [key, child] of Object.entries(node))
+        if (key === "text" && typeof child === "string") texts.push(child);
+        else walk(child);
+  };
+  const { author, body } = JSON.parse(value) as {
+    author: unknown;
+    body: unknown;
+  };
+  walk(body);
+  return JSON.stringify([author, texts.join("")]);
 }
 
 /** The export keeps every package part a later edit may still name: it rewrites owned XML only. */

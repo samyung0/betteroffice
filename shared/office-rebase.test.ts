@@ -654,6 +654,136 @@ test("a DOCX table that concurrent edits put after text in its slot follows that
   await expect(rebase()).rejects.toThrow("has no counterpart in the export");
 });
 
+/** The units a comment covers, `[kind]` for an embed. */
+function covered(session: YrsSession, commentId: string): string {
+  const [anchor] = session.resolveComment(commentId);
+  const all = session
+    .storySegments("body")
+    .flatMap((segment) =>
+      segment.kind === "text"
+        ? [...segment.text]
+        : [segment.kind === "pilcrow" ? "¶" : `[${segment.embedKind}]`]
+    );
+  return all.slice(anchor.start, anchor.end).join("");
+}
+const comment = (
+  session: YrsSession,
+  paraId: string,
+  start: number,
+  end: number
+) =>
+  session.addComment(
+    [
+      {
+        story: "body",
+        start: { paraId, offset: start },
+        end: { paraId, offset: end },
+      },
+    ],
+    "Reviewer",
+    "2026-09-28T00:00:00Z",
+    [{ type: "paragraph", content: [] }]
+  ).commentId;
+
+test("a DOCX comment added after the capture covers the same text where the export moved a table", async () => {
+  const concurrent = await blockAfterText(beforeAfter, (session, at) =>
+    session.insertTable(at, 1, 1)
+  );
+  let commentId = "";
+  let refused = "";
+  const { exported, latest, rebase } = await publishDocx(
+    beforeAfter,
+    (session) => session.loadState(concurrent),
+    (session) => {
+      const [slot] = session.paragraphs("body");
+      commentId = comment(session, slot.paraId, 0, 4);
+      // A comment over the table the export moved has nowhere to land.
+      refused = comment(session, slot.paraId, 5, 8);
+      expect(covered(session, commentId)).toBe("Befo");
+      expect(covered(session, refused)).toBe("e[table]A");
+    }
+  );
+  await expect(rebase()).rejects.toThrow(
+    "a comment anchor covers content the export wrote differently"
+  );
+  // Without it, the other lands on the text it covered.
+  const later = await docxSession(beforeAfter, latest);
+  try {
+    later.applyRawOps("body", [{ op: "removeComment", id: refused }]);
+    const rebased = await rebaseOffice(
+      beforeAfter,
+      checkpoint("docx", beforeAfter, concurrent),
+      checkpoint("docx", beforeAfter, later.encodeState()),
+      exported
+    );
+    const current = await docxSession(exported, rebased.state);
+    try {
+      expect(units(current)).toBe("[table]BeforeAfter¶");
+      expect(covered(current, commentId)).toBe("Befo");
+    } finally {
+      current.destroy();
+    }
+  } finally {
+    later.destroy();
+  }
+});
+
+test("a DOCX comment made before the capture can be changed and removed after it", async () => {
+  const base = docx(
+    `${paragraph("11111111", "First paragraph")}${paragraph(
+      "22222222",
+      "Second paragraph"
+    )}`
+  );
+  for (const change of ["patch", "remove"] as const) {
+    let commentId = "";
+    const { exported, rebase } = await publishDocx(
+      base,
+      (session) => {
+        commentId = comment(session, "11111111", 0, 5);
+      },
+      (session) => {
+        // The export saves the comment under a numeric id of its own.
+        session.applyRawOps("body", [
+          change === "patch"
+            ? {
+                op: "patchComment",
+                id: commentId,
+                fields: {
+                  done: true,
+                  body: [
+                    {
+                      type: "paragraph",
+                      content: [
+                        {
+                          type: "run",
+                          content: [{ type: "text", text: "Edited" }],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }
+            : { op: "removeComment", id: commentId },
+        ]);
+      }
+    );
+    const current = await docxSession(exported, (await rebase()).state);
+    try {
+      const comments = current.listComments();
+      if (change === "remove") expect(comments).toEqual([]);
+      else {
+        expect(comments).toHaveLength(1);
+        expect(comments[0].done).toBe(true);
+        expect(JSON.stringify(comments[0].body)).toContain("Edited");
+        expect(covered(current, comments[0].id)).toBe("First");
+      }
+    } finally {
+      current.destroy();
+    }
+  }
+});
+
 test("a DOCX edit inside a run with a complex-script theme font rebases with that font", async () => {
   const base = docx(
     `${paragraph(
