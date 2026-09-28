@@ -1421,21 +1421,62 @@ function storyUnits(content: ParagraphContent): number {
   }
 }
 
-function splitTextRun(run: Run, offset: number): [Run | null, Run | null] {
-  if (!run.content.every((content) => content.type === 'text')) return [run, null];
-  const text = run.content.map((content) => (content.type === 'text' ? content.text : '')).join('');
-  const make = (part: string): Run | null =>
-    part
-      ? {
-          type: 'run',
-          ...(run.formatting ? { formatting: run.formatting } : {}),
-          ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
-          content: [{ type: 'text', text: part }],
-        }
-      : null;
-  return [make(text.slice(0, offset)), make(text.slice(offset))];
+/** Bookmark offsets count story units, but an inline content control as 2 (seed.rs `paragraph_attrs`). */
+const bookmarkUnits = (content: ParagraphContent): number =>
+  content.type === 'inlineSdt' ? 2 : storyUnits(content);
+
+/**
+ * `content` split `offset` story units in, or null where it cannot split: a
+ * run splits between its entries or inside text, a tracked change around its
+ * run; a hyperlink or field stays whole.
+ */
+function splitContent(
+  content: ParagraphContent,
+  offset: number
+): [ParagraphContent, ParagraphContent] | null {
+  if (
+    (content.type === 'insertion' ||
+      content.type === 'deletion' ||
+      content.type === 'moveFrom' ||
+      content.type === 'moveTo') &&
+    content.content.length === 1 &&
+    content.content[0]!.type === 'run'
+  ) {
+    const halves = splitContent(content.content[0]!, offset) as [Run, Run] | null;
+    if (!halves) return null;
+    return [
+      { ...content, content: [halves[0]] },
+      { ...content, content: [halves[1]] },
+    ];
+  }
+  if (content.type !== 'run') return null;
+  const left: RunContent[] = [];
+  const right: RunContent[] = [];
+  let units = 0;
+  for (const entry of content.content) {
+    const width = runContentUnits(entry);
+    if (units + width <= offset) left.push(entry);
+    else if (units >= offset) right.push(entry);
+    else if (entry.type === 'text') {
+      left.push({ type: 'text', text: entry.text.slice(0, offset - units) });
+      right.push({ type: 'text', text: entry.text.slice(offset - units) });
+    } else return null;
+    units += width;
+  }
+  const half = (entries: RunContent[]): Run => ({
+    type: 'run',
+    ...(content.formatting ? { formatting: content.formatting } : {}),
+    ...(content.propertyChanges ? { propertyChanges: content.propertyChanges } : {}),
+    content: entries,
+  });
+  return [half(left), half(right)];
 }
 
+/**
+ * Places each boundary `offset` units (by `measure`) into `content`. A
+ * boundary inside content that cannot split moves to that content's edge, so
+ * its range widens to hold the content whole.
+ */
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
@@ -1463,27 +1504,25 @@ function insertBoundaries(
 
   emit(0);
   for (const item of content) {
-    const length = measure(item);
-    const inside = sorted
-      .slice(boundaryIndex)
-      .map((boundary) => boundary.offset)
-      .filter((offset) => offset > cursor && offset < cursor + length);
-    if (item.type === 'run' && item.content.every((entry) => entry.type === 'text')) {
-      let remaining: Run | null = item;
-      let localCursor = 0;
-      for (const absolute of inside) {
-        if (!remaining) break;
-        const [left, right] = splitTextRun(remaining, absolute - cursor - localCursor);
-        if (left) result.push(left);
-        emit(absolute);
-        remaining = right;
-        localCursor = absolute - cursor;
+    const end = cursor + measure(item);
+    let rest = item;
+    let restStart = cursor;
+    const widened: ParagraphContent[] = [];
+    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+      const boundary = sorted[boundaryIndex];
+      const halves = splitContent(rest, boundary.offset - restStart);
+      if (halves) {
+        result.push(halves[0]);
+        emit(boundary.offset);
+        [rest, restStart] = [halves[1], boundary.offset];
+      } else {
+        boundaryIndex += 1;
+        if (boundary.kind === 'start') result.push(makeMarker(boundary));
+        else widened.push(makeMarker(boundary));
       }
-      if (remaining) result.push(remaining);
-    } else {
-      result.push(item);
     }
-    cursor += length;
+    result.push(rest, ...widened);
+    cursor = end;
     emit(cursor);
   }
   emit(cursor);
@@ -1562,11 +1601,11 @@ function paragraphFromStory(
     ...boundary,
     offset:
       boundary.offset === Number.MAX_SAFE_INTEGER
-        ? content.reduce((sum, child) => sum + paragraphContentLength(child), 0)
+        ? content.reduce((sum, child) => sum + bookmarkUnits(child), 0)
         : boundary.offset,
   }));
   if (bookmarks.length > 0) {
-    content = insertBoundaries(content, bookmarks, paragraphContentLength, (rawBoundary) => {
+    content = insertBoundaries(content, bookmarks, bookmarkUnits, (rawBoundary) => {
       const boundary = rawBoundary as BookmarkBoundary;
       return boundary.kind === 'start'
         ? {
@@ -2293,6 +2332,8 @@ class SaveContext {
     const segments = this.session.storySegments(storyId);
     let items: InlineItem[] = [];
     let paragraphStart = 0;
+    // Past a table, content control or break that opens the paragraph's slot.
+    let contentStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
     let candidatesByKey: Map<string, BlockContent[]> | null = null;
@@ -2332,10 +2373,12 @@ class SaveContext {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
         if (range.start >= paragraphStart && range.start <= end) {
-          boundaries.push({ id: range.id, kind: 'start', offset: range.start - paragraphStart });
+          const offset = Math.max(0, range.start - contentStart);
+          boundaries.push({ id: range.id, kind: 'start', offset });
         }
         if (range.end >= paragraphStart && range.end <= end) {
-          boundaries.push({ id: range.id, kind: 'end', offset: range.end - paragraphStart });
+          const offset = Math.max(0, range.end - contentStart);
+          boundaries.push({ id: range.id, kind: 'end', offset });
         }
       }
       return boundaries;
@@ -2465,7 +2508,7 @@ class SaveContext {
         items = [];
         paragraphIndex += 1;
         storyOffset += 1;
-        paragraphStart = storyOffset;
+        paragraphStart = contentStart = storyOffset;
         continue;
       }
 
@@ -2581,6 +2624,7 @@ class SaveContext {
       }
       if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
+      if (items.length === 0) contentStart = storyOffset;
     }
     if (flowUnits) settle();
 
