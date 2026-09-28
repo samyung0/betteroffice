@@ -1406,3 +1406,111 @@ fn page_content_dedupes_split_paragraph_fragments() {
         None
     );
 }
+
+// Slots that open with a table or page break
+
+/// Units as text: `¶` a pilcrow, `[kind]` any other embed.
+fn slot_units(doc: &EditingDoc) -> String {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .map(|segment| match segment.content {
+            SegmentContent::Text(text) => text,
+            SegmentContent::Pilcrow(_) => "¶".to_owned(),
+            SegmentContent::OtherEmbed { kind, .. } => format!("[{kind}]"),
+        })
+        .collect()
+}
+
+/// `Before¶[pageBreak]Chapter¶`: a page break opens the second slot.
+fn page_break_slot() -> (EditingDoc, ParagraphId, ParagraphId) {
+    let (doc, _) = doc_with("BeforeChapter");
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 6), None)
+        .unwrap();
+    doc.insert_embed(&ctx(), Position::new("body", 7), "pageBreak", vec![])
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[pageBreak]Chapter¶");
+    (doc, split.first_para_id, split.second_para_id)
+}
+
+#[test]
+fn a_merge_into_a_slot_that_opens_with_a_page_break_changes_nothing() {
+    for suggesting in [false, true] {
+        let (doc, first, second) = page_break_slot();
+        let context = if suggesting { sug("Bob") } else { ctx() };
+        let before = doc.encode_state_as_update_v1();
+        let forward = doc
+            .merge_paragraphs(&context, &first, MergeDirection::Forward)
+            .unwrap();
+        doc.merge_paragraphs(&context, &second, MergeDirection::Backward)
+            .unwrap();
+        assert_eq!(slot_units(&doc), "Before¶[pageBreak]Chapter¶");
+        assert_eq!(doc.encode_state_as_update_v1(), before);
+        assert_eq!(forward.range.unwrap().start, Loc::new("body", first, 6));
+    }
+}
+
+#[test]
+fn a_merge_into_a_slot_that_opens_with_a_table_changes_nothing() {
+    let (doc, _) = doc_with("BeforeAfter");
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 6), None)
+        .unwrap();
+    doc.insert_table(&ctx(), Position::new("body", 7), 1, 1)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
+    doc.merge_paragraphs(&ctx(), &split.first_para_id, MergeDirection::Forward)
+        .unwrap();
+    doc.merge_paragraphs(&ctx(), &split.second_para_id, MergeDirection::Backward)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
+}
+
+#[test]
+fn inline_content_meant_ahead_of_a_slot_opening_block_lands_after_it() {
+    let (doc, _, second) = page_break_slot();
+    let receipt = doc
+        .insert_text(
+            &ctx(),
+            Position::new("body", 7),
+            "Typed ",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[pageBreak]Typed Chapter¶");
+    assert_eq!(
+        receipt.range.unwrap(),
+        LocRange::new(
+            Loc::new("body", second.clone(), 1),
+            Loc::new("body", second, 7)
+        )
+    );
+    doc.insert_tab(&ctx(), Position::new("body", 7)).unwrap();
+    doc.insert_hard_break(&ctx(), Position::new("body", 7))
+        .unwrap();
+    doc.replace_range(&ctx(), StoryRange::new("body", 7, 7), "x")
+        .unwrap();
+    assert_eq!(
+        slot_units(&doc),
+        "Before¶[pageBreak]x[break]\tTyped Chapter¶"
+    );
+    // A block goes where it is asked to: a second break also opens the slot.
+    doc.insert_embed(&ctx(), Position::new("body", 7), "pageBreak", vec![])
+        .unwrap();
+    assert_eq!(
+        slot_units(&doc),
+        "Before¶[pageBreak][pageBreak]x[break]\tTyped Chapter¶"
+    );
+}
+
+#[test]
+fn a_replacement_of_a_leading_block_lands_after_the_blocks_left() {
+    let (doc, _, _) = page_break_slot();
+    doc.insert_embed(&ctx(), Position::new("body", 7), "pageBreak", vec![])
+        .unwrap();
+    // Replacing the first of two leading breaks keeps the second ahead of the text.
+    doc.replace_range(&ctx(), StoryRange::new("body", 7, 8), "Typed ")
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[pageBreak]Typed Chapter¶");
+}

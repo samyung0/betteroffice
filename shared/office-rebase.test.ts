@@ -1,7 +1,11 @@
 import { beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import * as Y from "yjs";
-import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
+import {
+  createYrsSession,
+  type YrsLoc,
+  type YrsSession,
+} from "../packages/docx/src/yrs";
 import { rezipContainer } from "../packages/docx/src/wasm/opc";
 import { PptxDocument } from "../packages/pptx/src/wasm/generated/pptx_wasm.js";
 import {
@@ -575,50 +579,74 @@ test("a DOCX page break whose paragraph was edited before the capture rebases ex
   }
 });
 
-test("DOCX text typed ahead of a page break in its paragraph slot stays ahead of it, and edits to it rebase", async () => {
+/**
+ * `Before` merged into `After` on one replica while another opens After's
+ * slot with `block`: together they put text ahead of that block in one slot,
+ * which neither editor allows on its own.
+ */
+async function blockAfterText(
+  base: Uint8Array,
+  block: (session: YrsSession, at: YrsLoc) => void
+): Promise<Uint8Array> {
+  const left = await docxSession(base);
+  const right = await createYrsSession({ clientId: 4102 });
+  try {
+    right.openDocx(base, false);
+    right.loadState(left.encodeState());
+    const [before, after] = left.paragraphs("body");
+    block(left, { story: "body", paraId: after.paraId, offset: 0 });
+    right.mergeParagraphs("body", before.paraId);
+    const merged = new Y.Doc();
+    Y.applyUpdate(merged, left.encodeState());
+    Y.applyUpdate(merged, right.encodeState());
+    return Y.encodeStateAsUpdate(merged);
+  } finally {
+    left.destroy();
+    right.destroy();
+  }
+}
+const beforeAfter = docx(
+  `${paragraph("11111111", "Before")}${paragraph("22222222", "After")}`
+);
+
+test("DOCX text that concurrent edits put ahead of a page break in its slot stays ahead of it, and edits to it rebase", async () => {
+  const concurrent = await blockAfterText(beforeAfter, (session, at) =>
+    session.insertPageBreak(at)
+  );
   const { exported, latest, rebase } = await publishDocx(
-    pageBreakParagraphs,
-    // The page break opens Chapter's slot; offset 0 lands ahead of it.
-    (session) =>
-      session.insertText(
-        { story: "body", paraId: "44444444", offset: 0 },
-        "Typed "
-      ),
+    beforeAfter,
+    (session) => session.loadState(concurrent),
     (session) =>
       session.deleteRange({
         story: "body",
-        start: { paraId: "44444444", offset: 1 },
-        end: { paraId: "44444444", offset: 3 },
+        start: { paraId: session.paragraphs("body")[0].paraId, offset: 1 },
+        end: { paraId: session.paragraphs("body")[0].paraId, offset: 3 },
       })
   );
   const current = await docxSession(exported, (await rebase()).state);
-  const later = await docxSession(pageBreakParagraphs, latest);
+  const later = await docxSession(beforeAfter, latest);
   try {
     // The export keeps the break between the texts; seeded again it closes
     // the paragraph, where the seed places every break after visible text.
     expect(text(current)).toEqual(text(later));
-    expect(units(later)).toBe("Before¶¶Ted [pageBreak]Chapter¶");
-    expect(units(current)).toBe("Before¶¶Ted Chapter¶[pageBreak]");
+    expect(units(later)).toBe("Bore[pageBreak]After¶");
+    expect(units(current)).toBe("BoreAfter¶[pageBreak]");
   } finally {
     current.destroy();
     later.destroy();
   }
 });
 
-test("a DOCX table that text typed ahead of it in its paragraph slot follows in the export refuses later edits", async () => {
-  const base = docx(
-    `${paragraph("11111111", "Before")}${table([["cell"]])}${paragraph(
-      "22222222",
-      "After"
-    )}`
+test("a DOCX table that concurrent edits put after text in its slot follows that text in the export and refuses later edits", async () => {
+  const concurrent = await blockAfterText(beforeAfter, (session, at) =>
+    session.insertTable(at, 1, 1)
   );
   const { rebase } = await publishDocx(
-    base,
-    (session) =>
-      session.insertText(
-        { story: "body", paraId: "22222222", offset: 0 },
-        "Typed "
-      ),
+    beforeAfter,
+    (session) => {
+      session.loadState(concurrent);
+      expect(units(session)).toBe("Before[table]After¶");
+    },
     // The export writes the text after the table, so the rebase lands edits
     // to the text but not to the table it no longer matches.
     (session) => session.deleteTable({ story: "body", tableIndex: 0 })

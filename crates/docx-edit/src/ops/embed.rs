@@ -5,6 +5,7 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot_range};
+use crate::segments::is_block_embed;
 use crate::{
     EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PILCROW_KIND, Position, check_position,
     insertion_attrs, is_pilcrow, out_len, revision_value, story_ref,
@@ -133,9 +134,11 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Inserts a non-pilcrow map-backed embed at the exact story position.
-    /// The caller supplies the typed kind/payload vocabulary; suggesting mode
-    /// stamps the embed with one insertion revision.
+    /// Inserts a non-pilcrow map-backed embed at the exact story position,
+    /// except that an inline embed meant ahead of the tables or breaks that
+    /// open a paragraph slot lands after them. The caller supplies the typed
+    /// kind/payload vocabulary; suggesting mode stamps the embed with one
+    /// insertion revision.
     pub fn insert_embed(
         &self,
         ctx: &EditCtx,
@@ -151,6 +154,14 @@ impl EditingDoc {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
+        let at = if is_block_embed(kind) {
+            at
+        } else {
+            Position::new(
+                &at.story,
+                self.inline_landing(&at.story, at.index, at.index)?,
+            )
+        };
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;

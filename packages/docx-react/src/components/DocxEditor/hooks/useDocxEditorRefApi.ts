@@ -294,8 +294,20 @@ export function useDocxEditorRefApi({
           paraId: located.paragraph.paraId,
           offset: located.paragraph.text.length,
         };
-        if (options.type === 'page') session.insertPageBreak(at);
-        else if (options.type === 'sectionNextPage') {
+        if (options.type === 'page') {
+          // The break opens the next paragraph slot, never follows text in
+          // its own; the last paragraph is split to make that slot.
+          const paragraphs = session.paragraphs(located.story);
+          const next =
+            paragraphs[paragraphs.findIndex((paragraph) => paragraph.paraId === at.paraId) + 1];
+          const end = session
+            .paragraphSpans(located.story)
+            .find((span) => span.paraId === at.paraId)!.length;
+          const paraId = next
+            ? next.paraId
+            : session.splitParagraph({ ...at, offset: end }).secondParaId;
+          session.insertPageBreak({ story: located.story, paraId, offset: 0 });
+        } else if (options.type === 'sectionNextPage') {
           session.insertSectionBreak(at, 'nextPage');
         } else if (options.type === 'sectionContinuous') {
           session.insertSectionBreak(at, 'continuous');

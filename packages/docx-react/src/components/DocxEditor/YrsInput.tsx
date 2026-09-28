@@ -462,13 +462,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i];
             if (piece || (i === 0 && hasSelection)) {
-              const insertedAt = caret;
-              if (i === 0 && hasSelection) {
-                session.replaceRange(selectedRange, piece, suggestingAuthor());
-              } else {
-                session.insertText(caret, piece, suggestingAuthor());
-              }
-              caret = { ...caret, offset: caret.offset + piece.length };
+              // Text lands after the tables or breaks opening its paragraph slot.
+              const { range: landed } =
+                i === 0 && hasSelection
+                  ? session.replaceRange(selectedRange, piece, suggestingAuthor())
+                  : session.insertText(caret, piece, suggestingAuthor());
+              const insertedAt = { story: landed.story, ...landed.start };
+              caret = { story: landed.story, ...landed.end };
               const insertedStored = storedFormattingByParagraphRef.current.get(
                 `${insertedAt.story}\u0000${insertedAt.paraId}`
               );

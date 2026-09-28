@@ -367,6 +367,18 @@ impl EditingDoc {
         Ok(index)
     }
 
+    /// Where inline content replacing `[start, end)` lands: after the tables,
+    /// block content controls and page or column breaks that still open its
+    /// paragraph slot once the range is gone. Inline content never goes ahead
+    /// of them in one slot, as in Word; the render bridge refuses that state.
+    pub(crate) fn inline_landing(&self, story_id: &str, start: u32, end: u32) -> EditResult<u32> {
+        let segments = self.segment_index(story_id)?;
+        Ok(match segments.para_at(start) {
+            Some(para) if end < para.node_start => start + (para.node_start - end),
+            _ => start,
+        })
+    }
+
     /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
     pub(crate) fn chunk_snapshot<T: ReadTxn>(
         &self,

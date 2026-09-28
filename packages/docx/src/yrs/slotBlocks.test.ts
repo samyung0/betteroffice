@@ -1,0 +1,144 @@
+import { beforeAll, describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
+import type { ResidentFontRequirement } from '../layout/measure';
+import { decodeFrameDelta } from '../layout/render/frameDelta';
+import { preloadEditWasm } from '../wasm/edit';
+import { preloadOpcWasm } from '../wasm/opc';
+import { preloadParseWasm } from '../wasm/parse';
+import { createYrsSession, type YrsSession } from './index';
+
+// Text never goes ahead of the tables or page breaks that open a paragraph
+// slot: the render bridge refuses that state, and Word never produces it.
+
+const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
+const FONT = resolve(
+  import.meta.dir,
+  '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+);
+const OFFICE_DOC = 'application/vnd.openxmlformats-officedocument';
+const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE_DOC}.wordprocessingml.document.main+xml"/></Types>`;
+const PACKAGE_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPkg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`;
+
+function fixture(body: string): Uint8Array {
+  const parts: PartsMap = new Map();
+  parts.set('[Content_Types].xml', toBytes(CONTENT_TYPES));
+  parts.set('_rels/.rels', toBytes(PACKAGE_RELS));
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`
+    )
+  );
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+const paragraph = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const PAGE_BREAK = `${paragraph('Before')}<w:p><w:r><w:br w:type="page"/></w:r></w:p>${paragraph(
+  'Chapter'
+)}`;
+const TABLE = `${paragraph('Before')}<w:tbl><w:tr><w:tc>${paragraph(
+  'cell'
+)}</w:tc></w:tr></w:tbl>${paragraph('After')}`;
+
+let clientId = 69100;
+async function open(body: string): Promise<YrsSession> {
+  const session = await createYrsSession({ clientId: (clientId += 1) });
+  session.openDocx(fixture(body), true);
+  return session;
+}
+const units = (session: YrsSession): string =>
+  session
+    .storySegments('body')
+    .map((segment) =>
+      segment.kind === 'text'
+        ? segment.text
+        : segment.kind === 'pilcrow'
+        ? '¶'
+        : `[${segment.embedKind}]`
+    )
+    .join('');
+const paraId = (session: YrsSession, index: number) => session.paragraphs('body')[index]!.paraId;
+
+describe('paragraph slots that open with a table or page break', () => {
+  beforeAll(() =>
+    Promise.all([
+      preloadEditWasm(new Uint8Array(readFileSync(WASM))),
+      preloadOpcWasm(),
+      preloadParseWasm(),
+    ])
+  );
+
+  it.each([
+    ['page break', PAGE_BREAK, 1, 'Before¶¶[pageBreak]Chapter¶'],
+    ['table', TABLE, 0, 'Before¶[table]After¶'],
+  ])(
+    'Delete at the end of the paragraph before a %s changes nothing',
+    async (_, body, index, seeded) => {
+      const session = await open(body);
+      try {
+        expect(units(session)).toBe(seeded);
+        const before = session.encodeState();
+        session.mergeParagraphs('body', paraId(session, index));
+        expect(units(session)).toBe(seeded);
+        expect(session.encodeState()).toEqual(before);
+      } finally {
+        session.destroy();
+      }
+    }
+  );
+
+  it.each([
+    ['page break', PAGE_BREAK, 2, 'Before¶¶[pageBreak]Typed Chapter¶'],
+    ['table', TABLE, 1, 'Before¶[table]Typed After¶'],
+  ])(
+    'an insert at offset 0 of a slot that opens with a %s lands after it',
+    async (_, body, index, typed) => {
+      const session = await open(body);
+      try {
+        const target = paraId(session, index);
+        const receipt = session.insertText({ story: 'body', paraId: target, offset: 0 }, 'Typed ');
+        expect(units(session)).toBe(typed);
+        expect(receipt.range).toEqual({
+          story: 'body',
+          start: { paraId: target, offset: 1 },
+          end: { paraId: target, offset: 7 },
+        });
+      } finally {
+        session.destroy();
+      }
+    }
+  );
+
+  it('typing at a resident caret ahead of a page break lands after it and keeps its order', async () => {
+    const session = await open(PAGE_BREAK);
+    try {
+      const document = session.materializeDocx()!;
+      const fontId = session.registerFont(new Uint8Array(readFileSync(FONT)));
+      const request = buildResidentRegionLayoutRequest(document, 24, {});
+      const requirements = JSON.parse(
+        session.layoutFontRequirementsJson(JSON.stringify(request))
+      ) as ResidentFontRequirement[];
+      request.measurement = {
+        fontChains: Object.fromEntries(
+          requirements.map((requirement) => [requirement.key, [fontId]])
+        ),
+        defaults: { fontSize: 11, fontFamily: 'Calibri' },
+        compat: { noLeading: false, doNotExpandShiftReturn: false },
+        authoritativeShaping: true,
+      };
+      session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+      session.setSelection({ story: 'body', paraId: paraId(session, 2), offset: 0 });
+      let epoch = decodeFrameDelta(session.buildDisplayListFrame('{}', 0)).frameEpoch;
+      for (const key of ['a', 'b'])
+        epoch = decodeFrameDelta(session.applyInput(key, epoch)).frameEpoch;
+      expect(units(session)).toBe('Before¶¶[pageBreak]abChapter¶');
+    } finally {
+      session.destroy();
+    }
+  });
+});

@@ -373,12 +373,14 @@ export class EditSession {
      */
     insert_table(story: string, para_id: string, offset: number, rows: number, columns: number, author_name?: string | null, author_date?: string | null): string;
     /**
-     * Inserts `text` at `(story, para_id, offset)`. It must contain no
-     * paragraph or line breaks, and it inherits the formatting at the
-     * insertion point. Receipt: `{"revisionId": string|null}` — non-null in
+     * Inserts `text` at `(story, para_id, offset)`, or after the tables and
+     * breaks that open that paragraph slot when the location is ahead of
+     * them. It must contain no paragraph or line breaks, and it inherits the
+     * formatting at the insertion point. Receipt: `{"revisionId":
+     * string|null, "range": YrsStoryRange}` — the revision is non-null in
      * suggesting mode, where the text is stamped `ins` and coalesces into an
      * adjacent insertion by the same author rather than opening a second
-     * revision.
+     * revision; the range is where the text landed.
      */
     insert_text(story: string, para_id: string, offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -557,7 +559,9 @@ export class EditSession {
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
      * the deletion and the insertion share one revision id. Receipt:
-     * `{"revisionId": string|null}`.
+     * `{"revisionId": string|null, "range": YrsStoryRange}`, the range being
+     * where the text landed (after the tables and breaks that open its
+     * paragraph slot).
      */
     replace_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**

@@ -146,6 +146,18 @@ fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSp
         })
 }
 
+/// `{"revisionId", "range"}` of an insertion, the range being where it landed.
+fn landed_receipt(receipt: crate::Receipt) -> Value {
+    let range = receipt.range.map(|range| {
+        json!({
+            "story": range.start.story,
+            "start": { "paraId": range.start.para, "offset": range.start.offset },
+            "end": { "paraId": range.end.para, "offset": range.end.offset },
+        })
+    });
+    json!({ "revisionId": receipt.revision_ids.into_iter().next(), "range": range })
+}
+
 /// `Loc { story, paraId, offset }` -> transient story-global index.
 fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Result<u32, JsValue> {
     let span = find_para_span(doc, story, para_id)?;
@@ -1067,6 +1079,36 @@ impl EditSession {
         Ok((story, loc.para_id, head))
     }
 
+    /// Types `text` at the resident caret `head`. Text meant ahead of the
+    /// blocks that open a paragraph slot lands after them, and the caret
+    /// follows it there.
+    fn insert_resident_text(&self, story: &str, head: u32, text: &str) -> Result<(), JsValue> {
+        let doc = self.engine.doc();
+        let landing = doc.inline_landing(story, head, head).map_err(js_err)?;
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new(story, head),
+            text,
+            FormatPolicy::Inherit,
+        )
+        .map_err(js_err)?;
+        if landing != head {
+            let end = landing + text.encode_utf16().count() as u32;
+            let txn = doc.yrs_doc().transact();
+            let caret = story_ref(&txn, story)
+                .map_err(js_err)?
+                .sticky_index(&txn, end, Assoc::After)
+                .ok_or_else(|| js_err("caret could not be made sticky"))?;
+            drop(txn);
+            *self.selection.borrow_mut() = Some(LocalSelection {
+                story: story.to_owned(),
+                anchor: caret.clone(),
+                head: caret,
+            });
+        }
+        Ok(())
+    }
+
     fn delete_resident_input(
         &self,
         direction: &str,
@@ -1340,23 +1382,24 @@ impl EditSession {
             ));
         }
 
-        let selection = self.selection.borrow();
-        let selection = selection
-            .as_ref()
-            .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
-        let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (story, anchor, head) = {
+            let selection = self.selection.borrow();
+            let selection = selection
+                .as_ref()
+                .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
+            let txn = self.engine.doc().yrs_doc().transact();
+            let anchor = selection
+                .anchor
+                .get_offset(&txn)
+                .ok_or_else(|| js_err("selection anchor no longer resolves"))?
+                .index;
+            let head = selection
+                .head
+                .get_offset(&txn)
+                .ok_or_else(|| js_err("selection head no longer resolves"))?
+                .index;
+            (selection.story.clone(), anchor, head)
+        };
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -1369,15 +1412,7 @@ impl EditSession {
             ));
         }
 
-        self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
-            .map_err(js_err)?;
+        self.insert_resident_text(&story, head, text)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
             .map_err(js_err)
@@ -1409,23 +1444,24 @@ impl EditSession {
         }
 
         let started = performance_now();
-        let selection = self.selection.borrow();
-        let selection = selection
-            .as_ref()
-            .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
-        let story = selection.story.clone();
-        let txn = self.engine.doc().yrs_doc().transact();
-        let anchor = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
-        drop(txn);
+        let (story, anchor, head) = {
+            let selection = self.selection.borrow();
+            let selection = selection
+                .as_ref()
+                .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
+            let txn = self.engine.doc().yrs_doc().transact();
+            let anchor = selection
+                .anchor
+                .get_offset(&txn)
+                .ok_or_else(|| js_err("selection anchor no longer resolves"))?
+                .index;
+            let head = selection
+                .head
+                .get_offset(&txn)
+                .ok_or_else(|| js_err("selection head no longer resolves"))?
+                .index;
+            (selection.story.clone(), anchor, head)
+        };
         if anchor != head {
             return Err(js_err(
                 "apply_input currently requires a collapsed selection",
@@ -1440,15 +1476,7 @@ impl EditSession {
         let selection_ms = performance_now() - started;
 
         let started = performance_now();
-        self.engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new(&story, head),
-                text,
-                FormatPolicy::Inherit,
-            )
-            .map_err(js_err)?;
+        self.insert_resident_text(&story, head, text)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
             .engine
@@ -2445,12 +2473,14 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Inserts `text` at `(story, para_id, offset)`. It must contain no
-    /// paragraph or line breaks, and it inherits the formatting at the
-    /// insertion point. Receipt: `{"revisionId": string|null}` — non-null in
+    /// Inserts `text` at `(story, para_id, offset)`, or after the tables and
+    /// breaks that open that paragraph slot when the location is ahead of
+    /// them. It must contain no paragraph or line breaks, and it inherits the
+    /// formatting at the insertion point. Receipt: `{"revisionId":
+    /// string|null, "range": YrsStoryRange}` — the revision is non-null in
     /// suggesting mode, where the text is stamped `ins` and coalesces into an
     /// adjacent insertion by the same author rather than opening a second
-    /// revision.
+    /// revision; the range is where the text landed.
     pub fn insert_text(
         &self,
         story: &str,
@@ -2467,7 +2497,7 @@ impl EditSession {
             .doc()
             .insert_text(&ctx, Position::new(story, at), text, FormatPolicy::Inherit)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(landed_receipt(receipt).to_string())
     }
 
     /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
@@ -2499,7 +2529,9 @@ impl EditSession {
     /// Replaces `[start, end)` with `text` in one transaction. The inserted
     /// text adopts the first replaced unit's formatting; in suggesting mode
     /// the deletion and the insertion share one revision id. Receipt:
-    /// `{"revisionId": string|null}`.
+    /// `{"revisionId": string|null, "range": YrsStoryRange}`, the range being
+    /// where the text landed (after the tables and breaks that open its
+    /// paragraph slot).
     #[allow(clippy::too_many_arguments)]
     pub fn replace_range(
         &self,
@@ -2520,7 +2552,7 @@ impl EditSession {
             .doc()
             .replace_range(&ctx, StoryRange::new(story, start, end), text)
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(landed_receipt(receipt).to_string())
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one

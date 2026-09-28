@@ -215,6 +215,8 @@ pub(crate) fn plain_delete(
 
 impl EditingDoc {
     /// Inserts break-free text with explicit stamps and formatting policy.
+    /// Text meant ahead of the tables or breaks that open a paragraph slot
+    /// lands after them ([`EditingDoc::inline_landing`]).
     pub fn insert_text(
         &self,
         ctx: &EditCtx,
@@ -223,6 +225,10 @@ impl EditingDoc {
         policy: FormatPolicy,
     ) -> OpResult<Receipt> {
         validate_text(text)?;
+        let at = Position::new(
+            &at.story,
+            self.inline_landing(&at.story, at.index, at.index)?,
+        );
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
@@ -310,6 +316,7 @@ impl EditingDoc {
         if len == 0 && text.is_empty() {
             return Err(OpError::EmptyRange);
         }
+        let landing = self.replacement_landing(ctx, &range)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -367,18 +374,29 @@ impl EditingDoc {
         if !text.is_empty() {
             story.insert_with_attributes(
                 &mut txn,
-                range.start,
+                landing,
                 text,
                 stamped_attrs(formatting, revision),
             );
         }
-        let end = range.start + utf16_len(text);
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, end)?;
+        let end = landing + utf16_len(text);
+        let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
             range: Some(loc_range),
         })
+    }
+
+    /// Where a replacement's text lands: a plain deletion removes the range
+    /// first, while a suggested one keeps it in place.
+    fn replacement_landing(&self, ctx: &EditCtx, range: &StoryRange) -> OpResult<u32> {
+        let kept_from = if ctx.is_suggesting() {
+            range.start
+        } else {
+            range.end
+        };
+        Ok(self.inline_landing(&range.story, range.start, kept_from)?)
     }
 
     /// [`EditingDoc::replace_range`] with explicitly formatted runs (rich paste / proposeChange
@@ -397,6 +415,7 @@ impl EditingDoc {
         if len == 0 && total == 0 {
             return Err(OpError::EmptyRange);
         }
+        let landing = self.replacement_landing(ctx, &range)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -431,7 +450,7 @@ impl EditingDoc {
                 plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             }
         }
-        let mut cursor = range.start;
+        let mut cursor = landing;
         for run in runs {
             if run.text.is_empty() {
                 continue;
@@ -450,7 +469,7 @@ impl EditingDoc {
             );
             cursor += utf16_len(&run.text);
         }
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, cursor)?;
+        let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, cursor)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -461,6 +480,10 @@ impl EditingDoc {
     /// Inserts a one-unit hard-break embed (`_kind: "break"`), inheriting run formatting like
     /// typing.
     pub fn insert_hard_break(&self, ctx: &EditCtx, at: Position) -> OpResult<Receipt> {
+        let at = Position::new(
+            &at.story,
+            self.inline_landing(&at.story, at.index, at.index)?,
+        );
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
@@ -491,6 +514,10 @@ impl EditingDoc {
     /// Inserts a one-unit tab. Tabs are the `\t` character in the story vocabulary (the render
     /// bridge splits text runs at `\t`), inheriting run formatting like typing.
     pub fn insert_tab(&self, ctx: &EditCtx, at: Position) -> OpResult<Receipt> {
+        let at = Position::new(
+            &at.story,
+            self.inline_landing(&at.story, at.index, at.index)?,
+        );
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;

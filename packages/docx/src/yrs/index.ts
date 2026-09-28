@@ -336,6 +336,11 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
+/** Receipt of an insertion: `range` is where the text landed. */
+export interface YrsInsertReceipt extends YrsRevisionReceipt {
+  range: YrsStoryRange;
+}
+
 /**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
@@ -876,15 +881,23 @@ export interface YrsSession extends CollaborationReplica {
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
-  /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  /**
+   * Inserts paragraph-break-free text. Suggesting mode mints a revision. Text
+   * meant ahead of the tables or breaks that open a paragraph slot lands
+   * after them.
+   */
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsInsertReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
   deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
-  /** Replaces a range with text in one transaction (one shared revision when suggesting). */
-  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  /**
+   * Replaces a range with text in one transaction (one shared revision when
+   * suggesting). The text lands after any tables or breaks that still open
+   * its paragraph slot.
+   */
+  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsInsertReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
    * original paraId; the SECOND half is re-minted (`secondParaId`).
@@ -1618,7 +1631,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsInsertReceipt
       );
     },
     deleteRange: (range, suggesting) => {
@@ -1653,7 +1666,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsInsertReceipt
       );
     },
     splitParagraph: (at, suggesting) => {

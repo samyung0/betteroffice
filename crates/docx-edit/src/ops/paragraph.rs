@@ -30,12 +30,14 @@ use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionM
 use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
-    adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, capture_pilcrow,
-    revision_id_in_range, snapshot_range,
+    ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
+    capture_pilcrow, revision_id_in_range, snapshot_range,
 };
+use crate::segments::is_block_embed;
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
-    Position, StoryRange, check_position, insertion_attrs, next_pilcrow, revision_value, story_ref,
+    Position, StoryRange, check_position, insertion_attrs, map_string, next_pilcrow,
+    revision_value, story_ref,
 };
 
 /// The paragraph attributes a style definition owns. Applying a style resets
@@ -469,6 +471,10 @@ impl EditingDoc {
     /// pending split: that retracts the suggestion, physically removing the
     /// pilcrow rather than authoring a second, contradictory revision.
     ///
+    /// A survivor that opens with a table, block content control or page or
+    /// column break is not merged into, as in Word: the op changes nothing,
+    /// so text never goes ahead of such a block in one paragraph slot.
+    ///
     /// The receipt's range is the caret position after the merge. Errors when
     /// the paragraph is unknown, when merging forward from a story's last
     /// paragraph, and when merging backward from its first.
@@ -507,6 +513,27 @@ impl EditingDoc {
         let survivor = &targets[boundary_index + 1];
         let story = boundary.story.clone();
         let pilcrow_index = boundary.bounds.pilcrow;
+        let opens_with_block = snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+            .first()
+            .is_some_and(|chunk| match &chunk.kind {
+                ChunkKind::Embed(Some(map)) => {
+                    is_block_embed(&map_string(map, &txn, KIND_KEY).unwrap_or_default())
+                }
+                _ => false,
+            });
+        if opens_with_block {
+            let caret = crate::op::loc_range_in_txn(
+                &boundary.story_id,
+                &story,
+                &txn,
+                pilcrow_index,
+                pilcrow_index,
+            )?;
+            return Ok(Receipt {
+                range: Some(caret),
+                ..Receipt::default()
+            });
+        }
         let own_insert = ctx
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
