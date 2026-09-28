@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
-import { exportOffice, seedOffice } from "./office-checkpoint";
+import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -31,14 +31,27 @@ const range = (id: number, xml: string) =>
   )}`;
 const image = `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="95250" cy="95250"/><wp:docPr id="1" name="Picture 1"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="95250" cy="95250"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
 
-/** A package whose body is `body`, with a Word comment for each id in `comments`. */
-function docx(body: string, comments = [1]): Uint8Array {
+/**
+ * A package whose body is `body`, with a Word comment for each id in
+ * `comments` and, when given, a default header (story `hf:rId20`).
+ */
+function docx(body: string, comments = [1], header = ""): Uint8Array {
+  const headerType = `<Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/>`;
+  const headerRel = `<Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/>`;
+  const headerRef = `<w:headerReference w:type="default" r:id="rId20"/>`;
   const parts: Record<string, string | Uint8Array> = {
-    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/></Types>`,
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/>${
+      header && headerType
+    }</Types>`,
     "_rels/.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
-    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdImage" Type="${REL}/image" Target="media/image1.png"/></Relationships>`,
+    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rIdImage" Type="${REL}/image" Target="media/image1.png"/>${
+      header && headerRel
+    }</Relationships>`,
     "word/media/image1.png": Buffer.from(PNG, "base64"),
-    "word/document.xml": `<w:document ${W}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
+    ...(header ? { "word/header1.xml": `<w:hdr ${W}>${header}</w:hdr>` } : {}),
+    "word/document.xml": `<w:document ${W}><w:body>${body}<w:sectPr>${
+      header && headerRef
+    }<w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
     "word/comments.xml": `<w:comments ${W}>${comments
       .map(
         (id) =>
@@ -65,18 +78,15 @@ async function open(bytes: Uint8Array): Promise<YrsSession> {
   return session;
 }
 
-async function publish(
-  bytes: Uint8Array,
-  session: YrsSession
-): Promise<Uint8Array> {
-  const state = session.encodeState();
-  const baseSha256 = createHash("sha256").update(bytes).digest("hex");
-  return exportOffice(
-    bytes,
-    { format: "docx", schemaVersion: 1, baseSha256, state },
-    fixed
-  );
-}
+const checkpoint = (base: Uint8Array, state: Uint8Array) => ({
+  format: "docx" as const,
+  schemaVersion: 1 as const,
+  baseSha256: createHash("sha256").update(base).digest("hex"),
+  state,
+});
+
+const publish = (bytes: Uint8Array, session: YrsSession) =>
+  exportOffice(bytes, checkpoint(bytes, session.encodeState()), fixed);
 
 type Span = [story: string, paraId: string, start: number, end: number];
 /** Adds a comment named `name` over `span`, ending in paragraph `endPara` when given. */
@@ -259,28 +269,84 @@ test.each<[string, string, (session: YrsSession) => void]>([
       comment(session, "a", [story, "44444444", 4, 8]);
     },
   ],
-  [
-    "a comment after a page break in a table cell",
-    `${table(p("44444444", run("abcdef")))}${tail}`,
-    (session) => {
-      const story = "body:t0:r0c0";
-      session.insertPageBreak({ story, paraId: "44444444", offset: 2 });
-      comment(session, "a", [story, "44444444", 3, 5]);
-    },
-  ],
-  [
-    "a comment after a page break inside a paragraph",
-    p("11111111", run("abcdef")) + tail,
-    (session) => {
-      session.insertPageBreak({ story: body, paraId: "11111111", offset: 2 });
-      comment(session, "a", [body, "11111111", 3, 5]);
-    },
-  ],
 ])("%s keeps its range across publications", async (_, xml, edit) => {
   const { seen } = await publications(docx(xml, []), edit);
   expect(seen[1]).toEqual(seen[0]);
   expect(seen[2]).toEqual(seen[0]);
 });
+
+/** The toolbar's page break: split at the caret, then the break at the new paragraph's start. */
+function pageBreak(
+  session: YrsSession,
+  story: string,
+  paraId: string,
+  offset: number
+): string {
+  const { secondParaId } = session.splitParagraph({ story, paraId, offset });
+  session.insertPageBreak({ story, paraId: secondParaId, offset: 0 });
+  return secondParaId;
+}
+
+// A break in a cell or header is a story unit until the export seeds it as none.
+const breakStories: Array<[string, string, string, string]> = [
+  [
+    "a table cell",
+    "body:t0:r0c0",
+    `${table(p("44444444", run("abcdef")))}${tail}`,
+    "",
+  ],
+  ["a header", "hf:rId20", tail, p("44444444", run("abcdef"))],
+  ["the body", body, p("44444444", run("abcdef")) + tail, ""],
+];
+
+test.each(breakStories)(
+  "a page break in %s and the comments beside it survive publications",
+  async (_, story, xml, header) => {
+    const { seen, bytes } = await publications(
+      docx(xml, [], header),
+      (session) => {
+        const next = pageBreak(session, story, "44444444", 2);
+        comment(session, "before", [story, "44444444", 0, 2]);
+        comment(session, "after", [story, next, 2, 4]);
+      }
+    );
+    expect(seen).toEqual(Array(3).fill({ before: "ab", after: "de" }));
+    const part =
+      story === "hf:rId20" ? "word/header1.xml" : "word/document.xml";
+    const xmlOut = new TextDecoder().decode(unzipContainer(bytes)[part]);
+    expect(xmlOut.match(/<w:br w:type="page"\/>/g)).toHaveLength(1);
+  }
+);
+
+test.each(breakStories.slice(0, 2))(
+  "typing above a page break in %s after a publication's capture rebases",
+  async (_, story, xml, header) => {
+    const base = docx(xml, [1], header);
+    const session = await open(base);
+    pageBreak(session, story, "44444444", 3);
+    const captured = session.encodeState();
+    const exported = await exportOffice(
+      base,
+      checkpoint(base, captured),
+      fixed
+    );
+    session.insertText({ story, paraId: "44444444", offset: 1 }, "Q");
+    const latest = session.encodeState();
+    const expected = session.paragraphs(story).map(({ text }) => text);
+    session.destroy();
+    const { state } = await rebaseOffice(
+      base,
+      checkpoint(base, captured),
+      checkpoint(base, latest),
+      exported
+    );
+    const rebased = await createYrsSession({ clientId: (clientId += 1) });
+    rebased.openDocx(exported, false);
+    rebased.loadState(state);
+    expect(rebased.paragraphs(story).map(({ text }) => text)).toEqual(expected);
+    rebased.destroy();
+  }
+);
 
 test("a comment ending inside a hyperlink widens to the link, and a later comment keeps its range", async () => {
   const link = `<w:hyperlink w:anchor="target"><w:r><w:t>linktext</w:t></w:r></w:hyperlink>`;
@@ -434,30 +500,45 @@ test.each([
   }
 );
 
-test("a Word range inside a field result covers the whole field across publications", async () => {
-  let bytes = docx(
-    p(
-      "11111111",
-      `${run("a ")}${field(`${run("20")}${S(5)}${run("26")}${E(5)}`)}${ref(
-        5
-      )}${run(" b")}`
-    ) + tail,
-    [5]
-  );
-  const seen: Array<Record<string, string>> = [];
-  for (let publication = 0; publication < 3; publication += 1) {
-    const session = await open(bytes);
-    seen.push(covered(session));
-    bytes = await publish(bytes, session);
-    session.destroy();
-    expect(marks(bytes).sort()).toEqual(["E5", "R5", "S5"]);
+const inserted = (xml: string) =>
+  `<w:ins w:id="90" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:ins>`;
+test.each([
+  [
+    "a field result",
+    field(`${run("20")}${S(5)}${run("26")}${E(5)}`),
+    "[field]",
+  ],
+  [
+    "a simple field",
+    `<w:fldSimple w:instr=" DATE ">${run("20")}${S(5)}${run("26")}${E(
+      5
+    )}</w:fldSimple>`,
+    "[field]",
+  ],
+  // The parser still moves the insertion out in front of its field.
+  [
+    "a change in a field result",
+    field(`${inserted(`${S(5)}${run("20")}${E(5)}`)}${run("26")}`),
+    "20[field]",
+  ],
+])(
+  "a Word range inside %s holds the whole field across publications",
+  async (_, xml, whole) => {
+    let bytes = docx(
+      p("11111111", `${run("a ")}${xml}${ref(5)}${run(" b")}`) + tail,
+      [5]
+    );
+    const seen: Array<Record<string, string>> = [];
+    for (let publication = 0; publication < 3; publication += 1) {
+      const session = await open(bytes);
+      seen.push(covered(session));
+      bytes = await publish(bytes, session);
+      session.destroy();
+      expect(marks(bytes).sort()).toEqual(["E5", "R5", "S5"]);
+    }
+    expect(seen).toEqual(Array(3).fill({ c5: whole }));
   }
-  expect(seen).toEqual([
-    { c5: "[field]" },
-    { c5: "[field]" },
-    { c5: "[field]" },
-  ]);
-});
+);
 
 test("a bookmark after a line break keeps its text across publications", async () => {
   const { bytes } = await publications(

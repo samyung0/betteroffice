@@ -500,11 +500,7 @@ fn parse_paragraph_contents(
                         hyperlink,
                     ))));
                 }
-                if fields.is_empty() {
-                    output.extend(ends);
-                } else {
-                    field_ends.extend(ends);
-                }
+                close_ranges(ends, &fields, &mut output, &mut field_ends);
             }
             "bookmarkStart" => {
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
@@ -532,6 +528,8 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                 )?;
+                let (starts, ends) = nested_comment_ranges(child);
+                output.extend(starts);
                 if let Some(active) = fields.last_mut() {
                     let runs = field.content.clone();
                     active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
@@ -540,6 +538,7 @@ fn parse_paragraph_contents(
                         field,
                     ))));
                 }
+                close_ranges(ends, &fields, &mut output, &mut field_ends);
             }
             "sdt" => {
                 if let Some(container) = child.child("w", "sdtContent") {
@@ -568,7 +567,7 @@ fn parse_paragraph_contents(
                             content: filter_field_inline(parsed),
                         },
                     ))));
-                    output.extend(ends);
+                    close_ranges(ends, &fields, &mut output, &mut field_ends);
                 }
             }
             "ins" | "del" | "moveFrom" | "moveTo" => {
@@ -607,7 +606,7 @@ fn parse_paragraph_contents(
                     info: parse_tracked_change_info(child),
                     content,
                 }));
-                output.extend(ends);
+                close_ranges(ends, &fields, &mut output, &mut field_ends);
             }
             "moveFromRangeStart" | "moveToRangeStart" => {
                 output.push(ParagraphContent::RangeStart(RangeStart {
@@ -631,8 +630,8 @@ fn parse_paragraph_contents(
                     id: parse_range_id(child),
                     offset: None,
                 });
-                if child.local_name() == "commentRangeEnd" && !fields.is_empty() {
-                    field_ends.push(marker);
+                if child.local_name() == "commentRangeEnd" {
+                    close_ranges(vec![marker], &fields, &mut output, &mut field_ends);
                 } else {
                     output.push(marker);
                 }
@@ -947,9 +946,24 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     }
 }
 
-/// Comment range markers inside a hyperlink, tracked change or inline content
-/// control, which cannot hold them: starts go before it and ends after it, so
-/// the range holds the container whole (complex fields: `field_ends`).
+/// Places range ends after the complex field still open around them, if any.
+fn close_ranges(
+    ends: Vec<ParagraphContent>,
+    fields: &[OpenComplexField],
+    output: &mut Vec<ParagraphContent>,
+    field_ends: &mut Vec<ParagraphContent>,
+) {
+    if fields.is_empty() {
+        output.extend(ends);
+    } else {
+        field_ends.extend(ends);
+    }
+}
+
+/// Comment range markers inside a hyperlink, tracked change, inline content
+/// control or simple field, which cannot hold them: starts go before it and
+/// ends after it, so the range holds the container whole (complex fields:
+/// `close_ranges`).
 fn nested_comment_ranges(container: &XmlElement) -> (Vec<ParagraphContent>, Vec<ParagraphContent>) {
     let (mut starts, mut ends) = (Vec::new(), Vec::new());
     for child in transparent_children(container, true) {
@@ -966,7 +980,7 @@ fn nested_comment_ranges(container: &XmlElement) -> (Vec<ParagraphContent>, Vec<
                     ends.push(marker);
                 }
             }
-            "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo" => {
+            "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo" | "fldSimple" => {
                 let (inner_starts, inner_ends) = nested_comment_ranges(child);
                 starts.extend(inner_starts);
                 ends.extend(inner_ends);
@@ -1775,6 +1789,38 @@ mod tests {
         assert_eq!(
             layout,
             ["commentRangeStart", "field", "commentRangeEnd", "other"]
+        );
+    }
+
+    #[test]
+    fn comment_markers_in_a_simple_field_or_a_change_in_a_field_result_move_to_the_field_edges() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:fldSimple w:instr=" DATE "><w:r><w:t>20</w:t></w:r><w:commentRangeStart w:id="1"/><w:r><w:t>26</w:t></w:r><w:commentRangeEnd w:id="1"/></w:fldSimple>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText> DATE </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:ins w:id="5"><w:commentRangeStart w:id="2"/><w:r><w:t>20</w:t></w:r><w:commentRangeEnd w:id="2"/></w:ins>
+              <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            </w:p>"#,
+        );
+        let layout: Vec<String> = paragraph
+            .content
+            .iter()
+            .map(|content| match content {
+                ParagraphContent::CommentRange(marker) => {
+                    format!("{}{}", &marker.node_type[12..13], marker.id)
+                }
+                ParagraphContent::Inline(InlineNode::SimpleField(_)) => "simple".into(),
+                ParagraphContent::Inline(InlineNode::ComplexField(_)) => "field".into(),
+                ParagraphContent::Tracked(change) => change.node_type.clone(),
+                _ => "other".into(),
+            })
+            .collect();
+        // The insertion itself still moves out in front of its field (existing behaviour).
+        assert_eq!(
+            layout,
+            ["S1", "simple", "E1", "S2", "insertion", "field", "E2"]
         );
     }
 

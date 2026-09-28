@@ -2514,15 +2514,15 @@ class SaveContext {
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
+        // A leading page break the seed kept as an attribute, not a unit.
+        const tokens = flowTokens(paragraph.content);
+        if (
+          segment.properties.pageBreakBeforeRun === true &&
+          tokens.some((token) => token.kind === 'visible') &&
+          !splitFlow(tokens).pageFirst
+        )
+          paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
         if (flowUnits) {
-          // A leading page break the seed kept as an attribute, not a unit.
-          const tokens = flowTokens(paragraph.content);
-          if (
-            segment.properties.pageBreakBeforeRun === true &&
-            tokens.some((token) => token.kind === 'visible') &&
-            !splitFlow(tokens).pageFirst
-          )
-            paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
           paragraph = settle(paragraph) ?? paragraph;
           carried = slotInlineBreaks;
           slotInlineBreaks = [];
@@ -2645,7 +2645,10 @@ class SaveContext {
         }
       } else {
         items.push(segment as EmbedItem);
-        if (this.onEmbed) projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
+        // A cell's or header's break seeds as no unit, so it carries no effects entry.
+        const flowBreak = segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak';
+        if (this.onEmbed && !flowBreak)
+          projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
       }
       if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
