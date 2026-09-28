@@ -1358,6 +1358,69 @@ function paragraphContentLength(content: ParagraphContent): number {
   }
 }
 
+function runContentUnits(content: RunContent): number {
+  switch (content.type) {
+    case 'text':
+      return content.text.length;
+    case 'symbol': {
+      const code = Number.parseInt(content.char, 16);
+      return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code).length : 0;
+    }
+    case 'break':
+      return content.breakType === undefined || content.breakType === 'textWrapping' ? 1 : 0;
+    case 'tab':
+    case 'softHyphen':
+    case 'noBreakHyphen':
+    case 'horizontalRule':
+    case 'commentReference':
+    case 'drawing':
+    case 'shape':
+    case 'chart':
+    case 'opaqueDrawing':
+    case 'footnoteRef':
+    case 'endnoteRef':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/** Story units `content` seeds as (seed.rs `paragraph_units`), where comment anchors live. */
+function storyUnits(content: ParagraphContent): number {
+  switch (content.type) {
+    case 'run':
+      return content.content.reduce((sum, entry) => sum + runContentUnits(entry), 0);
+    case 'hyperlink': {
+      let units = 0;
+      for (const child of content.structuredChildren ?? content.children) {
+        if (child.type === 'run') units += storyUnits(child);
+        else if (['simpleField', 'complexField', 'mathEquation'].includes(child.type)) units += 1;
+      }
+      return units;
+    }
+    case 'complexField': {
+      // seed.rs `field_to_units`: result hyperlinks and nested simple fields seed their own units.
+      const projected = [
+        ...(content.structuredCode?.inline ?? []),
+        ...(content.structuredResult?.inline ?? []),
+      ].filter((child) => child.type === 'hyperlink' || child.type === 'simpleField');
+      if (/^\d+$/.test(content.instruction.trim()) || projected.length === 0) return 1;
+      return projected.reduce((sum, child) => sum + storyUnits(child), 1);
+    }
+    case 'simpleField':
+    case 'inlineSdt':
+    case 'mathEquation':
+      return 1;
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
+      return content.content.reduce((sum, child) => sum + storyUnits(child), 0);
+    default:
+      return 0;
+  }
+}
+
 function splitTextRun(run: Run, offset: number): [Run | null, Run | null] {
   if (!run.content.every((content) => content.type === 'text')) return [run, null];
   const text = run.content.map((content) => (content.type === 'text' ? content.text : '')).join('');
@@ -1376,6 +1439,7 @@ function splitTextRun(run: Run, offset: number): [Run | null, Run | null] {
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
+  measure: (content: ParagraphContent) => number,
   makeMarker: (boundary: CommentBoundary) => ParagraphContent = (boundary) =>
     boundary.kind === 'start'
       ? { type: 'commentRangeStart', id: boundary.id }
@@ -1399,7 +1463,7 @@ function insertBoundaries(
 
   emit(0);
   for (const item of content) {
-    const length = paragraphContentLength(item);
+    const length = measure(item);
     const inside = sorted
       .slice(boundaryIndex)
       .map((boundary) => boundary.offset)
@@ -1458,7 +1522,12 @@ function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefi
     if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
     offset += paragraphContentLength(child);
   }
-  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+  return insertBoundaries(
+    content,
+    boundaries,
+    paragraphContentLength,
+    (boundary) => base.content[boundary.id]!
+  );
 }
 
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
@@ -1487,7 +1556,7 @@ function paragraphFromStory(
       : undefined
   );
   content = restoreRawInlines(content, baseParagraph);
-  content = insertBoundaries(content, commentBoundaries);
+  content = insertBoundaries(content, commentBoundaries, storyUnits);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
     ...boundary,
@@ -1497,7 +1566,7 @@ function paragraphFromStory(
         : boundary.offset,
   }));
   if (bookmarks.length > 0) {
-    content = insertBoundaries(content, bookmarks, (rawBoundary) => {
+    content = insertBoundaries(content, bookmarks, paragraphContentLength, (rawBoundary) => {
       const boundary = rawBoundary as BookmarkBoundary;
       return boundary.kind === 'start'
         ? {
