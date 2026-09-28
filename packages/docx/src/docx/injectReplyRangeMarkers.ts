@@ -24,12 +24,26 @@
 
 import type { BlockContent, Comment, ParagraphContent } from '../types/content';
 
+/** Ids of the comments whose range markers `blocks` already hold. */
+function markedComments(blocks: BlockContent[], found = new Set<number>()): Set<number> {
+  for (const block of blocks) {
+    if (block.type === 'paragraph') {
+      for (const item of block.content) if (item.type === 'commentRangeStart') found.add(item.id);
+    } else if (block.type === 'table') {
+      for (const row of block.rows)
+        for (const cell of row.cells) markedComments(cell.content, found);
+    } else if (block.type === 'blockSdt') markedComments(block.content, found);
+  }
+  return found;
+}
+
 /**
  * Inject `commentRangeStart`/`commentRangeEnd` for reply comments
  * that share their parent comment's text range.
  */
 export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment[]): void {
-  const replies = comments.filter((c) => c.parentId != null);
+  const marked = markedComments(content);
+  const replies = comments.filter((c) => c.parentId != null && !marked.has(c.id));
   if (replies.length === 0) return;
 
   // Build parentId → reply IDs map
@@ -91,7 +105,10 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
  */
 export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment[]): void {
   const commentIds = new Set(comments.map((c) => c.id));
-  const tcReplies = comments.filter((c) => c.parentId != null && !commentIds.has(c.parentId));
+  const marked = markedComments(content);
+  const tcReplies = comments.filter(
+    (c) => c.parentId != null && !commentIds.has(c.parentId) && !marked.has(c.id)
+  );
   if (tcReplies.length === 0) return;
 
   const replyIdsByRevision = new Map<number, number[]>();
