@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:comment w:id="0" w:author="Ada Lovelace" w:date="2026-09-01T10:00:00Z"><w:p w14:paraId="10000000"><w:r><w:t>Parent, Word's first comment id.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="1" w:author="Grace Hopper" w:date="2026-09-01T11:00:00Z"><w:p w14:paraId="10000001"><w:r><w:t>Reply on the parent's range.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="2" w:author="Ada Lovelace" w:date="2026-09-01T12:00:00Z"><w:p w14:paraId="10000002"><w:r><w:t>Outer range.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="3" w:author="Alan Turing" w:date="2026-09-01T12:30:00Z"><w:p w14:paraId="10000003"><w:r><w:t>Nested range.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="4" w:author="Alan Turing" w:date="2026-09-01T13:00:00Z"><w:p w14:paraId="10000004"><w:r><w:t>Overlapping range across paragraphs.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="5" w:author="Grace Hopper" w:date="2026-09-01T14:00:00Z"><w:p w14:paraId="10000005"><w:r><w:t>Table cell.</w:t></w:r></w:p></w:comment>
+  <w:comment w:id="6" w:author="Grace Hopper" w:date="2026-09-01T15:00:00Z"><w:p w14:paraId="10000006"><w:r><w:t>Content control.</w:t></w:r></w:p></w:comment>
+</w:comments>

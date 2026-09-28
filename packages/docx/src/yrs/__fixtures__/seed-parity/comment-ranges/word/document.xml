@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:commentRangeStart w:id="0"/>
+      <w:commentRangeStart w:id="1"/>
+      <w:r><w:t>A reply shares its parent's range</w:t></w:r>
+      <w:commentRangeEnd w:id="0"/>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="0"/></w:r>
+      <w:commentRangeEnd w:id="1"/>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r>
+    </w:p>
+    <w:p>
+      <w:commentRangeStart w:id="2"/>
+      <w:r><w:t xml:space="preserve">Outer, </w:t></w:r>
+      <w:commentRangeStart w:id="3"/>
+      <w:r><w:t>nested</w:t></w:r>
+      <w:commentRangeEnd w:id="3"/>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="3"/></w:r>
+      <w:hyperlink w:anchor="target"><w:r><w:t xml:space="preserve"> and linked</w:t></w:r></w:hyperlink>
+      <w:r><w:t xml:space="preserve"> text </w:t></w:r>
+      <w:commentRangeStart w:id="4"/>
+      <w:r><w:t>overlaps</w:t></w:r>
+      <w:commentRangeEnd w:id="2"/>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="2"/></w:r>
+      <w:r><w:t xml:space="preserve"> the next paragraph.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Across</w:t></w:r>
+      <w:commentRangeEnd w:id="4"/>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="4"/></w:r>
+      <w:r><w:t xml:space="preserve"> paragraphs.</w:t></w:r>
+    </w:p>
+    <w:tbl>
+      <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc>
+          <w:p>
+            <w:r><w:t xml:space="preserve">A </w:t></w:r>
+            <w:commentRangeStart w:id="5"/>
+            <w:r><w:t>cell</w:t></w:r>
+            <w:commentRangeEnd w:id="5"/>
+            <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="5"/></w:r>
+            <w:r><w:t xml:space="preserve"> comment.</w:t></w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:sdt>
+      <w:sdtPr><w:id w:val="101"/></w:sdtPr>
+      <w:sdtContent>
+        <w:p>
+          <w:commentRangeStart w:id="6"/>
+          <w:r><w:t>Inside a content control.</w:t></w:r>
+          <w:commentRangeEnd w:id="6"/>
+          <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="6"/></w:r>
+        </w:p>
+      </w:sdtContent>
+    </w:sdt>
+    <w:p><w:r><w:t>Tail.</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

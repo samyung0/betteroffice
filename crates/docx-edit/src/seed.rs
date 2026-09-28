@@ -29,7 +29,8 @@ struct InlineUnit {
     content: UnitContent,
     attrs: JsonObject,
     pm_size: u32,
-    comment_id: Option<String>,
+    /// Comments whose range holds this unit, in the order they opened.
+    comments: Vec<String>,
     marks: Vec<Mark>,
 }
 
@@ -59,7 +60,6 @@ struct ProjectedTable {
 struct StoryOptions {
     include_page_breaks: bool,
     append_body_tail: bool,
-    seed_comments: bool,
 }
 
 struct LoweringContext {
@@ -68,6 +68,15 @@ struct LoweringContext {
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
     compatibility_mode: u8,
+    open_comments: OpenComments,
+}
+
+impl LoweringContext {
+    /// Appends `unit` to plan `story`, inside the comments open there.
+    fn push(&mut self, story: usize, mut unit: InlineUnit) {
+        unit.comments = self.open_comments.covering(story);
+        self.plans[story].units.push(unit);
+    }
 }
 
 fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
@@ -991,23 +1000,17 @@ fn with_mark(marks: &[Mark], next: Mark) -> Vec<Mark> {
         .collect()
 }
 
-fn text_unit(text: String, marks: &[Mark], comment_id: Option<String>) -> InlineUnit {
+fn text_unit(text: String, marks: &[Mark]) -> InlineUnit {
     InlineUnit {
         pm_size: utf16_len(&text),
         content: UnitContent::Text(text),
         attrs: marks_to_attrs(marks),
-        comment_id,
+        comments: Vec::new(),
         marks: marks.to_vec(),
     }
 }
 
-fn embed_unit(
-    kind: &str,
-    payload: JsonObject,
-    marks: &[Mark],
-    comment_id: Option<String>,
-    pm_size: u32,
-) -> InlineUnit {
+fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> InlineUnit {
     InlineUnit {
         content: UnitContent::Embed {
             kind: kind.to_owned(),
@@ -1015,7 +1018,7 @@ fn embed_unit(
         },
         attrs: marks_to_attrs(marks),
         pm_size,
-        comment_id,
+        comments: Vec::new(),
         marks: marks.to_vec(),
     }
 }
@@ -1276,12 +1279,7 @@ fn hyperlink_mark(hyperlink: &Value) -> Mark {
     )
 }
 
-fn note_ref_unit(
-    id: &Value,
-    note_type: &str,
-    marks: &[Mark],
-    comment_id: Option<String>,
-) -> InlineUnit {
+fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
     let note_mark = mark(
         "footnoteRef",
         ordered_object([
@@ -1302,7 +1300,6 @@ fn note_ref_unit(
             json!({ "footnoteRefId": id })
         }),
         &all_marks,
-        comment_id,
         1,
     )
 }
@@ -1317,23 +1314,22 @@ fn hidden_marks(marks: &[Mark]) -> &[Mark] {
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
-    comment_id: Option<String>,
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
     match string(field(Some(content), "type")).unwrap_or_default() {
         "text" => string(field(Some(content), "text"))
             .filter(|text| !text.is_empty())
-            .map(|text| vec![text_unit(text.to_owned(), marks, comment_id)])
+            .map(|text| vec![text_unit(text.to_owned(), marks)])
             .unwrap_or_default(),
-        "tab" => vec![text_unit("\t".to_owned(), marks, comment_id)],
+        "tab" => vec![text_unit("\t".to_owned(), marks)],
         "break"
             if string(field(Some(content), "breakType"))
                 .is_none_or(|kind| kind == "textWrapping") =>
         {
-            vec![embed_unit("break", JsonObject::new(), marks, comment_id, 1)]
+            vec![embed_unit("break", JsonObject::new(), marks, 1)]
         }
-        "softHyphen" => vec![text_unit("\u{00ad}".to_owned(), marks, comment_id)],
-        "noBreakHyphen" => vec![text_unit("\u{2011}".to_owned(), marks, comment_id)],
+        "softHyphen" => vec![text_unit("\u{00ad}".to_owned(), marks)],
+        "noBreakHyphen" => vec![text_unit("\u{2011}".to_owned(), marks)],
         "symbol" => {
             let Some(codepoint) = string(field(Some(content), "char"))
                 .and_then(|value| u32::from_str_radix(value, 16).ok())
@@ -1361,7 +1357,6 @@ fn run_content_to_units(
             vec![text_unit(
                 codepoint.to_string(),
                 &with_mark(marks, symbol_mark),
-                comment_id,
             )]
         }
         "commentReference" => {
@@ -1382,7 +1377,7 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], None, 1)]
+            vec![embed_unit("field", map_from_value(value), &[], 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
@@ -1391,14 +1386,12 @@ fn run_content_to_units(
                 content,
             ),
             hidden_marks(marks),
-            None,
             1,
         )],
         "horizontalRule" => vec![embed_unit(
             "horizontalRule",
             map_from_value(json!({"rule": field(Some(content), "rule")})),
             marks,
-            comment_id,
             1,
         )],
         "shape" => vec![embed_unit(
@@ -1411,7 +1404,6 @@ fn run_content_to_units(
                 content,
             ),
             hidden_marks(marks),
-            None,
             1,
         )],
         "chart" => vec![embed_unit(
@@ -1421,7 +1413,6 @@ fn run_content_to_units(
                 source,
             ),
             hidden_marks(marks),
-            None,
             1,
         )],
         "opaqueDrawing" => vec![embed_unit(
@@ -1431,15 +1422,14 @@ fn run_content_to_units(
                 "xml": field(Some(content), "xml"),
             })),
             hidden_marks(marks),
-            None,
             1,
         )],
         "footnoteRef" => field(Some(content), "id")
-            .map(|id| note_ref_unit(id, "footnote", marks, comment_id))
+            .map(|id| note_ref_unit(id, "footnote", marks))
             .into_iter()
             .collect(),
         "endnoteRef" => field(Some(content), "id")
-            .map(|id| note_ref_unit(id, "endnote", marks, comment_id))
+            .map(|id| note_ref_unit(id, "endnote", marks))
             .into_iter()
             .collect(),
         _ => vec![],
@@ -1450,7 +1440,6 @@ fn run_to_units(
     run: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    comment_id: Option<String>,
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
@@ -1460,7 +1449,7 @@ fn run_to_units(
         .collect();
     array(field(Some(run), "content"))
         .iter()
-        .flat_map(|content| run_content_to_units(content, &marks, comment_id.clone(), source))
+        .flat_map(|content| run_content_to_units(content, &marks, source))
         .collect()
 }
 
@@ -1484,7 +1473,7 @@ fn hyperlink_to_units(
                     .chain(std::iter::once(link.clone()))
                     .collect();
                 for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, None, source));
+                    units.extend(run_content_to_units(content, &marks, source));
                 }
             }
             "simpleField" | "complexField" => {
@@ -1494,7 +1483,7 @@ fn hyperlink_to_units(
                     .chain(extra_marks.iter().cloned())
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.push(embed_unit("field", payload, &marks, 1));
             }
             "mathEquation" => {
                 let marks: Vec<Mark> = extra_marks
@@ -1502,7 +1491,7 @@ fn hyperlink_to_units(
                     .cloned()
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("math", math_payload(child), &marks, None, 1));
+                units.push(embed_unit("math", math_payload(child), &marks, 1));
             }
             _ => {}
         }
@@ -1540,7 +1529,7 @@ fn field_to_units(
         })
     {
         let (payload, marks) = field_payload(value, style_formatting, source);
-        return vec![embed_unit("field", payload, &marks, None, 1)];
+        return vec![embed_unit("field", payload, &marks, 1)];
     }
     let mut units = Vec::new();
     let mut children = Vec::new();
@@ -1549,7 +1538,7 @@ fn field_to_units(
             Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
             Some("simpleField") => {
                 let (payload, marks) = field_payload(child, style_formatting, source);
-                vec![embed_unit("field", payload, &marks, None, 1)]
+                vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
         };
@@ -1583,7 +1572,7 @@ fn field_to_units(
         "resultProjection".to_owned(),
         json!({"id":projection_id, "children":children}),
     );
-    units.push(embed_unit("field", payload, &marks, None, 1));
+    units.push(embed_unit("field", payload, &marks, 1));
     units
 }
 
@@ -1603,7 +1592,6 @@ fn tracked_to_units(
     content: &Value,
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    comment_id: Option<String>,
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
     let content_type = string(field(Some(content), "type")).unwrap_or_default();
@@ -1624,24 +1612,17 @@ fn tracked_to_units(
                 child,
                 style_formatting,
                 styles,
-                comment_id.clone(),
                 std::slice::from_ref(&marker),
                 source,
             ));
         } else {
-            let mut linked = hyperlink_to_units(
+            units.extend(hyperlink_to_units(
                 child,
                 style_formatting,
                 styles,
                 std::slice::from_ref(&marker),
                 source,
-            );
-            if let Some(comment_id) = &comment_id {
-                for unit in &mut linked {
-                    unit.comment_id = Some(comment_id.clone());
-                }
-            }
-            units.extend(linked);
+            ));
         }
     }
     units
@@ -1710,7 +1691,7 @@ fn sdt_payload(
     for child in array(field(Some(sdt), "content")) {
         match string(field(Some(child), "type")).unwrap_or_default() {
             "run" => {
-                for unit in run_to_units(child, style_formatting, styles, None, &[], source) {
+                for unit in run_to_units(child, style_formatting, styles, &[], source) {
                     append(&mut content, unit);
                 }
             }
@@ -1721,7 +1702,7 @@ fn sdt_payload(
             }
             "simpleField" | "complexField" => {
                 let (payload, marks) = field_payload(child, style_formatting, source);
-                append(&mut content, embed_unit("field", payload, &marks, None, 1));
+                append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(
                 &mut content,
@@ -1729,13 +1710,12 @@ fn sdt_payload(
                     "sdt",
                     sdt_payload(child, style_formatting, styles, source),
                     &[],
-                    None,
                     1,
                 ),
             ),
             "mathEquation" => append(
                 &mut content,
-                embed_unit("math", math_payload(child), &[], None, 1),
+                embed_unit("math", math_payload(child), &[], 1),
             ),
             _ => {}
         }
@@ -1819,7 +1799,7 @@ fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Val
             breaks.push(json!({ "offset": offset, "type": kind }));
             continue;
         }
-        offset += units_text(&run_content_to_units(content, &[], None, source))
+        offset += units_text(&run_content_to_units(content, &[], source))
             .encode_utf16()
             .count();
     }
@@ -2187,44 +2167,59 @@ fn para_attrs_to_ppr(attrs: JsonObject) -> JsonObject {
         .collect()
 }
 
+/// Comment ranges open at the lowering point, each with the story it opened in.
+#[derive(Default)]
+struct OpenComments(Vec<(String, usize)>);
+
+impl OpenComments {
+    fn open(&mut self, id: String, story: usize) {
+        if !self.0.iter().any(|(open, _)| *open == id) {
+            self.0.push((id, story));
+        }
+    }
+
+    fn close(&mut self, id: &str) {
+        self.0.retain(|(open, _)| open != id);
+    }
+
+    /// The comments a unit of `story` falls inside: a range covers only the story it opened in.
+    fn covering(&self, story: usize) -> Vec<String> {
+        self.0
+            .iter()
+            .filter(|(_, home)| *home == story)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+}
+
 fn paragraph_units(
     paragraph: &Value,
     styles: &StyleResolver,
     extra_run_formatting: Option<&Value>,
     source: &BTreeMap<String, String>,
+    comments: &mut OpenComments,
+    story: usize,
 ) -> (Vec<InlineUnit>, JsonObject) {
     let mut units = Vec::new();
-    let mut active_comments: Vec<String> = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
-        let comment_id = active_comments.first().cloned();
         match string(field(Some(content), "type")).unwrap_or_default() {
             "commentRangeStart" => {
                 if let Some(id) = field(Some(content), "id") {
-                    let id = js_string(id);
-                    if !active_comments.contains(&id) {
-                        active_comments.push(id);
-                    }
+                    comments.open(js_string(id), story);
                 }
             }
             "commentRangeEnd" => {
                 if let Some(id) = field(Some(content), "id") {
-                    let id = js_string(id);
-                    active_comments.retain(|candidate| candidate != &id);
+                    comments.close(&js_string(id));
                 }
             }
             "run" => {
-                let run_units = run_to_units(
-                    content,
-                    style_formatting.as_ref(),
-                    styles,
-                    comment_id,
-                    &[],
-                    source,
-                );
+                let run_units =
+                    run_to_units(content, style_formatting.as_ref(), styles, &[], source);
                 if let Some(run_boundaries) = &mut boundaries {
                     if let Some(boundary) = run_boundary(content, &run_units, source) {
                         run_boundaries.push(boundary);
@@ -2260,7 +2255,6 @@ fn paragraph_units(
                     "sdt",
                     sdt_payload(content, style_formatting.as_ref(), styles, source),
                     &[],
-                    None,
                     2,
                 ));
             }
@@ -2270,16 +2264,18 @@ fn paragraph_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
-                    comment_id,
                     source,
                 ));
             }
             "mathEquation" => {
                 boundaries = None;
-                units.push(embed_unit("math", math_payload(content), &[], None, 1));
+                units.push(embed_unit("math", math_payload(content), &[], 1));
             }
             "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
+        }
+        for unit in &mut units[start..] {
+            unit.comments = comments.covering(story);
         }
         unit_counts.push(units.len() - start);
     }
@@ -3188,16 +3184,31 @@ fn bind_field_result_blocks(
     }
 }
 
+fn is_comment_reference(unit: &InlineUnit) -> bool {
+    matches!(&unit.content, UnitContent::Embed { payload, .. }
+        if payload.get("modelKind").and_then(Value::as_str) == Some("commentReference"))
+}
+
 fn add_comment_coverage(plan: &mut StoryPlan) {
     let mut offset = 0u32;
-    for unit in &plan.units {
+    for (index, unit) in plan.units.iter().enumerate() {
         let width = match &unit.content {
             UnitContent::Text(text) => utf16_len(text),
             UnitContent::Embed { .. } => 1,
         };
-        if let Some(comment_id) = &unit.comment_id
-            && comment_id != "0"
-        {
+        // A reference mark follows its own range's end, so another range holds
+        // it only when that range goes on past it: coincident ends stay equal.
+        let next = is_comment_reference(unit).then(|| {
+            plan.units[index + 1..]
+                .iter()
+                .find(|next| !is_comment_reference(next))
+        });
+        for comment_id in &unit.comments {
+            if let Some(next) = next
+                && !next.is_some_and(|next| next.comments.contains(comment_id))
+            {
+                continue;
+            }
             let index = plan
                 .comment_coverage
                 .iter()
@@ -3252,17 +3263,17 @@ fn visit_story(
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
                 if options.include_page_breaks {
                     for kind in leading_breaks {
-                        context.plans[plan_index].units.push(embed_unit(
-                            kind,
-                            JsonObject::new(),
-                            &[],
-                            None,
-                            1,
-                        ));
+                        context.push(plan_index, embed_unit(kind, JsonObject::new(), &[], 1));
                     }
                 }
-                let (mut units, mut ppr) =
-                    paragraph_units(block, &context.styles, None, &context.source_json);
+                let (mut units, mut ppr) = paragraph_units(
+                    block,
+                    &context.styles,
+                    None,
+                    &context.source_json,
+                    &mut context.open_comments,
+                    plan_index,
+                );
                 ppr.insert("paraId".to_owned(), Value::String(block_id));
                 bind_field_result_blocks(
                     &mut units,
@@ -3273,18 +3284,10 @@ fn visit_story(
                     &mut result_table_ids,
                 );
                 context.plans[plan_index].units.extend(units);
-                context.plans[plan_index]
-                    .units
-                    .push(embed_unit("pilcrow", ppr, &[], None, 1));
+                context.push(plan_index, embed_unit("pilcrow", ppr, &[], 1));
                 if options.include_page_breaks {
                     for kind in trailing_breaks {
-                        context.plans[plan_index].units.push(embed_unit(
-                            kind,
-                            JsonObject::new(),
-                            &[],
-                            None,
-                            1,
-                        ));
+                        context.push(plan_index, embed_unit(kind, JsonObject::new(), &[], 1));
                     }
                 }
                 last_kind = Some("paragraph");
@@ -3336,9 +3339,7 @@ fn visit_story(
                 if let Some(id) = result_table_ids.remove(&block_index) {
                     payload.insert("blockId".to_owned(), Value::String(id));
                 }
-                context.plans[plan_index]
-                    .units
-                    .push(embed_unit("table", payload, &[], None, 1));
+                context.push(plan_index, embed_unit("table", payload, &[], 1));
                 let previous_table_formatting = context.styles.table_paragraph_formatting.take();
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
@@ -3350,7 +3351,6 @@ fn visit_story(
                             StoryOptions {
                                 include_page_breaks: false,
                                 append_body_tail: false,
-                                seed_comments: false,
                             },
                         );
                     }
@@ -3365,13 +3365,7 @@ fn visit_story(
                     &context.source_json,
                 );
                 properties.insert("story".to_owned(), Value::String(child_story.clone()));
-                context.plans[plan_index].units.push(embed_unit(
-                    "blockSdt",
-                    properties,
-                    &[],
-                    None,
-                    1,
-                ));
+                context.push(plan_index, embed_unit("blockSdt", properties, &[], 1));
                 visit_story(
                     context,
                     child_story,
@@ -3379,7 +3373,6 @@ fn visit_story(
                     StoryOptions {
                         include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
-                        seed_comments: false,
                     },
                 );
                 last_kind = Some("blockSdt");
@@ -3387,20 +3380,20 @@ fn visit_story(
         }
     }
     if options.append_body_tail && matches!(last_kind, Some("table" | "blockSdt")) {
-        context.plans[plan_index].units.push(embed_unit(
-            "pilcrow",
-            map_from_value(json!({
-                "hangingIndent": false,
-                "paraId": format!("{story_id}:p{}", cursor.paragraph)
-            })),
-            &[],
-            None,
-            1,
-        ));
+        context.push(
+            plan_index,
+            embed_unit(
+                "pilcrow",
+                map_from_value(json!({
+                    "hangingIndent": false,
+                    "paraId": format!("{story_id}:p{}", cursor.paragraph)
+                })),
+                &[],
+                1,
+            ),
+        );
     }
-    if options.seed_comments {
-        add_comment_coverage(&mut context.plans[plan_index]);
-    }
+    add_comment_coverage(&mut context.plans[plan_index]);
 }
 
 fn collect_font_entry(key: &str, value: &Value, fonts: &mut BTreeSet<String>) {
@@ -3671,6 +3664,7 @@ pub fn seed_parsed_docx_in_place(
         source_json: Arc::new(source_json),
         plans: Vec::new(),
         compatibility_mode,
+        open_comments: OpenComments::default(),
     };
     visit_story(
         &mut context,
@@ -3679,7 +3673,6 @@ pub fn seed_parsed_docx_in_place(
         StoryOptions {
             include_page_breaks: true,
             append_body_tail: true,
-            seed_comments: true,
         },
     );
     for entry in array(field(Some(package), "headerEntries")) {
@@ -3693,7 +3686,6 @@ pub fn seed_parsed_docx_in_place(
             StoryOptions {
                 include_page_breaks: false,
                 append_body_tail: false,
-                seed_comments: true,
             },
         );
     }
@@ -3712,7 +3704,6 @@ pub fn seed_parsed_docx_in_place(
             StoryOptions {
                 include_page_breaks: false,
                 append_body_tail: false,
-                seed_comments: true,
             },
         );
     }
@@ -3728,7 +3719,6 @@ pub fn seed_parsed_docx_in_place(
                 StoryOptions {
                     include_page_breaks: false,
                     append_body_tail: false,
-                    seed_comments: true,
                 },
             );
         }
@@ -3794,6 +3784,7 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            open_comments: OpenComments::default(),
         };
         visit_story(
             &mut context,
@@ -3802,7 +3793,6 @@ mod tests {
             StoryOptions {
                 include_page_breaks: true,
                 append_body_tail: false,
-                seed_comments: false,
             },
         );
         let document = EditingDoc::new(74101);
@@ -3973,8 +3963,14 @@ mod tests {
         let styles = StyleResolver::new(Some(
             &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
         ));
-        let (units, _) =
-            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new());
+        let (units, _) = paragraph_units(
+            &json!({"content":[value]}),
+            &styles,
+            None,
+            &BTreeMap::new(),
+            &mut OpenComments::default(),
+            0,
+        );
         assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
         assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
         assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
@@ -4036,6 +4032,7 @@ mod tests {
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
             compatibility_mode: 12,
+            open_comments: OpenComments::default(),
         };
         visit_story(
             &mut context,
@@ -4048,7 +4045,6 @@ mod tests {
             StoryOptions {
                 include_page_breaks: true,
                 append_body_tail: true,
-                seed_comments: true,
             },
         );
         assert_eq!(context.plans.len(), 1);
@@ -4066,6 +4062,8 @@ mod tests {
                 &StyleResolver::new(None),
                 None,
                 &BTreeMap::new(),
+                &mut OpenComments::default(),
+                0,
             )
             .1
             .get("_originalRunBoundaries")
@@ -4553,7 +4551,7 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
             assert!(units.is_empty());
             let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
             assert_eq!(
@@ -4575,7 +4573,7 @@ mod tests {
                 { "type": "break", "breakType": "textWrapping" },
             ],
         });
-        let units = run_to_units(&wrapping, None, &styles, None, &[], &BTreeMap::new());
+        let units = run_to_units(&wrapping, None, &styles, &[], &BTreeMap::new());
         // A wrapping break is an inline unit, so the run keeps no boundary.
         assert!(run_boundary(&wrapping, &units, &BTreeMap::new()).is_none());
 
@@ -4588,7 +4586,7 @@ mod tests {
                 { "type": "break", "breakType": "column" },
             ],
         });
-        let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+        let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
         let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
         assert_eq!(boundary.get("text"), Some(&json!("ABC")));
         assert_eq!(
@@ -4598,6 +4596,38 @@ mod tests {
                 { "offset": 3, "type": "column" },
             ]))
         );
+    }
+
+    #[test]
+    fn every_open_comment_covers_its_units() {
+        let start = |id: u32| json!({"type": "commentRangeStart", "id": id});
+        let end = |id: u32| json!({"type": "commentRangeEnd", "id": id});
+        let mark =
+            |id: u32| json!({"type": "run", "content": [{"type": "commentReference", "id": id}]});
+        let cell = json!({"type": "tableCell", "content": [
+            {"type": "paragraph", "content": [start(3), run("cell"), end(3), mark(3)]}
+        ]});
+        // Word's reply layout: the reply's markers beside its parent's.
+        let document = seed_body(&[
+            json!({"type": "paragraph", "content": [
+                start(0), start(1), run("alpha"), end(0), mark(0), end(1), mark(1), start(2), run(" beta")
+            ]}),
+            json!({"type": "paragraph", "content": [run("gamma"), end(2), mark(2)]}),
+            json!({"type": "table", "rows": [{"type": "tableRow", "cells": [cell]}]}),
+        ]);
+        let covered = |id: &str| {
+            document
+                .resolve_comment(id)
+                .unwrap()
+                .into_iter()
+                .map(|anchor| (anchor.story, anchor.start, anchor.end))
+                .collect::<Vec<_>>()
+        };
+        let body = |start, end| vec![("body".to_owned(), start, end)];
+        assert_eq!(covered("0"), body(0, 5));
+        assert_eq!(covered("1"), body(0, 5));
+        assert_eq!(covered("2"), body(7, 18));
+        assert_eq!(covered("3"), vec![("body:t0:r0c0".to_owned(), 0, 4)]);
     }
 
     #[test]
@@ -4616,14 +4646,12 @@ mod tests {
             &StyleResolver::new(None),
             None,
             &BTreeMap::new(),
+            &mut OpenComments::default(),
+            0,
         );
         assert_eq!(units.len(), 4);
-        assert!(
-            units[..3]
-                .iter()
-                .all(|unit| unit.comment_id.as_deref() == Some("7"))
-        );
-        assert!(units[3].comment_id.is_none());
+        assert!(units[..3].iter().all(|unit| unit.comments == ["7"]));
+        assert!(units[3].comments.is_empty());
         assert_eq!(units[3].pm_size, 1);
         let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
         assert_eq!(boundaries.len(), 2);
@@ -4642,7 +4670,6 @@ mod tests {
             }),
             None,
             &styles,
-            None,
             &[],
             &BTreeMap::new(),
         );

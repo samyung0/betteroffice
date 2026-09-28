@@ -69,7 +69,8 @@ interface TextUnit {
   attrs: YrsAttrs;
   /** Node width, used only for bookmark offsets. */
   pmSize: number;
-  commentId?: number;
+  /** Comments whose range holds this unit, in the order they opened. */
+  comments?: number[];
   marks: MarkDescriptor[];
 }
 
@@ -79,7 +80,7 @@ interface EmbedUnit {
   payload: Attrs;
   attrs: YrsAttrs;
   pmSize: number;
-  commentId?: number;
+  comments?: number[];
   marks: MarkDescriptor[];
 }
 
@@ -94,7 +95,6 @@ interface StoryPlan {
 interface StoryOptions {
   includePageBreaks: boolean;
   appendBodyTail: boolean;
-  seedComments: boolean;
   extraRunFormatting?: TextFormatting;
   tableParagraphFormatting?: ParagraphFormatting;
 }
@@ -121,6 +121,13 @@ interface LoweringContext {
   theme: Theme | null;
   plans: StoryPlan[];
   compatibilityMode: number;
+  /** Comment ranges open at the lowering point, each with the plan it opened in. */
+  openComments: Array<[id: number, plan: number]>;
+}
+
+/** The comments a unit of `plan` falls inside: a range covers only the story it opened in. */
+function covering(context: LoweringContext, plan: number): number[] {
+  return context.openComments.filter(([, home]) => home === plan).map(([id]) => id);
 }
 
 function compatibilityModeFromDocument(document: Document): number {
@@ -302,13 +309,12 @@ function withMark(marks: readonly MarkDescriptor[], mark: MarkDescriptor): MarkD
   return [...marks.filter((candidate) => candidate.name !== mark.name), mark];
 }
 
-function textUnit(text: string, marks: readonly MarkDescriptor[], commentId?: number): TextUnit {
+function textUnit(text: string, marks: readonly MarkDescriptor[]): TextUnit {
   return {
     kind: 'text',
     text,
     attrs: marksToYrsAttrs(marks),
     pmSize: text.length,
-    ...(commentId !== undefined ? { commentId } : {}),
     marks: [...marks],
   };
 }
@@ -317,7 +323,6 @@ function embedUnit(
   embedKind: string,
   payload: Attrs,
   marks: readonly MarkDescriptor[] = [],
-  commentId?: number,
   pmSize = 1
 ): EmbedUnit {
   return {
@@ -326,7 +331,6 @@ function embedUnit(
     payload,
     attrs: marksToYrsAttrs(marks),
     pmSize,
-    ...(commentId !== undefined ? { commentId } : {}),
     marks: [...marks],
   };
 }
@@ -577,8 +581,7 @@ function fieldToUnits(
 function noteRefUnit(
   id: number,
   noteType: 'footnote' | 'endnote',
-  marks: readonly MarkDescriptor[],
-  commentId?: number
+  marks: readonly MarkDescriptor[]
 ): EmbedUnit {
   const noteMark: MarkDescriptor = {
     name: 'footnoteRef',
@@ -588,29 +591,24 @@ function noteRefUnit(
   return embedUnit(
     'noteRef',
     noteType === 'endnote' ? { endnoteRefId: id } : { footnoteRefId: id },
-    allMarks,
-    commentId
+    allMarks
   );
 }
 
-function runContentToUnits(
-  content: RunContent,
-  marks: readonly MarkDescriptor[],
-  commentId?: number
-): InlineUnit[] {
+function runContentToUnits(content: RunContent, marks: readonly MarkDescriptor[]): InlineUnit[] {
   switch (content.type) {
     case 'text':
-      return content.text ? [textUnit(content.text, marks, commentId)] : [];
+      return content.text ? [textUnit(content.text, marks)] : [];
     case 'tab':
-      return [textUnit('\t', marks, commentId)];
+      return [textUnit('\t', marks)];
     case 'break':
       return content.breakType === undefined || content.breakType === 'textWrapping'
-        ? [embedUnit('break', {}, marks, commentId)]
+        ? [embedUnit('break', {}, marks)]
         : [];
     case 'softHyphen':
-      return [textUnit('\u00ad', marks, commentId)];
+      return [textUnit('\u00ad', marks)];
     case 'noBreakHyphen':
-      return [textUnit('\u2011', marks, commentId)];
+      return [textUnit('\u2011', marks)];
     case 'symbol': {
       const codePoint = Number.parseInt(content.char, 16);
       if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return [];
@@ -627,7 +625,7 @@ function runContentToUnits(
           csTheme: null,
         },
       };
-      return [textUnit(String.fromCodePoint(codePoint), withMark(marks, symbolMark), commentId)];
+      return [textUnit(String.fromCodePoint(codePoint), withMark(marks, symbolMark))];
     }
     case 'commentReference':
       return [
@@ -647,7 +645,7 @@ function runContentToUnits(
     case 'drawing':
       return [embedUnit('image', withSourceXml(imagePayload(content.image), content.sourceXml))];
     case 'horizontalRule':
-      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks)];
     case 'shape':
       return [embedUnit('shape', withSourceXml(shapePayload(content.shape), content.sourceXml))];
     case 'chart':
@@ -655,9 +653,9 @@ function runContentToUnits(
     case 'opaqueDrawing':
       return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml })];
     case 'footnoteRef':
-      return [noteRefUnit(content.id, 'footnote', marks, commentId)];
+      return [noteRefUnit(content.id, 'footnote', marks)];
     case 'endnoteRef':
-      return [noteRefUnit(content.id, 'endnote', marks, commentId)];
+      return [noteRefUnit(content.id, 'endnote', marks)];
     default:
       return [];
   }
@@ -667,11 +665,10 @@ function runToUnits(
   run: Run,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  commentId?: number,
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks, commentId));
+  return run.content.flatMap((content) => runContentToUnits(content, marks));
 }
 
 function hyperlinkToUnits(
@@ -715,8 +712,7 @@ function trackedMark(
 function trackedToUnits(
   content: Extract<ParagraphContent, { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }>,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
-  commentId?: number
+  styleResolver: StyleResolver | null
 ): InlineUnit[] {
   const kind = content.type === 'insertion' || content.type === 'moveTo' ? 'insertion' : 'deletion';
   const mark = trackedMark(
@@ -727,13 +723,9 @@ function trackedToUnits(
   const units: InlineUnit[] = [];
   for (const child of content.content) {
     if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
+      units.push(...runToUnits(child, styleFormatting, styleResolver, [mark]));
     } else {
-      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]);
-      for (const unit of linked) {
-        if (commentId !== undefined) unit.commentId = commentId;
-      }
-      units.push(...linked);
+      units.push(...hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]));
     }
   }
   return units;
@@ -1070,26 +1062,29 @@ function unitsForParagraphContent(content: ParagraphContent): number {
 }
 
 function paragraphUnits(
+  context: LoweringContext,
+  plan: number,
   paragraph: Paragraph,
-  styleResolver: StyleResolver | null,
   extraRunFormatting?: TextFormatting,
   tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; ppr: Attrs } {
+  const { styleResolver, openComments } = context;
   const units: InlineUnit[] = [];
-  const activeComments = new Set<number>();
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
-    const commentId = activeComments.values().next().value as number | undefined;
-    if (content.type === 'commentRangeStart') activeComments.add(content.id);
-    else if (content.type === 'commentRangeEnd') activeComments.delete(content.id);
-    else if (content.type === 'run') {
+    if (content.type === 'commentRangeStart') {
+      if (!openComments.some(([id]) => id === content.id)) openComments.push([content.id, plan]);
+    } else if (content.type === 'commentRangeEnd') {
+      const open = openComments.findIndex(([id]) => id === content.id);
+      if (open >= 0) openComments.splice(open, 1);
+    } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...runToUnits(content, styleFormatting, styleResolver));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
@@ -1098,9 +1093,7 @@ function paragraphUnits(
       units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
-      units.push(
-        embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver), [], undefined, 2)
-      );
+      units.push(embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver), [], 2));
     } else if (
       content.type === 'insertion' ||
       content.type === 'deletion' ||
@@ -1108,13 +1101,14 @@ function paragraphUnits(
       content.type === 'moveTo'
     ) {
       boundaries = undefined;
-      units.push(...trackedToUnits(content, styleFormatting, styleResolver, commentId));
+      units.push(...trackedToUnits(content, styleFormatting, styleResolver));
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
       boundaries = undefined;
     }
+    for (const unit of units.slice(start)) unit.comments = covering(context, plan);
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
   // The cache is kept only for what merging equal-formatted runs would lose.
@@ -1531,16 +1525,25 @@ function blockSdtAttrs(properties: SdtProperties): Attrs {
   return blockSdtAttrsToPayload(sdtPropsToAttrs(properties));
 }
 
+const isCommentReference = (unit: InlineUnit): boolean =>
+  unit.kind === 'embed' && unit.payload.modelKind === 'commentReference';
+
 function addCommentCoverage(plan: StoryPlan): void {
   let offset = 0;
-  for (const unit of plan.units) {
+  for (const [index, unit] of plan.units.entries()) {
     const width = unit.kind === 'text' ? unit.text.length : 1;
-    if (unit.commentId !== undefined && unit.commentId !== 0) {
-      const intervals = plan.commentCoverage.get(unit.commentId);
+    // A reference mark follows its own range's end, so another range holds
+    // it only when that range goes on past it: coincident ends stay equal.
+    const next = isCommentReference(unit)
+      ? plan.units.slice(index + 1).find((candidate) => !isCommentReference(candidate))
+      : unit;
+    for (const id of unit.comments ?? []) {
+      if (!next?.comments?.includes(id)) continue;
+      const intervals = plan.commentCoverage.get(id);
       const previous = intervals?.[intervals.length - 1];
       if (previous && previous[1] === offset) previous[1] = offset + width;
       else if (intervals) intervals.push([offset, offset + width]);
-      else plan.commentCoverage.set(unit.commentId, [[offset, offset + width]]);
+      else plan.commentCoverage.set(id, [[offset, offset + width]]);
     }
     offset += width;
   }
@@ -1622,7 +1625,12 @@ function visitStory(
     units: [],
     commentCoverage: new Map(),
   };
-  context.plans.push(plan);
+  const planIndex = context.plans.push(plan) - 1;
+  /** Appends `unit` inside the comments open in this story. */
+  const push = (unit: InlineUnit): void => {
+    unit.comments = covering(context, planIndex);
+    plan.units.push(unit);
+  };
   const blocks =
     sourceBlocks.length > 0 ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
   const cursor: BlockCursor = { paragraph: 0, table: 0, sdt: 0 };
@@ -1636,8 +1644,9 @@ function visitStory(
     if (blockId === null) continue;
     if (block.type === 'paragraph') {
       const paragraph = paragraphUnits(
+        context,
+        planIndex,
         block,
-        context.styleResolver,
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
@@ -1650,9 +1659,9 @@ function visitStory(
         resultTableIds
       );
       plan.units.push(...paragraph.units);
-      plan.units.push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
+      push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
       if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
-        plan.units.push(embedUnit('pageBreak', {}));
+        push(embedUnit('pageBreak', {}));
       }
       lastKind = 'paragraph';
       continue;
@@ -1672,7 +1681,7 @@ function visitStory(
         })),
       }));
       const resultTableId = resultTableIds.get(blockIndex);
-      plan.units.push(
+      push(
         embedUnit('table', {
           tblPr: tableAttrsToTblPr(table.attrs),
           grid: tableAttrsToGrid(table.attrs),
@@ -1689,7 +1698,6 @@ function visitStory(
             {
               includePageBreaks: false,
               appendBodyTail: false,
-              seedComments: false,
               extraRunFormatting: cell.extraRunFormatting,
               tableParagraphFormatting: cell.paragraphFormatting,
             }
@@ -1700,7 +1708,7 @@ function visitStory(
       continue;
     }
     const childStory = blockId;
-    plan.units.push(
+    push(
       embedUnit('blockSdt', {
         ...blockSdtAttrs(block.properties),
         story: childStory,
@@ -1709,21 +1717,20 @@ function visitStory(
     visitStory(context, childStory, block.content, {
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
-      seedComments: false,
       tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';
   }
 
   if (options.appendBodyTail && (lastKind === 'table' || lastKind === 'blockSdt')) {
-    plan.units.push(
+    push(
       embedUnit('pilcrow', {
         hangingIndent: false,
         paraId: `${storyId}:p${cursor.paragraph}`,
       })
     );
   }
-  if (options.seedComments) addCommentCoverage(plan);
+  addCommentCoverage(plan);
 }
 
 function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
@@ -1792,17 +1799,16 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     theme: document.package.theme ?? null,
     plans: [],
     compatibilityMode: compatibilityModeFromDocument(document),
+    openComments: [],
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,
     appendBodyTail: true,
-    seedComments: true,
   });
   for (const [rId, part] of document.package.headers ?? []) {
     visitStory(context, headerFooterStoryId(rId), part.content, {
       includePageBreaks: false,
       appendBodyTail: false,
-      seedComments: true,
     });
   }
   for (const [rId, part] of document.package.footers ?? []) {
@@ -1810,21 +1816,18 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     visitStory(context, headerFooterStoryId(rId), part.content, {
       includePageBreaks: false,
       appendBodyTail: false,
-      seedComments: true,
     });
   }
   for (const note of document.package.footnotes ?? []) {
     visitStory(context, footnoteStoryId(note.id), note.content, {
       includePageBreaks: false,
       appendBodyTail: false,
-      seedComments: true,
     });
   }
   for (const note of document.package.endnotes ?? []) {
     visitStory(context, endnoteStoryId(note.id), note.content, {
       includePageBreaks: false,
       appendBodyTail: false,
-      seedComments: true,
     });
   }
 
