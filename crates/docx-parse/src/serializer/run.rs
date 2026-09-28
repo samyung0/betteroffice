@@ -166,13 +166,14 @@ pub fn serialize_run(run: &Run, context: &mut SerializerContext) -> Result<Strin
         return Ok(String::new());
     }
     let mut output = String::from("<w:r>");
-    for _ in 0..context.take_rendered_page_breaks() {
-        output.push_str("<w:lastRenderedPageBreak/>");
-    }
+    // CT_R requires w:rPr first; the break markers are run content.
     output.push_str(&serialize_run_properties(
         run.formatting.as_ref(),
         run.property_changes.as_deref(),
     ));
+    for _ in 0..context.take_rendered_page_breaks() {
+        output.push_str("<w:lastRenderedPageBreak/>");
+    }
     for content in &run.content {
         output.push_str(&serialize_run_content(content, context)?);
     }
@@ -1337,6 +1338,28 @@ mod tests {
         let next_id = first.allocate_drawing_id();
         assert_eq!(next_id, second.allocate_drawing_id());
         assert_ne!(first_id, next_id);
+    }
+
+    #[test]
+    fn a_rendered_page_break_follows_the_run_properties() {
+        let run = Run {
+            node_type: RunType::Run,
+            formatting: Some(TextFormatting {
+                bold: Some(true),
+                ..TextFormatting::default()
+            }),
+            property_changes: None,
+            content: vec![RunContent::Text {
+                text: "Next".to_owned(),
+                preserve_space: None,
+            }],
+        };
+        let mut context = context();
+        context.enter_paragraph(true);
+        assert_eq!(
+            serialize_run(&run, &mut context).unwrap(),
+            "<w:r><w:rPr><w:b/></w:rPr><w:lastRenderedPageBreak/><w:t>Next</w:t></w:r>"
+        );
     }
 
     #[test]
