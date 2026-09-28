@@ -1,7 +1,8 @@
 //! Local-origin undo management.
 //!
 //! One manager per session, scoped on the stories root, so every story — body, headers, footers,
-//! notes and table cells — shares one ordered history. yrs gates `SystemClock`,
+//! notes and table cells — shares one ordered history, and on the comments root, since removing
+//! a comment also removes its reference field in a story. yrs gates `SystemClock`,
 //! `Options::default()` and `UndoManager::new` off `wasm32-unknown-unknown`, so the manager is
 //! built from explicit `Options` around an injectable [`Clock`]: native code reads the system
 //! clock and the wasm host injects `Date.now`.
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use yrs::sync::time::Clock;
 use yrs::{Map, Origin, Out, ReadTxn, Subscription, Transact};
 
-use crate::{EditingDoc, STORIES};
+use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
 pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
@@ -125,8 +126,15 @@ impl DocUndoManager {
             init_redo_stack: Vec::new(),
         };
         let mut inner = yrs::undo::UndoManager::with_options(options);
-        let root = stories_root(&doc.yrs_doc().transact());
+        let (root, comments) = {
+            let txn = doc.yrs_doc().transact();
+            let comments = txn
+                .get_map(COMMENTS)
+                .expect("comments root is declared by EditingDoc::new");
+            (stories_root(&txn), comments)
+        };
         inner.expand_scope(doc.yrs_doc(), &root);
+        inner.expand_scope(doc.yrs_doc(), &comments);
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
         let popped = {
             let changed_stories = Arc::clone(&changed_stories);

@@ -20,10 +20,11 @@
 //! delete, which models a user removing a paragraph mark rather than a
 //! revision being applied. A story's FINAL pilcrow is never removed, because a
 //! document always keeps its last paragraph mark; a join that would remove it
-//! clears the markers instead. Neither is an accepted deletion of a mark whose
-//! paragraph still holds content when the next paragraph opens with a table,
-//! block content control or break: the editor never puts content ahead of such
-//! a block in one paragraph, so the mark stays.
+//! clears the markers instead. Neither is a mark whose paragraph still holds
+//! content when the next paragraph opens with a table, block content control
+//! or break, whether its deletion is accepted or its insertion rejected: the
+//! editor never puts content ahead of such a block in one paragraph, so the
+//! mark stays and only its markers go.
 //!
 //! Resolving APPLIES a revision, it does not author one: no new revision is
 //! ever stamped and the context's suggesting mode is ignored.
@@ -206,17 +207,27 @@ fn opens_with_block<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
         })
 }
 
-/// Whether the paragraph ending after `before` keeps inline content once an
-/// accept under `filter` has removed its deleted units; `None` when `before`
-/// ends without reaching the paragraph's start.
-fn holds_content<T: ReadTxn>(before: &[Chunk], txn: &T, filter: Option<&str>) -> Option<bool> {
+/// Whether the paragraph ending after `before` keeps inline content once
+/// resolving in `mode` under `filter` has removed its units (deleted ones on
+/// accept, inserted ones on reject); `None` when `before` ends without
+/// reaching the paragraph's start.
+fn holds_content<T: ReadTxn>(
+    before: &[Chunk],
+    txn: &T,
+    mode: ResolveMode,
+    filter: Option<&str>,
+) -> Option<bool> {
+    let removed = match mode {
+        ResolveMode::Accept => DEL,
+        ResolveMode::Reject => INS,
+    };
     for chunk in before.iter().rev() {
         match &chunk.kind {
             ChunkKind::Pilcrow(_) => return Some(false),
             ChunkKind::Embed(Some(map))
                 if crate::map_string(map, txn, KIND_KEY)
                     .is_some_and(|kind| is_block_embed(&kind)) => {}
-            _ if active_stamp(chunk.attrs.get(DEL).cloned(), filter).is_none() => {
+            _ if active_stamp(chunk.attrs.get(removed).cloned(), filter).is_none() => {
                 return Some(true);
             }
             _ => {}
@@ -287,15 +298,18 @@ fn resolve_story(
                             record(resolved, attr_ins.as_ref());
                         }
                     }
-                    let keep = mode == ResolveMode::Accept
-                        && opens_with_block(story, txn, chunk.start + 1)
-                        && holds_content(&chunks[..position], txn, filter).unwrap_or_else(|| {
-                            // The paragraph starts before a range resolve's span.
-                            span_start > 0
-                                && !snapshot_range(story, txn, span_start - 1, span_start)
-                                    .first()
-                                    .is_some_and(|unit| matches!(unit.kind, ChunkKind::Pilcrow(_)))
-                        });
+                    let keep = opens_with_block(story, txn, chunk.start + 1)
+                        && holds_content(&chunks[..position], txn, mode, filter).unwrap_or_else(
+                            || {
+                                // The paragraph starts before a range resolve's span.
+                                span_start > 0
+                                    && !snapshot_range(story, txn, span_start - 1, span_start)
+                                        .first()
+                                        .is_some_and(|unit| {
+                                            matches!(unit.kind, ChunkKind::Pilcrow(_))
+                                        })
+                            },
+                        );
                     if Some(chunk.start) == final_pilcrow || keep {
                         // The final paragraph mark can never be removed, nor one
                         // that keeps content out of a block's slot — clear instead.

@@ -38,6 +38,7 @@ afterAll(async () => {
 async function mount(
   applyResidentInput?: YrsInputProps['applyResidentInput'],
   onPendingChange?: YrsInputProps['onPendingChange'],
+  nextParagraphStyleId?: YrsInputProps['nextParagraphStyleId'],
 ) {
   const session = await createYrsSession();
   sessions.push(session);
@@ -65,6 +66,7 @@ async function mount(
       onDirectInput={() => {}}
       onPendingChange={onPendingChange}
       applyResidentInput={applyResidentInput}
+      nextParagraphStyleId={nextParagraphStyleId}
     />
   );
   const view = render(component());
@@ -223,4 +225,32 @@ test('read-only interrupts active composition and rejects flush without waiting 
   expect(textarea.value).toBe('');
   expect(session.paragraphs('body')[0].text).toBe('Seed');
   await expect(input.current!.flushPendingInput()).rejects.toThrow('Composition interrupted');
+});
+
+test("Enter before a table leaves the table paragraph's style alone", async () => {
+  const { session, input, view } = await mount(undefined, undefined, () => 'Normal');
+  const [seed] = session.paragraphs('body');
+  // Seed¶[table]¶: the paragraph after the table is empty.
+  const { secondParaId: slot } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
+  session.insertTable({ story: 'body', paraId: slot, offset: 0 }, 1, 1);
+  const styled: string[] = [];
+  session.applyParagraphStyle = (range) => {
+    styled.push(range.start.paraId);
+  };
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  const enter = async (paraId: string, offset: number) => {
+    act(() => session.setSelection({ story: 'body', paraId, offset }));
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    await act(async () => {
+      await input.current!.flushPendingInput();
+    });
+  };
+  // The new paragraph opens ahead of the table's, which keeps its id and style.
+  await enter(slot, 0);
+  expect(styled).toEqual([]);
+  expect(session.paragraphs('body').map((p) => p.paraId)[2]).toBe(slot);
+  // At the end of a paragraph the new one takes the next style.
+  await enter(seed.paraId, 4);
+  expect(styled).toHaveLength(1);
+  expect(styled[0]).not.toBe(seed.paraId);
 });

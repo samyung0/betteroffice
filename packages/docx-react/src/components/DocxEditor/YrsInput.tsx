@@ -625,8 +625,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         typeof currentParagraph?.properties.pStyle === 'string'
           ? currentParagraph.properties.pStyle
           : null;
+      // Enter before a table or break inserts a paragraph ahead of the caret's
+      // own, which keeps its id and must keep its style.
       const nextStyleId =
-        currentParagraph && current.offset === currentParagraph.text.length
+        currentParagraph &&
+        current.offset === currentParagraph.text.length &&
+        receipt.secondParaId !== current.paraId
           ? (nextParagraphStyleId?.(currentStyleId) ?? null)
           : null;
       if (nextStyleId) {

@@ -1875,3 +1875,164 @@ fn removing_a_comment_removes_its_reference_field() {
     .unwrap();
     assert_eq!(slot_units(&doc), "alpha beta¶");
 }
+
+/// Each pilcrow's property values, in story order.
+fn marks(doc: &EditingDoc) -> Vec<BTreeMap<String, Any>> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter_map(|segment| match segment.content {
+            SegmentContent::Pilcrow(properties) => Some(properties.values),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn rejecting_an_inserted_mark_keeps_it_while_its_paragraph_holds_content_before_a_block() {
+    for typist in [None, Some("Bob"), Some("Ann")] {
+        let (doc, _) = block_slot("table");
+        // Ann suggests Enter before the table; someone types into the new paragraph.
+        let split = doc
+            .split_paragraph(&sug("Ann"), Position::new("body", 7), None)
+            .unwrap();
+        let context = typist.map_or_else(ctx, sug);
+        doc.insert_text(
+            &context,
+            Position::new("body", 7),
+            "hello",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        doc.reject_change(
+            &ctx(),
+            &ChangeTarget::Revision(split.revision_ids[0].clone()),
+        )
+        .unwrap();
+        // Ann's own typing goes with her paragraph; anyone else's keeps it.
+        let expected = if typist == Some("Ann") {
+            "Before¶[table]After¶"
+        } else {
+            "Before¶hello¶[table]After¶"
+        };
+        assert_eq!(slot_units(&doc), expected, "{typist:?}");
+        assert!(marks(&doc).iter().all(|mark| !active(mark, "pPrIns")));
+    }
+}
+
+#[test]
+fn undoing_a_comment_removal_restores_the_comment_with_its_field() {
+    let (doc, _) = doc_with("alpha beta");
+    let system = EditCtx::system(DATE);
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::SetComment {
+            id: "7".into(),
+            ranges: vec![(0, 5)],
+            author: "Ada".into(),
+            date: DATE.into(),
+            body: Any::Null,
+        }],
+        &system,
+    )
+    .unwrap();
+    let reference = vec![
+        (
+            "modelKind".to_owned(),
+            Any::String("commentReference".into()),
+        ),
+        ("commentId".to_owned(), Any::String("7".into())),
+    ];
+    doc.insert_embed(&system, Position::new("body", 5), "field", reference)
+        .unwrap();
+    let mut undo = doc.undo_manager();
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::RemoveComment { id: "7".into() }],
+        &ctx(),
+    )
+    .unwrap();
+    assert_eq!(slot_units(&doc), "alpha beta¶");
+    assert!(undo.undo());
+    assert_eq!(slot_units(&doc), "alpha[field] beta¶");
+    assert_eq!(doc.resolve_comment("7").unwrap().len(), 1);
+    assert!(undo.redo());
+    assert!(doc.resolve_comment("7").is_err());
+}
+
+#[test]
+fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new_half() {
+    let section = || {
+        let attr = |key: &str, value: Any| RawOp::SetEmbedAttr {
+            index: 9,
+            key: key.into(),
+            value,
+        };
+        let original = Any::Map(Arc::new(
+            [
+                ("borders".to_owned(), Any::String("top".into())),
+                ("spaceAfter".to_owned(), Any::Number(480.0)),
+            ]
+            .into(),
+        ));
+        vec![
+            attr(
+                "sectPr",
+                Any::Map(Arc::new(
+                    [("sectionStart".to_owned(), Any::String("nextPage".into()))].into(),
+                )),
+            ),
+            attr("sectionBreakType", Any::String("nextPage".into())),
+            attr("borders", Any::String("top".into())),
+            attr("_originalFormatting", original),
+        ]
+    };
+    let original_borders = |mark: &BTreeMap<String, Any>| match mark.get("_originalFormatting") {
+        Some(Any::Map(original)) => original.contains_key("borders"),
+        _ => false,
+    };
+    for at in [5, 9] {
+        // "AfterText" ends a section; Enter mid-paragraph or at its end.
+        let (doc, _) = doc_with("AfterText");
+        doc.apply_raw_ops("body", section(), &ctx()).unwrap();
+        doc.split_paragraph(&ctx(), Position::new("body", at), None)
+            .unwrap();
+        let [first, second] = marks(&doc).try_into().unwrap();
+        assert!(
+            !first.contains_key("sectPr") && !first.contains_key("sectionBreakType"),
+            "{at}"
+        );
+        assert!(
+            second.contains_key("sectPr") && second.contains_key("sectionBreakType"),
+            "{at}"
+        );
+        assert!(
+            !second.contains_key("borders") && !original_borders(&second),
+            "{at}"
+        );
+    }
+    // Enter before a table: the new paragraph takes neither the section nor borders.
+    let (doc, _) = block_slot("table");
+    doc.apply_raw_ops(
+        "body",
+        section()
+            .into_iter()
+            .map(|op| match op {
+                RawOp::SetEmbedAttr { key, value, .. } => RawOp::SetEmbedAttr {
+                    index: 13,
+                    key,
+                    value,
+                },
+                op => op,
+            })
+            .collect(),
+        &ctx(),
+    )
+    .unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", 7), None)
+        .unwrap();
+    let [_, inserted, slot] = marks(&doc).try_into().unwrap();
+    assert!(!inserted.contains_key("sectPr") && !inserted.contains_key("borders"));
+    assert!(!original_borders(&inserted));
+    assert!(slot.contains_key("sectPr") && slot.contains_key("borders") && original_borders(&slot));
+}

@@ -102,6 +102,11 @@ const INHERITED_PARA_ATTRS: [&str; 11] = [
 const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
+/// The source formatting a save compares against; it names borders too.
+const ORIGINAL_FORMATTING: &str = "_originalFormatting";
+/// The properties of a mark that ends a section. A split leaves them on the
+/// original mark, which still ends the section, and never copies them.
+const SECTION_KEYS: [&str; 2] = ["sectPr", "sectionBreakType"];
 const TABS: &str = "tabs";
 const INDENT_LEFT: &str = "indentLeft";
 const DEFAULT_TEXT_FORMATTING: &str = "defaultTextFormatting";
@@ -326,6 +331,29 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
+/// `_originalFormatting` without its borders.
+fn original_without_borders(value: &Any) -> Option<Any> {
+    match value {
+        Any::Map(original) if original.contains_key(BORDERS) => {
+            let mut original = (**original).clone();
+            original.remove(BORDERS);
+            Some(Any::Map(Arc::new(original)))
+        }
+        _ => None,
+    }
+}
+
+/// Drops a mark's borders, in its properties and its source formatting alike,
+/// so a save does not write them back from the source.
+fn remove_borders(txn: &mut TransactionMut<'_>, map: &MapRef) {
+    map.remove(txn, BORDERS);
+    if let Some(Out::Any(original)) = map.get(txn, ORIGINAL_FORMATTING)
+        && let Some(original) = original_without_borders(&original)
+    {
+        map.insert(txn, ORIGINAL_FORMATTING, original);
+    }
+}
+
 /// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
 fn style_carry_dtf(value: &Any) -> Option<Any> {
     let Any::Map(map) = value else {
@@ -353,7 +381,8 @@ impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
     /// The new pilcrow terminates the FIRST half, carrying the source
-    /// paragraph's full properties and its ORIGINAL paraId; the original
+    /// paragraph's properties (but the section it ends) and its ORIGINAL
+    /// paraId; the original
     /// pilcrow is re-minted with a fresh paraId and becomes the second half's
     /// mark. What the second half then keeps depends on where the split fell:
     ///
@@ -365,7 +394,9 @@ impl EditingDoc {
     ///   projection outright instead.
     ///
     /// Paragraph borders are cleared in every case, because Word never
-    /// propagates `w:pBdr` across a split. Suggesting mode stamps the inserted
+    /// propagates `w:pBdr` across a split. A section the paragraph ends stays
+    /// with the second half's mark, which still ends it: the new mark never
+    /// takes `sectPr` or `sectionBreakType`. Suggesting mode stamps the inserted
     /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
     /// author when there is one.
     ///
@@ -434,9 +465,15 @@ impl EditingDoc {
         };
         new_pilcrow.insert(&mut txn, PARA_ID, new_para_id.as_str());
         for (key, value) in &props {
-            if !(before_block && key == BORDERS) {
-                new_pilcrow.insert(&mut txn, key.clone(), value.clone());
+            if SECTION_KEYS.contains(&key.as_str()) || (before_block && key == BORDERS) {
+                continue;
             }
+            let value = if before_block && key == ORIGINAL_FORMATTING {
+                original_without_borders(value).unwrap_or_else(|| value.clone())
+            } else {
+                value.clone()
+            };
+            new_pilcrow.insert(&mut txn, key.clone(), value);
         }
         if let Some(id) = revision_id.as_ref() {
             new_pilcrow.insert(
@@ -461,7 +498,9 @@ impl EditingDoc {
                 // A `w:next` switch starts from nothing: drop the source
                 // properties before writing the projection.
                 for (key, _) in &props {
-                    orig_map.remove(&mut txn, key);
+                    if !SECTION_KEYS.contains(&key.as_str()) {
+                        orig_map.remove(&mut txn, key);
+                    }
                 }
                 orig_map.insert(&mut txn, "pStyle", next.style_id.as_str());
                 apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
@@ -470,6 +509,9 @@ impl EditingDoc {
                 // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
                 // font/size/color carry. Borders fall out of the sweep.
                 for (key, value) in &props {
+                    if SECTION_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
                         orig_map.remove(&mut txn, key);
                     } else if key == DEFAULT_TEXT_FORMATTING {
@@ -484,7 +526,7 @@ impl EditingDoc {
             }
         } else {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
-            orig_map.remove(&mut txn, BORDERS);
+            remove_borders(&mut txn, &orig_map);
         }
         Ok(SplitReceipt {
             first_para_id,
