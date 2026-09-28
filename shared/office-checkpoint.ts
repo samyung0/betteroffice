@@ -1316,7 +1316,7 @@ export async function rebaseOffice(
     clientId
   );
   const state = rebased.state;
-  if (format === "docx")
+  if (format === "docx") {
     await assertDocxRestorations(
       baseBytes,
       latest.state,
@@ -1325,7 +1325,8 @@ export async function rebaseOffice(
       clientId,
       rebased.ids
     );
-  else assertPptxRestorations(seed, state);
+    await assertDocxRenders(exportedSource, state);
+  } else assertPptxRestorations(seed, state);
   const effects = compareBaselines(
     await officeBaseline(exportedSource, { ...exported, state: seed }),
     await officeBaseline(exportedSource, { ...exported, state })
@@ -1481,6 +1482,36 @@ async function docxRawInlines(
       },
     });
     return paragraphs;
+  } finally {
+    session.destroy();
+  }
+}
+
+/**
+ * The editor can open the rebased state: its render bridge takes every story.
+ * It refuses, say, text or a field ahead of a table in one paragraph slot,
+ * which the editor never writes but concurrent edits and an export can.
+ */
+async function assertDocxRenders(
+  source: Uint8Array,
+  state: Uint8Array
+): Promise<void> {
+  const session = await createYrsSession({
+    clientId: randomInt(1, 0x1fffffffffff),
+  });
+  try {
+    session.openDocx(source, false);
+    session.loadState(state);
+    for (const story of session.storyIds())
+      try {
+        session.yrsBlocksForStory(story);
+      } catch (error) {
+        throw new RebaseError(
+          `Office rebase: the rebased story ${story} does not render: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
   } finally {
     session.destroy();
   }

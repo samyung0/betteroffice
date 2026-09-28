@@ -26,6 +26,8 @@ export interface Lineage {
       id: (value: string) => string
     ): unknown;
   };
+  /** Brings the rebased state in line with what its export writes, once every change landed. */
+  settle?(doc: Y.Doc): void;
 }
 
 export class RebaseError extends Error {}
@@ -99,6 +101,19 @@ export const DOCX_LINEAGE: Lineage = {
         };
       });
     },
+  },
+  // A comment the later edits removed takes its reference field with it, as
+  // removing it in the editor does: an export drops a field naming no comment.
+  settle(doc) {
+    const comments = doc.getMap("comments");
+    for (const text of doc.getMap("stories").values())
+      if (text instanceof Y.Text)
+        for (const [offset, embed] of embeds(text).reverse())
+          if (
+            embed.get("modelKind") === "commentReference" &&
+            !comments.has(String(embed.get("commentId")))
+          )
+            text.delete(offset, 1);
   },
 };
 
@@ -336,13 +351,22 @@ function landDelta(
     s = to;
   };
   // A range lands in runs of units that stay together in the seed.
-  const range = (length: number, op: (length: number) => Delta) => {
+  const range = (
+    length: number,
+    op: (length: number) => Delta,
+    deleting = false
+  ) => {
     for (let at = c; at < c + length; ) {
       const target = f.map[at];
       if (target < 0)
         fail(
           `a change at ${where}:${at} touches content the export wrote differently`
         );
+      // Reference fields only the seed holds, inside a delete, go with it.
+      if (deleting && at > c && target > s && past(f, s) === target) {
+        out.push({ delete: target - s });
+        s = target;
+      }
       let run = 1;
       while (at + run < c + length && f.map[at + run] === target + run) run++;
       move(target);
@@ -365,7 +389,7 @@ function landDelta(
         insert: typeof op.insert === "string" ? op.insert : copy(op.insert),
       });
     } else if (op.delete !== undefined)
-      range(op.delete, (length) => ({ delete: length }));
+      range(op.delete, (length) => ({ delete: length }), true);
     else if (op.attributes)
       range(op.retain!, (length) => ({
         retain: length,
@@ -611,6 +635,7 @@ export function transplant(
           lineage.positions!.key,
           lineage.positions!.rewrite(value, edited, result, id)
         );
+      lineage.settle?.(result);
     });
 
     // Every touched entity reads as in the latest state, but for what the

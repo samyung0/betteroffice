@@ -955,3 +955,147 @@ test("a PPTX slide restored after the capture fails the rebase: its part left wi
     doc.free();
   }
 });
+
+test("deleting after the capture the paragraph an editor comment ends in takes the export's reference mark with it", async () => {
+  const breakParagraph = `<w:p w14:paraId="33333333"><w:r><w:br w:type="page"/></w:r></w:p>`;
+  const removals: Array<[string, (session: YrsSession) => void]> = [
+    [
+      "the text, then Delete",
+      (session) => {
+        session.deleteRange({
+          story: "body",
+          start: { paraId: "11111111", offset: 0 },
+          end: { paraId: "11111111", offset: 5 },
+        });
+        session.mergeParagraphs("body", "11111111", "forward");
+      },
+    ],
+    [
+      "the paragraph with its mark",
+      (session) =>
+        session.deleteRange({
+          story: "body",
+          start: { paraId: "11111111", offset: 0 },
+          end: { paraId: session.paragraphs("body")[1].paraId, offset: 0 },
+        }),
+    ],
+  ];
+  for (const block of [table([["cell"]]), breakParagraph])
+    for (const [name, remove] of removals) {
+      const base = docx(
+        `${paragraph("11111111", "alpha")}${block}${paragraph(
+          "22222222",
+          "After"
+        )}`
+      );
+      const { exported, latest, rebase } = await publishDocx(
+        base,
+        (session) => comment(session, "11111111", 0, 5),
+        remove
+      );
+      const current = await docxSession(exported, (await rebase()).state);
+      const later = await docxSession(base, latest);
+      try {
+        expect(units(current), name).toBe(units(later));
+        expect(() => current.yrsBlocksForStory("body")).not.toThrow();
+      } finally {
+        current.destroy();
+        later.destroy();
+      }
+    }
+});
+
+test("a DOCX comment removed after the capture takes its reference mark, so the next publication rebases", async () => {
+  const base = docx(
+    `${paragraph("11111111", "alpha beta gamma")}${paragraph(
+      "22222222",
+      "delta epsilon"
+    )}`
+  );
+  const first = await publishDocx(
+    base,
+    (session) => comment(session, "11111111", 0, 5),
+    (session) =>
+      session.applyRawOps("body", [
+        { op: "removeComment", id: session.listComments()[0].id },
+      ])
+  );
+  const rebased = (await first.rebase()).state;
+  // The next cycle starts from that publication and deletes across the mark.
+  const session = await docxSession(first.exported, rebased);
+  try {
+    expect(units(session)).toBe("alpha beta gamma¶delta epsilon¶");
+    session.insertText(
+      {
+        story: "body",
+        paraId: session.paragraphs("body")[1].paraId,
+        offset: 0,
+      },
+      "c2 "
+    );
+    const captured = session.encodeState();
+    const exported = await exportOffice(
+      first.exported,
+      checkpoint("docx", first.exported, captured),
+      fixed
+    );
+    const [paragraphId] = session.paragraphs("body").map((p) => p.paraId);
+    session.deleteRange({
+      story: "body",
+      start: { paraId: paragraphId, offset: 2 },
+      end: { paraId: paragraphId, offset: 9 },
+    });
+    const next = await rebaseOffice(
+      first.exported,
+      checkpoint("docx", first.exported, captured),
+      checkpoint("docx", first.exported, session.encodeState()),
+      exported
+    );
+    const current = await docxSession(exported, next.state);
+    try {
+      expect(text(current)).toEqual(text(session));
+    } finally {
+      current.destroy();
+    }
+  } finally {
+    session.destroy();
+  }
+});
+
+test("a DOCX rebase refuses a state the editor cannot render: the export's reference mark ahead of a table", async () => {
+  const base = docx(
+    `${paragraph("11111111", "alpha")}${paragraph("22222222", "After")}`
+  );
+  const right = await createYrsSession({ clientId: 4102 });
+  try {
+    const { rebase } = await publishDocx(
+      base,
+      (session) => {
+        // A comment whose text is gone: the export still writes its mark.
+        comment(session, "11111111", 0, 5);
+        session.deleteRange({
+          story: "body",
+          start: { paraId: "11111111", offset: 0 },
+          end: { paraId: "11111111", offset: 5 },
+        });
+      },
+      (session) => {
+        // Concurrent edits: one editor opens After's slot with a table while
+        // another deletes the empty paragraph before it.
+        right.openDocx(base, false);
+        right.loadState(session.encodeState());
+        session.insertTable(
+          { story: "body", paraId: "22222222", offset: 0 },
+          1,
+          1
+        );
+        right.mergeParagraphs("body", "11111111", "forward");
+        session.loadState(right.encodeState());
+        expect(units(session)).toBe("[table]After¶");
+      }
+    );
+    await expect(rebase()).rejects.toThrow("does not render");
+  } finally {
+    right.destroy();
+  }
+});
