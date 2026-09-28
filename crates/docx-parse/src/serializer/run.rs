@@ -69,7 +69,8 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 "w:eastAsiaTheme",
                 fonts.east_asia_theme.as_deref(),
             );
-            optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            // ECMA-376 spells this attribute `w:cstheme` (17.3.2.26).
+            optional_nonempty_attr(&mut body, "w:cstheme", fonts.cs_theme.as_deref());
             optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
@@ -1289,6 +1290,41 @@ mod tests {
         assert_eq!(
             serialize_run(&run, &mut context()).unwrap(),
             "<w:r><w:rPr><w:rStyle w:val=\"bad&quot;/&gt;&lt;evil&amp;\"/><w:rFonts w:ascii=\"A&amp;B\"/><w:b w:val=\"0\"/><w:i/><w:sz w:val=\"24\"/></w:rPr><w:t xml:space=\"preserve\"> &lt;hello&gt; &amp; </w:t></w:r>"
+        );
+    }
+
+    #[test]
+    fn complex_script_theme_font_round_trips() {
+        let run = Run {
+            node_type: RunType::Run,
+            formatting: Some(TextFormatting {
+                font_family: Some(FontFamily {
+                    cs_theme: Some("majorBidi".to_owned()),
+                    ..FontFamily::default()
+                }),
+                ..TextFormatting::default()
+            }),
+            property_changes: None,
+            content: Vec::new(),
+        };
+        let xml = serialize_run(&run, &mut context()).unwrap();
+        assert!(
+            xml.contains(r#"<w:rFonts w:cstheme="majorBidi"/>"#),
+            "{xml}"
+        );
+        let limits = crate::xml::ParseLimits::default();
+        let parsed = crate::xml::parse_xml(
+            xml.as_bytes(),
+            "run.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let properties =
+            crate::formatting::parse_run_properties(parsed.root().unwrap().child("w", "rPr"), None)
+                .unwrap();
+        assert_eq!(
+            properties.font_family.unwrap().cs_theme.as_deref(),
+            Some("majorBidi")
         );
     }
 

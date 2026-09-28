@@ -626,6 +626,46 @@ test("a DOCX table that text typed ahead of it in its paragraph slot follows in 
   await expect(rebase()).rejects.toThrow("has no counterpart in the export");
 });
 
+test("a DOCX edit inside a run with a complex-script theme font rebases with that font", async () => {
+  const base = docx(
+    `${paragraph(
+      "11111111",
+      "Before"
+    )}<w:p w14:paraId="22222222"><w:r><w:rPr><w:rFonts w:cstheme="majorBidi"/></w:rPr><w:t>Theme font</w:t></w:r></w:p>`
+  );
+  const themed = (session: YrsSession) =>
+    session
+      .storySegments("body")
+      .filter((segment) => segment.kind === "text")
+      .map((segment) => [
+        segment.text,
+        (segment.attributes.fontFamily as { csTheme?: string } | undefined)
+          ?.csTheme,
+      ]);
+  const { exported, latest, rebase } = await publishDocx(
+    base,
+    (session) =>
+      session.insertText(
+        { story: "body", paraId: "11111111", offset: 6 },
+        " edited"
+      ),
+    (session) =>
+      session.insertText(
+        { story: "body", paraId: "22222222", offset: 5 },
+        " typed"
+      )
+  );
+  const current = await docxSession(exported, (await rebase()).state);
+  const later = await docxSession(base, latest);
+  try {
+    expect(themed(later)).toContainEqual(["Theme typed font", "majorBidi"]);
+    expect(themed(current)).toEqual(themed(later));
+  } finally {
+    current.destroy();
+    later.destroy();
+  }
+});
+
 test("a DOCX paragraph restored after the capture fails the rebase when its raw markup left with the export", async () => {
   const base = docx(
     `${paragraph("11111111", "Kept")}${paragraph(
