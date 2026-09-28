@@ -17,6 +17,12 @@ const run = (text: string) =>
 const p = (id: string, xml: string) => `<w:p w14:paraId="${id}">${xml}</w:p>`;
 const ref = (id: number) =>
   `<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="${id}"/></w:r>`;
+const S = (id: number) => `<w:commentRangeStart w:id="${id}"/>`;
+const E = (id: number) => `<w:commentRangeEnd w:id="${id}"/>`;
+const table = (...cells: string[]) =>
+  `<w:tbl><w:tr>${cells
+    .map((cell) => `<w:tc>${cell}</w:tc>`)
+    .join("")}</w:tr></w:tbl>`;
 const range = (id: number, xml: string) =>
   `<w:commentRangeStart w:id="${id}"/>${xml}<w:commentRangeEnd w:id="${id}"/>${ref(
     id
@@ -251,6 +257,23 @@ test.each<[string, string, (session: YrsSession) => void]>([
       comment(session, "a", [story, "44444444", 4, 8]);
     },
   ],
+  [
+    "a comment after a page break in a table cell",
+    `${table(p("44444444", run("abcdef")))}${tail}`,
+    (session) => {
+      const story = "body:t0:r0c0";
+      session.insertPageBreak({ story, paraId: "44444444", offset: 2 });
+      comment(session, "a", [story, "44444444", 3, 5]);
+    },
+  ],
+  [
+    "a comment after a page break inside a paragraph",
+    p("11111111", run("abcdef")) + tail,
+    (session) => {
+      session.insertPageBreak({ story: body, paraId: "11111111", offset: 2 });
+      comment(session, "a", [body, "11111111", 3, 5]);
+    },
+  ],
 ])("%s keeps its range across publications", async (_, xml, edit) => {
   const { seen } = await publications(docx(xml, []), edit);
   expect(seen[1]).toEqual(seen[0]);
@@ -273,14 +296,16 @@ test("a comment ending inside a hyperlink widens to the link, and a later commen
   ]);
 });
 
-test("a Word reply thread, nested and overlapping ranges, and cell and multi-paragraph comments seed exactly", async () => {
+test("Word's comment layouts seed exactly", async () => {
+  const link = (xml: string) =>
+    `<w:hyperlink w:anchor="target">${xml}</w:hyperlink>`;
+  const tracked = (tag: string, xml: string) =>
+    `<w:${tag} w:id="90" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:${tag}>`;
   const bytes = docx(
-    // Word writes a reply's markers beside its parent's, first comment id 0.
+    // A reply's markers sit beside its parent's; Word's first comment id is 0.
     p(
       "11111111",
-      `<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/>${alpha}<w:commentRangeEnd w:id="0"/>${ref(
-        0
-      )}<w:commentRangeEnd w:id="1"/>${ref(1)}${run(" beta")}`
+      `${S(0)}${S(1)}${alpha}${E(0)}${ref(0)}${E(1)}${ref(1)}${run(" beta")}`
     ) +
       p(
         "33333333",
@@ -288,25 +313,45 @@ test("a Word reply thread, nested and overlapping ranges, and cell and multi-par
       ) +
       p(
         "55555555",
-        `${run("one ")}<w:commentRangeStart w:id="4"/>${run(
-          "two "
-        )}<w:commentRangeStart w:id="5"/>${run(
-          "three"
-        )}<w:commentRangeEnd w:id="4"/>${ref(4)}${run(
-          " four"
-        )}<w:commentRangeEnd w:id="5"/>${ref(5)}`
+        `${run("one ")}${S(4)}${run("two ")}${S(5)}${run("three")}${E(4)}${ref(
+          4
+        )}${run(" four")}${E(5)}${ref(5)}`
       ) +
-      p("66666666", `<w:commentRangeStart w:id="6"/>${run("across")}`) +
+      p("66666666", `${S(6)}${run("across")}`) +
+      p("77777777", `${run("paragraphs")}${E(6)}${ref(6)}`) +
+      table(p("44444444", range(7, run("cell")))) +
+      // Markers inside a container move to its edges.
       p(
-        "77777777",
-        `${run("paragraphs")}<w:commentRangeEnd w:id="6"/>${ref(6)}`
+        "88888888",
+        `${run("a ")}${link(`${run("li")}${S(8)}${run("nk")}`)}${run(" b")}${E(
+          8
+        )}${ref(8)}`
       ) +
-      `<w:tbl><w:tr><w:tc>${p(
-        "44444444",
-        range(7, run("cell"))
-      )}</w:tc></w:tr></w:tbl>` +
+      p(
+        "99999999",
+        `${tracked("ins", `${run("ins")}${S(9)}${run("erted")}${E(9)}`)}${ref(
+          9
+        )}${run(" c")}`
+      ) +
+      p(
+        "AAAAAAAA",
+        `${run("d ")}${S(10)}${tracked(
+          "del",
+          `<w:r><w:delText>de</w:delText></w:r>${E(
+            10
+          )}<w:r><w:delText>leted</w:delText></w:r>`
+        )}${ref(10)}`
+      ) +
+      p(
+        "BBBBBBBB",
+        `<w:sdt><w:sdtPr><w:id w:val="8"/></w:sdtPr><w:sdtContent>${run(
+          "ct"
+        )}${S(11)}${run("rl")}</w:sdtContent></w:sdt>${run(" e")}${E(11)}${ref(
+          11
+        )}`
+      ) +
       tail,
-    [0, 1, 2, 3, 4, 5, 6, 7]
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
   );
   const seed = await seedOffice("docx", bytes);
   const session = await open(bytes);
@@ -319,13 +364,66 @@ test("a Word reply thread, nested and overlapping ranges, and cell and multi-par
     c5: "three four",
     c6: "across¶paragraphs",
     c7: "cell",
+    c8: "link b",
+    c9: "inserted",
+    c10: "deleted",
+    c11: "[sdt] e",
   });
   session.destroy();
   // A changed hash means the seed changed: the pin bump needs a maintenance window.
   expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
-    "f358c1a7c07cbdb0e679fd735ef26131047b0a258a4379ddcb1649bb4b85b5b0"
+    "e10952b37eb25612b825c1e923c06a3f53cd5281960d02bf5e4d02f02d8bfda3"
   );
 });
+
+/** Each comment's range markers and reference marks in document.xml, in order. */
+const marks = (bytes: Uint8Array) =>
+  [
+    ...new TextDecoder()
+      .decode(unzipContainer(bytes)["word/document.xml"])
+      .matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="(\d+)"/g),
+  ].map(([, kind, id]) => `${kind === "Reference" ? "R" : kind[5]}${id}`);
+
+test.each([
+  [
+    "into the next cell",
+    table(
+      p("44444444", `${run("A ")}${S(5)}${run("one")}`),
+      p("55555555", `${run("two")}${E(5)}${ref(5)}`)
+    ),
+  ],
+  [
+    "out of a cell",
+    table(p("44444444", `${run("in ")}${S(5)}${run("cell")}`)) +
+      p("11111111", `${run("after")}${E(5)}${ref(5)}`),
+  ],
+  [
+    "into a cell",
+    p("11111111", `${run("pre ")}${S(5)}${run("body")}`) +
+      table(p("44444444", `${run("in")}${E(5)}${ref(5)}${run(" cell")}`)),
+  ],
+  [
+    "without an end",
+    p("11111111", `${run("a ")}${S(5)}${run("b")}`) +
+      p("33333333", run("next")),
+  ],
+])(
+  "a Word range running %s saves one start, end and reference and then holds",
+  async (_, xml) => {
+    let bytes = docx(xml + tail, [5]);
+    const seen: Array<Record<string, string>> = [];
+    for (let publication = 0; publication < 2; publication += 1) {
+      const session = await open(bytes);
+      bytes = await publish(bytes, session);
+      session.destroy();
+      expect(marks(bytes).sort()).toEqual(["E5", "R5", "S5"]);
+      const reopened = await open(bytes);
+      seen.push(covered(reopened));
+      reopened.destroy();
+    }
+    expect(seen[1]).toEqual(seen[0]);
+  }
+);
 
 test("a bookmark after a line break keeps its text across publications", async () => {
   const { bytes } = await publications(

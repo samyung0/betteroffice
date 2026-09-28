@@ -28,7 +28,7 @@ use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
-use super::paragraph::serialize_paragraph;
+use super::paragraph::{block_comment_references, serialize_paragraph};
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
@@ -147,6 +147,25 @@ pub fn write_docx_s13_parts(
     // Deleted comments must leave no anchor or reference behind.
     if let Some(comments) = &request.document.comments {
         context.keep_comments(comments.iter().map(|comment| comment.id));
+    }
+    // A comment gets a generated reference mark only when no part holds one.
+    let stories = std::iter::once(&request.document.content)
+        .chain(
+            request
+                .header_entries
+                .iter()
+                .chain(&request.footer_entries)
+                .map(|(_, story)| &story.content),
+        )
+        .chain(
+            request
+                .footnotes
+                .iter()
+                .chain(&request.endnotes)
+                .map(|note| &note.content),
+        );
+    for blocks in stories {
+        block_comment_references(blocks, &mut |id| context.note_comment_reference(id));
     }
     let document_xml = if let Some(selective) = request.selective.as_ref() {
         let original = package

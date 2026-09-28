@@ -57,6 +57,11 @@ fn comment_package(content: Value) -> Vec<u8> {
 
 /// A package whose comments part holds a comment for each of `ids`.
 fn comment_package_with(content: Value, ids: &[u64]) -> Vec<u8> {
+    comment_package_of(&[content], ids)
+}
+
+/// A package with a paragraph per entry of `paragraphs` and a comment for each of `ids`.
+fn comment_package_of(paragraphs: &[Value], ids: &[u64]) -> Vec<u8> {
     let original = ooxml_opc::rezip_parts(&[
         (
             "[Content_Types].xml".to_owned(),
@@ -74,7 +79,7 @@ fn comment_package_with(content: Value, ids: &[u64]) -> Vec<u8> {
     .unwrap();
     let mut request = save_request(&original);
     request.document = serde_json::from_value(json!({
-        "content": [{ "type": "paragraph", "paraId": "11111111", "content": content }],
+        "content": paragraphs.iter().map(|content| json!({ "type": "paragraph", "content": content })).collect::<Vec<_>>(),
         "comments": ids.iter().map(|id| json!({
             "id": id, "author": "Reviewer", "initials": "R",
             "date": "2026-01-01T00:00:00Z", "status": "active", "paletteIndex": 0,
@@ -188,4 +193,27 @@ fn another_comments_reference_does_not_suppress_a_new_reference() {
         element_ids(&saved, "word/document.xml", b"w:commentReference"),
         ["7", "9"]
     );
+}
+
+#[test]
+fn a_reference_in_another_paragraph_is_not_generated_again() {
+    let reference = json!({ "type": "run", "content": [{ "type": "commentReference", "id": 7 }] });
+    let text = |text: &str| json!({ "type": "run", "content": [{ "type": "text", "text": text }] });
+    // A range closing in the paragraph after the one holding its reference, and one before it.
+    for paragraphs in [
+        [
+            json!([{ "type": "commentRangeStart", "id": 7 }, text("in"), reference.clone()]),
+            json!([text("out"), { "type": "commentRangeEnd", "id": 7 }]),
+        ],
+        [
+            json!([{ "type": "commentRangeStart", "id": 7 }, text("in"), { "type": "commentRangeEnd", "id": 7 }]),
+            json!([text("out"), reference.clone()]),
+        ],
+    ] {
+        let saved = comment_package_of(&paragraphs, &[7]);
+        assert_eq!(
+            element_ids(&saved, "word/document.xml", b"w:commentReference"),
+            ["7"]
+        );
+    }
 }

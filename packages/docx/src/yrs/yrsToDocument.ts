@@ -943,7 +943,12 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'flowBreak':
-      return breakRun(item.payload.breakType as FlowBreak);
+      return unitBreakRun(item.payload.breakType as FlowBreak);
+    // Page and column breaks in a story without flow breaks (a cell, a header).
+    case 'pageBreak':
+      return unitBreakRun('page');
+    case 'columnBreak':
+      return unitBreakRun('column');
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
@@ -1367,7 +1372,11 @@ function runContentUnits(content: RunContent): number {
       return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code).length : 0;
     }
     case 'break':
-      return content.breakType === undefined || content.breakType === 'textWrapping' ? 1 : 0;
+      return content.breakType === undefined ||
+        content.breakType === 'textWrapping' ||
+        unitBreaks.has(content)
+        ? 1
+        : 0;
     case 'tab':
     case 'softHyphen':
     case 'noBreakHyphen':
@@ -1893,6 +1902,14 @@ const breakRun = (kind: FlowBreak): Run => ({
   content: [{ type: 'break', breakType: kind }],
 });
 
+/** Page and column breaks that are story units; one the run cache restores holds none. */
+const unitBreaks = new WeakSet<RunContent>();
+function unitBreakRun(kind: FlowBreak): Run {
+  const run = breakRun(kind);
+  unitBreaks.add(run.content[0]!);
+  return run;
+}
+
 /**
  * A paragraph's page/column breaks and visible content in the order the seed
  * reads them (`inline_tokens` in crates/docx-edit/src/seed.rs).
@@ -2369,6 +2386,13 @@ class SaveContext {
         );
       });
 
+    // A range that leaves the story it opened in (Word's range into the next
+    // cell, say) covers its final pilcrow; it closes at its last paragraph's end.
+    let lastPilcrow = -1;
+    segments.reduce((offset, segment) => {
+      if (segment.kind === 'pilcrow') lastPilcrow = offset;
+      return offset + (segment.kind === 'text' ? segment.text.length : 1);
+    }, 0);
     const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
       const boundaries: CommentBoundary[] = [];
       for (const range of storyComments) {
@@ -2376,8 +2400,9 @@ class SaveContext {
           const offset = Math.max(0, range.start - contentStart);
           boundaries.push({ id: range.id, kind: 'start', offset });
         }
-        if (range.end >= paragraphStart && range.end <= end) {
-          const offset = Math.max(0, range.end - contentStart);
+        const rangeEnd = Math.min(range.end, lastPilcrow);
+        if (rangeEnd >= paragraphStart && rangeEnd <= end) {
+          const offset = Math.max(0, rangeEnd - contentStart);
           boundaries.push({ id: range.id, kind: 'end', offset });
         }
       }

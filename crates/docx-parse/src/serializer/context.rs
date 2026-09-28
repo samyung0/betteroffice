@@ -16,6 +16,8 @@ pub struct SerializerContext {
     rendered_page_breaks: Vec<bool>,
     /// Ids of the comments the package keeps; `None` keeps every comment marker.
     comments: Option<HashSet<u64>>,
+    /// Comments whose reference mark is written, so none is generated for them.
+    references: HashSet<u64>,
 }
 
 impl SerializerContext {
@@ -26,6 +28,7 @@ impl SerializerContext {
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
             comments: None,
+            references: HashSet::new(),
         })
     }
 
@@ -39,6 +42,14 @@ impl SerializerContext {
         self.comments
             .as_ref()
             .is_none_or(|ids| ids.contains(&id.to_bits()))
+    }
+
+    pub(crate) fn note_comment_reference(&mut self, id: f64) {
+        self.references.insert(id.to_bits());
+    }
+
+    pub(crate) fn references_comment(&self, id: f64) -> bool {
+        self.references.contains(&id.to_bits())
     }
 
     pub fn allocate_hex_id(&mut self) -> String {

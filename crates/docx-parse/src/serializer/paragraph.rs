@@ -1,5 +1,6 @@
 //! Paragraph properties and inline-content serialization.
 
+use crate::block::BlockContent;
 use crate::borders::Borders;
 use crate::formatting::{NumberingProperties, ParagraphFormatting, ParagraphFrame};
 use crate::inline::{
@@ -69,21 +70,13 @@ fn serialize_paragraph_inner(
         paragraph.section_properties.as_ref(),
     )?;
     append_generated(&mut writer, &properties);
-    let mut generated_comment_references = Vec::new();
     for content in &paragraph.content {
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
         if let ParagraphContent::CommentRange(marker) = content
             && marker.node_type == "commentRangeEnd"
             && context.keeps_comment(marker.id)
-            && !generated_comment_references.contains(&marker.id)
-            && !paragraph.content.iter().any(|content| match content {
-                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
-                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
-                    matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_))
-                        && has_comment_reference(node, marker.id)
-                }),
-                _ => false,
-            })
+            && !context.references_comment(marker.id)
+            && !paragraph_has_comment_reference(paragraph, marker.id)
         {
             writer
                 .start_element("w:r")
@@ -96,7 +89,7 @@ fn serialize_paragraph_inner(
                 .attribute("w:id", &js_number(marker.id))
                 .end_element()
                 .end_element();
-            generated_comment_references.push(marker.id);
+            context.note_comment_reference(marker.id);
         }
     }
     writer.end_element();
@@ -580,48 +573,95 @@ fn serialize_range_end(marker: &RangeEnd) -> Result<String, ParseError> {
     Ok(writer.finish())
 }
 
-fn run_has_comment_reference(run: &Run, id: f64) -> bool {
-    run.content.iter().any(
-        |content| matches!(content, RunContent::CommentReference { id: reference } if *reference == Some(id)),
-    )
+fn run_comment_references(run: &Run, found: &mut impl FnMut(f64)) {
+    for content in &run.content {
+        if let RunContent::CommentReference { id: Some(id) } = content {
+            found(*id);
+        }
+    }
 }
 
-fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
+/// Calls `found` with the id of each comment reference `node` writes.
+fn comment_references(node: &InlineNode, found: &mut impl FnMut(f64)) {
     match node {
-        InlineNode::Run(run) => run_has_comment_reference(run, id),
-        InlineNode::Hyperlink(hyperlink) => hyperlink
-            .children
-            .iter()
-            .any(|node| matches!(node, InlineNode::Run(run) if run_has_comment_reference(run, id))),
-        InlineNode::InlineSdt(sdt) => sdt
-            .content
-            .iter()
-            .any(|node| has_comment_reference(node, id)),
-        InlineNode::SimpleField(field) => field
-            .content
-            .iter()
-            .any(|run| run_has_comment_reference(run, id)),
-        InlineNode::ComplexField(field) => {
-            field
-                .field_code
-                .iter()
-                .any(|run| run_has_comment_reference(run, id))
-                || field
-                    .structured_result
-                    .as_ref()
-                    .filter(|content| content.blocks.is_none())
-                    .and_then(|content| content.inline.as_ref())
-                    .map_or_else(
-                        || {
-                            field
-                                .field_result
-                                .iter()
-                                .any(|run| run_has_comment_reference(run, id))
-                        },
-                        |nodes| nodes.iter().any(|node| has_comment_reference(node, id)),
-                    )
+        InlineNode::Run(run) => run_comment_references(run, found),
+        InlineNode::Hyperlink(hyperlink) => {
+            for node in &hyperlink.children {
+                if let InlineNode::Run(run) = node {
+                    run_comment_references(run, found);
+                }
+            }
         }
-        _ => false,
+        InlineNode::InlineSdt(sdt) => {
+            for node in &sdt.content {
+                comment_references(node, found);
+            }
+        }
+        InlineNode::SimpleField(field) => {
+            for run in &field.content {
+                run_comment_references(run, found);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            for run in &field.field_code {
+                run_comment_references(run, found);
+            }
+            match field
+                .structured_result
+                .as_ref()
+                .filter(|content| content.blocks.is_none())
+                .and_then(|content| content.inline.as_ref())
+            {
+                Some(nodes) => nodes
+                    .iter()
+                    .for_each(|node| comment_references(node, found)),
+                None => field
+                    .field_result
+                    .iter()
+                    .for_each(|run| run_comment_references(run, found)),
+            }
+        }
+        _ => {}
+    }
+}
+
+fn paragraph_comment_references(paragraph: &Paragraph, found: &mut impl FnMut(f64)) {
+    for content in &paragraph.content {
+        match content {
+            ParagraphContent::Inline(node) => comment_references(node, found),
+            ParagraphContent::Tracked(change) => {
+                for node in &change.content {
+                    if matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_)) {
+                        comment_references(node, found);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn paragraph_has_comment_reference(paragraph: &Paragraph, id: f64) -> bool {
+    let mut held = false;
+    paragraph_comment_references(paragraph, &mut |reference| held |= reference == id);
+    held
+}
+
+/// Calls `found` with the id of each comment reference `blocks` write.
+pub(crate) fn block_comment_references(blocks: &[BlockContent], found: &mut impl FnMut(f64)) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => paragraph_comment_references(paragraph, found),
+            BlockContent::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        block_comment_references(&cell.content, found);
+                    }
+                }
+            }
+            BlockContent::BlockSdt(sdt) => block_comment_references(&sdt.content, found),
+            BlockContent::RawXml(_) => {}
+        }
     }
 }
 
