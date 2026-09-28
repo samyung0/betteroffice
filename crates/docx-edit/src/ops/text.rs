@@ -213,6 +213,33 @@ pub(crate) fn plain_delete(
     DeleteOutcome { removed }
 }
 
+/// Deletes `[start, end)` but for the paragraph mark at `kept`, plainly or as
+/// a suggestion under `revision`; returns the units physically removed.
+#[allow(clippy::too_many_arguments)]
+fn delete_keeping(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    ctx: &EditCtx,
+    revision: Option<&Any>,
+    start: u32,
+    end: u32,
+    kept: Option<u32>,
+    chunks: &[Chunk],
+) -> u32 {
+    let pieces = match kept {
+        Some(mark) => vec![(mark + 1, end), (start, mark)],
+        None => vec![(start, end)],
+    };
+    pieces
+        .into_iter()
+        .filter(|(from, to)| from < to)
+        .map(|(from, to)| match revision {
+            Some(revision) => suggest_delete(txn, story, ctx, revision, from, to, chunks).removed,
+            None => plain_delete(txn, story, from, to, chunks).removed,
+        })
+        .sum()
+}
+
 impl EditingDoc {
     /// Inserts break-free text with explicit stamps and formatting policy.
     /// Text meant ahead of the tables or breaks that open a paragraph slot
@@ -261,12 +288,15 @@ impl EditingDoc {
         })
     }
 
-    /// Deletes a range while preserving surviving paragraph properties.
+    /// Deletes a range while preserving surviving paragraph properties. A
+    /// range ending at a slot that opens with a table or break keeps the
+    /// paragraph mark before it ([`EditingDoc::kept_mark`]).
     pub fn delete_range(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
         }
+        let kept = self.kept_mark(&range.story, range.start, range.end)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -281,20 +311,22 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
                 .unwrap_or_else(|| self.next_id())
         });
-        let result_end = if let Some(id) = revision_id.as_ref() {
-            let revision = revision_value(id, &ctx.revision_author());
-            let outcome = suggest_delete(
-                &mut txn,
-                &story,
-                ctx,
-                &revision,
-                range.start,
-                range.end,
-                &chunks,
-            );
-            range.end - outcome.removed
+        let revision = revision_id
+            .as_ref()
+            .map(|id| revision_value(id, &ctx.revision_author()));
+        let removed = delete_keeping(
+            &mut txn,
+            &story,
+            ctx,
+            revision.as_ref(),
+            range.start,
+            range.end,
+            kept,
+            &chunks,
+        );
+        let result_end = if revision.is_some() {
+            range.end - removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             range.start
         };
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
@@ -317,6 +349,7 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let landing = self.replacement_landing(ctx, &range)?;
+        let kept = self.kept_mark(&range.story, range.start, range.end)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -356,21 +389,16 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        if len > 0 {
-            if let Some(revision) = revision.as_ref() {
-                suggest_delete(
-                    &mut txn,
-                    &story,
-                    ctx,
-                    revision,
-                    range.start,
-                    range.end,
-                    &chunks,
-                );
-            } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
-            }
-        }
+        delete_keeping(
+            &mut txn,
+            &story,
+            ctx,
+            revision.as_ref(),
+            range.start,
+            range.end,
+            kept,
+            &chunks,
+        );
         if !text.is_empty() {
             story.insert_with_attributes(
                 &mut txn,
@@ -416,6 +444,7 @@ impl EditingDoc {
             return Err(OpError::EmptyRange);
         }
         let landing = self.replacement_landing(ctx, &range)?;
+        let kept = self.kept_mark(&range.story, range.start, range.end)?;
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
@@ -435,21 +464,16 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        if len > 0 {
-            if let Some(revision) = revision.as_ref() {
-                suggest_delete(
-                    &mut txn,
-                    &story,
-                    ctx,
-                    revision,
-                    range.start,
-                    range.end,
-                    &chunks,
-                );
-            } else {
-                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
-            }
-        }
+        delete_keeping(
+            &mut txn,
+            &story,
+            ctx,
+            revision.as_ref(),
+            range.start,
+            range.end,
+            kept,
+            &chunks,
+        );
         let mut cursor = landing;
         for run in runs {
             if run.text.is_empty() {

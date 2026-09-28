@@ -114,6 +114,23 @@ describe('paragraph slots that open with a table or page break', () => {
     }
   );
 
+  it('a selection delete or cut ending at a table slot keeps the mark before it, and Undo restores the text', async () => {
+    const session = await open(TABLE);
+    try {
+      // The editor's selection delete and cut both delete the selected range.
+      session.deleteRange({
+        story: 'body',
+        start: { paraId: paraId(session, 0), offset: 3 },
+        end: { paraId: paraId(session, 1), offset: 0 },
+      });
+      expect(units(session)).toBe('Bef¶[table]After¶');
+      expect(session.undo()).toBe(true);
+      expect(units(session)).toBe('Before¶[table]After¶');
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('typing at a resident caret ahead of a page break lands after it and keeps its order', async () => {
     const session = await open(PAGE_BREAK);
     try {

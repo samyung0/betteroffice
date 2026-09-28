@@ -379,6 +379,25 @@ impl EditingDoc {
         })
     }
 
+    /// The paragraph mark a delete of `[start, end)` keeps, as Word does: the
+    /// one before a slot that opens with a table or break, when removing it
+    /// would put the text before `start` ahead of that block.
+    pub(crate) fn kept_mark(
+        &self,
+        story_id: &str,
+        start: u32,
+        end: u32,
+    ) -> EditResult<Option<u32>> {
+        let segments = self.segment_index(story_id)?;
+        let (Some(first), Some(last)) = (segments.para_at(start), segments.para_at(end)) else {
+            return Ok(None);
+        };
+        Ok(
+            (start > first.node_start && last.start > start && end < last.node_start)
+                .then(|| last.start - 1),
+        )
+    }
+
     /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
     pub(crate) fn chunk_snapshot<T: ReadTxn>(
         &self,

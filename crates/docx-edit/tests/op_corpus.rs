@@ -1514,3 +1514,85 @@ fn a_replacement_of_a_leading_block_lands_after_the_blocks_left() {
         .unwrap();
     assert_eq!(slot_units(&doc), "Before¶[pageBreak]Typed Chapter¶");
 }
+
+/// `Before¶[kind]After¶`: a block of `kind` opens the second slot.
+fn block_slot(kind: &str) -> (EditingDoc, ParagraphId) {
+    let (doc, _) = doc_with("BeforeAfter");
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 6), None)
+        .unwrap();
+    if kind == "table" {
+        doc.insert_table(&ctx(), Position::new("body", 7), 1, 1)
+            .unwrap();
+    } else {
+        doc.insert_embed(&ctx(), Position::new("body", 7), kind, vec![])
+            .unwrap();
+    }
+    assert_eq!(slot_units(&doc), format!("Before¶[{kind}]After¶"));
+    (doc, split.first_para_id)
+}
+
+#[test]
+fn a_range_delete_ending_at_a_block_led_slot_keeps_the_mark_before_it() {
+    for kind in ["table", "pageBreak", "columnBreak", "blockSdt"] {
+        let (doc, first) = block_slot(kind);
+        doc.delete_range(&ctx(), StoryRange::new("body", 3, 7))
+            .unwrap();
+        assert_eq!(slot_units(&doc), format!("Bef¶[{kind}]After¶"), "{kind}");
+        assert_eq!(doc.paragraphs("body").unwrap()[0].para_id, first);
+    }
+}
+
+#[test]
+fn a_range_delete_across_paragraphs_keeps_the_last_mark_with_the_first_identity() {
+    let (doc, first) = block_slot("table");
+    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Bef¶ore¶[table]After¶");
+    doc.delete_range(&ctx(), StoryRange::new("body", 1, 8))
+        .unwrap();
+    assert_eq!(slot_units(&doc), "B¶[table]After¶");
+    assert_eq!(doc.paragraphs("body").unwrap()[0].para_id, first);
+    // A range that also takes one of the slot's leading blocks keeps the mark
+    // and deletes that block.
+    let (doc, _) = block_slot("pageBreak");
+    doc.insert_embed(&ctx(), Position::new("body", 7), "table", vec![])
+        .unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 3, 8))
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Bef¶[pageBreak]After¶");
+}
+
+#[test]
+fn a_range_delete_from_an_empty_paragraph_or_one_block_still_deletes_it() {
+    // Nothing is left ahead of the block, so the mark goes.
+    let (doc, _) = block_slot("table");
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 7))
+        .unwrap();
+    assert_eq!(slot_units(&doc), "[table]After¶");
+    // Backspace after a block deletes that block.
+    let (doc, _) = block_slot("pageBreak");
+    doc.delete_range(&ctx(), StoryRange::new("body", 7, 8))
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶After¶");
+}
+
+#[test]
+fn a_suggested_range_delete_or_replacement_keeps_the_mark_before_a_block() {
+    let (doc, _) = block_slot("table");
+    doc.delete_range(&sug("Bob"), StoryRange::new("body", 3, 7))
+        .unwrap();
+    assert_eq!(slot_units(&doc), "Before¶[table]After¶");
+    assert!(active(&seg_attrs(&doc, "ore"), "del"));
+    let pilcrow = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .find(|segment| matches!(segment.content, SegmentContent::Pilcrow(_)))
+        .unwrap();
+    assert!(!active(&pilcrow.attributes, "del"));
+    let (doc, _) = block_slot("table");
+    doc.replace_range(&ctx(), StoryRange::new("body", 3, 7), "X")
+        .unwrap();
+    assert_eq!(slot_units(&doc), "BefX¶[table]After¶");
+}
