@@ -1248,13 +1248,21 @@ export async function rebaseOffice(
   }
   await initialize(format);
   if (format === "xlsx") {
-    const state = XlsxDocument.rebaseCheckpoint(
-      baseBytes,
-      captured.state,
-      latest.state,
-      exportedSource,
-      randomInt(1, 0x1fffffffffff)
-    );
+    let state: Uint8Array;
+    try {
+      state = XlsxDocument.rebaseCheckpoint(
+        baseBytes,
+        captured.state,
+        latest.state,
+        exportedSource,
+        randomInt(1, 0x1fffffffffff)
+      );
+    } catch (error) {
+      if (error instanceof WebAssembly.RuntimeError) throw error;
+      throw new RebaseError(
+        `Office rebase: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     const checkpoint = {
       format,
       schemaVersion: 1 as const,

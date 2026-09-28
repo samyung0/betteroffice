@@ -102,6 +102,32 @@ test("XLSX publications rebase later edits as overrides and report them as effec
   }
 });
 
+test("an XLSX publication rebase the engine refuses is an Office rebase refusal", async () => {
+  const bytes = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", bytes);
+  const doc = XlsxDocument.openCollaborative(bytes, 9989);
+  try {
+    doc.applyUpdateJson(seeded.state);
+    doc.editCellJson(
+      JSON.stringify({ sheet: 0, row: 0, col: 0, input: "later" })
+    );
+    // An export whose sheets are not the captured ones cannot take the edits.
+    const other = await fixture("showcase.xlsx");
+    await expect(
+      rebaseOffice(
+        bytes,
+        seeded,
+        { ...seeded, state: doc.encodeStateAsUpdate() },
+        other
+      )
+    ).rejects.toThrow(
+      "Office rebase: invalid collaborative workbook state: published workbook does not match captured sheet order"
+    );
+  } finally {
+    doc.free();
+  }
+});
+
 test("PPTX checkpoint exports preserve opaque parts and mismatched source restoration fails immediately", async () => {
   const bytes = await fixture("betteroffice-demo.pptx");
   const before = await seedOffice("pptx", bytes);

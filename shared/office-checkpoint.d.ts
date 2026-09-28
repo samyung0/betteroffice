@@ -129,7 +129,11 @@ export declare function compareBaselines(
   to: OfficeBaselineEntry[],
 ): NetEffect[];
 
-/** The edits saved after the capture landed on seed(export), with their effects against the export. */
+/**
+ * The edits saved after the capture landed on seed(export), with their effects
+ * against the export. A refusal is an Error whose message starts with
+ * "Office rebase:"; the same inputs are always refused again.
+ */
 export declare function rebaseOffice(
   baseBytes: Uint8Array,
   captured: OfficeCheckpoint,
