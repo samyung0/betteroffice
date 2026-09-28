@@ -478,6 +478,8 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                 )?;
+                let (starts, ends) = nested_comment_ranges(child);
+                output.extend(starts);
                 if let Some(active) = fields.last_mut() {
                     let runs: Vec<Run> = hyperlink
                         .children
@@ -493,6 +495,7 @@ fn parse_paragraph_contents(
                         hyperlink,
                     ))));
                 }
+                output.extend(ends);
             }
             "bookmarkStart" => {
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
@@ -543,6 +546,8 @@ fn parse_paragraph_contents(
                         depth + 1,
                         tracked_context == TrackedContext::Deletion,
                     )?;
+                    let (starts, ends) = nested_comment_ranges(container);
+                    output.extend(starts);
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
                             node_type: InlineSdtType::InlineSdt,
@@ -554,6 +559,7 @@ fn parse_paragraph_contents(
                             content: filter_field_inline(parsed),
                         },
                     ))));
+                    output.extend(ends);
                 }
             }
             "ins" | "del" | "moveFrom" | "moveTo" => {
@@ -585,11 +591,14 @@ fn parse_paragraph_contents(
                     "moveFrom" => "moveFrom",
                     _ => "moveTo",
                 };
+                let (starts, ends) = nested_comment_ranges(child);
+                output.extend(starts);
                 output.push(ParagraphContent::Tracked(TrackedInline {
                     node_type: node_type.to_owned(),
                     info: parse_tracked_change_info(child),
                     content,
                 }));
+                output.extend(ends);
             }
             "moveFromRangeStart" | "moveToRangeStart" => {
                 output.push(ParagraphContent::RangeStart(RangeStart {
@@ -921,6 +930,36 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
             })
             .collect(),
     }
+}
+
+/// Comment range markers inside a hyperlink, tracked change or inline content
+/// control, which cannot hold them: starts go before it and ends after it, so
+/// the range holds the container whole.
+fn nested_comment_ranges(container: &XmlElement) -> (Vec<ParagraphContent>, Vec<ParagraphContent>) {
+    let (mut starts, mut ends) = (Vec::new(), Vec::new());
+    for child in transparent_children(container, true) {
+        match child.local_name() {
+            name @ ("commentRangeStart" | "commentRangeEnd") => {
+                let marker = ParagraphContent::CommentRange(CommentRange {
+                    node_type: name.to_owned(),
+                    id: parse_range_id(child),
+                    offset: None,
+                });
+                if name == "commentRangeStart" {
+                    starts.push(marker);
+                } else {
+                    ends.push(marker);
+                }
+            }
+            "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo" => {
+                let (inner_starts, inner_ends) = nested_comment_ranges(child);
+                starts.extend(inner_starts);
+                ends.extend(inner_ends);
+            }
+            _ => {}
+        }
+    }
+    (starts, ends)
 }
 
 fn parse_range_id(element: &XmlElement) -> f64 {
@@ -1655,6 +1694,46 @@ mod tests {
             panic!("bookmark end")
         };
         assert_eq!(end.position.as_ref().unwrap().offset, Some(5.0));
+    }
+
+    #[test]
+    fn comment_markers_inside_a_container_move_to_its_edges() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:hyperlink w:anchor="a"><w:r><w:t>li</w:t></w:r><w:commentRangeStart w:id="1"/><w:r><w:t>nk</w:t></w:r></w:hyperlink>
+              <w:ins w:id="5"><w:r><w:t>in</w:t></w:r><w:commentRangeEnd w:id="1"/><w:commentRangeStart w:id="2"/></w:ins>
+              <w:del w:id="6"><w:commentRangeEnd w:id="2"/><w:r><w:delText>de</w:delText></w:r></w:del>
+              <w:sdt><w:sdtContent><w:r><w:t>ct</w:t></w:r><w:commentRangeStart w:id="3"/><w:r><w:t>rl</w:t></w:r><w:commentRangeEnd w:id="3"/></w:sdtContent></w:sdt>
+            </w:p>"#,
+        );
+        let layout: Vec<String> = paragraph
+            .content
+            .iter()
+            .map(|content| match content {
+                ParagraphContent::CommentRange(marker) => {
+                    format!("{}{}", &marker.node_type[12..13], marker.id)
+                }
+                ParagraphContent::Inline(InlineNode::Hyperlink(_)) => "link".into(),
+                ParagraphContent::Inline(InlineNode::InlineSdt(_)) => "sdt".into(),
+                ParagraphContent::Tracked(change) => change.node_type.clone(),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            layout,
+            [
+                "S1",
+                "link",
+                "S2",
+                "insertion",
+                "E1",
+                "deletion",
+                "E2",
+                "S3",
+                "sdt",
+                "E3"
+            ]
+        );
     }
 
     fn run_texts(paragraph: &Paragraph) -> Vec<&str> {

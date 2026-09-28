@@ -57,6 +57,11 @@
         </w:p>
       </w:sdtContent>
     </w:sdt>
+    <w:p>
+      <w:hyperlink w:anchor="target"><w:r><w:t xml:space="preserve">Markers inside </w:t></w:r><w:commentRangeStart w:id="7"/><w:r><w:t>a link</w:t></w:r></w:hyperlink>
+      <w:ins w:id="90" w:author="Ada Lovelace" w:date="2026-09-01T16:00:00Z"><w:r><w:t xml:space="preserve"> and an insertion</w:t></w:r><w:commentRangeEnd w:id="7"/></w:ins>
+      <w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="7"/></w:r>
+    </w:p>
     <w:p><w:r><w:t>Tail.</w:t></w:r></w:p>
     <w:sectPr>
       <w:pgSz w:w="12240" w:h="15840"/>
