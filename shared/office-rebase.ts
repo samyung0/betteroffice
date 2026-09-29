@@ -582,7 +582,11 @@ function landLater(
   try {
     const steps: Step[] = [];
     for (const name of [...lineage.maps, ...lineage.arrays])
-      root(lineage, edited, name).observeDeep((events) => {
+      root(lineage, edited, name).observeDeep((events, transaction) => {
+        // After applying the later edits, Yjs removes the formatting they
+        // left redundant in a transaction of its own. That changes no
+        // content or attribute, and its positions are no captured ones.
+        if (transaction.local) return;
         for (const event of events) {
           const common = { root: name, path: event.path as Path };
           if (event.target instanceof Y.Text)

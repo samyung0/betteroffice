@@ -1246,3 +1246,18 @@ test.each([
   };
   expect(await directly(bytes, over)).toBe(expected);
 });
+
+test("deleting a field with the tracked break after it, after the capture, lands when the export's seed numbers the next field otherwise", async () => {
+  // The seed reads the deleted break as the next paragraph's, so the seed of
+  // the export numbers the second field one lower than the capture does.
+  const pageBreak = '<w:r><w:br w:type="page"/></w:r>';
+  const bytes = docx(
+    p("33333333", run("prev")) + p("11111111", `${run("a ")}${field(link(run("26")))}${del(pageBreak)}${field(link(run("30")))}`) + tail
+  );
+  const removeField: Edit = (session) => {
+    const { story, paraId, offset } = textAt(session, "26");
+    session.deleteRange({ story, start: { paraId, offset }, end: { paraId, offset: offset + 3 } });
+  };
+  const { next, direct } = await landed(bytes, () => {}, removeField);
+  expect(next).toBe(direct);
+});
