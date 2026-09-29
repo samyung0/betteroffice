@@ -376,7 +376,33 @@ fn content_index<T: ReadTxn>(
     let mut count = 0;
     let mut offset = 0;
     let mut link: Option<&Any> = None;
-    for chunk in &chunks[first..position] {
+    // The blocks opening the paragraph's slot are no content of it, save the
+    // breaks the export writes as its first runs: from a leading one on, or
+    // all of them with no paragraph before (as `settle` in yrsToDocument.ts).
+    let mut head = first;
+    let mut after_paragraph = first > 0;
+    let mut leads = false;
+    while head < position {
+        let ChunkKind::Embed(Some(map)) = &chunks[head].kind else {
+            break;
+        };
+        match map_string(map, txn, KIND_KEY).as_deref() {
+            Some("table" | "blockSdt") => {
+                after_paragraph = false;
+                leads = false;
+            }
+            Some("pageBreak" | "columnBreak") => {
+                leads |= !after_paragraph
+                    || matches!(map.get(txn, "leading"), Some(Out::Any(Any::Bool(true))));
+                if leads {
+                    count += 1;
+                }
+            }
+            _ => break,
+        }
+        head += 1;
+    }
+    for chunk in &chunks[head..position] {
         offset += match &chunk.kind {
             ChunkKind::Embed(Some(map))
                 if map_string(map, txn, KIND_KEY).as_deref() == Some("sdt") =>

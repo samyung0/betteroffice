@@ -91,24 +91,20 @@ const checkpoint = (base: Uint8Array, state: Uint8Array) => ({
 const publish = (bytes: Uint8Array, session: YrsSession) =>
   exportOffice(bytes, checkpoint(bytes, session.encodeState()), fixed);
 
-/** A story's units: text, ¶, [kind] per embed ([pageBreak^] when it leads its paragraph), +/- for tracked ones. */
+/** A segment as a unit: text, ¶, [kind] per embed ([pageBreak^] when it leads its paragraph), +/- for tracked ones. */
+function units_(
+  segment: ReturnType<YrsSession["storySegments"]>[number]
+): string {
+  if (segment.kind === "text") return segment.text;
+  if (segment.kind === "pilcrow") return "¶";
+  if (segment.payload.modelKind === "commentReference") return "";
+  const mark = segment.attributes.ins ? "+" : segment.attributes.del ? "-" : "";
+  return `${mark}[${segment.embedKind}${segment.payload.leading ? "^" : ""}]`;
+}
+
+/** A story's units (see `units_`). */
 function units(session: YrsSession, story: string): string {
-  return session
-    .storySegments(story)
-    .map((segment) => {
-      if (segment.kind === "text") return segment.text;
-      if (segment.kind === "pilcrow") return "¶";
-      if (segment.payload.modelKind === "commentReference") return "";
-      const mark = segment.attributes.ins
-        ? "+"
-        : segment.attributes.del
-        ? "-"
-        : "";
-      return `${mark}[${segment.embedKind}${
-        segment.payload.leading ? "^" : ""
-      }]`;
-    })
-    .join("");
+  return session.storySegments(story).map(units_).join("");
 }
 
 /** The story's part as text: [PB]/[CB] breaks, ¶ per paragraph, +{…}/-{…} tracked changes, T[…] tables. */
@@ -1255,5 +1251,66 @@ describe.each(EVERY)(
       session.destroy();
       expect(order(out, part, "44444444")).toBe(end > 1 ? edited : untouched);
     });
+  }
+);
+
+describe.each(["body", "cell"] as Where[])(
+  "a field Accept All resolves in a paragraph a page break's slot opens, in %s",
+  (where) => {
+    const link = (xml: string) =>
+      `<w:hyperlink w:anchor="target">${xml}</w:hyperlink>`;
+    // Accepting the first field's insertion uncovers a link it then projects.
+    const fields = `${field(
+      `${run("20")}${tracked("ins", link(run("26")))}`
+    )}${field(link(run("30")))}`;
+    test.each([
+      [
+        "a break closing the paragraph before",
+        `${p("33333333", `${run("prev")}${BR}`)}${p("44444444", fields)}`,
+      ],
+      [
+        "a break leading the paragraph",
+        `${p("33333333", run("prev"))}${p("44444444", `${BR}${fields}`)}`,
+      ],
+      [
+        "a table before the paragraph",
+        `${table(p("66666666", run("in")))}${p("44444444", fields)}`,
+      ],
+    ])(
+      "after %s, numbers each field's projection as its export seeds it",
+      async (_, xml) => {
+        const [story, part] = STORY[where];
+        // Units with the projection ids that pair a field with its children.
+        const projections = (session: YrsSession) =>
+          session
+            .storySegments(story)
+            .map((segment) => {
+              const child = segment.attributes.fieldResult as
+                | { id?: number }
+                | undefined;
+              const owner =
+                segment.kind === "embed"
+                  ? segment.payload.resultProjection
+                  : undefined;
+              return `${units_(segment)}${child ? `<${child.id}` : ""}${
+                owner ? `>${(owner as { id?: number }).id}` : ""
+              }`;
+            })
+            .join("");
+        const bytes = docx(where, xml);
+        const session = await open(bytes);
+        session.acceptChange({ all: true });
+        const resolved = projections(session);
+        const out = await publish(bytes, session);
+        session.destroy();
+        const reopened = await open(out);
+        expect(projections(reopened)).toBe(resolved);
+        reopened.destroy();
+        expect(plain(out, part)).toContain("2026");
+        expect(new TextDecoder().decode(unzipContainer(out)[part])).toMatch(
+          /<w:fldChar w:fldCharType="separate"\/><\/w:r><w:hyperlink w:anchor="target"><w:r><w:t[^>]*>30</
+        );
+      }
+    );
   }
 );
