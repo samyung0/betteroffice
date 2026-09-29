@@ -776,12 +776,6 @@
   "editor": {
     "toggleCommentsSidebar": "Przełącz panel komentarzy",
     "showDocumentOutline": "Pokaż konspekt dokumentu",
-    "editing": "Edytowanie",
-    "editingDescription": "Edytuj dokument bezpośrednio",
-    "suggesting": "Sugerowanie",
-    "suggestingDescription": "Zmiany stają się sugestiami",
-    "viewing": "Wyświetlanie",
-    "viewingDescription": "Tylko do odczytu, bez edycji",
     "failedToParse": "Nie udało się przetworzyć dokumentu",
     "linkRemoved": "Usunięto link",
     "linkCopied": "Skopiowano link do schowka",

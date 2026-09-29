@@ -776,12 +776,6 @@
   "editor": {
     "toggleCommentsSidebar": "切换批注侧边栏",
     "showDocumentOutline": "显示文档大纲",
-    "editing": "编辑",
-    "editingDescription": "直接编辑文档",
-    "suggesting": "修订",
-    "suggestingDescription": "编辑内容将显示为修订建议",
-    "viewing": "查看",
-    "viewingDescription": "只读，不可编辑",
     "failedToParse": "解析文档失败",
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",

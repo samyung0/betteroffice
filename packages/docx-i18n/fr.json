@@ -779,12 +779,6 @@
   "editor": {
     "toggleCommentsSidebar": "Afficher/masquer les commentaires",
     "showDocumentOutline": "Afficher le plan",
-    "editing": "Éditer",
-    "editingDescription": "Modifier directement le document",
-    "suggesting": "Suggestions",
-    "suggestingDescription": "Les modifications deviennent des suggestions",
-    "viewing": "Affichage",
-    "viewingDescription": "Lecture seule, aucune modification",
     "failedToParse": "Impossible d'analyser le document",
     "linkRemoved": "Lien supprimé",
     "linkCopied": "Lien copié dans le presse-papiers",

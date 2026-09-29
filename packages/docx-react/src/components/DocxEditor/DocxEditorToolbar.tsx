@@ -6,8 +6,6 @@ import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
 import { CommentsSidebarToggle } from './CommentsSidebarToggle';
-import { EditingModeDropdown } from './EditingModeDropdown';
-import type { EditorMode } from './internals/editing-modes';
 
 interface ImageContext {
   pos: number;
@@ -28,7 +26,7 @@ interface ImageContext {
  * with the document state (selection formatting, table/image context,
  * undo/redo depth), plus the title bar slots (logo, document name,
  * right-side actions, menu bar) and the trailing toolbar extras (comments
- * sidebar toggle and editing mode dropdown).
+ * sidebar toggle).
  *
  * Undo/redo availability comes from the authoritative Yrs history.
  */
@@ -42,10 +40,8 @@ export function DocxEditorToolbar({
   selectionFormatting,
   tableContext,
   imageContext,
-  // Editor modes + flags
+  // Flags
   readOnly,
-  editingMode,
-  setEditingMode,
   setShowCommentsSidebar,
   setExpandedSidebarItem,
   showCommentsSidebar,
@@ -93,8 +89,6 @@ export function DocxEditorToolbar({
   tableContext: TableContextInfo | null;
   imageContext: ImageContext | null;
   readOnly: boolean;
-  editingMode: EditorMode;
-  setEditingMode: (mode: EditorMode) => void;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   setExpandedSidebarItem: React.Dispatch<React.SetStateAction<string | null>>;
   showCommentsSidebar: boolean;
@@ -192,14 +186,6 @@ export function DocxEditorToolbar({
               // collapsed state — resolved threads stay as checkmarks, not opened.
               setShowCommentsSidebar((v) => !v);
               setExpandedSidebarItem(null);
-            }}
-          />
-          <ToolbarSeparator />
-          <EditingModeDropdown
-            mode={editingMode}
-            onModeChange={(mode) => {
-              setEditingMode(mode);
-              if (mode === 'suggesting') setShowCommentsSidebar(true);
             }}
           />
           {toolbarExtra}

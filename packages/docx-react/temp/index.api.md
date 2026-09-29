@@ -91,7 +91,6 @@ export interface DocxEditorProps {
     onEditorViewReady?: (view: prosemirror_view.EditorView) => void;
     onError?: (error: Error) => void;
     onFontsLoaded?: () => void;
-    onModeChange?: (mode: EditorMode) => void;
     onOpen?: (file: File) => void | Promise<void>;
     onPaste?: () => void;
     onPrint?: () => void;

@@ -253,8 +253,6 @@ export interface DocxEditorProps {
   onPaste?: () => void;
   /** Editor mode: 'editing' (direct edits), 'suggesting' (track changes), or 'viewing' (read-only). Default: 'editing' */
   mode?: EditorMode;
-  /** Callback when the editing mode changes */
-  onModeChange?: (mode: EditorMode) => void;
   /** Callback when a comment is added via the UI */
   onCommentAdd?: (comment: Comment) => void;
   /** Callback when a comment is resolved via the UI */
@@ -523,8 +521,8 @@ interface EditorState {
   } | null;
 }
 
-export type { EditorMode } from './DocxEditor/internals/editing-modes';
-import type { EditorMode } from './DocxEditor/internals/editing-modes';
+/** How the editor applies edits: directly, as tracked changes, or not at all. */
+export type EditorMode = 'editing' | 'suggesting' | 'viewing';
 
 function displayRangeToYrsRange(
   editor: PagedEditorRef,
@@ -608,7 +606,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onCut: _onCut,
     onPaste: _onPaste,
     mode: modeProp,
-    onModeChange,
     onCommentAdd,
     onCommentResolve,
     onCommentDelete,
@@ -734,12 +731,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     useState<Map<string, number>>(EMPTY_ANCHOR_POSITIONS);
   // No separate state needed — pluginRenderedDomContext comes from PluginHost
 
-  const [editingModeInternal, setEditingModeInternal] = useState<EditorMode>(modeProp ?? 'editing');
-  const editingMode = modeProp ?? editingModeInternal;
-  const setEditingMode = (mode: EditorMode) => {
-    if (!modeProp) setEditingModeInternal(mode);
-    onModeChange?.(mode);
-  };
+  const editingMode = modeProp ?? 'editing';
   // 'viewing' mode acts as read-only
   const readOnly = readOnlyProp || editingMode === 'viewing';
 
@@ -1847,8 +1839,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               tableContext={toolbarTableContext}
               imageContext={state.pmImageContext}
               readOnly={readOnly}
-              editingMode={editingMode}
-              setEditingMode={setEditingMode}
               setShowCommentsSidebar={setShowCommentsSidebar}
               setExpandedSidebarItem={setExpandedSidebarItem}
               showCommentsSidebar={showCommentsSidebar}

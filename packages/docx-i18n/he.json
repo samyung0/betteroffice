@@ -776,12 +776,6 @@
   "editor": {
     "toggleCommentsSidebar": "הצג/הסתר סרגל תגובות",
     "showDocumentOutline": "הצג מתאר מסמך",
-    "editing": "עריכה",
-    "editingDescription": "ערוך את המסמך ישירות",
-    "suggesting": "הצעות",
-    "suggestingDescription": "עריכות יוצגו כהצעות",
-    "viewing": "צפייה",
-    "viewingDescription": "קריאה בלבד, ללא עריכה",
     "failedToParse": "שגיאה בפתיחת המסמך",
     "linkRemoved": "הקישור הוסר",
     "linkCopied": "הקישור הועתק ללוח",

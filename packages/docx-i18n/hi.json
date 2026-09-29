@@ -779,12 +779,6 @@
   "editor": {
     "toggleCommentsSidebar": "टिप्पणी साइडबार टॉगल करें",
     "showDocumentOutline": "दस्तावेज़ की रूपरेखा दिखाएं",
-    "editing": "संपादन",
-    "editingDescription": "दस्तावेज़ को सीधे संपादित करें",
-    "suggesting": "सुझाव देना",
-    "suggestingDescription": "संपादन सुझाव बन जाते हैं",
-    "viewing": "देखना",
-    "viewingDescription": "केवल पढ़ने के लिए, कोई संपादन नहीं",
     "failedToParse": "दस्तावेज़ का विश्लेषण करने में विफल",
     "linkRemoved": "लिंक हटा दिया गया",
     "linkCopied": "लिंक क्लिपबोर्ड पर कॉपी किया गया",

@@ -776,12 +776,6 @@
   "editor": {
     "toggleCommentsSidebar": "Kommentarleiste umschalten",
     "showDocumentOutline": "Dokumentgliederung anzeigen",
-    "editing": "Bearbeiten",
-    "editingDescription": "Dokument direkt bearbeiten",
-    "suggesting": "Vorschlagen",
-    "suggestingDescription": "Änderungen werden zu Vorschlägen",
-    "viewing": "Anzeigen",
-    "viewingDescription": "Schreibgeschützt, keine Bearbeitung",
     "failedToParse": "Dokument konnte nicht verarbeitet werden",
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",

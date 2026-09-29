@@ -794,12 +794,6 @@
   "editor": {
     "toggleCommentsSidebar": "Tampilkan/Sembunyikan Panel Komentar",
     "showDocumentOutline": "Tampilkan Kerangka Dokumen",
-    "editing": "Mengedit",
-    "editingDescription": "Edit dokumen secara langsung",
-    "suggesting": "Menyarankan",
-    "suggestingDescription": "Perubahan akan menjadi saran",
-    "viewing": "Melihat",
-    "viewingDescription": "Hanya baca, tidak dapat mengedit",
     "failedToParse": "Gagal membaca dokumen",
     "linkRemoved": "Tautan dihapus",
     "linkCopied": "Tautan disalin ke papan klip",

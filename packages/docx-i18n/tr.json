@@ -779,12 +779,6 @@
   "editor": {
     "toggleCommentsSidebar": "Yorum kenar çubuğunu aç/kapa",
     "showDocumentOutline": "Belge ana hattını göster",
-    "editing": "Düzenleniyor",
-    "editingDescription": "Belgeyi doğrudan düzenle",
-    "suggesting": "Öneriliyor",
-    "suggestingDescription": "Düzenlemeler öneri olur",
-    "viewing": "Görüntüleniyor",
-    "viewingDescription": "Salt okunur, düzenleme yok",
     "failedToParse": "Belge ayrıştırılamadı",
     "linkRemoved": "Bağlantı kaldırıldı",
     "linkCopied": "Bağlantı panoya kopyalandı",

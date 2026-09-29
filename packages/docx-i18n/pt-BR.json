@@ -776,12 +776,6 @@
   "editor": {
     "toggleCommentsSidebar": "Alternar barra lateral de comentários",
     "showDocumentOutline": "Mostrar estrutura do documento",
-    "editing": "Editando",
-    "editingDescription": "Editar documento diretamente",
-    "suggesting": "Sugerindo",
-    "suggestingDescription": "Edições se tornam sugestões",
-    "viewing": "Visualizando",
-    "viewingDescription": "Somente leitura, sem edições",
     "failedToParse": "Falha ao analisar documento",
     "linkRemoved": "Link removido",
     "linkCopied": "Link copiado para a área de transferência",
