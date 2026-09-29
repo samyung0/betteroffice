@@ -114,7 +114,7 @@ export function DocxEditorToolbar({
   onRefocusEditor: () => void;
   onInsertTable: (rows: number, columns: number) => void;
   onInsertImage: () => void;
-  onInsertPageBreak: () => void;
+  onInsertPageBreak?: () => void;
   onInsertSectionBreakNextPage: () => void;
   onInsertSectionBreakContinuous: () => void;
   onInsertTOC: () => void;

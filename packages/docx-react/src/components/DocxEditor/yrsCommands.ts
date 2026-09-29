@@ -88,6 +88,14 @@ export interface YrsHyperlinkHit {
   range: YrsStoryRange;
 }
 
+/**
+ * Whether the toolbar offers a page break in `story`: as in Word, not in a
+ * table cell, header, footer or note.
+ */
+export function pageBreakOffered(story: string): boolean {
+  return !/^(?:hf|fn|en):|:t\d+:r\d+c\d+/.test(story);
+}
+
 export function yrsStoryOffsetForLoc(session: YrsSession, loc: YrsLoc): number {
   const span = session.locateParagraph(loc.story, loc.paraId);
   return span.start + loc.offset;

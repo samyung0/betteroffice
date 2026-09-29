@@ -53,6 +53,7 @@ import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolean';
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
+import { pageBreakOffered } from './DocxEditor/yrsCommands';
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
@@ -1870,7 +1871,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onRefocusEditor={focusActiveEditor}
               onInsertTable={handleInsertTable}
               onInsertImage={handleInsertImageClick}
-              onInsertPageBreak={handleInsertPageBreak}
+              onInsertPageBreak={
+                !liveYrsStory || pageBreakOffered(liveYrsStory) ? handleInsertPageBreak : undefined
+              }
               onInsertSectionBreakNextPage={handleInsertSectionBreakNextPage}
               onInsertSectionBreakContinuous={handleInsertSectionBreakContinuous}
               onInsertTOC={handleInsertTOC}

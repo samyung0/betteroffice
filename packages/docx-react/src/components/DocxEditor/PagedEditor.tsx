@@ -125,6 +125,7 @@ import {
   yrsHyperlinkAtSelection,
   yrsSelectionNearTable,
   yrsTableSelectionRange,
+  pageBreakOffered,
   type YrsEditorCommand,
 } from './yrsCommands';
 import {
@@ -1092,6 +1093,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             const at = session.selection()?.head;
             if (!at) return false;
             if (command.type === 'insertPageBreak') {
+              if (!pageBreakOffered(at.story)) return false;
               // The native renderer consumes page breaks at block boundaries.
               // Split a non-empty prefix first so the facade insert lands
               // between paragraph pilcrows.
@@ -1099,12 +1101,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 at.offset > 0
                   ? {
                       story: at.story,
-                      paraId: session.splitParagraph(at).secondParaId,
+                      paraId: session.splitParagraph(at, structuralAuthor).secondParaId,
                       offset: 0,
                     }
                   : at;
               session.setSelection(breakAt);
-              session.insertPageBreak(breakAt);
+              session.insertPageBreak(breakAt, structuralAuthor);
             } else session.insertSectionBreak(at, command.breakType);
           } else if (command.type === 'insertTable') {
             const at = session.selection()?.head;
