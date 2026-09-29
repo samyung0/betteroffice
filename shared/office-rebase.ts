@@ -107,15 +107,50 @@ export const DOCX_LINEAGE: Lineage = {
   settle(doc) {
     const comments = doc.getMap("comments");
     for (const text of doc.getMap("stories").values())
-      if (text instanceof Y.Text)
+      if (text instanceof Y.Text) {
         for (const [offset, embed] of embeds(text).reverse())
           if (
             embed.get("modelKind") === "commentReference" &&
             !comments.has(String(embed.get("commentId")))
           )
             text.delete(offset, 1);
+        pairProjectedChildren(text);
+      }
   },
 };
+
+/**
+ * Gives each projected child of a field result the number of the field that
+ * closes it, which the export pairs them by (`restoreProjectedFieldResults`):
+ * text the later edits typed there carries the capture's number, and the
+ * export's seed may number that field otherwise.
+ */
+function pairProjectedChildren(text: Y.Text): void {
+  type Marker = { id: number; index: number };
+  const pending: Array<[offset: number, length: number, marker: Marker]> = [];
+  const fixes: Array<[offset: number, length: number, marker: Marker]> = [];
+  let offset = 0;
+  for (const { insert, attributes } of text.toDelta() as Array<{
+    insert: unknown;
+    attributes?: { fieldResult?: Marker };
+  }>) {
+    const length = typeof insert === "string" ? insert.length : 1;
+    const marker = attributes?.fieldResult;
+    if (marker) pending.push([offset, length, marker]);
+    else if (insert instanceof Y.Map) {
+      const projection = insert.get("resultProjection") as { id?: number } | undefined;
+      if (insert.get("_kind") === "pilcrow") pending.length = 0;
+      else if (typeof projection?.id === "number") {
+        for (const [at, units, child] of pending)
+          if (child.id !== projection.id)
+            fixes.push([at, units, { ...child, id: projection.id }]);
+        pending.length = 0;
+      }
+    }
+    offset += length;
+  }
+  for (const [at, units, marker] of fixes) text.format(at, units, { fieldResult: marker });
+}
 
 export const PPTX_LINEAGE: Lineage = {
   maps: [
