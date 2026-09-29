@@ -584,7 +584,8 @@
     "added": "Dodano",
     "deleted": "Usunięto",
     "acceptAll": "Zaakceptuj wszystkie",
-    "rejectAll": "Odrzuć wszystkie"
+    "rejectAll": "Odrzuć wszystkie",
+    "inFieldsOnly": "Te zmiany znajdują się w polach, np. w spisie treści."
   },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",

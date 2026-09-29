@@ -584,7 +584,8 @@
     "added": "添加",
     "deleted": "删除",
     "acceptAll": "全部接受",
-    "rejectAll": "全部拒绝"
+    "rejectAll": "全部拒绝",
+    "inFieldsOnly": "这些修订位于域中，例如目录。"
   },
   "contextMenu": {
     "ariaLabel": "AI 操作菜单",

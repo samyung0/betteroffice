@@ -584,7 +584,8 @@
     "added": "Ajouté",
     "deleted": "Supprimé",
     "acceptAll": "Tout accepter",
-    "rejectAll": "Tout refuser"
+    "rejectAll": "Tout refuser",
+    "inFieldsOnly": "Ces modifications se trouvent dans des champs, comme une table des matières."
   },
   "contextMenu": {
     "ariaLabel": "Menu des actions IA",

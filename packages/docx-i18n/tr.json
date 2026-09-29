@@ -584,7 +584,8 @@
     "added": "Eklendi",
     "deleted": "Silindi",
     "acceptAll": "Tümünü kabul et",
-    "rejectAll": "Tümünü reddet"
+    "rejectAll": "Tümünü reddet",
+    "inFieldsOnly": "Bu değişiklikler içindekiler tablosu gibi alanların içinde."
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",

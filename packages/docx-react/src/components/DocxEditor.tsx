@@ -722,6 +722,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => ({
       entries: [],
       commentToRevision: new Map(),
+      fieldChanges: false,
     })
   );
 
@@ -1379,7 +1380,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // --- Unified sidebar items ---
   const refreshTrackedChanges = useCallback((session: YrsSession): void => {
     setYrsTrackedChangesResult(
-      extractTrackedChangesFromYrs(session.listRevisions(), createYrsSidebarProjection(session))
+      extractTrackedChangesFromYrs(
+        session.listRevisions(),
+        createYrsSidebarProjection(session),
+        session.hasFieldChanges()
+      )
     );
   }, []);
   const commentCallbacksRef = useRef<CommentCallbacks>({});
@@ -1543,8 +1548,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     },
     [refreshTrackedChanges]
   );
+  const getYrsSession = useCallback(() => pagedEditorRef.current?.getYrsSession() ?? null, []);
   const reviewAllItems = useReviewAllItems({
-    session: pagedEditorRef.current?.getYrsSession(),
+    getSession: getYrsSession,
     trackedChanges: yrsTrackedChangesResult,
     readOnly,
     onResolved: handleReviewAllResolved,

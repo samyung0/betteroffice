@@ -584,7 +584,8 @@
     "added": "Adicionado",
     "deleted": "Excluído",
     "acceptAll": "Aceitar tudo",
-    "rejectAll": "Rejeitar tudo"
+    "rejectAll": "Rejeitar tudo",
+    "inFieldsOnly": "Estas alterações estão dentro de campos, como um sumário."
   },
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",

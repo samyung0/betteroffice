@@ -19,7 +19,7 @@ import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { yrsToDocument } from '@betteroffice/docx/yrs/yrsToDocument';
 import { useReviewAllItems } from './useReviewAllItems';
 
-const { act, cleanup, render, screen } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, screen } = await import('@testing-library/react');
 
 const GENERATED = resolve(import.meta.dir, '../../../docx/src/wasm/generated');
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -69,13 +69,18 @@ async function open(bytes: Uint8Array): Promise<YrsSession> {
 afterAll(() => sessions.forEach((session) => session.destroy()));
 
 const listed = (session: YrsSession) =>
-  extractTrackedChangesFromYrs(session.listRevisions(), createYrsSidebarProjection(session));
+  extractTrackedChangesFromYrs(
+    session.listRevisions(),
+    createYrsSidebarProjection(session),
+    session.hasFieldChanges()
+  );
 
-/** The review-all items as the editor's sidebar renders them. */
+/** The review-all items as the editor's sidebar renders them, re-read after each resolve. */
 function Sidebar({ session, readOnly = false }: { session: YrsSession; readOnly?: boolean }) {
   const [trackedChanges, setTrackedChanges] = useState(() => listed(session));
+  const getSession = useCallback(() => session, [session]);
   const onResolved = useCallback((resolved: YrsSession) => setTrackedChanges(listed(resolved)), []);
-  const items = useReviewAllItems({ session, trackedChanges, readOnly, onResolved });
+  const items = useReviewAllItems({ getSession, trackedChanges, readOnly, onResolved });
   return (
     <>
       {items.map((item) => (
@@ -104,6 +109,13 @@ test('Accept all and Reject all show only while the document holds changes it ca
   expect(inField.listRevisions()).toEqual([]);
   render(<Sidebar session={inField} />);
   expect(buttons()).toEqual(['Accept all', 'Reject all']);
+  // Only changes inside fields: the page marks none, so a line says where they are.
+  expect(screen.queryByText(/inside fields/)).not.toBeNull();
+  cleanup();
+
+  render(<Sidebar session={await open(docx(`${run('a ')}${ins(run('new'))}${fieldChange}`))} />);
+  expect(buttons()).toEqual(['Accept all', 'Reject all']);
+  expect(screen.queryByText(/inside fields/)).toBeNull();
   cleanup();
 
   render(<Sidebar session={inField} readOnly />);
@@ -127,4 +139,19 @@ test.each([
   const xml = await exported(bytes, session);
   expect(xml).not.toMatch(/<w:(ins|del)\b/);
   expect([...xml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(([, t]) => t).join('')).toBe(text);
+});
+
+test('Accept all is its own undo step and leaves the editor focused', async () => {
+  const session = await open(docx(`${run('a ')}${fieldChange}`));
+  render(<Sidebar session={session} />);
+  const paraId = session.paragraphs('body')[0]!.paraId;
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'typed ');
+  const accept = screen.getByText('Accept all');
+  // A prevented mousedown keeps focus where it was, so Ctrl+Z reaches the editor.
+  expect(fireEvent.mouseDown(accept)).toBe(false);
+  await act(async () => accept.click());
+  expect(session.hasFieldChanges()).toBe(false);
+  session.undo();
+  expect(session.hasFieldChanges()).toBe(true);
+  expect(session.paragraphs('body')[0]!.text).toStartWith('typed a ');
 });

@@ -584,7 +584,8 @@
     "added": "Added",
     "deleted": "Deleted",
     "acceptAll": "Accept all",
-    "rejectAll": "Reject all"
+    "rejectAll": "Reject all",
+    "inFieldsOnly": "These changes are inside fields, such as a table of contents."
   },
   "revisions": {
     "paragraphMarkInserted": "Inserted paragraph break",

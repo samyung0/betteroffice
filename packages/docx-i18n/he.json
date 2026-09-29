@@ -584,7 +584,8 @@
     "added": "נוסף",
     "deleted": "נמחק",
     "acceptAll": "אישור הכול",
-    "rejectAll": "דחיית הכול"
+    "rejectAll": "דחיית הכול",
+    "inFieldsOnly": "השינויים האלה נמצאים בתוך שדות, כמו תוכן עניינים."
   },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",

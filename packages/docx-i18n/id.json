@@ -584,7 +584,8 @@
     "added": "Tambah",
     "deleted": "Hapus",
     "acceptAll": "Terima semua",
-    "rejectAll": "Tolak semua"
+    "rejectAll": "Tolak semua",
+    "inFieldsOnly": "Perubahan ini berada di dalam bidang, seperti daftar isi."
   },
   "revisions": {
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",

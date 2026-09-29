@@ -9,12 +9,15 @@ import {
 export interface TrackedChangesResult {
   entries: TrackedChangeEntry[];
   commentToRevision: Map<number, number>;
+  /** Whether a field keeps a tracked change the entries leave out (`hasFieldChanges`). */
+  fieldChanges: boolean;
 }
 
 /** Project Yrs revisions onto the display-position sidebar contract. */
 export function extractTrackedChangesFromYrs(
   revisions: readonly YrsRevisionInfo[],
-  projection: YrsSidebarProjection
+  projection: YrsSidebarProjection,
+  fieldChanges: boolean
 ): TrackedChangesResult {
   const mapped: TrackedChangeEntry[] = revisions.map((revision) => {
     const start = projection.locToDisplayPoint({
@@ -119,5 +122,5 @@ export function extractTrackedChangesFromYrs(
     }
   }
 
-  return { entries, commentToRevision: new Map() };
+  return { entries, commentToRevision: new Map(), fieldChanges };
 }

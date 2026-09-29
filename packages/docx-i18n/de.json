@@ -584,7 +584,8 @@
     "added": "Hinzugefügt",
     "deleted": "Gelöscht",
     "acceptAll": "Alle annehmen",
-    "rejectAll": "Alle ablehnen"
+    "rejectAll": "Alle ablehnen",
+    "inFieldsOnly": "Diese Änderungen befinden sich in Feldern, etwa einem Inhaltsverzeichnis."
   },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",

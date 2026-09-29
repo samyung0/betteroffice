@@ -435,6 +435,7 @@ const NO_SIDEBAR_COMMENT_IDS: readonly (string | number)[] = [];
 const EMPTY_TRACKED_CHANGES_RESULT: TrackedChangesResult = {
   entries: [],
   commentToRevision: new Map(),
+  fieldChanges: false,
 };
 
 /**
@@ -1553,7 +1554,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
         };
         const revisions = session.listRevisions();
-        if (sidebarCommentIds.length === 0 && revisions.length === 0) {
+        const fieldChanges = session.hasFieldChanges();
+        if (sidebarCommentIds.length === 0 && revisions.length === 0 && !fieldChanges) {
           onYrsTrackedChangesChange?.(EMPTY_TRACKED_CHANGES_RESULT);
           if (lastAnchorPositionsRef.current !== EMPTY_ANCHOR_POSITIONS) {
             lastAnchorPositionsRef.current = EMPTY_ANCHOR_POSITIONS;
@@ -1562,7 +1564,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           return;
         }
         const projection = createYrsSidebarProjection(session);
-        onYrsTrackedChangesChange?.(extractTrackedChangesFromYrs(revisions, projection));
+        onYrsTrackedChangesChange?.(
+          extractTrackedChangesFromYrs(revisions, projection, fieldChanges)
+        );
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
           hfRegions.set(rId, 'header');
