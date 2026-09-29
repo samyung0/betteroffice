@@ -254,10 +254,20 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
-                    slot.close(
-                        &mut blocks,
-                        !paragraph_runs.is_empty() || !paragraph_drawings.is_empty(),
-                    );
+                    // A comment's own reference mark, which the save writes
+                    // after the end of a comment no story holds one for, is
+                    // content for the slot's breaks to lead as well.
+                    let text = !paragraph_runs.is_empty()
+                        || !paragraph_drawings.is_empty()
+                        || (!slot.breaks.is_empty()
+                            && crate::comment_boundaries(txn).get(story_id).is_some_and(
+                                |boundaries| {
+                                    boundaries.iter().any(|&(at, writes)| {
+                                        writes && (paragraph_start..=story_index).contains(&at)
+                                    })
+                                },
+                            ));
+                    slot.close(&mut blocks, text);
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,

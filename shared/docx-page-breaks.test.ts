@@ -2,7 +2,13 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
-import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
+import {
+  applyOfficeCommands,
+  exportOffice,
+  inspectOffice,
+  rebaseOffice,
+  seedOffice,
+} from "./office-checkpoint";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -763,6 +769,38 @@ describe.each(["body", "control", "cell"] as Where[])(
             end: { paraId: "44444444", offset: 4 },
           }),
         [false],
+      ],
+      [
+        // Its reference mark, which the save writes, is the text the break leads.
+        "an editor comment over a leading break, the text after it deleted",
+        lead,
+        (s, story) => {
+          s.addComment(
+            [
+              {
+                story,
+                start: { paraId: "44444444", offset: 0 },
+                end: { paraId: "44444444", offset: 1 },
+              },
+            ],
+            "R",
+            "2026-09-29T00:00:00Z",
+            [
+              {
+                type: "paragraph",
+                content: [
+                  { type: "run", content: [{ type: "text", text: "c" }] },
+                ],
+              },
+            ]
+          );
+          s.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: 1 },
+            end: { paraId: "44444444", offset: 4 },
+          });
+        },
+        [true],
       ],
       [
         "Enter right after a leading break",
@@ -1696,5 +1734,266 @@ describe.each(EVERY)(
         expect(direct).toMatch(/^B+SET$/);
       }
     );
+  }
+);
+
+describe.each(EVERY)(
+  "an editor comment over a heading a page break opens, its text removed after a capture, in %s",
+  (where) => {
+    const [story, part] = STORY[where];
+    const heading = p("44444444", `${BR}${run("Heading")}`);
+    /** Each place of the heading: its package, and the story's text a save keeps. */
+    const layouts = {
+      "after a paragraph": {
+        bytes: docx(where, `${p("33333333", run("prev"))}${heading}`),
+        saved: /^(T\[)?prev¶\[PB\]¶\]? #$/,
+      },
+      // The reference mark is content for the break to lead: no break-only paragraph.
+      "at the story's start": {
+        bytes: docx(where, `${heading}${p("45454545", run("next"))}`),
+        saved: /^(T\[)?\[PB\]¶next¶\]? #$/,
+      },
+    };
+    type Layout = keyof typeof layouts;
+    /** An editor comment from the break to `end` in the heading's paragraph. */
+    const comment = (end: number) => (session: YrsSession) =>
+      void session.addComment(
+        [
+          {
+            story,
+            start: { paraId: "44444444", offset: 0 },
+            end: { paraId: "44444444", offset: end },
+          },
+        ],
+        "R",
+        "2026-09-29T00:00:00Z",
+        [
+          {
+            type: "paragraph",
+            content: [{ type: "run", content: [{ type: "text", text: "c" }] }],
+          },
+        ]
+      );
+    const comments = [
+      ["over the break and the heading", comment(8)],
+      ["over the break", comment(1)],
+    ] as const;
+    /** The heading's offset in its paragraph: after the break, and after a reference mark a publication put there. */
+    const headingAt = (session: YrsSession) => {
+      const units = session
+        .storySegments(story)
+        .flatMap((segment) =>
+          segment.kind === "text" ? [...segment.text] : ["#"]
+        )
+        .join("");
+      return units.indexOf("Heading") - (units.startsWith("prev") ? 5 : 0);
+    };
+    const removals = [
+      [
+        "a range delete",
+        (session: YrsSession) => {
+          const at = headingAt(session);
+          session.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: at },
+            end: { paraId: "44444444", offset: at + 7 },
+          });
+        },
+      ],
+      [
+        "Backspace",
+        (session: YrsSession) => {
+          const at = headingAt(session);
+          for (let offset = at + 7; offset > at; offset -= 1)
+            session.deleteAt({ story, paraId: "44444444", offset }, "backward");
+        },
+      ],
+    ] as const;
+    /** The story's breaks and text and what the comment covers, in this publication and two more. */
+    const republished = async (published: Uint8Array) => {
+      const seen: string[] = [];
+      for (let publication = 0; publication < 3; publication += 1) {
+        const session = await open(published);
+        seen.push(
+          `${view(published, part).replace(/z*tail¶/, "")} ${covered(
+            session,
+            story
+          )}`
+        );
+        session.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "z"
+        );
+        published = await publish(published, session);
+        session.destroy();
+      }
+      return seen;
+    };
+    /** The comment keeps covering the break, which still opens the heading's paragraph. */
+    const keeps = (layout: Layout, seen: string[]) => {
+      expect(seen[0]).toMatch(layouts[layout].saved);
+      expect(new Set(seen).size).toBe(1);
+    };
+
+    test.each([
+      ...comments.flatMap(([name, cover]) =>
+        removals.map(
+          ([way, remove]) =>
+            ["after a paragraph", name, way, cover, remove] as const
+        )
+      ),
+      ...comments.map(
+        ([name, cover]) =>
+          [
+            "at the story's start",
+            name,
+            removals[0][0],
+            cover,
+            removals[0][1],
+          ] as const
+      ),
+    ])(
+      "%s, a comment %s, the text removed by %s: the direct, publish-then-edit and rebased saves keep the comment over the break",
+      async (layout, _, __, cover, remove) => {
+        const { bytes } = layouts[layout];
+        const session = await open(bytes);
+        cover(session);
+        const published = await publish(bytes, session);
+        remove(session);
+        const direct = await republished(await publish(bytes, session));
+        session.destroy();
+        const reopened = await open(published);
+        remove(reopened);
+        const sequential = await republished(
+          await publish(published, reopened)
+        );
+        reopened.destroy();
+        const { next } = await rebase(bytes, story, cover, remove);
+        keeps(layout, direct);
+        expect(sequential).toEqual(direct);
+        expect(await republished(next)).toEqual(direct);
+      }
+    );
+
+    test.each(
+      (Object.keys(layouts) as Layout[]).flatMap((layout) =>
+        comments.map(([name, cover]) => [layout, name, cover] as const)
+      )
+    )(
+      "%s, a comment %s, the text removed by the agent's replace_text: the direct and rebased saves keep the comment over the break",
+      async (layout, _, cover) => {
+        const { bytes } = layouts[layout];
+        const session = await open(bytes);
+        cover(session);
+        const captured = checkpoint(bytes, session.encodeState());
+        session.destroy();
+        const exported = await exportOffice(bytes, captured, fixed);
+        const target = (await inspectOffice(bytes, captured)).find(({ id }) =>
+          id.endsWith(":paragraph:44444444")
+        )!;
+        const { state: edited } = await applyOfficeCommands(bytes, captured, [
+          {
+            type: "replace_text",
+            targetId: target.id,
+            expectedText: "Heading",
+            text: "",
+          },
+        ]);
+        const latest = { ...captured, state: edited };
+        const direct = await republished(
+          await exportOffice(bytes, latest, fixed)
+        );
+        const { state } = await rebaseOffice(bytes, captured, latest, exported);
+        const seeded = await seedOffice("docx", exported);
+        const next = await exportOffice(exported, { ...seeded, state }, fixed);
+        keeps(layout, direct);
+        expect(await republished(next)).toEqual(direct);
+      }
+    );
+  }
+);
+
+/** Paragraph XML as text, [PB] breaks, <c c> comment range marks, R reference marks and ¶ per paragraph. */
+const marked = (xml: string) =>
+  [
+    ...xml.matchAll(
+      /<(\/?)w:(p|br|t|commentRangeStart|commentRangeEnd|commentReference)\b([^>]*?)\/?>([^<]*)/g
+    ),
+  ]
+    .map(([, close, tag, attrs, text]) =>
+      tag === "t"
+        ? close
+          ? ""
+          : text
+        : tag === "br"
+        ? /"page"/.test(attrs!)
+          ? "[PB]"
+          : ""
+        : tag === "p"
+        ? close
+          ? "¶"
+          : ""
+        : tag === "commentRangeStart"
+        ? "<c"
+        : tag === "commentRangeEnd"
+        ? "c>"
+        : "R"
+    )
+    .join("");
+
+describe.each(EVERY)(
+  "a paragraph holding a page break and a comment's reference mark saves unchanged, in %s",
+  (where) => {
+    test.each([
+      [
+        "a comment over the break",
+        `${p("33333333", run("prev"))}${p(
+          "44444444",
+          `${S(1)}${BR}${E(1)}${ref(1)}`
+        )}`,
+      ],
+      [
+        "a comment over the paragraph before",
+        `${p("33333333", `${S(1)}${run("prev")}${E(1)}`)}${p(
+          "44444444",
+          `${BR}${ref(1)}`
+        )}`,
+      ],
+      [
+        "a comment over the break at the story's start",
+        `${p("44444444", `${S(1)}${BR}${E(1)}${ref(1)}`)}${p(
+          "45454545",
+          run("next")
+        )}`,
+      ],
+      [
+        "a comment from the break into the next paragraph",
+        `${p("33333333", run("prev"))}${p(
+          "44444444",
+          `${S(1)}${BR}${ref(1)}`
+        )}${p("45454545", `${run("nx")}${E(1)}`)}`,
+      ],
+    ])("%s", async (_, xml) => {
+      const [story, part] = STORY[where];
+      // An edit after them has the story saved again.
+      let bytes = docx(where, `${xml}${p("5A5A5A5A", run("edit"))}`);
+      const text = (bytes: Uint8Array) => {
+        const saved = new TextDecoder().decode(unzipContainer(bytes)[part]);
+        const start = saved.search(/<w:p w14:paraId="(33333333|44444444)"/);
+        return saved.slice(start, saved.indexOf('<w:p w14:paraId="5A5A5A5A"'));
+      };
+      const source = text(bytes);
+      const seen: string[] = [];
+      for (let publication = 0; publication < 3; publication += 1) {
+        const session = await open(bytes);
+        session.insertText({ story, paraId: "5A5A5A5A", offset: 0 }, "z");
+        bytes = await publish(bytes, session);
+        session.destroy();
+        seen.push(text(bytes));
+      }
+      // The save writes the source's paragraphs in its own form, then the same bytes.
+      expect(seen.map(marked)).toEqual(Array(3).fill(marked(source)));
+      expect(new Set(seen).size).toBe(1);
+    });
   }
 );

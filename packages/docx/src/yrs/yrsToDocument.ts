@@ -1963,12 +1963,18 @@ function pageBreakParagraph(): Paragraph {
 type FlowBreak = 'page' | 'column';
 type Tracked = 'ins' | 'del' | undefined;
 interface FlowToken {
-  /** A break, text, or a bookmark (no text, but a break before one leads it). */
-  kind: FlowBreak | 'visible' | 'mark';
+  /**
+   * A break, text, a bookmark (no text, but a break before one leads it), or
+   * a comment's end (the save writes a reference mark after the end of a
+   * comment no story holds one for).
+   */
+  kind: FlowBreak | 'visible' | 'mark' | 'end';
   run?: Run;
   index?: number;
   /** The tracked change around a break. */
   tracked?: Tracked;
+  /** The comment an `end` closes. */
+  id?: number;
 }
 /** A break unit opening a paragraph slot. */
 interface SlotBreak {
@@ -2044,6 +2050,7 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
         runs(item.content);
       } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd')
         tokens.push({ kind: 'mark' });
+      else if (item.type === 'commentRangeEnd') tokens.push({ kind: 'end', id: item.id });
       else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
       else if (item.type === 'inlineSdt') inline(item.content);
       else if (item.type === 'insertion' || item.type === 'moveTo') children(item.content, 'ins');
@@ -2060,10 +2067,18 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
  * `leading` become units before its text, `trailing` units after its pilcrow.
  * Without text, the breaks up to its last column break lead.
  */
-function splitFlow(tokens: FlowToken[]): { leading: FlowToken[]; trailing: FlowToken[] } {
-  // Breaks lead the content that follows them: the text, or without text
-  // the last bookmark. Without either, those up to the last column break lead.
-  let split = tokens.findIndex((token) => token.kind === 'visible');
+function splitFlow(
+  tokens: FlowToken[],
+  referenced: (id: number) => boolean
+): { leading: FlowToken[]; trailing: FlowToken[] } {
+  // Breaks lead the content that follows them: the text (a comment's own
+  // reference mark included), or without text the last bookmark. Without
+  // either, those up to the last column break lead.
+  if (!tokens.some(({ kind }) => kind === 'page' || kind === 'column'))
+    return { leading: [], trailing: [] };
+  let split = tokens.findIndex(
+    ({ kind, id }) => kind === 'visible' || (kind === 'end' && !referenced(id!))
+  );
   if (split < 0) split = tokens.map(({ kind }) => kind).lastIndexOf('mark');
   if (split < 0) {
     split = 0;
@@ -2433,6 +2448,8 @@ class SaveContext {
   private readonly projectedStories = new Set<string>();
   private readonly memo: SessionProjectionMemo;
   private readonly bypassMemo: boolean;
+  /** Comments some story holds a reference mark for; read when a save first needs it. */
+  private referencedComments?: Set<number>;
 
   constructor(
     private readonly session: YrsSession,
@@ -2475,6 +2492,26 @@ class SaveContext {
       ? this.memo.clean.has(storyId)
       : !this.memo.dirty.has(storyId);
   }
+
+  /**
+   * Whether a story holds comment `id`'s reference mark. The save writes one
+   * after the end of a comment no story holds one for, as
+   * `comment_boundaries` in crates/docx-edit/src/lib.rs reads it.
+   */
+  private readonly referenced = (id: number): boolean => {
+    this.referencedComments ??= new Set(
+      [...this.storyIds].flatMap((story) =>
+        this.session.storySegments(story).flatMap((segment) => {
+          const comment =
+            segment.kind === 'embed' && segment.payload.modelKind === 'commentReference'
+              ? asFiniteNumber(segment.payload.commentId)
+              : undefined;
+          return comment === undefined ? [] : [comment];
+        })
+      )
+    );
+    return this.referencedComments.has(id);
+  };
 
   private cellContents(payload: TablePayload): BlockContent[][] {
     const contents: BlockContent[][] = [];
@@ -2600,14 +2637,18 @@ class SaveContext {
       carried = [];
       slotBreaks = [];
       const before = previous >= 0 ? (blocks[previous] as Paragraph) : undefined;
-      const beforeFlow = before && splitFlow(flowTokens(before.content));
+      const beforeFlow = before && splitFlow(flowTokens(before.content), this.referenced);
       const nextTokens = next ? flowTokens(next.content) : [];
-      const nextFlow = next && splitFlow(nextTokens);
-      // Content for the breaks to lead: text, or a bookmark after them.
+      const nextFlow = next && splitFlow(nextTokens, this.referenced);
+      // Content for the breaks to lead: text, a bookmark after them, or a
+      // comment's own reference mark, which the save writes after the end of
+      // a comment no story holds one for.
       const text =
         next !== undefined &&
         (nextTokens.some(({ kind }) => kind === 'visible' || kind === 'mark') ||
-          bookmarks.some(({ breaksAfter }) => !breaksAfter));
+          bookmarks.some(({ breaksAfter }) => !breaksAfter) ||
+          (expected.length > 0 &&
+            nextTokens.some(({ kind, id }) => kind === 'end' && !this.referenced(id!))));
       // From the first leading break on they open the text (all of them with no
       // paragraph before); the rest close the paragraph before. A paragraph
       // without text or bookmarks keeps breaks ending in a column break as its
