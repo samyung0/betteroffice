@@ -3024,15 +3024,17 @@ impl EditSession {
     }
 
     /// Inserts a page-break embed at `(story, para_id, offset)`, occupying one
-    /// story unit. Always a plain local edit.
+    /// story unit; with an author, a tracked insertion.
     pub fn insert_page_break(
         &self,
         story: &str,
         para_id: &str,
         offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
+        let ctx = edit_ctx(author_name, author_date)?;
         self.engine
             .doc()
             .insert_embed(&ctx, Position::new(story, index), "pageBreak", vec![])

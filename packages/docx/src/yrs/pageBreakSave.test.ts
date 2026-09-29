@@ -145,6 +145,46 @@ describe('page break save projection', () => {
     }
   });
 
+  it('seeds leading, tracked and cell breaks through the projector as the engine does', async () => {
+    const tracked = `<w:ins w:id="9" w:author="A">${PAGE_BREAK}</w:ins>`;
+    const paragraphs =
+      `<w:p>${PAGE_BREAK}${tracked}<w:r><w:t>LEAD</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:t>END</w:t><w:br w:type="column"/></w:r></w:p><w:p>${PAGE_BREAK}</w:p>`;
+    const cell =
+      `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>` +
+      `<w:tr><w:tc>${paragraphs}</w:tc></w:tr></w:tbl>`;
+    const bytes = fixture(`${paragraphs}${cell}<w:p/>`);
+    const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const projected = await createYrsSession({ clientId: 0 });
+    const engine = await createYrsSession({ clientId: 68002 });
+    try {
+      documentToYrs(projected, parsed);
+      engine.seedFromDocx(bytes);
+      for (const story of ['body', 'body:t0:r0c0']) {
+        expect(engine.storySegments(story)).toEqual(projected.storySegments(story));
+        expect(
+          engine
+            .storySegments(story)
+            .filter((segment) => segment.kind === 'embed')
+            .map((segment) => [
+              segment.embedKind,
+              segment.payload.leading === true,
+              !!segment.attributes.ins,
+            ])
+        ).toEqual([
+          ['pageBreak', true, false],
+          ['pageBreak', true, true],
+          ['columnBreak', false, false],
+          ['pageBreak', false, false],
+          ...(story === 'body' ? [['table', false, false]] : []),
+        ]);
+      }
+    } finally {
+      projected.destroy();
+      engine.destroy();
+    }
+  });
+
   describe('saves the break units the session holds', () => {
     const units = (session: YrsSession): string =>
       session
@@ -153,10 +193,8 @@ describe('page break save projection', () => {
           segment.kind === 'text'
             ? segment.text
             : segment.kind === 'pilcrow'
-              ? segment.properties.pageBreakBeforeRun
-                ? '[pageBreakBeforeRun]¶'
-                : '¶'
-              : `[${segment.embedKind}]`
+              ? '¶'
+              : `[${segment.embedKind}${segment.payload.leading ? '^' : ''}]`
         )
         .join('');
     /** The edited body's units, and the units of its save seeded again. */

@@ -1,0 +1,654 @@
+import { beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
+import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
+import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
+
+const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
+const W =
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+const OFFICE = "application/vnd.openxmlformats-officedocument.wordprocessingml";
+const REL =
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+const run = (text: string) =>
+  `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+const p = (id: string, xml: string) => `<w:p w14:paraId="${id}">${xml}</w:p>`;
+const BR = `<w:r><w:br w:type="page"/></w:r>`;
+const COL = `<w:r><w:br w:type="column"/></w:r>`;
+const tracked = (tag: "ins" | "del", xml: string) =>
+  `<w:${tag} w:id="90" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:${tag}>`;
+const table = (xml: string) =>
+  `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>${xml}</w:tc></w:tr></w:tbl>`;
+const tail = p("22222222", run("tail"));
+
+/** Each story kind: its id in the session and the part it saves to. */
+const STORY = {
+  body: ["body", "word/document.xml"],
+  control: ["body:sdt0", "word/document.xml"],
+  cell: ["body:t0:r0c0", "word/document.xml"],
+  header: ["hf:rId20", "word/header1.xml"],
+  footer: ["hf:rId21", "word/footer1.xml"],
+  footnote: ["fn:1", "word/footnotes.xml"],
+} as const;
+type Where = keyof typeof STORY;
+const OUTSIDE: Where[] = ["cell", "header", "footer", "footnote"];
+const EVERY: Where[] = ["body", "control", ...OUTSIDE];
+
+/** A package holding `content` in story `where`, with `tail` in the body. */
+function docx(where: Where, content: string): Uint8Array {
+  const body =
+    where === "body"
+      ? content
+      : where === "control"
+      ? `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`
+      : where === "cell"
+      ? table(content)
+      : where === "footnote"
+      ? p("11111111", `${run("x")}<w:r><w:footnoteReference w:id="1"/></w:r>`)
+      : "";
+  const parts: Record<string, string> = {
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footer1.xml" ContentType="${OFFICE}.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/></Types>`,
+    "_rels/.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId21" Type="${REL}/footer" Target="footer1.xml"/><Relationship Id="rId22" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`,
+    "word/document.xml": `<w:document ${W}><w:body>${body}${tail}<w:sectPr><w:headerReference w:type="default" r:id="rId20"/><w:footerReference w:type="default" r:id="rId21"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
+    // One comment keeps the comments part, which a rebase requires the export to keep.
+    "word/comments.xml": `<w:comments ${W}><w:comment w:id="1" w:author="R" w:date="2026-09-01T00:00:00Z"><w:p><w:r><w:t>c1</w:t></w:r></w:p></w:comment></w:comments>`,
+    "word/header1.xml": `<w:hdr ${W}>${
+      where === "header" ? content : p("66666666", run("head"))
+    }</w:hdr>`,
+    "word/footer1.xml": `<w:ftr ${W}>${
+      where === "footer" ? content : p("77777777", run("foot"))
+    }</w:ftr>`,
+    "word/footnotes.xml": `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${
+      where === "footnote" ? content : p("88888888", run("note"))
+    }</w:footnote></w:footnotes>`,
+  };
+  return rezipContainer(
+    Object.fromEntries(
+      Object.entries(parts).map(([path, part]) => [
+        path,
+        new TextEncoder().encode(part),
+      ])
+    )
+  );
+}
+
+beforeAll(() => seedOffice("docx", docx("body", p("11111111", run("x")))));
+let clientId = 9800;
+async function open(bytes: Uint8Array): Promise<YrsSession> {
+  const session = await createYrsSession({ clientId: (clientId += 1) });
+  session.openDocx(bytes, true);
+  return session;
+}
+const checkpoint = (base: Uint8Array, state: Uint8Array) => ({
+  format: "docx" as const,
+  schemaVersion: 1 as const,
+  baseSha256: createHash("sha256").update(base).digest("hex"),
+  state,
+});
+const publish = (bytes: Uint8Array, session: YrsSession) =>
+  exportOffice(bytes, checkpoint(bytes, session.encodeState()), fixed);
+
+/** A story's units: text, ¶, [kind] per embed ([pageBreak^] when it leads its paragraph), +/- for tracked ones. */
+function units(session: YrsSession, story: string): string {
+  return session
+    .storySegments(story)
+    .map((segment) => {
+      if (segment.kind === "text") return segment.text;
+      if (segment.kind === "pilcrow") return "¶";
+      if (segment.payload.modelKind === "commentReference") return "";
+      const mark = segment.attributes.ins
+        ? "+"
+        : segment.attributes.del
+        ? "-"
+        : "";
+      return `${mark}[${segment.embedKind}${
+        segment.payload.leading ? "^" : ""
+      }]`;
+    })
+    .join("");
+}
+
+/** The story's part as text: [PB]/[CB] breaks, ¶ per paragraph, +{…}/-{…} tracked changes, T[…] tables. */
+function view(bytes: Uint8Array, part: string): string {
+  const xml = new TextDecoder().decode(unzipContainer(bytes)[part]);
+  const from = Math.max(
+    xml.indexOf("<w:body>"),
+    xml.indexOf('<w:footnote w:id="1"'),
+    0
+  );
+  return [
+    ...xml
+      .slice(from)
+      .matchAll(/<(\/?)w:(p|br|t|delText|ins|del|tbl)\b([^>]*?)\/?>([^<]*)/g),
+  ]
+    .map(([, close, tag, attrs, text]) => {
+      if (tag === "t" || tag === "delText") return close ? "" : text;
+      if (tag === "br")
+        return /"page"/.test(attrs)
+          ? "[PB]"
+          : /"column"/.test(attrs)
+          ? "[CB]"
+          : "";
+      if (tag === "p") return close ? "¶" : "";
+      if (tag === "tbl") return close ? "]" : "T[";
+      return close ? "}" : tag === "ins" ? "+{" : "-{";
+    })
+    .join("");
+}
+
+const breaks = (bytes: Uint8Array, part: string, type = "page") =>
+  new TextDecoder()
+    .decode(unzipContainer(bytes)[part])
+    .split(`<w:br w:type="${type}"/>`).length - 1;
+
+/** The toolbar's page break: split at the caret, then the break at the new paragraph's start. */
+function toolbarBreak(
+  session: YrsSession,
+  story: string,
+  paraId: string,
+  offset: number
+): string {
+  const { secondParaId } = session.splitParagraph({ story, paraId, offset });
+  session.insertPageBreak({ story, paraId: secondParaId, offset: 0 });
+  return secondParaId;
+}
+
+const paraOf = (session: YrsSession, story: string, text: string) =>
+  session.paragraphs(story).find((paragraph) => paragraph.text === text)!
+    .paraId;
+
+/**
+ * Publishes after `edit`, then twice more: the story's units (without the
+ * body's tail paragraph) before and after each publication, and each export.
+ */
+async function publications(
+  bytes: Uint8Array,
+  story: string,
+  edit: (session: YrsSession) => void
+) {
+  let session = await open(bytes);
+  edit(session);
+  const own = (text: string) => text.replace(/tail¶$/, "");
+  const seen = [own(units(session, story))];
+  const exports: Uint8Array[] = [];
+  for (let publication = 0; publication < 3; publication += 1) {
+    bytes = await publish(bytes, session);
+    exports.push(bytes);
+    session.destroy();
+    session = await open(bytes);
+    seen.push(own(units(session, story)));
+  }
+  session.destroy();
+  return { seen, exports };
+}
+
+/** Captures after `before`, publishes, applies `after` and rebases onto the export's seed. */
+async function rebase(
+  bytes: Uint8Array,
+  story: string,
+  before: (session: YrsSession) => void,
+  after: (session: YrsSession) => void
+) {
+  const session = await open(bytes);
+  before(session);
+  const captured = session.encodeState();
+  const exported = await exportOffice(
+    bytes,
+    checkpoint(bytes, captured),
+    fixed
+  );
+  after(session);
+  const latest = units(session, story);
+  const { state } = await rebaseOffice(
+    bytes,
+    checkpoint(bytes, captured),
+    checkpoint(bytes, session.encodeState()),
+    exported
+  );
+  session.destroy();
+  const rebased = await createYrsSession({ clientId: (clientId += 1) });
+  rebased.openDocx(exported, false);
+  rebased.loadState(state);
+  const result = {
+    latest,
+    rebased: units(rebased, story),
+    next: await publish(exported, rebased),
+  };
+  rebased.destroy();
+  return result;
+}
+
+describe("the toolbar's page break (split, then the break at the new paragraph's start)", () => {
+  test.each(EVERY)(
+    "in %s saves in its place and seeds back as the same unit",
+    async (where) => {
+      const [story, part] = STORY[where];
+      const { seen, exports } = await publications(
+        docx(where, p("44444444", run("abcdef"))),
+        story,
+        (session) => toolbarBreak(session, story, "44444444", 3)
+      );
+      expect(seen).toEqual(Array(4).fill("abc¶[pageBreak]def¶"));
+      for (const bytes of exports)
+        expect(view(bytes, part)).toContain("abc[PB]¶def¶");
+    }
+  );
+
+  test.each(EVERY)(
+    "at the start of %s leads its paragraph from the first publication on",
+    async (where) => {
+      const [story, part] = STORY[where];
+      const { seen, exports } = await publications(
+        docx(where, p("44444444", run("abcdef"))),
+        story,
+        (session) =>
+          session.insertPageBreak({ story, paraId: "44444444", offset: 0 })
+      );
+      expect(seen).toEqual([
+        "[pageBreak]abcdef¶",
+        ...Array(3).fill("[pageBreak^]abcdef¶"),
+      ]);
+      for (const bytes of exports)
+        expect(view(bytes, part)).toContain("[PB]abcdef¶");
+    }
+  );
+
+  test.each(EVERY)(
+    "in %s stays single through Enter after a publication",
+    async (where) => {
+      const [story, part] = STORY[where];
+      let bytes = docx(where, p("44444444", run("abcdef")));
+      let session = await open(bytes);
+      toolbarBreak(session, story, "44444444", 3);
+      bytes = await publish(bytes, session);
+      session.destroy();
+      session = await open(bytes);
+      session.splitParagraph({
+        story,
+        paraId: paraOf(session, story, "def"),
+        offset: 3,
+      });
+      bytes = await publish(bytes, session);
+      session.destroy();
+      expect(view(bytes, part)).toContain("abc[PB]¶de¶f¶");
+    }
+  );
+});
+
+// Offsets in the break's paragraph count the break that opens its slot.
+const after: Array<[string, (session: YrsSession, story: string) => void]> = [
+  [
+    "Enter mid-text after the break",
+    (s, story) =>
+      s.splitParagraph({ story, paraId: paraOf(s, story, "def"), offset: 3 }),
+  ],
+  [
+    "a second break",
+    (s, story) => toolbarBreak(s, story, paraOf(s, story, "def"), 3),
+  ],
+  [
+    "deleting the text after the break",
+    (s, story) => {
+      const paraId = paraOf(s, story, "def");
+      s.deleteRange({
+        story,
+        start: { paraId, offset: 1 },
+        end: { paraId, offset: 4 },
+      });
+    },
+  ],
+  [
+    "Enter right after the break",
+    (s, story) =>
+      s.splitParagraph({ story, paraId: paraOf(s, story, "def"), offset: 1 }),
+  ],
+  [
+    "Backspace over the break",
+    (s, story) =>
+      s.deleteAt(
+        { story, paraId: paraOf(s, story, "def"), offset: 1 },
+        "backward"
+      ),
+  ],
+  [
+    "typing above the break",
+    (s, story) => s.insertText({ story, paraId: "44444444", offset: 1 }, "Q"),
+  ],
+];
+describe.each(EVERY)(
+  "an edit after a publication's capture lands beside a break in %s",
+  (where) => {
+    test.each(after)("%s", async (_, edit) => {
+      const [story, part] = STORY[where];
+      const { latest, rebased, next } = await rebase(
+        docx(where, p("44444444", run("abcdef"))),
+        story,
+        (session) => toolbarBreak(session, story, "44444444", 3),
+        (session) => edit(session, story)
+      );
+      expect(rebased).toBe(latest);
+      expect(breaks(next, part)).toBe(latest.split("[pageBreak").length - 1);
+    });
+  }
+);
+
+describe.each(EVERY)("breaks from the file in %s", (where) => {
+  test.each<[string, string, string, string]>([
+    [
+      "a trailing page break",
+      `${p("44444444", `${run("abc")}${BR}`)}${p("55555555", run("def"))}`,
+      "abc¶[pageBreak]def¶",
+      "abcX[PB]¶def¶",
+    ],
+    [
+      "a leading page break",
+      `${p("33333333", run("prev"))}${p("44444444", `${BR}${run("abc")}`)}`,
+      "prev¶[pageBreak^]abc¶",
+      "prev¶[PB]abcX¶",
+    ],
+    [
+      "a page break mid-paragraph",
+      p("44444444", `${run("ab")}${BR}${run("cd")}`),
+      "abcd¶[pageBreak]",
+      "abcdX[PB]¶",
+    ],
+    [
+      "two leading page breaks",
+      p("44444444", `${BR}${BR}${run("abc")}`),
+      "[pageBreak^][pageBreak^]abc¶",
+      "[PB][PB]abcX¶",
+    ],
+    [
+      "a leading column break",
+      p("44444444", `${COL}${run("abc")}`),
+      "[columnBreak]abc¶",
+      "[CB]abcX¶",
+    ],
+    [
+      "a break-only paragraph",
+      `${p("33333333", run("prev"))}${p("44444444", BR)}${p(
+        "55555555",
+        run("def")
+      )}`,
+      "prev¶¶[pageBreak]def¶",
+      "prev¶X[PB]¶def¶",
+    ],
+  ])(
+    "%s seeds as units and survives an edit of its paragraph",
+    async (_, xml, seeded, saved) => {
+      const [story, part] = STORY[where];
+      const bytes = docx(where, xml);
+      const session = await open(bytes);
+      expect(units(session, story)).toStartWith(seeded);
+      const end = session
+        .paragraphSpans(story)
+        .find(({ paraId }) => paraId === "44444444")!.length;
+      session.insertText({ story, paraId: "44444444", offset: end }, "X");
+      const out = await publish(bytes, session);
+      session.destroy();
+      expect(view(out, part)).toContain(saved);
+    }
+  );
+});
+
+describe.each(EVERY)(
+  "a page break leading a paragraph of the file in %s, edited as in Word",
+  (where) => {
+    const xml = `${p("33333333", run("prev"))}${p(
+      "44444444",
+      `${BR}${run("abcdef")}`
+    )}`;
+    test.each<[string, (session: YrsSession, story: string) => void, string]>([
+      [
+        "Enter before it adds an empty paragraph before the break",
+        (s, story) =>
+          s.splitParagraph({ story, paraId: "44444444", offset: 0 }),
+        "prev¶¶[PB]abcdef¶",
+      ],
+      [
+        "Enter mid-text keeps it before the first half",
+        (s, story) =>
+          s.splitParagraph({ story, paraId: "44444444", offset: 4 }),
+        "prev¶[PB]abc¶def¶",
+      ],
+      [
+        "Enter right after it leaves it before an empty paragraph",
+        (s, story) =>
+          s.splitParagraph({ story, paraId: "44444444", offset: 1 }),
+        "prev[PB]¶¶abcdef¶",
+      ],
+      [
+        "Backspace right after it removes it alone",
+        (s, story) =>
+          s.deleteAt({ story, paraId: "44444444", offset: 1 }, "backward"),
+        "prev¶abcdef¶",
+      ],
+      [
+        "Delete at the previous paragraph's end removes it alone",
+        (s, story) =>
+          s.deleteAt({ story, paraId: "33333333", offset: 4 }, "forward"),
+        "prev¶abcdef¶",
+      ],
+      [
+        "deleting the text after it leaves it before an empty paragraph",
+        (s, story) =>
+          s.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: 1 },
+            end: { paraId: "44444444", offset: 7 },
+          }),
+        "prev[PB]¶¶",
+      ],
+    ])("%s", async (_, edit, saved) => {
+      const [story, part] = STORY[where];
+      const { seen, exports } = await publications(
+        docx(where, xml),
+        story,
+        (session) => edit(session, story)
+      );
+      expect(view(exports[0], part)).toContain(saved);
+      expect(seen.slice(2)).toEqual([seen[1], seen[1]]);
+    });
+  }
+);
+
+describe("tracked breaks", () => {
+  const author = { name: "Reviewer", date: "2026-09-29T00:00:00Z" };
+  test.each(
+    EVERY.flatMap((where) =>
+      (
+        [
+          [
+            "a deleted leading break",
+            p("44444444", `${tracked("del", BR)}${run("abc")}`),
+            "-[pageBreak^]abc¶",
+            "-{[PB]}abcX¶",
+          ],
+          [
+            "an inserted leading break",
+            p("44444444", `${tracked("ins", BR)}${run("abc")}`),
+            "+[pageBreak^]abc¶",
+            "+{[PB]}abcX¶",
+          ],
+          [
+            "an inserted trailing break",
+            `${p("44444444", `${run("abc")}${tracked("ins", BR)}`)}${p(
+              "55555555",
+              run("def")
+            )}`,
+            "abc¶+[pageBreak]def¶",
+            "abcX+{[PB]}¶def¶",
+          ],
+        ] as const
+      ).map(
+        ([name, xml, seeded, saved]) =>
+          [where, name, xml, seeded, saved] as const
+      )
+    )
+  )(
+    "%s: %s keeps its tracking through an edit",
+    async (where, _, xml, seeded, saved) => {
+      const [story, part] = STORY[where];
+      const bytes = docx(where, xml);
+      const session = await open(bytes);
+      expect(units(session, story)).toStartWith(seeded);
+      const end = session
+        .paragraphSpans(story)
+        .find(({ paraId }) => paraId === "44444444")!.length;
+      session.insertText({ story, paraId: "44444444", offset: end }, "X");
+      const out = await publish(bytes, session);
+      session.destroy();
+      expect(view(out, part)).toContain(saved);
+    }
+  );
+
+  test("a suggested deletion of a break saves as w:del, and accepting it removes the break", async () => {
+    const bytes = docx(
+      "body",
+      `${p("33333333", `${run("abc")}${BR}`)}${p("44444444", run("def"))}`
+    );
+    const session = await open(bytes);
+    session.deleteAt(
+      { story: "body", paraId: "33333333", offset: 3 },
+      "forward",
+      author
+    );
+    const suggested = await publish(bytes, session);
+    expect(view(suggested, STORY.body[1])).toContain("abc-{[PB]}¶def¶");
+    // The break opens the second paragraph's slot.
+    session.acceptChange({
+      story: "body",
+      start: { paraId: "44444444", offset: 0 },
+      end: { paraId: "44444444", offset: 1 },
+    });
+    expect(view(await publish(bytes, session), STORY.body[1])).toContain(
+      "abc¶def¶"
+    );
+    session.destroy();
+  });
+
+  test("the toolbar's break in suggesting mode saves as w:ins", async () => {
+    const bytes = docx("body", p("44444444", run("abcdef")));
+    const session = await open(bytes);
+    const { secondParaId } = session.splitParagraph(
+      { story: "body", paraId: "44444444", offset: 3 },
+      author
+    );
+    session.insertPageBreak(
+      { story: "body", paraId: secondParaId, offset: 0 },
+      author
+    );
+    expect(units(session, "body")).toStartWith("abc¶+[pageBreak]def¶");
+    const out = await publish(bytes, session);
+    session.destroy();
+    expect(view(out, STORY.body[1])).toContain("abc+{[PB]}¶def¶");
+    const reopened = await open(out);
+    expect(units(reopened, "body")).toStartWith("abc¶+[pageBreak]def¶");
+    reopened.destroy();
+  });
+});
+
+test.each(["cell", "header"] as Where[])(
+  "a comment after a break before a nested table in a %s keeps its range",
+  async (where) => {
+    const [story] = STORY[where];
+    let bytes = docx(
+      where,
+      `${p("33333333", run("before"))}${table(p("66666666", run("inner")))}${p(
+        "44444444",
+        run("xyzw")
+      )}`
+    );
+    let session = await open(bytes);
+    session.insertPageBreak({ story, paraId: "44444444", offset: 0 });
+    // The break and the table open the paragraph's slot: "yz" is 3..5.
+    session.addComment(
+      [
+        {
+          story,
+          start: { paraId: "44444444", offset: 3 },
+          end: { paraId: "44444444", offset: 5 },
+        },
+      ],
+      "R",
+      "2026-09-29T00:00:00Z",
+      [
+        {
+          type: "paragraph",
+          content: [{ type: "run", content: [{ type: "text", text: "c" }] }],
+        },
+      ]
+    );
+    const covered = (s: YrsSession) =>
+      s.listComments().flatMap(({ id }) =>
+        s.resolveComment(id).map(({ start, end }) =>
+          s
+            .storySegments(story)
+            .flatMap((segment) =>
+              segment.kind === "text"
+                ? [...segment.text]
+                : segment.kind === "pilcrow"
+                ? ["¶"]
+                : [segment.payload.modelKind === "commentReference" ? "" : "#"]
+            )
+            .slice(start, end)
+            .join("")
+        )
+      );
+    const seen = [covered(session)];
+    for (let publication = 0; publication < 3; publication += 1) {
+      bytes = await publish(bytes, session);
+      session.destroy();
+      session = await open(bytes);
+      seen.push(covered(session));
+    }
+    session.destroy();
+    expect(seen).toEqual(Array(4).fill(["yz"]));
+  }
+);
+
+describe("a break with no paragraph before it and no text to lead", () => {
+  const start = (where: Where) =>
+    docx(
+      where,
+      `${table(p("66666666", run("inner")))}${p("44444444", run("xyzw"))}`
+    );
+  test.each(EVERY)(
+    "in %s saves as its own paragraph, which the next seed holds",
+    async (where) => {
+      const [story, part] = STORY[where];
+      const { seen, exports } = await publications(
+        start(where),
+        story,
+        (session) =>
+          session.insertPageBreak({ story, paraId: "44444444", offset: 0 })
+      );
+      expect(seen[0]).toStartWith("[pageBreak][table]xyzw¶");
+      expect(seen.slice(1)).toEqual(Array(3).fill(seen[1]));
+      expect(seen[1]).toStartWith("¶[pageBreak][table]xyzw¶");
+      expect(view(exports[2], part)).toContain("[PB]¶T[inner¶]xyzw¶");
+    }
+  );
+
+  test("an insertion made there after a capture refuses the rebase; one elsewhere lands", async () => {
+    const bytes = start("cell");
+    const [story] = STORY.cell;
+    const breakFirst = (session: YrsSession) =>
+      session.insertPageBreak({ story, paraId: "44444444", offset: 0 });
+    await expect(
+      rebase(bytes, story, breakFirst, (session) =>
+        session.splitParagraph({ story, paraId: "44444444", offset: 0 })
+      )
+    ).rejects.toThrow("Office rebase:");
+    const { latest, rebased } = await rebase(
+      bytes,
+      story,
+      breakFirst,
+      (session) =>
+        session.insertText({ story, paraId: "44444444", offset: 3 }, "Q")
+    );
+    expect(rebased).toBe(`¶${latest}`);
+  });
+});

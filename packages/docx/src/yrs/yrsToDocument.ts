@@ -992,6 +992,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
     run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
     run = opaqueDrawingRun(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'flowBreak')
+    run = unitBreakRun(item.payload.breakType as FlowBreak);
   else if (item.kind === 'text') {
     const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
     run = {
@@ -1585,29 +1587,6 @@ function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefi
   );
 }
 
-/**
- * `boundaries` moved back past the page and column breaks a story without flow
- * breaks (a cell, a header) holds: story units the export drops.
- */
-function withoutDroppedBreaks(
-  boundaries: CommentBoundary[],
-  items: InlineItem[]
-): CommentBoundary[] {
-  const dropped: number[] = [];
-  let unit = 0;
-  for (const item of items) {
-    const flowBreak =
-      item.kind === 'embed' && (item.embedKind === 'pageBreak' || item.embedKind === 'columnBreak');
-    if (flowBreak) dropped.push(unit);
-    unit += item.kind === 'text' ? item.text.length : 1;
-  }
-  if (dropped.length === 0) return boundaries;
-  return boundaries.map((boundary) => ({
-    ...boundary,
-    offset: boundary.offset - dropped.filter((at) => at < boundary.offset).length,
-  }));
-}
-
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   const attrs = { ...PARAGRAPH_ATTR_DEFAULTS, ...properties } as Attrs;
   attrs.styleId = properties.pStyle ?? null;
@@ -1634,7 +1613,7 @@ function paragraphFromStory(
       : undefined
   );
   content = restoreRawInlines(content, baseParagraph);
-  content = insertBoundaries(content, withoutDroppedBreaks(commentBoundaries, items), storyUnits);
+  content = insertBoundaries(content, commentBoundaries, storyUnits);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
     ...boundary,
@@ -1921,10 +1900,20 @@ function pageBreakParagraph(): Paragraph {
 }
 
 type FlowBreak = 'page' | 'column';
+type Tracked = 'ins' | 'del' | undefined;
 interface FlowToken {
   kind: FlowBreak | 'visible';
   run?: Run;
   index?: number;
+  /** The tracked change around a break. */
+  tracked?: Tracked;
+}
+/** A break unit opening a paragraph slot. */
+interface SlotBreak {
+  kind: FlowBreak;
+  /** Seeded from a page break opening its paragraph's text: it stays that text's first run. */
+  leading: boolean;
+  attributes: Attrs;
 }
 
 const breakRun = (kind: FlowBreak): Run => ({
@@ -1940,20 +1929,36 @@ function unitBreakRun(kind: FlowBreak): Run {
   return run;
 }
 
+const trackedKind = (attributes: Attrs): Tracked =>
+  attributes.ins ? 'ins' : attributes.del ? 'del' : undefined;
+
+/** A slot's break as a run, inside the tracked change it carries. */
+function slotBreakContent({ kind, attributes }: SlotBreak): ParagraphContent {
+  const info = trackedInfo(attributes.ins ?? attributes.del);
+  if (!info) return breakRun(kind);
+  const item: InlineItem = {
+    kind: 'embed',
+    embedKind: 'flowBreak',
+    payload: { breakType: kind },
+    attributes,
+  };
+  return trackedContentForItem(item, info);
+}
+
 /**
  * A paragraph's page/column breaks and visible content in the order the seed
  * reads them (`inline_tokens` in crates/docx-edit/src/seed.rs).
  */
 function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
   const tokens: FlowToken[] = [];
-  const run = (item: Run): void =>
+  const run = (item: Run, tracked?: Tracked): void =>
     item.content.forEach((entry, index) => {
       if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column'))
-        tokens.push({ kind: entry.breakType, run: item, index });
+        tokens.push({ kind: entry.breakType, run: item, index, tracked });
       else if (entry.type !== 'text' || entry.text !== '') tokens.push({ kind: 'visible' });
     });
-  const runs = (items: readonly { type: string }[]): void => {
-    for (const item of items) if (item.type === 'run') run(item as Run);
+  const runs = (items: readonly { type: string }[], tracked?: Tracked): void => {
+    for (const item of items) if (item.type === 'run') run(item as Run, tracked);
   };
   const inline = (items: readonly ParagraphContent[]): void => {
     for (const item of items) {
@@ -1962,13 +1967,8 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
       else if (item.type === 'simpleField') runs(item.content);
       else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
       else if (item.type === 'inlineSdt') inline(item.content);
-      else if (
-        item.type === 'insertion' ||
-        item.type === 'deletion' ||
-        item.type === 'moveFrom' ||
-        item.type === 'moveTo'
-      )
-        runs(item.content);
+      else if (item.type === 'insertion' || item.type === 'moveTo') runs(item.content, 'ins');
+      else if (item.type === 'deletion' || item.type === 'moveFrom') runs(item.content, 'del');
       else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
     }
   };
@@ -1978,36 +1978,19 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
 
 /**
  * Splits a paragraph's breaks as the seed places them (`paragraph_flow_breaks`):
- * `leading` become units before its content, `trailing` units after its
- * pilcrow, and `pageFirst` is a leading page break the seed keeps as the
- * `pageBreakBeforeRun` attribute instead of a unit.
+ * `leading` become units before its text, `trailing` units after its pilcrow.
+ * Without text, the breaks up to its last column break lead.
  */
-function splitFlow(tokens: FlowToken[]): {
-  leading: FlowToken[];
-  trailing: FlowToken[];
-  pageFirst: boolean;
-} {
-  const breaks = tokens.filter((token) => token.kind !== 'visible');
-  if (!tokens.some((token) => token.kind === 'visible')) {
-    let split = 0;
-    breaks.forEach((token, index) => {
+function splitFlow(tokens: FlowToken[]): { leading: FlowToken[]; trailing: FlowToken[] } {
+  let split = tokens.findIndex((token) => token.kind === 'visible');
+  if (split < 0) {
+    split = 0;
+    tokens.forEach((token, index) => {
       if (token.kind === 'column') split = index + 1;
     });
-    return { leading: breaks.slice(0, split), trailing: breaks.slice(split), pageFirst: false };
   }
-  let first: FlowToken | undefined;
-  let visible = false;
-  const trailing: FlowToken[] = [];
-  for (const token of tokens) {
-    if (token.kind === 'visible') visible = true;
-    else if (visible || first) trailing.push(token);
-    else first = token;
-  }
-  return {
-    leading: first?.kind === 'column' ? [first] : [],
-    trailing,
-    pageFirst: first?.kind === 'page',
-  };
+  const breaks = (part: FlowToken[]) => part.filter((token) => token.kind !== 'visible');
+  return { leading: breaks(tokens.slice(0, split)), trailing: breaks(tokens.slice(split)) };
 }
 
 /** `content` without the given break tokens; runs left empty are dropped. */
@@ -2047,8 +2030,10 @@ function withoutBreaks(
         item.type === 'deletion' ||
         item.type === 'moveFrom' ||
         item.type === 'moveTo'
-      )
-        return [{ ...item, content: runs(item.content) }];
+      ) {
+        const kept = runs(item.content);
+        return kept.length > 0 || item.content.length === 0 ? [{ ...item, content: kept }] : [];
+      }
       return [item];
     });
   return drop.size === 0 ? [...content] : inline(content);
@@ -2292,8 +2277,6 @@ class SaveContext {
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
-  /** Stories whose page and column breaks are story units (the seed's `include_page_breaks`). */
-  private readonly flowBreakStories = new Set(['body']);
   private readonly memo: SessionProjectionMemo;
   private readonly bypassMemo: boolean;
 
@@ -2440,13 +2423,12 @@ class SaveContext {
     };
 
     // Break units opening a slot are where the seed put the trailing breaks of
-    // the paragraph before it (or the slot paragraph's leading column breaks).
+    // the paragraph before it, or the breaks leading the slot paragraph's text.
     // Paragraphs keep breaks that still match the units and are rewritten
     // from the units otherwise.
-    const flowUnits = this.flowBreakStories.has(storyId);
-    let slotBreaks: FlowBreak[] = [];
-    let slotInlineBreaks: FlowBreak[] = [];
-    let carried: FlowBreak[] = [];
+    let slotBreaks: SlotBreak[] = [];
+    let slotInlineBreaks: SlotBreak[] = [];
+    let carried: SlotBreak[] = [];
     let previous = -1;
     const settle = (next?: Paragraph): Paragraph | undefined => {
       const expected = [...carried, ...slotBreaks];
@@ -2455,32 +2437,50 @@ class SaveContext {
       const before = previous >= 0 ? (blocks[previous] as Paragraph) : undefined;
       const beforeFlow = before && splitFlow(flowTokens(before.content));
       const nextFlow = next && splitFlow(flowTokens(next.content));
+      const text =
+        next !== undefined && flowTokens(next.content).some(({ kind }) => kind === 'visible');
+      // From the first leading break on they open the text (all of them with no
+      // paragraph before); the rest close the paragraph before.
+      const leading = expected.findIndex((entry) => entry.leading);
+      const split = !text || (before && leading < 0) ? expected.length : before ? leading : 0;
+      const trailing = beforeFlow?.trailing.length ?? 0;
       const have = [...(beforeFlow?.trailing ?? []), ...(nextFlow?.leading ?? [])];
       if (
         have.length === expected.length &&
-        have.every((token, index) => token.kind === expected[index])
+        have.every(
+          (token, index) =>
+            token.kind === expected[index]!.kind &&
+            token.tracked === trackedKind(expected[index]!.attributes) &&
+            (token.kind === 'column' || index < trailing === index < split)
+        )
       )
         return next;
       const rest =
         next && nextFlow && nextFlow.leading.length > 0
           ? { ...next, content: withoutBreaks(next.content, nextFlow.leading) }
           : next;
+      const lead = (paragraph: Paragraph | undefined, entries: SlotBreak[]) =>
+        paragraph && entries.length > 0
+          ? { ...paragraph, content: [...entries.map(slotBreakContent), ...paragraph.content] }
+          : paragraph;
       if (before && beforeFlow) {
         blocks[previous] = {
           ...before,
           content: [
             ...withoutBreaks(before.content, beforeFlow.trailing),
-            ...expected.map(breakRun),
+            ...expected.slice(0, split).map(slotBreakContent),
           ],
         };
-        return rest;
+        return lead(rest, expected.slice(split));
       }
-      if (rest) return { ...rest, content: [...expected.map(breakRun), ...rest.content] };
-      if (expected.length > 0) blocks.push({ type: 'paragraph', content: expected.map(breakRun) });
-      return undefined;
+      if (text) return lead(rest, expected);
+      // No paragraph before them and no text to lead: a paragraph of their own.
+      if (expected.length > 0)
+        blocks.push({ type: 'paragraph', content: expected.map(slotBreakContent) });
+      return rest;
     };
     const openBlock = (): void => {
-      if (flowUnits) settle();
+      settle();
       previous = -1;
     };
 
@@ -2544,19 +2544,9 @@ class SaveContext {
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
-        if (flowUnits) {
-          // A leading page break the seed kept as an attribute, not a unit.
-          const tokens = flowTokens(paragraph.content);
-          if (
-            segment.properties.pageBreakBeforeRun === true &&
-            tokens.some((token) => token.kind === 'visible') &&
-            !splitFlow(tokens).pageFirst
-          )
-            paragraph = { ...paragraph, content: [breakRun('page'), ...paragraph.content] };
-          paragraph = settle(paragraph) ?? paragraph;
-          carried = slotInlineBreaks;
-          slotInlineBreaks = [];
-        }
+        paragraph = settle(paragraph) ?? paragraph;
+        carried = slotInlineBreaks;
+        slotInlineBreaks = [];
         blocks.push(paragraph);
         previous = blocks.length - 1;
         this.onParagraph?.(storyId, storyOffset, paragraph, segment.paraId);
@@ -2597,7 +2587,6 @@ class SaveContext {
         blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
-        if (flowUnits && childStory) this.flowBreakStories.add(childStory);
         openBlock();
         const childContent =
           childStory && this.storyIds.has(childStory)
@@ -2657,21 +2646,23 @@ class SaveContext {
           // base model stores them inside paragraph runs), so they remain the
           // documented opaque carry gap.
         }
-      } else if (
-        flowUnits &&
-        (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak')
-      ) {
-        const kind = segment.embedKind === 'pageBreak' ? 'page' : 'column';
-        if (items.length === 0) slotBreaks.push(kind);
+      } else if (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak') {
+        const entry: SlotBreak = {
+          kind: segment.embedKind === 'pageBreak' ? 'page' : 'column',
+          leading: segment.payload.leading === true,
+          attributes: segment.attributes,
+        };
+        if (items.length === 0) slotBreaks.push(entry);
         else {
-          // Inside paragraph content, which the seed never produces: kept in place.
+          // Inside paragraph content, which the seed never produces: kept in
+          // place, and seeded back as a break after the paragraph.
           items.push({
             kind: 'embed',
             embedKind: 'flowBreak',
-            payload: { breakType: kind },
+            payload: { breakType: entry.kind },
             attributes: segment.attributes,
           });
-          slotInlineBreaks.push(kind);
+          slotInlineBreaks.push({ ...entry, leading: false });
         }
       } else {
         items.push(segment as EmbedItem);
@@ -2681,7 +2672,7 @@ class SaveContext {
       storyOffset += 1;
       if (items.length === 0) contentStart = storyOffset;
     }
-    if (flowUnits) settle();
+    settle();
 
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
     // A story ending in a flow-break embed is well-formed, not a lost

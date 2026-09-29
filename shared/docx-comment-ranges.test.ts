@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
-import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
+import { exportOffice, seedOffice } from "./office-checkpoint";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -287,23 +287,21 @@ function pageBreak(
   return secondParaId;
 }
 
-// The export keeps a body page break; one in a cell or header is a story unit
-// it drops (a known gap), so comments beside it are measured past it.
-const breakStories: Array<[string, string, string, string, number]> = [
+// A page break is a story unit in every story, saved in its place.
+const breakStories: Array<[string, string, string, string]> = [
   [
     "a table cell",
     "body:t0:r0c0",
     `${table(p("44444444", run("abcdef")))}${tail}`,
     "",
-    0,
   ],
-  ["a header", "hf:rId20", tail, p("44444444", run("abcdef")), 0],
-  ["the body", body, p("44444444", run("abcdef")) + tail, "", 1],
+  ["a header", "hf:rId20", tail, p("44444444", run("abcdef"))],
+  ["the body", body, p("44444444", run("abcdef")) + tail, ""],
 ];
 
 test.each(breakStories)(
   "the comments beside a page break in %s keep their ranges across publications",
-  async (_, story, xml, header, kept) => {
+  async (_, story, xml, header) => {
     const { seen, bytes } = await publications(
       docx(xml, [], header),
       (session) => {
@@ -316,7 +314,7 @@ test.each(breakStories)(
     const part =
       story === "hf:rId20" ? "word/header1.xml" : "word/document.xml";
     const xmlOut = new TextDecoder().decode(unzipContainer(bytes)[part]);
-    expect(xmlOut.match(/<w:br w:type="page"\/>/g) ?? []).toHaveLength(kept);
+    expect(xmlOut.match(/<w:br w:type="page"\/>/g) ?? []).toHaveLength(1);
   }
 );
 
@@ -374,39 +372,6 @@ test.each<
         .matchAll(/<w:comment(RangeStart|RangeEnd|Reference) /g),
     ].map(([, kind]) => kind);
     expect(order).toEqual(["Reference"]);
-  }
-);
-
-test.each(breakStories.slice(0, 2))(
-  "typing above a page break in %s after a publication's capture rebases",
-  async (_, story, xml, header) => {
-    const base = docx(xml, [1], header);
-    const session = await open(base);
-    pageBreak(session, story, "44444444", 3);
-    const captured = session.encodeState();
-    const exported = await exportOffice(
-      base,
-      checkpoint(base, captured),
-      fixed
-    );
-    session.insertText({ story, paraId: "44444444", offset: 1 }, "Q");
-    const latest = session.encodeState();
-    session.destroy();
-    const { state } = await rebaseOffice(
-      base,
-      checkpoint(base, captured),
-      checkpoint(base, latest),
-      exported
-    );
-    const rebased = await createYrsSession({ clientId: (clientId += 1) });
-    rebased.openDocx(exported, false);
-    rebased.loadState(state);
-    // The export dropped the break, so the typing lands on its text alone.
-    expect(rebased.paragraphs(story).map(({ text }) => text)).toEqual([
-      "aQbc",
-      "def",
-    ]);
-    rebased.destroy();
   }
 );
 

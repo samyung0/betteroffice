@@ -223,6 +223,8 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
+        // A paragraph closed the last slot: a break after it is its trailing break.
+        let mut after_paragraph = false;
         let mut hidden_field_blocks = BTreeSet::new();
         let mut pending_hidden_field_blocks = BTreeSet::new();
         // Sections are body-level, so the cascade is per story; cell and
@@ -292,6 +294,7 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    after_paragraph = true;
                 }
                 Out::YMap(table)
                     if shared_map_string(&table, txn, "_kind").as_deref() == Some("table") =>
@@ -327,6 +330,7 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
                     at_block_boundary = true;
+                    after_paragraph = false;
                 }
                 Out::YMap(page_break)
                     if matches!(
@@ -363,11 +367,18 @@ fn lower_story<T: ReadTxn>(
                             pm_end: Some((pm_cursor + 1) as f64),
                         }));
                     } else {
+                        // Saved as the first run of the paragraph it opens
+                        // when flagged or when no paragraph precedes it.
+                        let leading = matches!(
+                            page_break.get(txn, "leading"),
+                            Some(Out::Any(Any::Bool(true)))
+                        );
                         blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
                             sdt_groups: None,
                             id,
                             pm_start: Some(pm_cursor as f64),
                             pm_end: Some((pm_cursor + 1) as f64),
+                            keeps_leading_spacing: (leading || !after_paragraph).then_some(true),
                         }));
                     }
                     story_index += 1;
@@ -418,6 +429,7 @@ fn lower_story<T: ReadTxn>(
                     pm_cursor += content_size + 2;
                     paragraph_pm_start = pm_cursor;
                     paragraph_pm_units = 0;
+                    after_paragraph = false;
                     at_block_boundary = true;
                 }
                 Out::YMap(note_ref)
@@ -2994,7 +3006,6 @@ fn lower_paragraph_attrs(
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");
     result.page_break_before = true_property(values, "pageBreakBefore");
-    result.page_break_before_run = true_property(values, "pageBreakBeforeRun");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
     // Document-grid opt-out (w:snapToGrid, default on): the direct pPr child
@@ -4380,9 +4391,10 @@ mod tests {
         assert_eq!(
             value,
             json!([
+                // With no paragraph before it, the save writes it leading the next one.
                 {
                     "kind": "pageBreak", "id": "body:pageBreak:0",
-                    "pmStart": 0.0, "pmEnd": 1.0
+                    "pmStart": 0.0, "pmEnd": 1.0, "keepsLeadingSpacing": true
                 },
                 {
                     "kind": "columnBreak", "id": "body:columnBreak:1",

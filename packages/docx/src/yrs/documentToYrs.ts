@@ -94,7 +94,6 @@ interface StoryPlan {
 }
 
 interface StoryOptions {
-  includePageBreaks: boolean;
   appendBodyTail: boolean;
   extraRunFormatting?: TextFormatting;
   tableParagraphFormatting?: ParagraphFormatting;
@@ -1042,7 +1041,6 @@ function paragraphAttrs(
     }
   }
   if (paragraph.renderedPageBreakBefore) attrs.renderedPageBreakBefore = true;
-  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBeforeRun = true;
   if (paragraph.pPrIns) {
     attrs.pPrIns = {
       revisionId: paragraph.pPrIns.id,
@@ -1159,16 +1157,20 @@ function paragraphUnits(
   return { units, ppr: paraAttrsToPpr(attrs) };
 }
 
-type ParagraphToken = 'pageBreak' | 'visible';
+/** A page or column break (with the tracked change around it), or visible content. */
+type FlowToken = { kind: 'pageBreak' | 'columnBreak' | 'visible'; marker?: MarkDescriptor };
 
-function runTokens(run: Run, tokens: ParagraphToken[]): void {
+function runTokens(run: Run, tokens: FlowToken[], marker?: MarkDescriptor): void {
   for (const content of run.content) {
-    if (content.type === 'break' && content.breakType === 'page') tokens.push('pageBreak');
-    else if (content.type !== 'text' || content.text.length > 0) tokens.push('visible');
+    const flow =
+      content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column');
+    if (flow)
+      tokens.push({ kind: content.breakType === 'page' ? 'pageBreak' : 'columnBreak', marker });
+    else if (content.type !== 'text' || content.text.length > 0) tokens.push({ kind: 'visible' });
   }
 }
 
-function inlineTokens(content: readonly ParagraphContent[], tokens: ParagraphToken[]): void {
+function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[]): void {
   for (const item of content) {
     if (item.type === 'run') runTokens(item, tokens);
     else if (item.type === 'hyperlink') {
@@ -1184,29 +1186,44 @@ function inlineTokens(content: readonly ParagraphContent[], tokens: ParagraphTok
       item.type === 'moveFrom' ||
       item.type === 'moveTo'
     ) {
-      for (const child of item.content) if (child.type === 'run') runTokens(child, tokens);
-    } else if (item.type === 'mathEquation') tokens.push('visible');
+      const marker = trackedMark(
+        item.info,
+        item.type === 'insertion' || item.type === 'moveTo' ? 'insertion' : 'deletion',
+        item.type === 'moveFrom' || item.type === 'moveTo'
+      );
+      for (const child of item.content) if (child.type === 'run') runTokens(child, tokens, marker);
+    } else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
   }
 }
 
-function paragraphStartsWithPageBreak(paragraph: Paragraph): boolean {
-  const tokens: ParagraphToken[] = [];
+/**
+ * The break units before a paragraph's text (page ones flagged `leading`) and
+ * after its pilcrow, as `paragraph_flow_breaks` in crates/docx-edit/src/seed.rs.
+ */
+function paragraphFlowBreaks(paragraph: Paragraph): [EmbedUnit[], EmbedUnit[]] {
+  const tokens: FlowToken[] = [];
   inlineTokens(paragraph.content, tokens);
-  return tokens[0] === 'pageBreak';
-}
-
-function paragraphHasNonLeadingPageBreak(paragraph: Paragraph): boolean {
-  const tokens: ParagraphToken[] = [];
-  inlineTokens(paragraph.content, tokens);
-  let leading = false;
-  let visible = false;
-  for (const token of tokens) {
-    if (token === 'pageBreak') {
-      if (visible || leading) return true;
-      leading = true;
-    } else visible = true;
+  const text = tokens.findIndex((token) => token.kind === 'visible');
+  let split = text;
+  if (text < 0) {
+    split = 0;
+    tokens.forEach((token, index) => {
+      if (token.kind === 'columnBreak') split = index + 1;
+    });
   }
-  return false;
+  const units = (part: FlowToken[], leading: boolean) =>
+    part.flatMap(({ kind, marker }) =>
+      kind === 'visible'
+        ? []
+        : [
+            embedUnit(
+              kind,
+              leading && kind === 'pageBreak' ? { leading: true } : {},
+              marker ? [marker] : []
+            ),
+          ]
+    );
+  return [units(tokens.slice(0, split), text >= 0), units(tokens.slice(split), false)];
 }
 
 type RowSpanInfo = { rowSpan: number; skip: boolean };
@@ -1676,6 +1693,8 @@ function visitStory(
     const blockId = takeBlockId(cursor, storyId, block);
     if (blockId === null) continue;
     if (block.type === 'paragraph') {
+      const [leadingBreaks, trailingBreaks] = paragraphFlowBreaks(block);
+      for (const unit of leadingBreaks) push(unit);
       const paragraph = paragraphUnits(
         context,
         planIndex,
@@ -1693,9 +1712,7 @@ function visitStory(
       );
       plan.units.push(...paragraph.units);
       push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
-      if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
-        push(embedUnit('pageBreak', {}));
-      }
+      for (const unit of trailingBreaks) push(unit);
       lastKind = 'paragraph';
       continue;
     }
@@ -1729,7 +1746,6 @@ function visitStory(
             tableCellStoryId(storyId, currentTable, rowIndex, cellIndex),
             cell.content,
             {
-              includePageBreaks: false,
               appendBodyTail: false,
               extraRunFormatting: cell.extraRunFormatting,
               tableParagraphFormatting: cell.paragraphFormatting,
@@ -1748,7 +1764,6 @@ function visitStory(
       })
     );
     visitStory(context, childStory, block.content, {
-      includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
       tableParagraphFormatting: options.tableParagraphFormatting,
     });
@@ -1835,31 +1850,26 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     openComments: [],
   };
   visitStory(context, 'body', document.package.document.content, {
-    includePageBreaks: true,
     appendBodyTail: true,
   });
   for (const [rId, part] of document.package.headers ?? []) {
     visitStory(context, headerFooterStoryId(rId), part.content, {
-      includePageBreaks: false,
       appendBodyTail: false,
     });
   }
   for (const [rId, part] of document.package.footers ?? []) {
     if (context.plans.some((plan) => plan.storyId === headerFooterStoryId(rId))) continue;
     visitStory(context, headerFooterStoryId(rId), part.content, {
-      includePageBreaks: false,
       appendBodyTail: false,
     });
   }
   for (const note of document.package.footnotes ?? []) {
     visitStory(context, footnoteStoryId(note.id), note.content, {
-      includePageBreaks: false,
       appendBodyTail: false,
     });
   }
   for (const note of document.package.endnotes ?? []) {
     visitStory(context, endnoteStoryId(note.id), note.content, {
-      includePageBreaks: false,
       appendBodyTail: false,
     });
   }

@@ -1,35 +1,15 @@
 //! Pre-placement break policy.
 
-use crate::keep_together::paragraph_breaks_before_run;
+use crate::keep_together::paragraph_breaks_before;
 use crate::types::LayoutBlock;
 
-/// Why a paragraph opens a fresh page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthoredBreak {
-    /// `w:pageBreakBefore` (ECMA-376 §17.3.1.23) on the paragraph itself.
-    PageBreakBefore,
-    /// A `w:br w:type="page"` run opening the paragraph (§17.3.3.1).
-    HardBreakRun,
-}
-
-impl AuthoredBreak {
-    /// Word keeps space-before across an authored break, not an automatic one.
-    /// The variants differ only under `w:suppressSpBfAfterPgBrk` (§17.15.1.87).
-    pub fn keeps_leading_spacing(self) -> bool {
-        matches!(self, Self::HardBreakRun | Self::PageBreakBefore)
-    }
-}
-
-/// Why a block forces a fresh page before it is placed, if it does.
-pub fn breaks_before_block(block: &LayoutBlock) -> Option<AuthoredBreak> {
-    let (property, run) = paragraph_breaks_before_run(block);
-    if run {
-        Some(AuthoredBreak::HardBreakRun)
-    } else if property {
-        Some(AuthoredBreak::PageBreakBefore)
-    } else {
-        None
-    }
+/// Whether a block forces a fresh page before it is placed: `w:pageBreakBefore`
+/// (ECMA-376 §17.3.1.23). Word keeps the paragraph's space-before across it,
+/// as across a page-break run opening the paragraph
+/// (`PageBreakBlock::keeps_leading_spacing`); they differ only under
+/// `w:suppressSpBfAfterPgBrk` (§17.15.1.87).
+pub fn breaks_before_block(block: &LayoutBlock) -> bool {
+    paragraph_breaks_before(block)
 }
 
 /// Geometry a keep-with-next group is weighed against at the page cursor.
@@ -98,39 +78,22 @@ mod tests {
             page_break_before: Some(true),
             ..Default::default()
         };
-        assert_eq!(
-            breaks_before_block(&paragraph(Some(attrs))),
-            Some(AuthoredBreak::PageBreakBefore)
-        );
+        assert!(breaks_before_block(&paragraph(Some(attrs))));
     }
 
     #[test]
     fn breaks_before_is_false_for_a_paragraph_without_page_break_before() {
-        assert_eq!(breaks_before_block(&paragraph(None)), None);
+        assert!(!breaks_before_block(&paragraph(None)));
         let attrs = ParagraphAttrs {
             page_break_before: Some(false),
             ..Default::default()
         };
-        assert_eq!(breaks_before_block(&paragraph(Some(attrs))), None);
-    }
-
-    #[test]
-    fn a_leading_hard_break_run_reports_a_hard_break() {
-        let attrs = ParagraphAttrs {
-            page_break_before_run: Some(true),
-            ..Default::default()
-        };
-        assert_eq!(
-            breaks_before_block(&paragraph(Some(attrs))),
-            Some(AuthoredBreak::HardBreakRun)
-        );
-        assert!(AuthoredBreak::HardBreakRun.keeps_leading_spacing());
-        assert!(AuthoredBreak::PageBreakBefore.keeps_leading_spacing());
+        assert!(!breaks_before_block(&paragraph(Some(attrs))));
     }
 
     #[test]
     fn breaks_before_is_false_for_a_non_paragraph_block() {
-        assert_eq!(breaks_before_block(&LayoutBlock::Unsupported), None);
+        assert!(!breaks_before_block(&LayoutBlock::Unsupported));
     }
 
     #[test]

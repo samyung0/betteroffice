@@ -58,7 +58,6 @@ struct ProjectedTable {
 
 #[derive(Clone, Copy)]
 struct StoryOptions {
-    include_page_breaks: bool,
     append_body_tail: bool,
 }
 
@@ -2141,9 +2140,6 @@ fn paragraph_attrs(
     if truthy(field(Some(paragraph), "renderedPageBreakBefore")) {
         attrs.insert("renderedPageBreakBefore".to_owned(), Value::Bool(true));
     }
-    if paragraph_starts_with_page_break(paragraph) {
-        attrs.insert("pageBreakBeforeRun".to_owned(), Value::Bool(true));
-    }
     for (source, target) in [("pPrIns", "pPrIns"), ("pPrDel", "pPrDel")] {
         if let Some(info) = field(Some(paragraph), source) {
             attrs.insert(
@@ -2360,106 +2356,125 @@ fn paragraph_units(
     (units, para_attrs_to_ppr(attrs))
 }
 
-fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
+/// A page or column break (with the tracked change around it), or visible
+/// content, in the order Word reads a paragraph.
+type FlowToken = (&'static str, Option<Mark>);
+
+fn run_tokens(run: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
     for content in array(field(Some(run), "content")) {
-        if string(field(Some(content), "type")) == Some("break")
-            && matches!(
-                string(field(Some(content), "breakType")),
-                Some("page" | "column")
-            )
-        {
-            tokens.push(
-                if string(field(Some(content), "breakType")) == Some("column") {
+        if let Some(kind) = flow_break_type(content) {
+            tokens.push((
+                if kind == "column" {
                     "columnBreak"
                 } else {
                     "pageBreak"
                 },
-            );
+                marker.cloned(),
+            ));
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
                 .is_empty()
         {
-            tokens.push("visible");
+            tokens.push(("visible", None));
         }
     }
 }
 
-fn inline_tokens(content: &[Value], tokens: &mut Vec<&'static str>) {
+fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
     for item in content {
         match string(field(Some(item), "type")).unwrap_or_default() {
-            "run" => run_tokens(item, tokens),
+            "run" => run_tokens(item, None, tokens),
             "hyperlink" => {
                 for child in array(field(Some(item), "children")) {
                     if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, tokens);
+                        run_tokens(child, None, tokens);
                     }
                 }
             }
             "simpleField" => {
                 for child in array(field(Some(item), "content")) {
                     if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, tokens);
+                        run_tokens(child, None, tokens);
                     }
                 }
             }
             "complexField" => {
                 for key in ["fieldCode", "fieldResult"] {
                     for child in array(field(Some(item), key)) {
-                        run_tokens(child, tokens);
+                        run_tokens(child, None, tokens);
                     }
                 }
             }
             "inlineSdt" => inline_tokens(array(field(Some(item), "content")), tokens),
-            "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+            kind @ ("insertion" | "deletion" | "moveFrom" | "moveTo") => {
+                let marker = tracked_mark(
+                    field(Some(item), "info").unwrap_or(&Value::Null),
+                    if matches!(kind, "insertion" | "moveTo") {
+                        "insertion"
+                    } else {
+                        "deletion"
+                    },
+                    matches!(kind, "moveFrom" | "moveTo"),
+                );
                 for child in array(field(Some(item), "content")) {
                     if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, tokens);
+                        run_tokens(child, Some(&marker), tokens);
                     }
                 }
             }
-            "mathEquation" => tokens.push("visible"),
+            "mathEquation" => tokens.push(("visible", None)),
             _ => {}
         }
     }
 }
 
-fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
-    let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
+/// A break unit the seed places around its paragraph, `leading` when Word
+/// wrote it as a page break opening the paragraph's text (which keeps the
+/// paragraph's space-before).
+struct FlowBreak {
+    kind: &'static str,
+    leading: bool,
+    marker: Option<Mark>,
 }
 
-fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
+impl FlowBreak {
+    fn unit(self) -> InlineUnit {
+        let mut payload = JsonObject::new();
+        if self.leading {
+            payload.insert("leading".to_owned(), Value::Bool(true));
+        }
+        embed_unit(self.kind, payload, self.marker.as_slice(), 1)
+    }
+}
+
+/// The breaks that open a paragraph's slot (before its text) and those that
+/// follow its pilcrow (after its text). A paragraph without text keeps its
+/// breaks after its pilcrow, except those up to its last column break.
+fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    if !tokens.contains(&"visible") {
-        let split = tokens
+    let text = tokens.iter().position(|(kind, _)| *kind == "visible");
+    let split = text.unwrap_or_else(|| {
+        tokens
             .iter()
-            .rposition(|token| *token == "columnBreak")
-            .map_or(0, |index| index + 1);
-        return (tokens[..split].to_vec(), tokens[split..].to_vec());
-    }
-    let mut leading = None;
-    let mut trailing = Vec::new();
-    let mut visible = false;
-    for token in tokens {
-        if matches!(token, "pageBreak" | "columnBreak") {
-            if visible || leading.is_some() {
-                trailing.push(token);
-            } else {
-                leading = Some(token);
-            }
-        } else {
-            visible = true;
-        }
-    }
+            .rposition(|(kind, _)| *kind == "columnBreak")
+            .map_or(0, |index| index + 1)
+    });
+    let breaks = |tokens: &[FlowToken], leading: bool| {
+        tokens
+            .iter()
+            .filter(|(kind, _)| *kind != "visible")
+            .map(|(kind, marker)| FlowBreak {
+                kind,
+                leading: leading && *kind == "pageBreak",
+                marker: marker.clone(),
+            })
+            .collect()
+    };
     (
-        leading
-            .filter(|kind| *kind == "columnBreak")
-            .into_iter()
-            .collect(),
-        trailing,
+        breaks(&tokens[..split], text.is_some()),
+        breaks(&tokens[split..], false),
     )
 }
 
@@ -3329,10 +3344,8 @@ fn visit_story(
         match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
-                if options.include_page_breaks {
-                    for kind in leading_breaks {
-                        context.push(plan_index, embed_unit(kind, JsonObject::new(), &[], 1));
-                    }
+                for flow in leading_breaks {
+                    context.push(plan_index, flow.unit());
                 }
                 let (mut units, mut ppr) = paragraph_units(
                     block,
@@ -3353,10 +3366,8 @@ fn visit_story(
                 );
                 context.plans[plan_index].units.extend(units);
                 context.push(plan_index, embed_unit("pilcrow", ppr, &[], 1));
-                if options.include_page_breaks {
-                    for kind in trailing_breaks {
-                        context.push(plan_index, embed_unit(kind, JsonObject::new(), &[], 1));
-                    }
+                for flow in trailing_breaks {
+                    context.push(plan_index, flow.unit());
                 }
                 last_kind = Some("paragraph");
             }
@@ -3417,7 +3428,6 @@ fn visit_story(
                             table_cell_story_id(&story_id, current_table, row_index, cell_index),
                             &cell.content,
                             StoryOptions {
-                                include_page_breaks: false,
                                 append_body_tail: false,
                             },
                         );
@@ -3439,7 +3449,6 @@ fn visit_story(
                     child_story,
                     array(field(Some(block), "content")),
                     StoryOptions {
-                        include_page_breaks: options.include_page_breaks,
                         append_body_tail: false,
                     },
                 );
@@ -3745,7 +3754,6 @@ pub fn seed_parsed_docx_in_place(
         "body".to_owned(),
         array(field(field(Some(package), "document"), "content")),
         StoryOptions {
-            include_page_breaks: true,
             append_body_tail: true,
         },
     );
@@ -3758,7 +3766,6 @@ pub fn seed_parsed_docx_in_place(
             format!("hf:{relationship_id}"),
             array(field(Some(part), "content")),
             StoryOptions {
-                include_page_breaks: false,
                 append_body_tail: false,
             },
         );
@@ -3776,7 +3783,6 @@ pub fn seed_parsed_docx_in_place(
             story_id,
             array(field(Some(part), "content")),
             StoryOptions {
-                include_page_breaks: false,
                 append_body_tail: false,
             },
         );
@@ -3791,7 +3797,6 @@ pub fn seed_parsed_docx_in_place(
                 format!("{prefix}:{}", js_string(id)),
                 array(field(Some(note), "content")),
                 StoryOptions {
-                    include_page_breaks: false,
                     append_body_tail: false,
                 },
             );
@@ -3865,7 +3870,6 @@ mod tests {
             "body".to_owned(),
             blocks,
             StoryOptions {
-                include_page_breaks: true,
                 append_body_tail: false,
             },
         );
@@ -4117,7 +4121,6 @@ mod tests {
                 json!({"type":"paragraph","content":[]}),
             ],
             StoryOptions {
-                include_page_breaks: true,
                 append_body_tail: true,
             },
         );
@@ -4670,6 +4673,52 @@ mod tests {
                 { "offset": 3, "type": "column" },
             ]))
         );
+    }
+
+    #[test]
+    fn breaks_before_a_paragraphs_text_lead_it_and_keep_their_tracked_change() {
+        let describe = |breaks: Vec<FlowBreak>| {
+            breaks
+                .into_iter()
+                .map(|flow| {
+                    let unit = flow.unit();
+                    let UnitContent::Embed { kind, payload } = unit.content else {
+                        panic!("a break is an embed")
+                    };
+                    format!(
+                        "{kind}{}{}",
+                        if payload.contains_key("leading") {
+                            "^"
+                        } else {
+                            ""
+                        },
+                        if unit.attrs.contains_key("del") {
+                            "-"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let page = json!({"type": "break", "breakType": "page"});
+        let column = json!({"type": "break", "breakType": "column"});
+        let paragraph = json!({"type": "paragraph", "content": [
+            {"type": "deletion", "info": {"id": 7, "author": "A"}, "content": [
+                {"type": "run", "content": [page]}
+            ]},
+            {"type": "run", "content": [column, {"type": "text", "text": "x"}, page]},
+        ]});
+        let (leading, trailing) = paragraph_flow_breaks(&paragraph);
+        assert_eq!(describe(leading), ["pageBreak^-", "columnBreak"]);
+        assert_eq!(describe(trailing), ["pageBreak"]);
+
+        // Without text the breaks follow the paragraph's mark.
+        let (leading, trailing) = paragraph_flow_breaks(
+            &json!({"type": "paragraph", "content": [{"type": "run", "content": [page]}]}),
+        );
+        assert!(leading.is_empty());
+        assert_eq!(describe(trailing), ["pageBreak"]);
     }
 
     #[test]

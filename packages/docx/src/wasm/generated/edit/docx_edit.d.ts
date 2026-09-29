@@ -370,9 +370,9 @@ export class EditSession {
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
      * Inserts a page-break embed at `(story, para_id, offset)`, occupying one
-     * story unit. Always a plain local edit.
+     * story unit; with an author, a tracked insertion.
      */
-    insert_page_break(story: string, para_id: string, offset: number): void;
+    insert_page_break(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): void;
     /**
      * Inserts a row above (`after = false`) or below (`after = true`) the
      * cell `at_json` names. `at_json` is a [`CellLoc`].
@@ -1068,7 +1068,7 @@ export interface InitOutput {
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
-    readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+    readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
     readonly editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_insert_table: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];

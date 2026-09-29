@@ -962,8 +962,8 @@ export interface YrsSession extends CollaborationReplica {
   clearContentControlValue(embedId: string): void;
   /** Commits image size/wrapping/position fields in one transaction. */
   setImageGeometry(embedId: string, geometry: YrsImageGeometry): void;
-  /** Inserts a native page-break embed at a paragraph-keyed location. */
-  insertPageBreak(at: YrsLoc): void;
+  /** Inserts a native page-break embed at a paragraph-keyed location, tracked when suggesting. */
+  insertPageBreak(at: YrsLoc, suggesting?: YrsAuthor): void;
   /** Inserts a native section-break embed at a paragraph-keyed location. */
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
@@ -1862,9 +1862,17 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty('all');
       mutate(() => session.set_image_geometry(embedId, JSON.stringify(geometry)));
     },
-    insertPageBreak: (at) => {
+    insertPageBreak: (at, suggesting) => {
       ensureUndo(at.story);
-      mutate(() => session.insert_page_break(at.story, at.paraId, at.offset));
+      mutate(() =>
+        session.insert_page_break(
+          at.story,
+          at.paraId,
+          at.offset,
+          suggesting?.name,
+          suggesting?.date
+        )
+      );
     },
     insertSectionBreak: (at, type) => {
       ensureUndo(at.story);

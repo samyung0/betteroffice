@@ -577,9 +577,6 @@ pub struct ParagraphAttrs {
     pub widow_control: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_break_before: Option<bool>,
-    /// Opens with a hard `w:br w:type="page"` run rather than `w:pageBreakBefore`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page_break_before_run: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1097,6 +1094,10 @@ pub struct PageBreakBlock {
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_end: Option<f64>,
+    /// A `w:br w:type="page"` run opening the next paragraph (§17.3.3.1):
+    /// Word keeps that paragraph's space-before on the new page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keeps_leading_spacing: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1639,8 +1640,11 @@ impl PartialEq for PageBreakBlock {
             id: _,
             pm_start: _,
             pm_end: _,
+            keeps_leading_spacing: _,
         } = other;
-        self.sdt_groups == other.sdt_groups && self.id == other.id
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.keeps_leading_spacing == other.keeps_leading_spacing
     }
 }
 

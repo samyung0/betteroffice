@@ -511,10 +511,10 @@ fn place(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
-        // pageBreakBefore, or a hard page-break run, forces a fresh page and
-        // keeps the paragraph's space-before net of the previous space-after
-        if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
-            paginator.force_authored_page_break(authored.keeps_leading_spacing());
+        // pageBreakBefore forces a fresh page and keeps the paragraph's
+        // space-before net of the previous space-after
+        if hooks::breaks_before_block(&mb.block)? {
+            paginator.force_authored_page_break(true);
         }
 
         // at the head of a keep-with-next group, move to a fresh page when the
@@ -598,8 +598,8 @@ fn place(
                 layout_text_box(block, measure, paginator);
             }
 
-            LayoutBlock::PageBreak(_) => {
-                paginator.force_authored_page_break(false);
+            LayoutBlock::PageBreak(block) => {
+                paginator.force_authored_page_break(block.keeps_leading_spacing == Some(true));
             }
 
             LayoutBlock::ColumnBreak(_) => {
@@ -1295,6 +1295,11 @@ mod pagination_rule_tests {
         layout_document(&mut input).unwrap()
     }
 
+    /// A page-break run opening the next paragraph.
+    fn leading_page_break() -> serde_json::Value {
+        json!({"block":{"kind":"pageBreak","id":"break","keepsLeadingSpacing":true},"measure":{"kind":"pageBreak"}})
+    }
+
     fn input(measured: Vec<serde_json::Value>) -> Input {
         serde_json::from_value(json!({
             "measured": measured,
@@ -1340,12 +1345,18 @@ mod pagination_rule_tests {
     /// on the new page, however full the previous page was.
     #[test]
     fn a_paragraph_that_breaks_its_own_page_keeps_leading_spacing() {
-        for attrs in [
-            json!({"spacing":{"before":20},"pageBreakBeforeRun":true}),
-            json!({"spacing":{"before":20},"pageBreakBefore":true}),
+        for (hard_break, attrs) in [
+            (true, json!({"spacing":{"before":20}})),
+            (
+                false,
+                json!({"spacing":{"before":20},"pageBreakBefore":true}),
+            ),
         ] {
             for filler in [1, 5, 9] {
                 let mut measured = vec![paragraph(0, filler, 10.0, json!({}))];
+                if hard_break {
+                    measured.push(leading_page_break());
+                }
                 measured.push(paragraph(1, 1, 10.0, attrs.clone()));
                 let mut value = input(measured);
                 let result = layout_document(&mut value).unwrap();
@@ -1406,14 +1417,18 @@ mod pagination_rule_tests {
             (36.0, 24.0, 10.0),
             (36.0, 48.0, 22.0),
         ] {
-            for attrs in [
-                json!({"spacing":{"before":before},"pageBreakBefore":true}),
-                json!({"spacing":{"before":before},"pageBreakBeforeRun":true}),
-            ] {
-                let mut value = input(vec![
-                    paragraph(1, 1, 10.0, json!({"spacing":{"after":after}})),
-                    paragraph(2, 1, 10.0, attrs),
-                ]);
+            for hard_break in [false, true] {
+                let mut measured = vec![paragraph(1, 1, 10.0, json!({"spacing":{"after":after}}))];
+                if hard_break {
+                    measured.push(leading_page_break());
+                }
+                measured.push(paragraph(
+                    2,
+                    1,
+                    10.0,
+                    json!({"spacing":{"before":before},"pageBreakBefore":!hard_break}),
+                ));
+                let mut value = input(measured);
                 let result = layout_document(&mut value).unwrap();
                 assert_eq!(result.pages.len(), 2, "after {after} before {before}");
                 let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {

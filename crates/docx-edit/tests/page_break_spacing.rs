@@ -155,8 +155,8 @@ fn an_authored_break_spends_the_previous_space_after() {
     }
 }
 
-/// The break is a run, not `w:pPr`, so the save projection must not learn a
-/// `w:pageBreakBefore` the file never had.
+/// The break is a run, not `w:pPr`: it lowers as a page break that keeps the
+/// paragraph's space-before, and the paragraph learns no `w:pageBreakBefore`.
 #[test]
 fn a_leading_hard_break_run_does_not_claim_page_break_before() {
     let body = format!(
@@ -169,7 +169,8 @@ fn a_leading_hard_break_run_does_not_claim_page_break_before() {
             .unwrap(),
     )
     .unwrap();
-    let attrs = &blocks.as_array().unwrap()[1]["attrs"];
-    assert_eq!(attrs["pageBreakBeforeRun"], json!(true));
-    assert_eq!(attrs["pageBreakBefore"], Value::Null);
+    let blocks = blocks.as_array().unwrap();
+    assert_eq!(blocks[1]["kind"], json!("pageBreak"));
+    assert_eq!(blocks[1]["keepsLeadingSpacing"], json!(true));
+    assert_eq!(blocks[2]["attrs"]["pageBreakBefore"], Value::Null);
 }
