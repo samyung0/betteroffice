@@ -1793,6 +1793,46 @@ fn an_empty_paragraph_ending_a_section_keeps_its_section_before_a_block() {
 }
 
 #[test]
+fn a_removed_empty_paragraph_before_a_block_hands_its_bookmarks_to_the_next() {
+    let bookmark = |kind: &str| {
+        Any::Map(Arc::new(
+            [
+                ("id".to_owned(), Any::from(5_i64)),
+                ("kind".to_owned(), Any::String(kind.into())),
+                ("offset".to_owned(), Any::from(0_i64)),
+            ]
+            .into(),
+        ))
+    };
+    for kind in ["pageBreak", "columnBreak", "table"] {
+        let (doc, _) = block_slot(kind);
+        let split = doc
+            .split_paragraph(&ctx(), Position::new("body", 7), None)
+            .unwrap();
+        doc.set_paragraph_attr(
+            &split.first_para_id,
+            "bookmarks",
+            Any::Array(vec![bookmark("start"), bookmark("end")].into()),
+        )
+        .unwrap();
+        merge(&doc, &ctx(), &split.first_para_id, true);
+        let paragraphs = doc.paragraphs("body").unwrap();
+        assert_eq!(paragraphs.len(), 2, "{kind}");
+        let Some(Any::Array(moved)) = paragraphs[1].properties.get("bookmarks") else {
+            panic!("{kind}: the bookmarks did not move");
+        };
+        assert_eq!(moved.len(), 2, "{kind}");
+        // Ahead of the break the slot opens with; a table is no break.
+        let Any::Map(first) = &moved[0] else { panic!() };
+        assert_eq!(
+            first.get("breaksAfter").is_some(),
+            kind != "table",
+            "{kind}"
+        );
+    }
+}
+
+#[test]
 fn a_suggested_delete_in_an_original_empty_paragraph_before_a_break_marks_it_deleted() {
     let (doc, _, _) = page_break_slot();
     let split = doc

@@ -1314,3 +1314,87 @@ describe.each(["body", "cell"] as Where[])(
     );
   }
 );
+
+describe.each(EVERY)(
+  "removing an empty paragraph that holds a bookmark, in %s",
+  (where) => {
+    const bookmark = `<w:bookmarkStart w:id="5" w:name="Target"/><w:bookmarkEnd w:id="5"/>`;
+    const holder = `<w:p w14:paraId="55555555">${bookmark}</w:p>`;
+    const slots = [
+      ["a page break", `${p("44444444", `${BR}${run("abc")}`)}`, "SEBT"],
+      ["a column break", `${p("44444444", `${COL}${run("abc")}`)}`, "SEBT"],
+      [
+        "a table",
+        `${table(p("66666666", run("in")))}${p("44444444", run("abc"))}`,
+        "SET",
+      ],
+    ] as const;
+    test.each(
+      slots.flatMap(([name, slot, order]) =>
+        (["forward", "backward"] as const).map(
+          (direction) => [name, direction, slot, order] as const
+        )
+      )
+    )(
+      "before %s moves it to the paragraph that stays: %s",
+      async (_, direction, slot, expected) => {
+        const [story, part] = STORY[where];
+        const bytes = docx(
+          where,
+          `${p("33333333", run("prev"))}${holder}${slot}`
+        );
+        const session = await open(bytes);
+        if (direction === "forward")
+          session.deleteAt({ story, paraId: "55555555", offset: 0 }, "forward");
+        else
+          session.deleteAt(
+            { story, paraId: "44444444", offset: 0 },
+            "backward"
+          );
+        let out = await publish(bytes, session);
+        session.destroy();
+        for (let publication = 0; publication < 2; publication += 1) {
+          expect(
+            new TextDecoder()
+              .decode(unzipContainer(out)[part])
+              .split('w:name="Target"').length - 1
+          ).toBe(1);
+          expect(order(out, part, "44444444")).toBe(expected);
+          const reopened = await open(out);
+          reopened.insertText(
+            { story: "body", paraId: "22222222", offset: 0 },
+            "z"
+          );
+          out = await publish(out, reopened);
+          reopened.destroy();
+        }
+      }
+    );
+
+    test("Enter at a break's slot, then Delete, leaves one copy of the paragraph's bookmark", async () => {
+      const [story, part] = STORY[where];
+      const bytes = docx(
+        where,
+        `${p("33333333", run("prev"))}${p(
+          "44444444",
+          `${bookmark}${BR}${run("abc")}`
+        )}`
+      );
+      const session = await open(bytes);
+      const { firstParaId } = session.splitParagraph({
+        story,
+        paraId: "44444444",
+        offset: 0,
+      });
+      session.deleteAt({ story, paraId: firstParaId, offset: 0 }, "forward");
+      const out = await publish(bytes, session);
+      session.destroy();
+      expect(
+        new TextDecoder()
+          .decode(unzipContainer(out)[part])
+          .split('w:name="Target"').length - 1
+      ).toBe(1);
+      expect(order(out, part, "44444444")).toBe("SEBT");
+    });
+  }
+);

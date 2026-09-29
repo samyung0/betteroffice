@@ -228,6 +228,43 @@ fn all_targets<T: ReadTxn>(txn: &T) -> Vec<TargetPara> {
     result
 }
 
+/// Moves the bookmarks of paragraph mark `from` onto `to`, at the start of its
+/// content and ahead of `breaks` leading breaks, skipping those `to` holds.
+fn move_bookmarks(txn: &mut TransactionMut, from: &MapRef, to: &MapRef, breaks: usize) {
+    let Some(Out::Any(Any::Array(moving))) = from.get(txn, "bookmarks") else {
+        return;
+    };
+    let kept = match to.get(txn, "bookmarks") {
+        Some(Out::Any(Any::Array(list))) => list.to_vec(),
+        _ => Vec::new(),
+    };
+    let key = |bookmark: &Any| match bookmark {
+        Any::Map(map) => Some((map.get("id").cloned(), map.get("kind").cloned())),
+        _ => None,
+    };
+    let mut bookmarks: Vec<Any> = moving
+        .iter()
+        .filter(|bookmark| !kept.iter().any(|held| key(held) == key(bookmark)))
+        .filter_map(|bookmark| {
+            let Any::Map(map) = bookmark else {
+                return None;
+            };
+            let mut map = (**map).clone();
+            map.insert("offset".to_owned(), Any::from(0_i64));
+            map.remove("breaksAfter");
+            if breaks > 0 {
+                map.insert("breaksAfter".to_owned(), Any::from(breaks as i64));
+            }
+            Some(Any::Map(Arc::new(map)))
+        })
+        .collect();
+    if bookmarks.is_empty() {
+        return;
+    }
+    bookmarks.extend(kept);
+    to.insert(txn, "bookmarks", Any::Array(bookmarks.into()));
+}
+
 /// Resolves a selector to pilcrow targets, validating BEFORE any mutation.
 fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Vec<TargetPara>> {
     let all = all_targets(txn);
@@ -635,6 +672,21 @@ impl EditingDoc {
                 _ if empty => (start, pilcrow_index + 1),
                 _ => (pilcrow_index, pilcrow_index),
             };
+            // A removed empty paragraph's bookmarks move to the paragraph that
+            // stays, ahead of its slot's breaks (a suggested deletion keeps them).
+            if from == start && from < to && (!ctx.is_suggesting() || own_insert.is_some()) {
+                let breaks =
+                    snapshot_range(&story, &txn, survivor.bounds.start, survivor.bounds.pilcrow)
+                        .iter()
+                        .map_while(|chunk| match &chunk.kind {
+                            ChunkKind::Embed(Some(map)) => map_string(map, &txn, KIND_KEY)
+                                .filter(|kind| is_block_embed(kind))
+                                .map(|kind| usize::from(kind.ends_with("Break"))),
+                            _ => None,
+                        })
+                        .sum();
+                move_bookmarks(&mut txn, &boundary.map, &survivor.map, breaks);
+            }
             let mut revision_id = None;
             // Units removed ahead of the paragraph mark: the caret shifts by them.
             let mut removed = 0;
