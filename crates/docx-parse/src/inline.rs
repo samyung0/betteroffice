@@ -1026,11 +1026,20 @@ impl SimpleField {
 }
 
 impl ComplexField {
-    /// The code nodes a save writes; `None` writes `field_code` or the instruction.
+    /// The code nodes a save writes; `None` writes `field_code` or the
+    /// instruction. Code holding a nested field (`IF { MERGEFIELD x } …`) or
+    /// kept markup writes its nodes, which the code runs cannot.
     pub fn written_code(&self) -> Option<&[InlineNode]> {
         self.structured_code
             .as_ref()
-            .filter(|content| content.keeps_markup())
+            .filter(|content| {
+                content.keeps_markup()
+                    || content
+                        .inline
+                        .iter()
+                        .flatten()
+                        .any(|node| matches!(node, InlineNode::ComplexField(_)))
+            })
             .and_then(|content| content.inline.as_deref())
     }
 
@@ -1948,7 +1957,13 @@ impl OpenComplexField {
 
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
         let tree = field.field_tree.clone();
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
+        // A nested field shows its result in a result; in code it is code.
+        let runs = if self.in_result() {
+            field.field_result.clone()
+        } else {
+            Vec::new()
+        };
+        self.absorb(InlineNode::ComplexField(Box::new(field)), runs);
         if let Some(tree) = tree {
             self.children.push(tree);
         }

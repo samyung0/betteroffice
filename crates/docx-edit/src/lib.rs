@@ -308,6 +308,8 @@ pub struct EditingDoc {
     epoch: Arc<AtomicU64>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    /// The source package's style definitions, which reseeding a field needs.
+    styles: Mutex<Option<Arc<serde_json::Value>>>,
     _update_sub: Subscription,
 }
 
@@ -338,8 +340,18 @@ impl EditingDoc {
             epoch,
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
+            styles: Mutex::new(None),
             _update_sub: update_sub,
         }
+    }
+
+    /// Records the source package's style definitions (`package.styles`).
+    pub fn set_styles(&self, styles: Option<serde_json::Value>) {
+        *self.styles.lock().unwrap() = styles.map(Arc::new);
+    }
+
+    pub(crate) fn styles(&self) -> Option<Arc<serde_json::Value>> {
+        self.styles.lock().unwrap().clone()
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.

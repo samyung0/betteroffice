@@ -41,6 +41,7 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::ops::field_changes::{self, resolve_field_changes};
 use crate::ops::table::resolve_table_row_revisions;
 use crate::ops::{Chunk, ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
@@ -405,9 +406,11 @@ impl EditingDoc {
                     return false;
                 };
                 match (map.get(&txn, KIND_KEY), map.get(&txn, "fieldData")) {
-                    (_, Some(Out::Any(Any::String(data)))) => field_data_keeps_changes(&data),
+                    (_, Some(Out::Any(Any::String(data)))) => {
+                        field_changes::field_data_keeps_changes(&data)
+                    }
                     (Some(Out::Any(Any::String(kind))), _) if kind.as_ref() == "sdt" => {
-                        matches!(map.get(&txn, "content"), Some(Out::Any(content)) if sdt_keeps_changes(&content))
+                        matches!(map.get(&txn, "content"), Some(Out::Any(content)) if field_changes::sdt_keeps_changes(&content))
                     }
                     _ => false,
                 }
@@ -476,6 +479,7 @@ impl EditingDoc {
                 })
             }
             ChangeTarget::All => {
+                let styles = self.styles();
                 for (story_id, story) in &sorted_stories(&txn) {
                     resolve_table_row_revisions(
                         &mut txn,
@@ -487,7 +491,13 @@ impl EditingDoc {
                         &mut resolved,
                     )?;
                     resolve_story(&mut txn, story, mode, None, None, &mut resolved);
-                    resolve_field_changes(&mut txn, story, mode == ResolveMode::Accept);
+                    resolve_field_changes(
+                        &mut txn,
+                        story_id,
+                        story,
+                        mode == ResolveMode::Accept,
+                        styles.as_deref(),
+                    )?;
                 }
                 Ok(Receipt {
                     new_para_ids: Vec::new(),
@@ -525,261 +535,5 @@ impl EditingDoc {
                 })
             }
         }
-    }
-}
-
-/// Resolves the tracked changes the fields in `story` keep as markup, in
-/// field embeds and in the fields inline content controls hold.
-fn resolve_field_changes(txn: &mut TransactionMut<'_>, story: &TextRef, accept: bool) {
-    for chunk in snapshot(story, txn) {
-        let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-            continue;
-        };
-        let Some(Out::Any(Any::String(kind))) = map.get(txn, KIND_KEY) else {
-            continue;
-        };
-        match kind.as_ref() {
-            "field" => {
-                let projected = map.get(txn, "resultProjection").is_some();
-                if let Some(Out::Any(Any::String(data))) = map.get(txn, "fieldData")
-                    && let Some(resolved) = resolved_field(&data, projected, accept)
-                {
-                    for (key, value) in resolved {
-                        map.insert(txn, key, value);
-                    }
-                }
-            }
-            "sdt" => {
-                if let Some(Out::Any(content)) = map.get(txn, "content")
-                    && let Some(content) = resolved_sdt_content(&content, accept)
-                {
-                    map.insert(txn, "content", content);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Whether a field's data keeps a tracked change as markup.
-fn field_data_keeps_changes(data: &str) -> bool {
-    fn keeps(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Array(items) => items.iter().any(keeps),
-            serde_json::Value::Object(entries) => {
-                (entries.get("type").and_then(|kind| kind.as_str()) == Some("rawXml")
-                    && entries
-                        .get("xml")
-                        .and_then(|xml| xml.as_str())
-                        .and_then(|xml| docx_parse::paragraph::resolve_raw_changes(xml, true))
-                        .is_some())
-                    || entries.values().any(keeps)
-            }
-            _ => false,
-        }
-    }
-    data.contains("rawXml")
-        && serde_json::from_str(data).is_ok_and(|field: serde_json::Value| keeps(&field))
-}
-
-/// Whether a field inside an inline content control's content keeps a tracked change.
-fn sdt_keeps_changes(content: &Any) -> bool {
-    let Any::Array(items) = content else {
-        return false;
-    };
-    items.iter().any(|item| {
-        let Any::Map(entry) = item else {
-            return false;
-        };
-        let Some(Any::Map(payload)) = entry.get("payload") else {
-            return false;
-        };
-        match (payload.get("fieldData"), payload.get("content")) {
-            (Some(Any::String(data)), _) => field_data_keeps_changes(data),
-            (_, Some(inner)) => sdt_keeps_changes(inner),
-            _ => false,
-        }
-    })
-}
-
-/// An inline content control's content with its fields' kept changes resolved.
-fn resolved_sdt_content(content: &Any, accept: bool) -> Option<Any> {
-    let Any::Array(items) = content else {
-        return None;
-    };
-    let mut changed = false;
-    let items: Vec<Any> = items
-        .iter()
-        .map(|item| {
-            let Any::Map(entry) = item else {
-                return item.clone();
-            };
-            let Some(Any::Map(payload)) = entry.get("payload") else {
-                return item.clone();
-            };
-            let mut payload = payload.as_ref().clone();
-            let updated = match entry.get("kind") {
-                Some(Any::String(kind)) if kind.as_ref() == "field" => {
-                    match payload.get("fieldData") {
-                        Some(Any::String(data)) => {
-                            let projected = payload.contains_key("resultProjection");
-                            resolved_field(data, projected, accept).map(|resolved| {
-                                payload.extend(
-                                    resolved
-                                        .into_iter()
-                                        .map(|(key, value)| (key.to_owned(), value)),
-                                )
-                            })
-                        }
-                        _ => None,
-                    }
-                }
-                Some(Any::String(kind)) if kind.as_ref() == "sdt" => payload
-                    .get("content")
-                    .and_then(|inner| resolved_sdt_content(inner, accept))
-                    .map(|inner| {
-                        payload.insert("content".to_owned(), inner);
-                    }),
-                _ => None,
-            };
-            if updated.is_none() {
-                return item.clone();
-            }
-            changed = true;
-            let mut entry = entry.as_ref().clone();
-            entry.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
-            Any::Map(Arc::new(entry))
-        })
-        .collect();
-    changed.then(|| Any::Array(Arc::from(items)))
-}
-
-/// A field embed's payload entries once the changes its data keeps as markup
-/// resolve; `None` when it keeps none. A `projected` field shows only the
-/// result its projected children leave (`field_to_units` in the seed).
-fn resolved_field(data: &str, projected: bool, accept: bool) -> Option<Vec<(&'static str, Any)>> {
-    use serde_json::Value;
-    let mut field: Value = serde_json::from_str(data).ok()?;
-    if !resolve_kept_changes(&mut field, accept) {
-        return None;
-    }
-    let runs = if field["type"] == "simpleField" {
-        field["content"].as_array().cloned().unwrap_or_default()
-    } else if projected {
-        let visible: Vec<Value> = field["structuredResult"]["inline"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|child| matches!(child["type"].as_str(), Some("run" | "rawXml" | "inlineSdt")))
-            .cloned()
-            .collect();
-        crate::seed::shown_runs(&visible)
-    } else {
-        field["fieldResult"].as_array().cloned().unwrap_or_default()
-    };
-    let display: String = runs
-        .iter()
-        .flat_map(|run| run["content"].as_array().into_iter().flatten())
-        .filter(|content| content["type"] == "text")
-        .filter_map(|content| content["text"].as_str())
-        .collect();
-    let text = |key: &str| Any::String(Arc::from(field[key].as_str().unwrap_or_default()));
-    Some(vec![
-        ("instruction", text("instruction")),
-        ("fieldType", text("fieldType")),
-        ("hasCachedResult", Any::Bool(!display.is_empty())),
-        ("displayText", Any::String(Arc::from(display))),
-        ("fieldData", Any::String(Arc::from(field.to_string()))),
-    ])
-}
-
-/// Resolves the raw tracked changes under `value`, refreshing what each field
-/// they sit in shows; returns whether any resolved.
-fn resolve_kept_changes(value: &mut serde_json::Value, accept: bool) -> bool {
-    use serde_json::Value;
-    match value {
-        Value::Array(items) => {
-            let mut changed = false;
-            let mut resolved = Vec::with_capacity(items.len());
-            for mut item in items.drain(..) {
-                let raw = (item["type"] == "rawXml")
-                    .then(|| item["xml"].as_str())
-                    .flatten()
-                    .and_then(|xml| docx_parse::paragraph::resolve_raw_changes(xml, accept));
-                if let Some(fragments) = raw {
-                    changed = true;
-                    resolved.extend(fragments.into_iter().map(|xml| {
-                        let shown: Vec<Value> = docx_parse::paragraph::shown_raw_runs(&xml)
-                            .iter()
-                            .filter_map(|run| serde_json::to_value(run).ok())
-                            .collect();
-                        serde_json::json!({ "type": "rawXml", "xml": xml, "shown": shown })
-                    }));
-                } else {
-                    changed |= resolve_kept_changes(&mut item, accept);
-                    resolved.push(item);
-                }
-            }
-            *items = resolved;
-            changed
-        }
-        Value::Object(entries) => {
-            let changed: Vec<String> = entries
-                .iter_mut()
-                .filter_map(|(key, value)| resolve_kept_changes(value, accept).then(|| key.clone()))
-                .collect();
-            let field_type = entries
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if matches!(field_type, "simpleField" | "complexField") {
-                refresh_field(entries, &changed);
-            }
-            !changed.is_empty()
-        }
-        _ => false,
-    }
-}
-
-/// Recomputes the runs a field shows from its structured code and result.
-fn refresh_field(field: &mut serde_json::Map<String, serde_json::Value>, changed: &[String]) {
-    use serde_json::Value;
-    let shown = |field: &serde_json::Map<String, Value>, key: &str| {
-        field
-            .get(key)
-            .and_then(|content| content["inline"].as_array())
-            .map(|nodes| Value::Array(crate::seed::shown_runs(nodes)))
-    };
-    if changed.iter().any(|key| key == "structuredResult")
-        && let Some(runs) = shown(field, "structuredResult")
-    {
-        let key = if field["type"] == "simpleField" {
-            "content"
-        } else {
-            "fieldResult"
-        };
-        field.insert(key.to_owned(), runs);
-    }
-    if changed.iter().any(|key| key == "structuredCode")
-        && let Some(runs) = shown(field, "structuredCode")
-    {
-        let instruction: String = runs
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|run| run["content"].as_array().into_iter().flatten())
-            .filter(|content| content["type"] == "instrText")
-            .filter_map(|content| content["text"].as_str())
-            .collect();
-        let instruction = instruction.trim();
-        field.insert(
-            "fieldType".to_owned(),
-            Value::String(docx_parse::inline::parse_field_type(instruction)),
-        );
-        field.insert(
-            "instruction".to_owned(),
-            Value::String(instruction.to_owned()),
-        );
-        field.insert("fieldCode".to_owned(), runs);
     }
 }

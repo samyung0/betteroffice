@@ -467,7 +467,8 @@ const toc = (first: string) =>
 test.each([
   ["w:del", `${del(deleted("Old"))}${run("Entry1 1")}`, "-{Old}Entry1 1", "Entry1 1", "OldEntry1 1"],
   ["w:ins", `${ins(run("Entry1"))}${run(" 1")}`, "+{Entry1} 1", "Entry1 1", " 1"],
-  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}", "H(Entry1 1)", ""],
+  // Accepted, the link is a plain first-paragraph link, which such a result saves as its text.
+  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}", "Entry1 1", ""],
   ["w:sdt", `${run("En")}${sdt(run("try1"))}${run(" 1")}`, "EnS{try1} 1", "EnS{try1} 1", "EnS{try1} 1"],
 ])(
   "a field result spanning paragraphs keeps %s in its first paragraph, and Accept or Reject All resolves it",
@@ -491,3 +492,163 @@ test.each([
     }
   }
 );
+
+/** The first paragraph as the story holds it: text, and [kind] per embed with a field's text. */
+const unitsView = (session: YrsSession) =>
+  session
+    .storySegments("body")
+    .map((segment) =>
+      segment.kind === "text"
+        ? segment.text
+        : segment.kind === "pilcrow"
+        ? "¶"
+        : segment.embedKind === "field"
+        ? `[${segment.payload.displayText}]`
+        : `[${segment.embedKind}]`
+    )
+    .join("")
+    .split("¶")[0];
+
+test.each([
+  ["a hyperlink Accept All uncovers", field(`${run("20")}${ins(link(run("26")))}`), "accept"],
+  ["a simple field Accept All uncovers", field(`${run("20")}${ins(fs(run("26"), " PAGE "))}`), "accept"],
+  ["a hyperlink Reject All restores", field(`${run("20")}${del(link(deleted("26")))}`), "reject"],
+  ["a nested field Accept All uncovers", field(`${run("20")}${ins(field(run("26"), " PAGE "))}`), "accept"],
+  ["a nested field whose change Reject All removes", field(`${run("20")}${field(`${run("2")}${ins(run("6"))}`, " PAGE ")}`), "reject"],
+  ["a projected simple field's change Accept All resolves", field(`${run("20")}${fs(ins(run("26")), " PAGE ")}`), "accept"],
+] as const)(
+  "%s in a field result leaves the units its export seeds, and later edits rebase",
+  async (_, xml, mode) => {
+    const bytes = paragraph(xml);
+    const session = await open(bytes);
+    resolveAll(mode)(session);
+    expect(session.hasFieldChanges()).toBe(false);
+    const resolved = unitsView(session);
+    const out = await publish(bytes, session.encodeState());
+    session.destroy();
+    const reopened = await open(out);
+    expect(unitsView(reopened)).toBe(resolved);
+    reopened.destroy();
+    // The field embed: the paragraph's last embed.
+    const fieldAt = (session: YrsSession) => {
+      let at = 0;
+      let offset = 0;
+      for (const segment of session.storySegments("body")) {
+        if (segment.kind === "pilcrow") break;
+        if (segment.kind === "embed") at = offset;
+        offset += segment.kind === "text" ? segment.text.length : 1;
+      }
+      return at;
+    };
+    for (const later of [
+      (session: YrsSession) => edit(session, "11111111", "y"),
+      // Right after the children it projects, which the typing joins.
+      (session: YrsSession) =>
+        session.insertText({ story: "body", paraId: "11111111", offset: fieldAt(session) }, "y"),
+      (session: YrsSession) =>
+        session.deleteRange({
+          story: "body",
+          start: { paraId: "11111111", offset: fieldAt(session) },
+          end: { paraId: "11111111", offset: fieldAt(session) + 1 },
+        }),
+    ]) {
+      const session = await open(bytes);
+      resolveAll(mode)(session);
+      edit(session, "22222222", "x");
+      const captured = session.encodeState();
+      const exported = await publish(bytes, captured);
+      later(session);
+      const direct = view(await publish(bytes, session.encodeState()));
+      const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, session.encodeState()), exported);
+      session.destroy();
+      const rebased = await open(exported, state);
+      expect(view(await publish(exported, rebased.encodeState()))).toBe(direct);
+      rebased.destroy();
+    }
+  }
+);
+
+test("a projected link edited before Accept All keeps its edit beside the link it uncovers", async () => {
+  const bytes = paragraph(field(`${link(run("20"))}${ins(link(run("26")))}`));
+  const session = await open(bytes);
+  edit(session, "11111111", "");
+  session.insertText({ story: "body", paraId: "11111111", offset: 3 }, "x");
+  resolveAll("accept")(session);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(out)).toBe("a [«DATE»|H(2x0)H(26)] b");
+});
+
+test.each([
+  [
+    "a change",
+    `<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> DATE \\@ yyyy </w:instrText></w:r>${ins(instr(" \\* MERGEFORMAT "))}`,
+    "a [«DATE \\@ yyyy»+{«\\* MERGEFORMAT»}|2026] b",
+  ],
+  [
+    "foreign markup",
+    `<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> DATE \\@ yyyy </w:instrText></w:r>${foreign}`,
+    "a [«DATE \\@ yyyy»X|2026] b",
+  ],
+  [
+    "a nested field (IF { PAGE })",
+    `${char("begin")}${instr(" IF ")}${field(run("1"), " PAGE ")}${instr(" = 1 yes no ")}`,
+    "a [«IF»[«PAGE»|1]«= 1 yes no»|2026] b",
+  ],
+])("field code holding %s keeps its instruction and nodes across publications", async (_, code, expected) => {
+  let bytes = paragraph(`${code}${char("separate")}${run("2026")}${char("end")}`);
+  for (let publication = 0; publication < 2; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(view(bytes)).toBe(expected);
+  }
+});
+
+test.each(["accept", "reject"] as const)(
+  "%s all keeps a nested field in field code as a field",
+  async (mode) => {
+    let bytes = paragraph(
+      `${char("begin")}${instr(" IF ")}${field(run("1"), " PAGE ")}${ins(instr(" = 1 yes no "))}${char("separate")}${run("a")}${char("end")}`
+    );
+    const expected = mode === "accept" ? "a [«IF»[«PAGE»|1]«= 1 yes no»|a] b" : "a [«IF»[«PAGE»|1]|a] b";
+    for (let publication = 0; publication < 2; publication += 1) {
+      const session = await open(bytes);
+      if (publication === 0) resolveAll(mode)(session);
+      edit(session, "22222222", "x");
+      bytes = await publish(bytes, session.encodeState());
+      session.destroy();
+      expect(view(bytes)).toBe(expected);
+    }
+  }
+);
+
+test("a comment reference sharing a run with text in a kept change is written once", async () => {
+  const bytes = docx(
+    p(
+      "11111111",
+      `${run("a ")}<w:commentRangeStart w:id="5"/>${field(
+        `${run("20")}${ins('<w:commentRangeEnd w:id="5"/><w:r><w:t>26</w:t><w:commentReference w:id="5"/></w:r>')}`
+      )}${run(" b")}`
+    ) + tail
+  );
+  const session = await open(bytes);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(marks(out)).toEqual(["E5", "R5", "S5"]);
+});
+
+test("Accept All of a formatted kept run settles the field's formatting in one publication", async () => {
+  let bytes = paragraph(field(`${run("20")}${ins('<w:r><w:rPr><w:b/></w:rPr><w:t>26</w:t></w:r>')}`));
+  const saved: string[] = [];
+  for (let publication = 0; publication < 2; publication += 1) {
+    const session = await open(bytes);
+    if (publication === 0) resolveAll("accept")(session);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    saved.push(documentXml(bytes).match(/<w:p [^>]*"11111111"[\s\S]*?<\/w:p>/)![0]);
+  }
+  expect(saved[1]).toBe(saved[0]);
+});

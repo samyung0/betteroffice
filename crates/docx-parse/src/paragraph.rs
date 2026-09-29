@@ -726,6 +726,19 @@ fn process_field_run(
     if let Some(active) = fields.last_mut() {
         active.append_instruction(&instruction);
         active.adopt_formatting(&run);
+        // Instruction text a begin or separate run carries is code, as its own run.
+        if (has_begin || has_separate) && !instruction.is_empty() && !active.in_result() {
+            let code = Run {
+                content: run
+                    .content
+                    .iter()
+                    .filter(|content| matches!(content, RunContent::InstrText { .. }))
+                    .cloned()
+                    .collect(),
+                ..run.clone()
+            };
+            active.absorb(InlineNode::Run(code.clone()), vec![code]);
+        }
         if has_separate {
             active.switch_to_result();
         }
@@ -961,11 +974,14 @@ fn shown_change_runs(change: &TrackedInline) -> Vec<Run> {
         "deletion" | "moveFrom" => Vec::new(),
         _ => shown_runs(&change.content)
             .into_iter()
-            .filter(|run| {
-                !run.content
+            .filter_map(|mut run| {
+                let referenced = run
+                    .content
                     .iter()
-                    .all(|content| matches!(content, RunContent::CommentReference { .. }))
-                    || run.content.is_empty()
+                    .any(|content| matches!(content, RunContent::CommentReference { .. }));
+                run.content
+                    .retain(|content| !matches!(content, RunContent::CommentReference { .. }));
+                (!referenced || !run.content.is_empty()).then_some(run)
             })
             .collect(),
     }
@@ -1003,14 +1019,19 @@ fn balanced_field_chars(element: &XmlElement) -> bool {
 
 /// A tracked change as the raw markup a field keeps, less the comment markers
 /// `nested_comment_ranges` moved to the field's edges and the comment
-/// references the export writes with their comments.
+/// references, which the export writes with their comments.
 fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
-    fn reference_run(run: &XmlElement) -> bool {
-        let mut children = run
+    /// A run without its comment references; `None` when nothing else was in it.
+    fn without_references(run: &XmlElement) -> Option<XmlElement> {
+        let mut kept = run.clone();
+        kept.children.retain(
+            |node| !matches!(node, XmlNode::Element(child) if child.local_name() == "commentReference"),
+        );
+        let referenced = kept.children.len() < run.children.len();
+        let left = kept
             .child_elements()
-            .filter(|child| child.local_name() != "rPr")
-            .peekable();
-        children.peek().is_some() && children.all(|child| child.local_name() == "commentReference")
+            .any(|child| child.local_name() != "rPr");
+        (!referenced || left).then_some(kept)
     }
     fn without_comment_ranges(element: &XmlElement) -> XmlElement {
         let children = element
@@ -1019,7 +1040,7 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
             .filter_map(|node| match node {
                 XmlNode::Element(child) => match child.local_name() {
                     "commentRangeStart" | "commentRangeEnd" => None,
-                    "r" if reference_run(child) => None,
+                    "r" => without_references(child).map(XmlNode::Element),
                     "customXml" | "smartTag" | "sdt" | "sdtContent" | "hyperlink" | "ins"
                     | "del" | "moveFrom" | "moveTo" | "fldSimple" => {
                         Some(XmlNode::Element(without_comment_ranges(child)))
@@ -1042,23 +1063,39 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
     }))
 }
 
-/// Raw inline markup a field keeps with its tracked changes resolved:
-/// accepting keeps insertions and removes deletions, rejecting the reverse.
-/// One fragment per element left, in order; `None` when it holds no change.
-pub fn resolve_raw_changes(xml: &str, accept: bool) -> Option<Vec<String>> {
-    fn change(element: &XmlElement) -> Option<bool> {
-        match element.local_name() {
-            "ins" | "moveTo" => Some(false),
-            "del" | "moveFrom" => Some(true),
-            _ => None,
-        }
+fn raw_change_kind(element: &XmlElement) -> Option<bool> {
+    match element.local_name() {
+        "ins" | "moveTo" => Some(false),
+        "del" | "moveFrom" => Some(true),
+        _ => None,
     }
-    fn holds_change(element: &XmlElement) -> bool {
-        change(element).is_some()
-            || element.local_name() != "rPr" && element.child_elements().any(holds_change)
-    }
+}
+
+fn holds_change(element: &XmlElement) -> bool {
+    raw_change_kind(element).is_some()
+        || element.local_name() != "rPr" && element.child_elements().any(holds_change)
+}
+
+fn parse_raw_root(xml: &str) -> Option<XmlElement> {
+    let limits = ParseLimits::default();
+    parse_xml_strict(xml.as_bytes(), "raw-inline", &mut ParseBudget::new(&limits))
+        .ok()?
+        .root()
+        .cloned()
+}
+
+/// Whether raw inline markup a field keeps holds a tracked change.
+pub fn raw_holds_changes(xml: &str) -> bool {
+    parse_raw_root(xml).is_some_and(|root| holds_change(&root))
+}
+
+/// Raw inline markup a field keeps, its tracked changes resolved (accepting
+/// keeps insertions and removes deletions, rejecting the reverse) and parsed,
+/// without styles, into what a field holding it in a file reads as; `None`
+/// when it holds no change.
+pub fn resolve_raw_inline(xml: &str, accept: bool) -> Option<Vec<InlineNode>> {
     fn resolve(element: &XmlElement, accept: bool) -> Vec<XmlElement> {
-        match change(element) {
+        match raw_change_kind(element) {
             Some(deletion) if deletion == accept => Vec::new(),
             Some(deletion) => {
                 let content = if deletion {
@@ -1089,55 +1126,38 @@ pub fn resolve_raw_changes(xml: &str, accept: bool) -> Option<Vec<String>> {
             }],
         }
     }
-    let limits = ParseLimits::default();
-    let document =
-        parse_xml_strict(xml.as_bytes(), "raw-inline", &mut ParseBudget::new(&limits)).ok()?;
-    let root = document.root().filter(|root| holds_change(root))?;
-    Some(
-        resolve(root, accept)
-            .iter()
-            .map(XmlElement::to_raw_inline_xml)
-            .collect(),
-    )
-}
-
-/// The runs raw inline markup a field keeps shows, parsed without styles.
-pub fn shown_raw_runs(xml: &str) -> Vec<Run> {
-    let limits = ParseLimits::default();
-    let mut budget = ParseBudget::new(&limits);
-    let Some(root) = parse_xml_strict(xml.as_bytes(), "raw-inline", &mut budget)
-        .ok()
-        .and_then(|document| document.root().cloned())
-    else {
-        return Vec::new();
-    };
+    let root = parse_raw_root(xml).filter(holds_change)?;
     let paragraph = XmlElement {
         name: "w:p".to_owned(),
         attributes: Default::default(),
-        children: vec![XmlNode::Element(root)],
+        children: resolve(&root, accept)
+            .into_iter()
+            .map(XmlNode::Element)
+            .collect(),
     };
-    let Ok(content) = parse_paragraph_contents(
+    let limits = ParseLimits::default();
+    let content = parse_paragraph_contents(
         &paragraph,
         None,
         None,
         None,
         None,
         "raw-inline",
-        &mut budget,
+        &mut ParseBudget::new(&limits),
         None,
         0,
         false,
-    ) else {
-        return Vec::new();
-    };
-    content
-        .iter()
-        .flat_map(|item| match item {
-            ParagraphContent::Inline(node) => shown_runs(std::slice::from_ref(node)),
-            ParagraphContent::Tracked(change) => shown_change_runs(change),
-            _ => Vec::new(),
-        })
-        .collect()
+    )
+    .ok()?;
+    Some(
+        content
+            .into_iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(node) => Some(node),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
@@ -2080,27 +2100,55 @@ mod tests {
     }
 
     #[test]
-    fn kept_changes_resolve_to_their_accepted_or_rejected_markup() {
-        let xml = r#"<w:del w:id="1"><w:r><w:delText>old</w:delText></w:r><w:r><w:delInstrText>x</w:delInstrText></w:r></w:del>"#;
-        assert_eq!(resolve_raw_changes(xml, true), Some(Vec::new()));
+    fn kept_changes_resolve_to_what_their_accepted_or_rejected_markup_parses_as() {
+        let texts = |nodes: Vec<InlineNode>| -> Vec<String> {
+            nodes
+                .iter()
+                .map(|node| match node {
+                    InlineNode::Run(run) => run_text(run),
+                    InlineNode::Hyperlink(link) => {
+                        format!("H({})", run_text(&shown_runs(&link.children)[0]))
+                    }
+                    InlineNode::ComplexField(field) => format!(
+                        "[{}|{}]",
+                        field.instruction,
+                        run_text(&field.field_result[0])
+                    ),
+                    other => other.node_type().to_owned(),
+                })
+                .collect()
+        };
+        let xml = r#"<w:del w:id="1"><w:r><w:delText>old</w:delText></w:r></w:del>"#;
+        assert_eq!(resolve_raw_inline(xml, true).map(texts), Some(Vec::new()));
         assert_eq!(
-            resolve_raw_changes(xml, false),
-            Some(vec![
-                "<w:r><w:t>old</w:t></w:r>".to_owned(),
-                "<w:r><w:instrText>x</w:instrText></w:r>".to_owned()
-            ])
+            resolve_raw_inline(xml, false).map(texts),
+            Some(vec!["old".to_owned()])
         );
-        let nested = r#"<w:hyperlink w:anchor="a"><w:ins w:id="2"><w:r><w:t>new</w:t></w:r></w:ins></w:hyperlink>"#;
+        let link = r#"<w:hyperlink w:anchor="a"><w:ins w:id="2"><w:r><w:t>new</w:t></w:r></w:ins></w:hyperlink>"#;
         assert_eq!(
-            resolve_raw_changes(nested, true),
-            Some(vec![
-                r#"<w:hyperlink w:anchor="a"><w:r><w:t>new</w:t></w:r></w:hyperlink>"#.to_owned()
-            ])
+            resolve_raw_inline(link, true).map(texts),
+            Some(vec!["H(new)".to_owned()])
         );
+        let field = r#"<w:ins w:id="3"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins>"#;
         assert_eq!(
-            resolve_raw_changes("<w:r><w:t>plain</w:t></w:r>", true),
+            resolve_raw_inline(field, true).map(texts),
+            Some(vec!["[PAGE|2]".to_owned()])
+        );
+        assert!(!raw_holds_changes("<w:r><w:t>plain</w:t></w:r>"));
+        assert_eq!(
+            resolve_raw_inline("<w:r><w:t>plain</w:t></w:r>", true),
             None
         );
+    }
+
+    fn run_text(run: &Run) -> String {
+        run.content
+            .iter()
+            .filter_map(|content| match content {
+                RunContent::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

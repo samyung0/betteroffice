@@ -305,7 +305,7 @@ impl InsertRun {
     }
 }
 
-fn apply_raw_ops_to_story(
+pub(crate) fn apply_raw_ops_to_story(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     ops: Vec<RawOp>,

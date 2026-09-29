@@ -10,7 +10,7 @@ use yrs::types::Attrs;
 
 use crate::{EditCtx, EditingDoc, RawOp};
 
-type JsonObject = BTreeMap<String, Value>;
+pub(crate) type JsonObject = BTreeMap<String, Value>;
 
 #[derive(Clone)]
 struct Mark {
@@ -458,7 +458,7 @@ fn value_from_map(value: &JsonObject) -> Value {
     )
 }
 
-fn any_from_value(value: Value) -> Result<Any, String> {
+pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     match value {
         Value::Null => Ok(Any::Null),
         Value::Bool(value) => Ok(Any::Bool(value)),
@@ -488,7 +488,7 @@ fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
+pub(crate) fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
     let mut entries = values
         .into_iter()
         .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
@@ -497,7 +497,7 @@ fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
     Ok(entries.into_iter().collect())
 }
 
-fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
     values
         .into_iter()
         .map(|(key, value)| Ok((key, any_from_value(value)?)))
@@ -1581,6 +1581,46 @@ fn field_to_units(
     );
     units.push(embed_unit("field", payload, &marks, 1));
     units
+}
+
+/// A field's story units as the seed makes them in a paragraph styled
+/// `style_id` under the package `styles`: its projected children, each
+/// marked with `fieldResult`, then its embed. An inline content control's
+/// field (`project` false) is its embed alone, as `sdt_payload` seeds it.
+/// Each unit is its text or embed kind and payload, and its attributes.
+pub(crate) fn field_units(
+    value: &Value,
+    styles: Option<&Value>,
+    style_id: Option<&str>,
+    projection_id: usize,
+    project: bool,
+) -> Vec<(Result<String, (String, JsonObject)>, JsonObject)> {
+    let styles = StyleResolver::new(styles);
+    let paragraph = json!({ "formatting": { "styleId": style_id } });
+    let style_formatting = paragraph_style_formatting(&paragraph, &styles, None);
+    let source = BTreeMap::new();
+    let units = if project {
+        field_to_units(
+            value,
+            style_formatting.as_ref(),
+            &styles,
+            &source,
+            projection_id,
+        )
+    } else {
+        let (payload, marks) = field_payload(value, style_formatting.as_ref(), &source);
+        vec![embed_unit("field", payload, &marks, 1)]
+    };
+    units
+        .into_iter()
+        .map(|unit| {
+            let content = match unit.content {
+                UnitContent::Text(text) => Ok(text),
+                UnitContent::Embed { kind, payload } => Err((kind, payload)),
+            };
+            (content, unit.attrs)
+        })
+        .collect()
 }
 
 /// The runs field result `nodes` show (`shown_runs` in docx-parse's paragraph module).
@@ -3631,6 +3671,11 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
+/// The package's style definitions, as the seed reads them.
+pub fn package_styles(envelope: &docx_parse::S9WireEnvelope) -> Option<Value> {
+    serde_json::to_value(&envelope.document.package.styles).ok()
+}
+
 /// Every seed is written under this client, so a package seeds to the same
 /// bytes and object ids on every engine instance (and costs one byte per id).
 pub const SEED_CLIENT_ID: u64 = 0;
@@ -3642,6 +3687,7 @@ pub fn seed_parsed_docx(
 ) -> Result<Vec<String>, String> {
     use yrs::Transact;
     use yrs::updates::decoder::Decode;
+    document.set_styles(package_styles(&envelope));
     let seed = EditingDoc::new(SEED_CLIENT_ID);
     let fonts = seed_parsed_docx_in_place(&seed, envelope)?;
     let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())

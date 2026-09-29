@@ -1,6 +1,7 @@
 //! Mutating editing operations.
 
 pub mod embed;
+mod field_changes;
 pub mod paragraph;
 pub mod resolve;
 pub mod table;
