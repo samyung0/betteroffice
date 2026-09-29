@@ -2606,9 +2606,18 @@ class SaveContext {
         (nextTokens.some(({ kind }) => kind === 'visible' || kind === 'mark') ||
           bookmarks.some(({ breaksAfter }) => !breaksAfter));
       // From the first leading break on they open the text (all of them with no
-      // paragraph before); the rest close the paragraph before.
+      // paragraph before); the rest close the paragraph before. A paragraph
+      // without text keeps breaks ending in a column break as its own, which
+      // is how the seed reads such a paragraph back.
       const leading = expected.findIndex((entry) => entry.leading);
-      const split = !text || (before && leading < 0) ? expected.length : before ? leading : 0;
+      const own = !text && next !== undefined && expected.at(-1)?.kind === 'column';
+      const split = own
+        ? 0
+        : !text || (before && leading < 0)
+          ? expected.length
+          : before
+            ? leading
+            : 0;
       const trailing = beforeFlow?.trailing.length ?? 0;
       const have = [...(beforeFlow?.trailing ?? []), ...(nextFlow?.leading ?? [])];
       if (
@@ -2618,6 +2627,8 @@ class SaveContext {
             token.kind === expected[index]!.kind &&
             token.tracked === trackedKind(expected[index]!.attributes) &&
             ((token.kind === 'column' && !expected[index]!.leading) ||
+              // Without text either place seeds back the same units.
+              !text ||
               index < trailing === index < split)
         ) &&
         // Boundaries at the slot's breaks are placed among them below.
@@ -2675,7 +2686,7 @@ class SaveContext {
         };
         return lead(rest, expected.slice(split));
       }
-      if (text) return lead(rest, expected);
+      if (text || own) return lead(rest, expected);
       // No paragraph before them and no text to lead: a paragraph of their own.
       if (expected.length > 0)
         blocks.push({ type: 'paragraph', content: expected.map(slotBreakContent) });

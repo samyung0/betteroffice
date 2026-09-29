@@ -1442,3 +1442,81 @@ describe.each(EVERY)(
     });
   }
 );
+
+describe.each(EVERY)(
+  "a paragraph without text whose breaks end in a column break, in %s",
+  (where) => {
+    test.each([
+      ["page then column", `${BR}${COL}`, "[PB][CB]"],
+      ["two pages then column", `${BR}${BR}${COL}`, "[PB][PB][CB]"],
+      [
+        "tracked page then column",
+        `${tracked("ins", BR)}${COL}`,
+        "+{[PB]}[CB]",
+      ],
+      ["tracked column alone", tracked("ins", COL), "+{[CB]}"],
+    ] as const)(
+      "keeps its breaks in one paragraph across publications: %s",
+      async (_, breaks, shown) => {
+        const [story, part] = STORY[where];
+        for (const [around, expected] of [
+          [
+            (own: string) => `${own}${p("45454545", run("abc"))}`,
+            `${shown}¶abc¶`,
+          ],
+          [
+            (own: string) => `${p("33333333", run("prev"))}${own}`,
+            `prev¶${shown}¶`,
+          ],
+        ] as const) {
+          let bytes = docx(where, around(p("44444444", breaks)));
+          const seen: string[] = [];
+          for (let publication = 0; publication < 3; publication += 1) {
+            const session = await open(bytes);
+            seen.push(units(session, story).replace(/z*tail¶$/, ""));
+            session.insertText(
+              { story: "body", paraId: "22222222", offset: 0 },
+              "z"
+            );
+            bytes = await publish(bytes, session);
+            session.destroy();
+            expect(view(bytes, part)).toContain(expected);
+          }
+          expect(seen).toEqual(Array(3).fill(seen[0]));
+        }
+      }
+    );
+
+    test("keeps one paragraph once a story-opening heading's text after them is deleted", async () => {
+      const [story, part] = STORY[where];
+      let bytes = docx(
+        where,
+        `${p("44444444", `${BR}${COL}${run("abc")}`)}${p(
+          "45454545",
+          run("next")
+        )}`
+      );
+      let session = await open(bytes);
+      session.deleteRange({
+        story,
+        start: { paraId: "44444444", offset: 2 },
+        end: { paraId: "44444444", offset: 5 },
+      });
+      const edited = units(session, story)
+        .replace(/\^/g, "")
+        .replace(/z*tail¶$/, "");
+      for (let publication = 0; publication < 3; publication += 1) {
+        bytes = await publish(bytes, session);
+        session.destroy();
+        expect(view(bytes, part)).toContain("[PB][CB]¶next¶");
+        session = await open(bytes);
+        expect(units(session, story).replace(/z*tail¶$/, "")).toBe(edited);
+        session.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "z"
+        );
+      }
+      session.destroy();
+    });
+  }
+);
