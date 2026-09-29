@@ -1155,3 +1155,81 @@ test("typing in a TOC's first entry after the capture refuses when a text and ta
   );
   await expect(landed(bytes, () => {}, typeIn("Intro"))).rejects.toBeInstanceOf(RebaseError);
 });
+
+// A delete right before a field's embed used to give the embed the deleted
+// text's link and field marker (yrs scanned past the embed for formatting to
+// clean up), and the export then dropped the field with its text.
+/** A Word table of contents: entries are links to headings, each with a tab and a PAGEREF field. */
+const tocEntry = (anchor: string, text: string, page: string) =>
+  `<w:hyperlink w:anchor="${anchor}" w:history="1">${run(text)}<w:r><w:tab/></w:r>${char("begin")}${instr(` PAGEREF ${anchor} \\h `)}${char("separate")}${run(page)}${char("end")}</w:hyperlink>`;
+const wordToc = docx(
+  p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${tocEntry("_Toc1", "Introduction", "1")}`) +
+    p("33333333", `${tocEntry("_Toc2", "Details", "2")}${char("end")}`) +
+    tail
+);
+/** The offset of the TOC field's embed: the end of its first entry. */
+const tocEnd = (session: YrsSession) => {
+  const { paraId, offset } = fieldAt(session, "TOC");
+  return { paraId, offset };
+};
+const atTocEnd: Record<string, [Edit, string]> = {
+  "Backspace at the end of the first entry (its page number field)": [
+    (session) => void session.deleteAt({ story: "body", ...tocEnd(session) }, "backward"),
+    "[«TOC \\o \\h»|H(Introduction)]",
+  ],
+  "retyping the first entry's page number": [
+    (session) => {
+      const { paraId, offset } = tocEnd(session);
+      session.replaceRange({ story: "body", start: { paraId, offset: offset - 1 }, end: { paraId, offset } }, "7");
+    },
+    "[«TOC \\o \\h»|H(Introduction7)]",
+  ],
+  "typing at the end of the first entry and deleting it": [
+    (session) => {
+      const { paraId, offset } = tocEnd(session);
+      session.insertText({ story: "body", paraId, offset }, "Z");
+      session.deleteAt({ story: "body", paraId, offset: offset + 1 }, "backward");
+    },
+    "[«TOC \\o \\h»|H(Introduction[«PAGEREF _Toc1 \\h»|1])]",
+  ],
+};
+test.each(Object.keys(atTocEnd))("%s keeps the TOC field across three publications", async (name) => {
+  const [change, expected] = atTocEnd[name]!;
+  let bytes = wordToc;
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    if (publication === 0) change(session);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(view(bytes)).toBe(expected);
+  }
+});
+test("Backspace at the end of a TOC's first entry after the capture lands with the field", async () => {
+  const [change, expected] = atTocEnd["Backspace at the end of the first entry (its page number field)"]!;
+  const { next, direct } = await landed(wordToc, () => {}, change);
+  expect(direct).toBe(expected);
+  expect(next).toBe(direct);
+});
+test.each([
+  [
+    "Backspace at the end of a field's link right before another field",
+    paragraph(`${field(linkTo("BBB"), " REF b \\h ")}${field(linkTo("CC"), " REF c \\h ")}`),
+    (session: YrsSession) => {
+      const { paraId, offset } = textAt(session, "BBB");
+      session.deleteAt({ story: "body", paraId, offset: offset + 3 }, "backward");
+    },
+    "a [«REF b \\h»|H(BB)][«REF c \\h»|H(CC)] b",
+  ],
+  [
+    "retyping the last character of a field's link right before another link",
+    paragraph(`${field(linkTo("BB"), " REF b \\h ")}${linkTo("next")}`),
+    (session: YrsSession) => {
+      const { paraId, offset } = textAt(session, "BB");
+      session.replaceRange({ story: "body", start: { paraId, offset: offset + 1 }, end: { paraId, offset: offset + 2 } }, "Q");
+    },
+    "a [«REF b \\h»|H(BQ)]H(next) b",
+  ],
+] as const)("%s keeps the field", async (_, bytes, change, expected) => {
+  expect(await directly(bytes, change)).toBe(expected);
+});

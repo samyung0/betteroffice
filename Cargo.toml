@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["apps/native-viewer"]
+exclude = ["apps/native-viewer", "third_party/yrs"]
 resolver = "3"
 
 [workspace.package]
@@ -40,6 +40,13 @@ vsdx-raster = { package = "betteroffice-vsdx-raster", path = "crates/vsdx-raster
 vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-validate", version = "0.2.0" }
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.2.0" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
+
+# yrs 0.27.3 from crates.io (upstream y-crdt ac476a47) with one fix in
+# `clean_format_gap` (src/types/text.rs): a delete no longer spreads the
+# deleted text's attributes onto a shared type embedded right after it, such
+# as a field or a paragraph mark. Drop this once upstream fixes it.
+[patch.crates-io]
+yrs = { path = "third_party/yrs" }
 
 [profile.release]
 opt-level = "s"
