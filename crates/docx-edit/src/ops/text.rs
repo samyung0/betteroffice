@@ -8,7 +8,7 @@ use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
 
 use crate::format::{FIELD_RESULT, FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::field_changes::{projection, release_children};
+use crate::ops::field_changes::{release_children, removes_owner};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
@@ -377,15 +377,14 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
                 .unwrap_or_else(|| self.next_id())
         });
-        let mut formatting: Vec<(String, Any)> = chunks
-            .iter()
-            .find(|chunk| {
-                matches!(chunk.kind, ChunkKind::Text(_))
-                    && chunk.end() > range.start
-                    && chunk.start < range.end
-            })
-            .map(|chunk| {
-                chunk
+        let replaced = chunks.iter().position(|chunk| {
+            matches!(chunk.kind, ChunkKind::Text(_))
+                && chunk.end() > range.start
+                && chunk.start < range.end
+        });
+        let mut formatting: Vec<(String, Any)> = replaced
+            .map(|index| {
+                chunks[index]
                     .attrs
                     .iter()
                     .filter(|(key, value)| {
@@ -395,12 +394,28 @@ impl EditingDoc {
                     .collect()
             })
             .unwrap_or_else(|| policy_attrs(&chunks, range.start, &FormatPolicy::Inherit));
-        // Text typed over a field it removes is no child of that field: its
-        // number could pair it with another field after a join or Accept All.
+        // The unit the text takes its formatting from: the first replaced
+        // text, or else the unit typing inherits from.
+        let source = replaced.or_else(|| {
+            let unit_at = |index: u32| {
+                chunks.iter().position(|chunk| {
+                    chunk.start <= index
+                        && index < chunk.end()
+                        && !matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                })
+            };
+            range
+                .start
+                .checked_sub(1)
+                .and_then(unit_at)
+                .or_else(|| unit_at(range.start))
+        });
+        // Text typed over the field that unit is a child of is no child of it:
+        // its number could pair the text with another field after a join or
+        // Accept All. A child of a field the range keeps stays one.
         if !ctx.is_suggesting()
-            && chunks.iter().any(|chunk| {
-                (range.start..range.end).contains(&chunk.start) && projection(&txn, chunk).is_some()
-            })
+            && source
+                .is_some_and(|index| removes_owner(&txn, &chunks, index, range.start, range.end))
         {
             formatting.retain(|(key, _)| key != FIELD_RESULT);
         }

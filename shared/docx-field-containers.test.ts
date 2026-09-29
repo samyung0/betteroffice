@@ -1233,3 +1233,16 @@ test.each([
 ] as const)("%s keeps the field", async (_, bytes, change, expected) => {
   expect(await directly(bytes, change)).toBe(expected);
 });
+
+test.each([
+  ["typing", "Q", "a H(AA)[«REF b \\h»|H(QB)] b"],
+  ["pasting", "XYZ", "a H(AA)[«REF b \\h»|H(XYZB)] b"],
+] as const)("%s over a removed field's embed into the next field's link keeps the text in that field", async (_, text, expected) => {
+  const bytes = paragraph(`${field(linkTo("AA"), " REF a \\h ")}${field(linkTo("BB"), " REF b \\h ")}`);
+  const over: Edit = (session) => {
+    const from = fieldAt(session, "REF a");
+    const to = textAt(session, "BB");
+    session.replaceRange({ story: "body", start: from, end: { paraId: to.paraId, offset: to.offset + 1 } }, text);
+  };
+  expect(await directly(bytes, over)).toBe(expected);
+});

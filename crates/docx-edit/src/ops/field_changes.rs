@@ -290,6 +290,26 @@ pub(crate) fn projection<T: ReadTxn>(txn: &T, chunk: &Chunk) -> Option<(i64, Vec
     Some((value["id"].as_i64()?, indices))
 }
 
+/// Whether `start..end` removes the field whose projected child
+/// `chunks[child]` is: the embed its run of children ends at. A unit that is
+/// no child, or whose field lies past `chunks`, has none there.
+pub(crate) fn removes_owner<T: ReadTxn>(
+    txn: &T,
+    chunks: &[Chunk],
+    child: usize,
+    start: u32,
+    end: u32,
+) -> bool {
+    let Some((id, _)) = field_result_attr(&chunks[child]) else {
+        return false;
+    };
+    chunks[child..]
+        .iter()
+        .find(|chunk| field_result_attr(chunk).is_none_or(|(child_id, _)| child_id != id))
+        .filter(|chunk| projection(txn, chunk).is_some_and(|(owner, _)| owner == id))
+        .is_some_and(|owner| (start..end).contains(&owner.start))
+}
+
 /// Clears the `fieldResult` markers of the children of the projecting field
 /// embeds in `start..end` of `story`, which a delete is about to remove: the
 /// children right before each that carry its number. A child whose field is
