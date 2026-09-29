@@ -1755,6 +1755,44 @@ fn delete_or_backspace_beside_an_empty_paragraph_before_a_break_removes_the_para
 }
 
 #[test]
+fn an_empty_paragraph_ending_a_section_keeps_its_section_before_a_block() {
+    for kind in ["pageBreak", "columnBreak", "table"] {
+        for forward in [true, false] {
+            let (doc, _) = block_slot(kind);
+            let split = doc
+                .split_paragraph(&ctx(), Position::new("body", 7), None)
+                .unwrap();
+            doc.set_paragraph_attr(
+                &split.first_para_id,
+                "sectionBreakType",
+                Any::String("nextPage".into()),
+            )
+            .unwrap();
+            let target = if forward {
+                &split.first_para_id
+            } else {
+                &split.second_para_id
+            };
+            merge(&doc, &ctx(), target, forward);
+            let case = format!("{kind} forward={forward}");
+            // Before a break the break goes; before a table nothing changes.
+            let expected = if kind == "table" {
+                "Before¶¶[table]After¶".to_owned()
+            } else {
+                "Before¶¶After¶".to_owned()
+            };
+            assert_eq!(slot_units(&doc), expected, "{case}");
+            assert!(
+                doc.paragraphs("body").unwrap()[1]
+                    .properties
+                    .contains_key("sectionBreakType"),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_suggested_delete_in_an_original_empty_paragraph_before_a_break_marks_it_deleted() {
     let (doc, _, _) = page_break_slot();
     let split = doc

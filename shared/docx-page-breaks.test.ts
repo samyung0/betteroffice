@@ -1062,3 +1062,69 @@ test("a heading retyped after its break's paragraph was published empty keeps no
   );
   rebased.destroy();
 });
+
+describe("an empty paragraph that ends a section keeps its section break", () => {
+  const sect = `<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>`;
+  const sections = (bytes: Uint8Array) =>
+    new TextDecoder()
+      .decode(unzipContainer(bytes)["word/document.xml"])
+      .split("<w:sectPr").length - 1;
+  const author = { name: "Reviewer", date: "2026-09-29T00:00:00Z" };
+  test.each(
+    (
+      [
+        ["page break", `${p("44444444", `${BR}${run("abc")}`)}`, "prev¶¶abc¶"],
+        [
+          "column break",
+          `${p("44444444", `${COL}${run("abc")}`)}`,
+          "prev¶¶abc¶",
+        ],
+        [
+          "table",
+          `${table(p("66666666", run("cell")))}${p("44444444", run("abc"))}`,
+          null,
+        ],
+      ] as const
+    ).flatMap(([name, slot, removed]) =>
+      (["forward", "backward"] as const).flatMap((direction) =>
+        (["plain", "suggesting"] as const).map(
+          (mode) => [name, direction, mode, slot, removed] as const
+        )
+      )
+    )
+  )("before a %s: %s, %s", async (_, direction, mode, slot, removed) => {
+    const bytes = docx(
+      "body",
+      `${p(
+        "33333333",
+        run("prev")
+      )}<w:p w14:paraId="55555555">${sect}</w:p>${slot}`
+    );
+    const session = await open(bytes);
+    const before = units(session, "body");
+    const by = mode === "suggesting" ? author : undefined;
+    if (direction === "forward")
+      session.deleteAt(
+        { story: "body", paraId: "55555555", offset: 0 },
+        "forward",
+        by
+      );
+    else
+      session.deleteAt(
+        { story: "body", paraId: "44444444", offset: 0 },
+        "backward",
+        by
+      );
+    // Before a break, Delete or Backspace removes the break; before a table, nothing.
+    const expected =
+      removed === null
+        ? before
+        : mode === "plain"
+        ? `${removed}tail¶`
+        : before.replace("[", "-[");
+    expect(units(session, "body")).toBe(expected);
+    const out = await publish(bytes, session);
+    session.destroy();
+    expect(sections(out)).toBe(2);
+  });
+});

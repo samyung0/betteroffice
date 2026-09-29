@@ -615,10 +615,15 @@ impl EditingDoc {
                 MergeDirection::Forward => pilcrow_index,
                 MergeDirection::Backward => pilcrow_index + 1,
             };
+            // A paragraph whose mark ends a section is never empty here: the
+            // section break stays.
             let empty = chunks
                 .iter()
                 .filter(|chunk| chunk.start < pilcrow_index)
-                .all(|chunk| is_comment_reference(chunk, &txn));
+                .all(|chunk| is_comment_reference(chunk, &txn))
+                && !SECTION_KEYS
+                    .iter()
+                    .any(|key| boundary.map.contains_key(&txn, key));
             let (from, to) = match lead.as_str() {
                 // Before a break it removes the break, unless the paragraph
                 // before is empty: that paragraph goes, as before a table, so
