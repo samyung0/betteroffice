@@ -1520,3 +1520,122 @@ describe.each(EVERY)(
     });
   }
 );
+
+describe.each(EVERY)(
+  "handing an empty paragraph's bookmark to a text-less paragraph that ends in a column break, in %s",
+  (where) => {
+    const holder = `<w:p w14:paraId="55555555"><w:bookmarkStart w:id="5" w:name="Target"/><w:bookmarkEnd w:id="5"/></w:p>`;
+    const shapes = [
+      ["a column break", COL],
+      ["page then column", `${BR}${COL}`],
+      ["two pages then column", `${BR}${BR}${COL}`],
+      ["tracked page then column", `${tracked("ins", BR)}${COL}`],
+      ["column, page, column", `${COL}${BR}${COL}`],
+    ] as const;
+    test.each(
+      shapes.flatMap(([name, breaks]) =>
+        (["after a paragraph", "at the story's start"] as const).flatMap(
+          (place) =>
+            (["forward", "backward"] as const).map(
+              (direction) => [name, place, direction, breaks] as const
+            )
+        )
+      )
+    )("keeps the breaks: %s, %s, %s", async (_, place, direction, breaks) => {
+      const [story, part] = STORY[where];
+      const before =
+        place === "after a paragraph" ? p("33333333", run("prev")) : "";
+      const bytes = docx(
+        where,
+        `${before}${holder}${p("44444444", breaks)}${p(
+          "45454545",
+          run("next")
+        )}`
+      );
+      const session = await open(bytes);
+      if (direction === "forward")
+        session.deleteAt({ story, paraId: "55555555", offset: 0 }, "forward");
+      else
+        session.deleteAt({ story, paraId: "44444444", offset: 0 }, "backward");
+      const edited = units(session, story).replace(/\^/g, "");
+      let out = await publish(bytes, session);
+      session.destroy();
+      for (let publication = 0; publication < 2; publication += 1) {
+        const xml = new TextDecoder().decode(unzipContainer(out)[part]);
+        expect([breaksIn(xml, "page"), breaksIn(xml, "column")]).toEqual([
+          breaks.split('w:type="page"').length - 1,
+          breaks.split('w:type="column"').length - 1,
+        ]);
+        expect(xml.split('w:name="Target"').length - 1).toBe(1);
+        const reopened = await open(out);
+        expect(
+          units(reopened, story)
+            .replace(/\^/g, "")
+            .replace(/z*tail¶$/, "")
+        ).toBe(edited.replace(/tail¶$/, ""));
+        reopened.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "z"
+        );
+        out = await publish(out, reopened);
+        reopened.destroy();
+      }
+    });
+  }
+);
+
+const breaksIn = (xml: string, type: string) =>
+  xml.split(`<w:br w:type="${type}"/>`).length - 1;
+
+describe.each(EVERY)(
+  "a comment boundary beside a text-less page and column break paragraph, in %s",
+  (where) => {
+    test.each([
+      [
+        "ending after the breaks",
+        (prev: string) =>
+          `${prev.replace("PREV", `${S(1)}${run("prev")}`)}${p(
+            "44444444",
+            `${BR}${COL}${E(1)}`
+          )}${p("45454545", `${run("abc")}${ref(1)}`)}`,
+        "prev¶##",
+      ],
+      [
+        "opening after the breaks",
+        (prev: string) =>
+          `${prev.replace("PREV", run("prev"))}${p(
+            "44444444",
+            `${BR}${COL}${S(1)}`
+          )}${p("45454545", `${run("abc")}${E(1)}${ref(1)}`)}`,
+        "¶abc",
+      ],
+      [
+        "opening after the breaks at the story's start",
+        () =>
+          `${p("44444444", `${BR}${COL}${S(1)}`)}${p(
+            "45454545",
+            `${run("abc")}${E(1)}${ref(1)}`
+          )}`,
+        "¶abc",
+      ],
+    ] as const)(
+      "%s keeps its range across publications",
+      async (_, xml, range) => {
+        const [story] = STORY[where];
+        let bytes = docx(where, xml(p("33333333", "PREV")));
+        const seen: string[][] = [];
+        for (let publication = 0; publication < 3; publication += 1) {
+          const session = await open(bytes);
+          seen.push(covered(session, story));
+          session.insertText(
+            { story: "body", paraId: "22222222", offset: 0 },
+            "z"
+          );
+          bytes = await publish(bytes, session);
+          session.destroy();
+        }
+        expect(seen).toEqual(Array(3).fill([range]));
+      }
+    );
+  }
+);

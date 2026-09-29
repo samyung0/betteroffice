@@ -2607,10 +2607,24 @@ class SaveContext {
           bookmarks.some(({ breaksAfter }) => !breaksAfter));
       // From the first leading break on they open the text (all of them with no
       // paragraph before); the rest close the paragraph before. A paragraph
-      // without text keeps breaks ending in a column break as its own, which
-      // is how the seed reads such a paragraph back.
+      // without text or bookmarks keeps breaks ending in a column break as its
+      // own, which is how the seed reads such a paragraph back. With bookmarks
+      // it does so only with no paragraph before, writing them after the
+      // breaks so the seed reads the breaks as leading them.
       const leading = expected.findIndex((entry) => entry.leading);
-      const own = !text && next !== undefined && expected.at(-1)?.kind === 'column';
+      const own =
+        !text &&
+        next !== undefined &&
+        (bookmarks.length === 0 || !before) &&
+        expected.at(-1)?.kind === 'column';
+      const trailingMarks = own && bookmarks.length > 0;
+      // A comment boundary in a paragraph without text sits after its breaks.
+      const commented =
+        !text &&
+        next !== undefined &&
+        next.content.some(
+          ({ type }) => type === 'commentRangeStart' || type === 'commentRangeEnd'
+        );
       const split = own
         ? 0
         : !text || (before && leading < 0)
@@ -2628,12 +2642,13 @@ class SaveContext {
             token.tracked === trackedKind(expected[index]!.attributes) &&
             ((token.kind === 'column' && !expected[index]!.leading) ||
               // Without text either place seeds back the same units.
-              !text ||
+              (!text && !commented) ||
               index < trailing === index < split)
         ) &&
         // Boundaries at the slot's breaks are placed among them below.
         marks.length === 0 &&
-        bookmarks.length === 0
+        bookmarks.length === 0 &&
+        !commented
       )
         return next;
       // Breaks the content holds ahead of its text are the slot's (all of them
@@ -2659,7 +2674,12 @@ class SaveContext {
         const placed = new Set<BookmarkBoundary>();
         const markTo = (at: number, index: number) => {
           for (const bookmark of bookmarks)
-            if (!placed.has(bookmark) && entries.length - (bookmark.breaksAfter ?? 0) <= index) {
+            if (
+              !placed.has(bookmark) &&
+              (trailingMarks
+                ? index === Number.POSITIVE_INFINITY
+                : entries.length - (bookmark.breaksAfter ?? 0) <= index)
+            ) {
               placed.add(bookmark);
               head.push(bookmarkNode(bookmark));
             }
