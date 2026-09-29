@@ -582,7 +582,9 @@
     "replaced": "הוחלף",
     "with": "עם",
     "added": "נוסף",
-    "deleted": "נמחק"
+    "deleted": "נמחק",
+    "acceptAll": "אישור הכול",
+    "rejectAll": "דחיית הכול"
   },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",

@@ -582,7 +582,9 @@
     "replaced": "Ersetzt",
     "with": "durch",
     "added": "Hinzugefügt",
-    "deleted": "Gelöscht"
+    "deleted": "Gelöscht",
+    "acceptAll": "Alle annehmen",
+    "rejectAll": "Alle ablehnen"
   },
   "contextMenu": {
     "ariaLabel": "KI-Aktionsmenü",

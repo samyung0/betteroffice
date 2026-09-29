@@ -38,7 +38,7 @@
 use std::sync::Arc;
 
 use yrs::types::Attrs;
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
@@ -395,6 +395,26 @@ fn sorted_stories<T: ReadTxn>(txn: &T) -> Vec<(String, TextRef)> {
 }
 
 impl EditingDoc {
+    /// Whether a field anywhere keeps a tracked change as markup in its code
+    /// or result: one only [`ChangeTarget::All`] resolves.
+    pub fn has_field_changes(&self) -> bool {
+        let txn = self.yrs_doc().transact();
+        sorted_stories(&txn).iter().any(|(_, story)| {
+            snapshot(story, &txn).iter().any(|chunk| {
+                let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+                    return false;
+                };
+                match (map.get(&txn, KIND_KEY), map.get(&txn, "fieldData")) {
+                    (_, Some(Out::Any(Any::String(data)))) => field_data_keeps_changes(&data),
+                    (Some(Out::Any(Any::String(kind))), _) if kind.as_ref() == "sdt" => {
+                        matches!(map.get(&txn, "content"), Some(Out::Any(content)) if sdt_keeps_changes(&content))
+                    }
+                    _ => false,
+                }
+            })
+        })
+    }
+
     /// Accepts the targeted changes: pending insertions become plain content
     /// and pending deletions are carried out. See the module docs for the full
     /// matrix and the join rule.
@@ -539,6 +559,47 @@ fn resolve_field_changes(txn: &mut TransactionMut<'_>, story: &TextRef, accept: 
             _ => {}
         }
     }
+}
+
+/// Whether a field's data keeps a tracked change as markup.
+fn field_data_keeps_changes(data: &str) -> bool {
+    fn keeps(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Array(items) => items.iter().any(keeps),
+            serde_json::Value::Object(entries) => {
+                (entries.get("type").and_then(|kind| kind.as_str()) == Some("rawXml")
+                    && entries
+                        .get("xml")
+                        .and_then(|xml| xml.as_str())
+                        .and_then(|xml| docx_parse::paragraph::resolve_raw_changes(xml, true))
+                        .is_some())
+                    || entries.values().any(keeps)
+            }
+            _ => false,
+        }
+    }
+    data.contains("rawXml")
+        && serde_json::from_str(data).is_ok_and(|field: serde_json::Value| keeps(&field))
+}
+
+/// Whether a field inside an inline content control's content keeps a tracked change.
+fn sdt_keeps_changes(content: &Any) -> bool {
+    let Any::Array(items) = content else {
+        return false;
+    };
+    items.iter().any(|item| {
+        let Any::Map(entry) = item else {
+            return false;
+        };
+        let Some(Any::Map(payload)) = entry.get("payload") else {
+            return false;
+        };
+        match (payload.get("fieldData"), payload.get("content")) {
+            (Some(Any::String(data)), _) => field_data_keeps_changes(data),
+            (_, Some(inner)) => sdt_keeps_changes(inner),
+            _ => false,
+        }
+    })
 }
 
 /// An inline content control's content with its fields' kept changes resolved.

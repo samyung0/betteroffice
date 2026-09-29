@@ -346,6 +346,11 @@ export class EditSession {
      */
     format_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, delta_json: string): void;
     /**
+     * Whether a field keeps a tracked change as markup in its code or result,
+     * which `list_revisions` leaves out and only an `{"all": true}` target resolves.
+     */
+    has_field_changes(): boolean;
+    /**
      * Stories changed by the latest undo or redo, sorted.
      */
     history_stories(): string[];
@@ -1059,6 +1064,7 @@ export interface InitOutput {
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
+    readonly editsession_has_field_changes: (a: number) => number;
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];

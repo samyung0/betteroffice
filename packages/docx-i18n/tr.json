@@ -582,7 +582,9 @@
     "replaced": "Değiştirildi",
     "with": "yerine",
     "added": "Eklendi",
-    "deleted": "Silindi"
+    "deleted": "Silindi",
+    "acceptAll": "Tümünü kabul et",
+    "rejectAll": "Tümünü reddet"
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",

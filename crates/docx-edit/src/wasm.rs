@@ -3316,6 +3316,12 @@ impl EditSession {
         .to_string())
     }
 
+    /// Whether a field keeps a tracked change as markup in its code or result,
+    /// which `list_revisions` leaves out and only an `{"all": true}` target resolves.
+    pub fn has_field_changes(&self) -> bool {
+        self.engine.doc().has_field_changes()
+    }
+
     /// Every pending tracked change across all stories, in deterministic
     /// story-then-position order:
     /// `[{"revisionId","author","date","kind","story","preview",

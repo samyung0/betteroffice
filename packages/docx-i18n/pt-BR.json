@@ -582,7 +582,9 @@
     "replaced": "Substituído",
     "with": "por",
     "added": "Adicionado",
-    "deleted": "Excluído"
+    "deleted": "Excluído",
+    "acceptAll": "Aceitar tudo",
+    "rejectAll": "Rejeitar tudo"
   },
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",

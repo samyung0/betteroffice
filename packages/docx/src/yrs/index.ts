@@ -1002,6 +1002,11 @@ export interface YrsSession extends CollaborationReplica {
   selectionContext(range: YrsStoryRange): YrsSelectionContext;
   /** Enumerate tracked changes across every story in deterministic order. */
   listRevisions(): YrsRevisionInfo[];
+  /**
+   * Whether a field keeps a tracked change in its code or result: one the
+   * revision list leaves out and only an `{ all: true }` target resolves.
+   */
+  hasFieldChanges(): boolean;
   /** Current offsets of a comment's sticky anchors. Throws when an anchor no longer resolves. */
   resolveComment(commentId: string): YrsResolvedCommentAnchor[];
   listComments(): YrsCommentInfo[];
@@ -1927,6 +1932,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return context;
     },
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
+    hasFieldChanges: () => session.has_field_changes(),
     listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],

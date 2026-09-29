@@ -582,7 +582,9 @@
     "replaced": "Ganti",
     "with": "dengan",
     "added": "Tambah",
-    "deleted": "Hapus"
+    "deleted": "Hapus",
+    "acceptAll": "Terima semua",
+    "rejectAll": "Tolak semua"
   },
   "revisions": {
     "paragraphMarkInserted": "Menyisipkan tanda paragraf",

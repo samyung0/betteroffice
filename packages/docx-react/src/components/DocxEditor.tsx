@@ -87,6 +87,7 @@ import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './Documen
 import { RULER_WIDTH } from './ui/VerticalRuler';
 import { SIDEBAR_DOCUMENT_SHIFT } from './sidebar/constants';
 import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useCommentSidebarItems';
+import { useReviewAllItems } from '../hooks/useReviewAllItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Translations } from '@betteroffice/docx-i18n';
@@ -1384,11 +1385,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
 
   // --- Unified sidebar items ---
-  const refreshTrackedChanges = (session: YrsSession): void => {
+  const refreshTrackedChanges = useCallback((session: YrsSession): void => {
     setYrsTrackedChangesResult(
       extractTrackedChangesFromYrs(session.listRevisions(), createYrsSidebarProjection(session))
     );
-  };
+  }, []);
   const commentCallbacksRef = useRef<CommentCallbacks>({});
   commentCallbacksRef.current = {
     onCommentReply: (id, text) => {
@@ -1543,12 +1544,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     addCommentYPosition,
   });
 
+  const handleReviewAllResolved = useCallback(
+    (session: YrsSession) => {
+      pagedEditorRef.current?.syncYrsInputState(true);
+      refreshTrackedChanges(session);
+    },
+    [refreshTrackedChanges]
+  );
+  const reviewAllItems = useReviewAllItems({
+    session: pagedEditorRef.current?.getYrsSession(),
+    trackedChanges: yrsTrackedChangesResult,
+    readOnly,
+    onResolved: handleReviewAllResolved,
+  });
+
   const allSidebarItems = useMemo(() => {
     const items: ReactSidebarItem[] = [];
-    if (showCommentsSidebar) items.push(...commentSidebarItems);
+    if (showCommentsSidebar) items.push(...reviewAllItems, ...commentSidebarItems);
     if (pluginSidebarItems) items.push(...pluginSidebarItems);
     return items;
-  }, [showCommentsSidebar, commentSidebarItems, pluginSidebarItems]);
+  }, [showCommentsSidebar, reviewAllItems, commentSidebarItems, pluginSidebarItems]);
 
   // Build a map from insertion revisionIds to sidebar item IDs for replacement tracked changes.
   // This allows clicking the insertion part of a replacement to activate the same sidebar card.
@@ -1681,10 +1696,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // manual close stays closed.
   useEffect(() => {
     if (sidebarAutoOpenedRef.current) return;
-    if (commentSidebarItems.length === 0) return;
+    if (commentSidebarItems.length === 0 && reviewAllItems.length === 0) return;
     sidebarAutoOpenedRef.current = true;
     setShowCommentsSidebar(true);
-  }, [commentSidebarItems]);
+  }, [commentSidebarItems, reviewAllItems]);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

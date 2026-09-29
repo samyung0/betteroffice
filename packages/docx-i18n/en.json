@@ -582,7 +582,9 @@
     "replaced": "Replaced",
     "with": "with",
     "added": "Added",
-    "deleted": "Deleted"
+    "deleted": "Deleted",
+    "acceptAll": "Accept all",
+    "rejectAll": "Reject all"
   },
   "revisions": {
     "paragraphMarkInserted": "Inserted paragraph break",

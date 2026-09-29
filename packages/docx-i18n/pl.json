@@ -582,7 +582,9 @@
     "replaced": "Zamieniono",
     "with": "na",
     "added": "Dodano",
-    "deleted": "Usunięto"
+    "deleted": "Usunięto",
+    "acceptAll": "Zaakceptuj wszystkie",
+    "rejectAll": "Odrzuć wszystkie"
   },
   "contextMenu": {
     "ariaLabel": "Menu akcji AI",

@@ -582,7 +582,9 @@
     "replaced": "替换",
     "with": "为",
     "added": "添加",
-    "deleted": "删除"
+    "deleted": "删除",
+    "acceptAll": "全部接受",
+    "rejectAll": "全部拒绝"
   },
   "contextMenu": {
     "ariaLabel": "AI 操作菜单",
