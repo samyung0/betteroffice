@@ -98,3 +98,20 @@ call sites that replace `from_utf8_unchecked` with checked decoding (see issue
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 
 License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).
+
+---
+
+## yrs (vendored copy for the workspace)
+
+`third_party/yrs` is the `yrs` 0.27.3 crate from crates.io (upstream
+https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from
+one match arm in `clean_format_gap` (`src/types/text.rs`) that counts a shared
+type as content, and a `[lints]` block in its `Cargo.toml` that allows its
+upstream warnings. The workspace substitutes it for the registry crate via
+`[patch.crates-io]`, so it is compiled into the workspace crates that use
+`yrs` and their WASM builds; crates published to crates.io depend on the
+registry crate.
+
+Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
+
+License: MIT (`third_party/yrs/LICENSE`).
