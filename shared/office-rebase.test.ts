@@ -8,6 +8,7 @@ import {
 } from "../packages/docx/src/yrs";
 import { rezipContainer } from "../packages/docx/src/wasm/opc";
 import { PptxDocument } from "../packages/pptx/src/wasm/generated/pptx_wasm.js";
+import { RebaseError, transplant } from "./office-rebase";
 import {
   exportOffice,
   officeBaseline,
@@ -1098,4 +1099,22 @@ test("a DOCX rebase refuses a state the editor cannot render: the export's refer
   } finally {
     right.destroy();
   }
+});
+
+test("any failure inside a rebase refuses it as a RebaseError", () => {
+  const doc = new Y.Doc();
+  doc.getMap("stories").set("body", new Y.Text("x"));
+  const state = Y.encodeStateAsUpdate(doc);
+  doc.destroy();
+  const lineage = {
+    maps: ["stories"],
+    arrays: [],
+    keyed: new Set(["stories"]),
+    settle() {
+      throw new TypeError("undefined is not an object");
+    },
+  };
+  expect(() => transplant(lineage, state, state, state, new Map(), 7)).toThrow(
+    RebaseError
+  );
 });

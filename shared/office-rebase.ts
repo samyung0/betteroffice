@@ -552,8 +552,22 @@ function translate(value: unknown, id: (value: string) => string): unknown {
  * latest − captured landed on `seed`, written by `clientID`. `ids` maps
  * captured entity ids to the seed's; an entity the later edits added keeps
  * its id unless the seed uses it. Returns the state and every id it changed.
+ * Any failure refuses the rebase: it would fail every retry the same way.
  */
 export function transplant(
+  ...args: Parameters<typeof landLater>
+): ReturnType<typeof landLater> {
+  try {
+    return landLater(...args);
+  } catch (error) {
+    if (error instanceof RebaseError) throw error;
+    throw new RebaseError(
+      `Office rebase: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function landLater(
   lineage: Lineage,
   captured: Uint8Array,
   latest: Uint8Array,
