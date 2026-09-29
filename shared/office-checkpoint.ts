@@ -645,7 +645,10 @@ function changedSpan(
 }
 interface DocxParagraph {
   paraId: string;
+  /** Story offset of the paragraph's replaceable text. */
   start: number;
+  /** Paragraph offset of that text: the page and column breaks it opens with lie before it. */
+  lead: number;
   length: number;
   text: string;
   plain: boolean;
@@ -662,6 +665,7 @@ function docxParagraphs(
   }
   const paragraphs: DocxParagraph[] = [];
   let start = 0;
+  let lead = 0;
   let cursor = 0;
   let text = "";
   let plain = true;
@@ -676,17 +680,27 @@ function docxParagraphs(
       paragraphs.push({
         paraId: segment.paraId,
         start,
+        lead,
         length: cursor - start,
         text,
         plain,
       });
       cursor++;
       start = cursor;
+      lead = 0;
       text = "";
       plain = true;
       continue;
     }
-    plain = false;
+    // A page or column break the paragraph opens with stays in place,
+    // outside its replaceable text.
+    if (
+      cursor === start &&
+      (segment.embedKind === "pageBreak" || segment.embedKind === "columnBreak")
+    ) {
+      start++;
+      lead++;
+    } else plain = false;
     cursor++;
   }
   return paragraphs;
@@ -915,8 +929,8 @@ async function open(
             session.replaceRange(
               {
                 story,
-                start: { paraId, offset: span.start },
-                end: { paraId, offset: span.end },
+                start: { paraId, offset: paragraph.lead + span.start },
+                end: { paraId, offset: paragraph.lead + span.end },
               },
               span.text
             );

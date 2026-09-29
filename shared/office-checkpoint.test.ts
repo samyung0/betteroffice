@@ -840,6 +840,77 @@ test("agent replace_text rewrites only the changed DOCX span and refuses tracked
   ).rejects.toThrow("unavailable_target");
 });
 
+/** A package holding a heading opening with a page break and a table cell opening with a column break. */
+async function breakLedHeadings() {
+  const source = await fixture("betteroffice-demo.docx");
+  await seedOffice("docx", source);
+  const parts = unzipContainer(source);
+  const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const br = (type: string) => `<w:r><w:br w:type="${type}"/></w:r>`;
+  parts["word/document.xml"] = new TextEncoder().encode(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>` +
+      `<w:p w14:paraId="0000000A">${run("Intro")}</w:p>` +
+      `<w:p w14:paraId="0000000B">${br("page")}${run("Heading")}</w:p>` +
+      `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0000000C">${br("column")}${run("Cell heading")}</w:p></w:tc></w:tr></w:tbl>` +
+      `<w:p w14:paraId="0000000D">${run("tail")}</w:p><w:sectPr/></w:body></w:document>`
+  );
+  return rezipContainer(parts);
+}
+const documentXml = (bytes: Uint8Array) =>
+  new TextDecoder().decode(unzipContainer(bytes)["word/document.xml"]);
+/** Replaces the text of each paragraph `edits` names by its current text. */
+async function replaceTexts(
+  bytes: Uint8Array,
+  checkpoint: Awaited<ReturnType<typeof seedOffice>>,
+  edits: Record<string, string>
+) {
+  const entries = await inspectOffice(bytes, checkpoint);
+  const commands = Object.entries(edits).map(([was, text]) => {
+    const target = entries.find((entry) => entry.value === was);
+    expect(target).toBeDefined();
+    return { type: "replace_text" as const, targetId: target!.id, expectedText: was, text };
+  });
+  return applyOfficeCommands(bytes, checkpoint, commands);
+}
+
+test("agent replace_text keeps the page or column break a paragraph opens with, in the body and a table cell, across publications", async () => {
+  let bytes = await breakLedHeadings();
+  let [heading, cell] = ["Heading", "Cell heading"];
+  for (let publication = 1; publication <= 3; publication += 1) {
+    const seeded = await seedOffice("docx", bytes);
+    const edit = await replaceTexts(bytes, seeded, {
+      [heading]: `Heading ${publication}`,
+      [cell]: `Cell heading ${publication}`,
+    });
+    [heading, cell] = [`Heading ${publication}`, `Cell heading ${publication}`];
+    bytes = await exportOffice(bytes, { ...seeded, state: edit.state }, fixed);
+    const xml = documentXml(bytes);
+    expect(xml).toMatch(new RegExp(`<w:br w:type="page"/>.*?${heading}<`));
+    expect(xml).toMatch(new RegExp(`<w:br w:type="column"/>.*?${cell}<`));
+    expect(xml.match(/<w:br /g)).toHaveLength(2);
+  }
+});
+
+test("agent replace_text on a paragraph opening with a page break made after a capture lands in the rebase", async () => {
+  const bytes = await breakLedHeadings();
+  const captured = await seedOffice("docx", bytes);
+  const published = await exportOffice(bytes, captured, fixed);
+  const edit = await replaceTexts(bytes, captured, { Heading: "New heading" });
+  const { state } = await rebaseOffice(bytes, captured, { ...captured, state: edit.state }, published);
+  const seeded = await seedOffice("docx", published);
+  const next = documentXml(await exportOffice(published, { ...seeded, state }, fixed));
+  expect(next).toMatch(/<w:br w:type="page"\/>.*?New heading</);
+  expect(next).not.toContain(">Heading<");
+});
+
+test("every paragraph opening with a page break stays an agent edit target in exchange-plan.docx", async () => {
+  const bytes = await readFile(new URL("../poc/fixtures/exchange-plan.docx", import.meta.url));
+  const entries = await inspectOffice(bytes, await seedOffice("docx", bytes));
+  expect(entries).toHaveLength(231);
+  expect(entries.filter((entry) => entry.value === "5.       工作計劃")).toHaveLength(2);
+  expect(entries.some((entry) => entry.value === "1. 引言")).toBe(true);
+});
+
 test("DOCX charts and unmodeled VML drawings survive seeding, an edit and repeated export", async () => {
   const xmlOf = (bytes: Uint8Array, part = "word/document.xml") =>
     new TextDecoder().decode(unzipContainer(bytes)[part]);
