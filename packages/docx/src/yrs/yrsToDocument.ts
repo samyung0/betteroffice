@@ -2617,9 +2617,13 @@ class SaveContext {
           segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
             ? ''
             : this.savedParaId(segment.paraId);
+        // A seeded id without w14:paraId names its source paragraph by index.
+        const seeded = segment.paraId.startsWith(`${storyId}:p`)
+          ? Number(segment.paraId.slice(storyId.length + 2))
+          : Number.NaN;
         const baseParagraph =
           this.baseParagraphs.get(segment.paraId) ??
-          (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
+          (Number.isInteger(seeded) ? baseParagraphBlocks?.[seeded] : undefined);
         const { boundaries, slot } = paragraphCommentBoundaries(storyOffset);
         const inputs = [
           segment.paraId,

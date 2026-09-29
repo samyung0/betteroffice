@@ -1128,3 +1128,49 @@ describe("an empty paragraph that ends a section keeps its section break", () =>
     expect(sections(out)).toBe(2);
   });
 });
+
+describe.each(["body", "cell", "header", "footnote"] as Where[])(
+  "in a file without w14:paraId, a page break beside content in %s",
+  (where) => {
+    test.each(
+      (
+        [
+          [
+            "a simple field",
+            `<w:fldSimple w:instr=" DATE ">${run("2026")}</w:fldSimple>`,
+          ],
+          [
+            "a hyperlink",
+            `<w:hyperlink w:anchor="target">${run("2026")}</w:hyperlink>`,
+          ],
+          ["a tracked insertion", tracked("ins", run("2026"))],
+        ] as const
+      ).flatMap(([name, before]) =>
+        (
+          ["Enter in a paragraph above", "a paragraph above deleted"] as const
+        ).map((edit) => [name, edit, before] as const)
+      )
+    )("after %s stays in place after %s", async (_, edit, before) => {
+      const [story, part] = STORY[where];
+      const xml = `<w:p>${run("one")}</w:p><w:p>${run("above")}</w:p><w:p>${run(
+        "a "
+      )}${before}${BR}${run("x")}</w:p>`;
+      const bytes = docx(where, xml);
+      const session = await open(bytes);
+      const id = (text: string) =>
+        session.paragraphs(story).find((paragraph) => paragraph.text === text)!
+          .paraId;
+      if (edit === "Enter in a paragraph above")
+        session.splitParagraph({ story, paraId: id("above"), offset: 2 });
+      else
+        session.deleteRange({
+          story,
+          start: { paraId: id("one"), offset: 3 },
+          end: { paraId: id("above"), offset: 5 },
+        });
+      const out = await publish(bytes, session);
+      session.destroy();
+      expect(plain(out, part)).toContain("a 2026[PB]x¶");
+    });
+  }
+);
