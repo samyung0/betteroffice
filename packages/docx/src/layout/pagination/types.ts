@@ -458,11 +458,6 @@ export type ParagraphAttrs = {
   /** w:widowControl, a toggle defaulting on: only an authored off is carried. */
   widowControl?: boolean;
   pageBreakBefore?: boolean;
-  /**
-   * The paragraph opens with a hard `w:br w:type="page"` run rather than
-   * carrying `w:pageBreakBefore`; Word keeps its space-before.
-   */
-  pageBreakBeforeRun?: boolean;
   styleId?: string;
   effectiveStyleId?: string;
   contextualSpacing?: boolean;
@@ -905,6 +900,8 @@ export type PageBreakBlock = {
   id: BlockId;
   pmStart?: number;
   pmEnd?: number;
+  /** Saved as the first run of the next paragraph's text: Word keeps its space-before. */
+  keepsLeadingSpacing?: boolean;
 };
 
 /**

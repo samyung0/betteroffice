@@ -97,16 +97,19 @@ describe('paragraph slots that open with a table or page break', () => {
   );
 
   it.each([
-    ['Delete at the end of the paragraph before', 1, 'forward'],
-    ['Backspace at the start of the paragraph opened by', 2, 'backward'],
-  ] as const)('%s a page break removes the break', async (_, index, direction) => {
+    ['Backspace at the start of the paragraph a page break opens removes it', 2, 'backward'],
+    ['Delete in an empty paragraph before a page break removes that paragraph', 1, 'forward'],
+  ] as const)('%s', async (_, index, direction) => {
     const session = await open(PAGE_BREAK);
     try {
       expect(units(session)).toBe('Before¶¶[pageBreak]Chapter¶');
       const target = paraId(session, index);
+      const chapter = paraId(session, 2);
       const { caret } = session.mergeParagraphs('body', target, direction);
-      expect(units(session)).toBe('Before¶¶Chapter¶');
-      expect(caret).toEqual(caretAt(target, 0));
+      expect(units(session)).toBe(
+        direction === 'forward' ? 'Before¶[pageBreak]Chapter¶' : 'Before¶¶Chapter¶'
+      );
+      expect(caret).toEqual(caretAt(chapter, 0));
       expect(session.undo()).toBe(true);
       expect(units(session)).toBe('Before¶¶[pageBreak]Chapter¶');
     } finally {

@@ -48,12 +48,13 @@ function docx(where: Where, content: string): Uint8Array {
       ? p("11111111", `${run("x")}<w:r><w:footnoteReference w:id="1"/></w:r>`)
       : "";
   const parts: Record<string, string> = {
-    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footer1.xml" ContentType="${OFFICE}.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/></Types>`,
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footer1.xml" ContentType="${OFFICE}.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/><Override PartName="/word/numbering.xml" ContentType="${OFFICE}.numbering+xml"/></Types>`,
     "_rels/.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
-    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId21" Type="${REL}/footer" Target="footer1.xml"/><Relationship Id="rId22" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`,
+    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId21" Type="${REL}/footer" Target="footer1.xml"/><Relationship Id="rId22" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId23" Type="${REL}/numbering" Target="numbering.xml"/></Relationships>`,
     "word/document.xml": `<w:document ${W}><w:body>${body}${tail}<w:sectPr><w:headerReference w:type="default" r:id="rId20"/><w:footerReference w:type="default" r:id="rId21"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
     // One comment keeps the comments part, which a rebase requires the export to keep.
     "word/comments.xml": `<w:comments ${W}><w:comment w:id="1" w:author="R" w:date="2026-09-01T00:00:00Z"><w:p><w:r><w:t>c1</w:t></w:r></w:p></w:comment></w:comments>`,
+    "word/numbering.xml": `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
     "word/header1.xml": `<w:hdr ${W}>${
       where === "header" ? content : p("66666666", run("head"))
     }</w:hdr>`,
@@ -651,4 +652,192 @@ describe("a break with no paragraph before it and no text to lead", () => {
     );
     expect(rebased).toBe(`¶${latest}`);
   });
+});
+
+describe.each(EVERY)(
+  "Enter at the start of a break's paragraph, then Delete, in %s",
+  (where) => {
+    test.each([
+      [
+        "a break leading the paragraph's text",
+        `${p("33333333", run("prev"))}${p(
+          "44444444",
+          `${BR}${run("abcdef")}`
+        )}`,
+      ],
+      [
+        "a break closing the paragraph before",
+        `${p("33333333", `${run("prev")}${BR}`)}${p(
+          "44444444",
+          run("abcdef")
+        )}`,
+      ],
+    ])("restores the document: %s", async (_, xml) => {
+      const [story] = STORY[where];
+      const session = await open(docx(where, xml));
+      const before = units(session, story);
+      const { firstParaId } = session.splitParagraph({
+        story,
+        paraId: "44444444",
+        offset: 0,
+      });
+      session.deleteAt({ story, paraId: firstParaId, offset: 0 }, "forward");
+      expect(units(session, story)).toBe(before);
+      session.destroy();
+    });
+  }
+);
+
+describe.each(["body", "control", "cell"] as Where[])(
+  "the editor keeps space-before after a break exactly where the save does, in %s",
+  (where) => {
+    const flags = (session: YrsSession, story: string) =>
+      (
+        session.yrsBlocksForStory(story) as Array<{
+          kind: string;
+          keepsLeadingSpacing?: boolean;
+        }>
+      )
+        .filter(({ kind }) => kind === "pageBreak")
+        .map(({ keepsLeadingSpacing }) => keepsLeadingSpacing === true);
+    const lead = `${p("33333333", run("prev"))}${p(
+      "44444444",
+      `${BR}${run("abc")}`
+    )}`;
+    test.each<
+      [string, string, (session: YrsSession, story: string) => void, boolean[]]
+    >([
+      ["a break leading text", lead, () => {}, [true]],
+      [
+        "the text after a leading break deleted",
+        lead,
+        (s, story) =>
+          s.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: 1 },
+            end: { paraId: "44444444", offset: 4 },
+          }),
+        [false],
+      ],
+      [
+        "Enter right after a leading break",
+        lead,
+        (s, story) =>
+          s.splitParagraph({ story, paraId: "44444444", offset: 1 }),
+        [false],
+      ],
+      [
+        "the toolbar's break",
+        p("44444444", run("abcdef")),
+        (s, story) => toolbarBreak(s, story, "44444444", 3),
+        [false],
+      ],
+      [
+        "a break opening the story before text",
+        p("44444444", run("abc")),
+        (s, story) =>
+          s.insertPageBreak({ story, paraId: "44444444", offset: 0 }),
+        [true],
+      ],
+      [
+        "a break opening the story before an empty paragraph",
+        `${p("44444444", "")}${p("55555555", run("abc"))}`,
+        (s, story) =>
+          s.insertPageBreak({ story, paraId: "44444444", offset: 0 }),
+        [false],
+      ],
+      [
+        "a break opening the story before a table",
+        `${table(p("66666666", run("inner")))}${p("44444444", run("xyzw"))}`,
+        (s, story) =>
+          s.insertPageBreak({ story, paraId: "44444444", offset: 0 }),
+        [false],
+      ],
+    ])("%s", async (_, xml, edit, expected) => {
+      const [story] = STORY[where];
+      const bytes = docx(where, xml);
+      const session = await open(bytes);
+      edit(session, story);
+      const editor = flags(session, story);
+      const reopened = await open(await publish(bytes, session));
+      session.destroy();
+      expect(editor).toEqual(expected);
+      expect(flags(reopened, story)).toEqual(editor);
+      reopened.destroy();
+    });
+  }
+);
+
+test("an empty list item before a paragraph a break leads keeps its number", async () => {
+  const num = `<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>`;
+  const session = await open(
+    docx(
+      "body",
+      `<w:p>${num}${run("one")}</w:p><w:p>${num}</w:p>${p(
+        "44444444",
+        `${BR}${run("abc")}`
+      )}`
+    )
+  );
+  const markers = (
+    session.yrsBlocksForStory("body") as Array<{
+      kind: string;
+      attrs?: { listMarker?: unknown; listMarkerHidden?: boolean };
+    }>
+  )
+    .filter(({ attrs }) => attrs?.listMarker)
+    .map(({ attrs }) => attrs?.listMarkerHidden === true);
+  session.destroy();
+  expect(markers).toEqual([false, false]);
+});
+
+test("a heading retyped after its break's paragraph was published empty keeps no space-before, in the editor and the save", async () => {
+  const bytes = docx(
+    "body",
+    `${p("33333333", run("prev"))}${p("44444444", `${BR}${run("abc")}`)}`
+  );
+  const flags = (session: YrsSession) =>
+    (
+      session.yrsBlocksForStory("body") as Array<{
+        kind: string;
+        keepsLeadingSpacing?: boolean;
+      }>
+    )
+      .filter(({ kind }) => kind === "pageBreak")
+      .map(({ keepsLeadingSpacing }) => keepsLeadingSpacing === true);
+  const retype = (session: YrsSession) =>
+    session.insertText({ story: "body", paraId: "44444444", offset: 1 }, "New");
+  const session = await open(bytes);
+  session.deleteRange({
+    story: "body",
+    start: { paraId: "44444444", offset: 1 },
+    end: { paraId: "44444444", offset: 4 },
+  });
+  const captured = session.encodeState();
+  const exported = await exportOffice(
+    bytes,
+    checkpoint(bytes, captured),
+    fixed
+  );
+  retype(session);
+  // Without the publication the break still leads the heading.
+  expect(flags(session)).toEqual([true]);
+  expect(view(await publish(bytes, session), "word/document.xml")).toContain(
+    "prev¶[PB]New¶"
+  );
+  const { state } = await rebaseOffice(
+    bytes,
+    checkpoint(bytes, captured),
+    checkpoint(bytes, session.encodeState()),
+    exported
+  );
+  session.destroy();
+  const rebased = await createYrsSession({ clientId: (clientId += 1) });
+  rebased.openDocx(exported, false);
+  rebased.loadState(state);
+  expect(flags(rebased)).toEqual([false]);
+  expect(view(await publish(exported, rebased), "word/document.xml")).toContain(
+    "prev[PB]¶New¶"
+  );
+  rebased.destroy();
 });

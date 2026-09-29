@@ -223,8 +223,11 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        // A paragraph closed the last slot: a break after it is its trailing break.
+        // The save writes a slot's breaks as the first runs of the slot
+        // paragraph's text when a leading one opens them or no paragraph
+        // precedes; otherwise as the previous paragraph's trailing breaks.
         let mut after_paragraph = false;
+        let mut slot = Slot::default();
         let mut hidden_field_blocks = BTreeSet::new();
         let mut pending_hidden_field_blocks = BTreeSet::new();
         // Sections are body-level, so the cascade is per story; cell and
@@ -251,6 +254,10 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
+                    slot.close(
+                        &mut blocks,
+                        !paragraph_runs.is_empty() || !paragraph_drawings.is_empty(),
+                    );
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
@@ -309,6 +316,7 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
+                    slot.close(&mut blocks, false);
                     let hidden = shared_map_string(&table, txn, "blockId")
                         .is_some_and(|id| hidden_field_blocks.contains(&id));
                     let (lowered, node_size) = lower_table(
@@ -348,15 +356,21 @@ fn lower_story<T: ReadTxn>(
                         });
                     }
                     let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    slot.leading |= matches!(
+                        page_break.get(txn, "leading"),
+                        Some(Out::Any(Any::Bool(true)))
+                    );
                     if kind == "pageBreak"
-                        && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
+                        && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last()
                         && paragraph.runs.is_empty()
                         && paragraph.pm_end == Some(pm_cursor as f64)
                         && paragraph.pm_end == paragraph.pm_start.map(|start| start + 2.0)
-                        && let Some(attrs) = paragraph.attrs.as_mut()
-                        && attrs.list_marker.is_some()
+                        && paragraph
+                            .attrs
+                            .as_ref()
+                            .is_some_and(|attrs| attrs.list_marker.is_some())
                     {
-                        attrs.list_marker_hidden = Some(true);
+                        slot.list_item = Some(blocks.len() - 1);
                     }
                     let id = BlockId::Str(format!("{story_id}:{kind}:{story_index}"));
                     if kind == "columnBreak" {
@@ -367,18 +381,16 @@ fn lower_story<T: ReadTxn>(
                             pm_end: Some((pm_cursor + 1) as f64),
                         }));
                     } else {
-                        // Saved as the first run of the paragraph it opens
-                        // when flagged or when no paragraph precedes it.
-                        let leading = matches!(
-                            page_break.get(txn, "leading"),
-                            Some(Out::Any(Any::Bool(true)))
-                        );
+                        let leading = slot.leading || !after_paragraph;
+                        if leading {
+                            slot.breaks.push(blocks.len());
+                        }
                         blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
                             sdt_groups: None,
                             id,
                             pm_start: Some(pm_cursor as f64),
                             pm_end: Some((pm_cursor + 1) as f64),
-                            keeps_leading_spacing: (leading || !after_paragraph).then_some(true),
+                            keeps_leading_spacing: leading.then_some(true),
                         }));
                     }
                     story_index += 1;
@@ -407,6 +419,7 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
+                    slot.close(&mut blocks, false);
                     let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
@@ -777,11 +790,50 @@ fn lower_story<T: ReadTxn>(
         {
             return Err(BridgeError::UnterminatedStory(story_id.to_owned()));
         }
+        slot.close(&mut blocks, false);
 
         Ok((blocks, pm_cursor - pm_base))
     })();
     active_stories.remove(story_id);
     result
+}
+
+/// The page breaks opening a paragraph slot, lowered as the save writes them:
+/// the first runs of the slot paragraph's text when a leading one opens them
+/// or no paragraph precedes, and the previous paragraph's trailing breaks
+/// otherwise (or a paragraph of their own when there is no text to lead).
+#[derive(Default)]
+struct Slot {
+    /// A break flagged `leading` opened the slot's leading breaks.
+    leading: bool,
+    /// Breaks that keep the next paragraph's space-before if text follows.
+    breaks: Vec<usize>,
+    /// An empty list item just before the breaks.
+    list_item: Option<usize>,
+}
+
+impl Slot {
+    /// Ends the slot at its paragraph (`text` when it holds any) or at a block.
+    fn close(&mut self, blocks: &mut [LayoutBlock], text: bool) {
+        let leads = text && !self.breaks.is_empty();
+        if !text {
+            for &index in &self.breaks {
+                if let Some(LayoutBlock::PageBreak(block)) = blocks.get_mut(index) {
+                    block.keeps_leading_spacing = None;
+                }
+            }
+        }
+        // An empty list item before a break-only paragraph shows no number;
+        // one before a break leading a paragraph's text does.
+        if !(leads && self.leading)
+            && let Some(LayoutBlock::Paragraph(paragraph)) =
+                self.list_item.and_then(|index| blocks.get_mut(index))
+            && let Some(attrs) = paragraph.attrs.as_mut()
+        {
+            attrs.list_marker_hidden = Some(true);
+        }
+        *self = Self::default();
+    }
 }
 
 /// CamelCase alias of [`yrs_doc_to_layout_blocks`] for callers spelling the
@@ -4391,10 +4443,9 @@ mod tests {
         assert_eq!(
             value,
             json!([
-                // With no paragraph before it, the save writes it leading the next one.
                 {
                     "kind": "pageBreak", "id": "body:pageBreak:0",
-                    "pmStart": 0.0, "pmEnd": 1.0, "keepsLeadingSpacing": true
+                    "pmStart": 0.0, "pmEnd": 1.0
                 },
                 {
                     "kind": "columnBreak", "id": "body:columnBreak:1",

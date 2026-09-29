@@ -1718,6 +1718,27 @@ fn a_replacement_from_a_paragraph_start_to_a_block_led_slot_keeps_the_mark() {
 }
 
 #[test]
+fn delete_in_an_empty_paragraph_before_a_break_removes_the_paragraph() {
+    for kind in ["pageBreak", "columnBreak"] {
+        let (doc, _) = block_slot(kind);
+        let split = doc
+            .split_paragraph(&ctx(), Position::new("body", 7), None)
+            .unwrap();
+        assert_eq!(
+            slot_units(&doc),
+            format!("Before¶¶[{kind}]After¶"),
+            "{kind}"
+        );
+        merge(&doc, &ctx(), &split.first_para_id, true);
+        assert_eq!(slot_units(&doc), format!("Before¶[{kind}]After¶"), "{kind}");
+        // With text before the break, Delete still removes the break.
+        let (doc, first) = block_slot(kind);
+        merge(&doc, &ctx(), &first, true);
+        assert_eq!(slot_units(&doc), "Before¶After¶", "{kind}");
+    }
+}
+
+#[test]
 fn a_suggested_delete_in_an_own_paragraph_before_a_break_tracks_the_break() {
     let (doc, _, _) = page_break_slot();
     let split = doc
