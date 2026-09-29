@@ -825,12 +825,16 @@ fn parse_raw_ops(ops_json: &str) -> Result<Vec<RawOp>, JsValue> {
 }
 
 /// Parses an accept/reject target from JSON: `{"revisionId": string}` (one
-/// coalesced revision, any story) or a Loc range
+/// coalesced revision, any story), `{"all": true}` (every change, with those
+/// fields keep) or a Loc range
 /// `{"story","startPara","startOffset","endPara","endOffset"}`.
 fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarget, JsValue> {
     let value: Value = serde_json::from_str(target_json).map_err(js_err)?;
     if let Some(id) = value.get("revisionId").and_then(Value::as_str) {
         return Ok(ChangeTarget::Revision(id.to_owned()));
+    }
+    if value.get("all") == Some(&Value::Bool(true)) {
+        return Ok(ChangeTarget::All);
     }
     let get_str = |key: &str| {
         value

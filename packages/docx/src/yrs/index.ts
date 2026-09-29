@@ -433,10 +433,12 @@ export interface YrsCommentReceipt {
 /**
  * Target of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}:
  * one coalesced revision id (resolved at every site, in any story — the
- * `acceptChangeById` twin) or an explicit story range (the range-command twin;
- * every tracked change overlapping the range resolves, no id filtering).
+ * `acceptChangeById` twin), every change (Accept All / Reject All, including
+ * the changes fields keep in their code or result, which the revision list
+ * leaves out) or an explicit story range (the range-command twin; every
+ * tracked change overlapping the range resolves, no id filtering).
  */
-export type YrsChangeTarget = { revisionId: string } | YrsStoryRange;
+export type YrsChangeTarget = { revisionId: string } | { all: true } | YrsStoryRange;
 
 /** Receipt of {@link YrsSession.acceptChange} / {@link YrsSession.rejectChange}. */
 export interface YrsResolveReceipt {
@@ -1049,6 +1051,8 @@ function wireChangeTarget(target: YrsChangeTarget): string {
   return JSON.stringify(
     'revisionId' in target
       ? { revisionId: target.revisionId }
+      : 'all' in target
+      ? { all: true }
       : {
           story: target.story,
           startPara: target.start.paraId,

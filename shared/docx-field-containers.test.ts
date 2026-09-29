@@ -335,6 +335,72 @@ test.each(cases)(
   }
 );
 
+/** The view and field texts Accept All and Reject All leave, where they differ from the source. */
+const resolvedCases: Record<string, Record<"accept" | "reject", [string, string]>> = {
+  "w:fldSimple inside w:ins": {
+    accept: ["a F<2026> b", "a 2026 b"],
+    reject: ["a  b", "a  b"],
+  },
+  "w:ins inside w:fldSimple": {
+    accept: ["a F<2026> b", "a 2026 b"],
+    reject: ["a F<> b", "a  b"],
+  },
+  "w:ins inside a complex field result": {
+    accept: ["a [«DATE»|2026] b", "a 2026 b"],
+    reject: ["a [«DATE»|20] b", "a 20 b"],
+  },
+  "w:del inside a complex field result": {
+    accept: ["a [«DATE»|20] b", "a 20 b"],
+    reject: ["a [«DATE»|2026] b", "a 2026 b"],
+  },
+  "w:moveFrom and w:moveTo inside a complex field result": {
+    accept: ["a [«DATE»|2026] b", "a 2026 b"],
+    reject: ["a [«DATE»|20x] b", "a 20x b"],
+  },
+  "w:ins beside a hyperlink in a complex field result": {
+    accept: ["a [«DATE»|H(20)26] b", "a 2026 b"],
+    reject: ["a [«DATE»|H(20)] b", "a 20 b"],
+  },
+  "w:ins in the code of a complex field inside w:fldSimple": {
+    accept: ["a F<[«PAGE»|26]> b", "a 26 b"],
+    reject: ["a F<[«»|26]> b", "a 26 b"],
+  },
+};
+const resolveAll = (mode: "accept" | "reject") => (session: YrsSession) =>
+  mode === "accept"
+    ? session.acceptChange({ all: true })
+    : session.rejectChange({ all: true });
+
+test.each(
+  cases.flatMap(([name, build, expected, shown]) =>
+    (["accept", "reject"] as const).map(
+      (mode) =>
+        [name, mode, build, ...(resolvedCases[name]?.[mode] ?? [expected, shown])] as const
+    )
+  )
+)(
+  "%s: %s all resolves the changes it keeps, across publications and a rebase",
+  async (name, mode, build, expected, shown) => {
+    const bytes = paragraph(build(plain));
+    const session = await open(bytes);
+    // Changes inside a field stay out of the revision list.
+    expect(session.listRevisions().length).toBe(name === "w:fldSimple inside w:ins" ? 1 : 0);
+    resolveAll(mode)(session);
+    expect(session.listRevisions()).toEqual([]);
+    expect(shownText(session)).toBe(shown);
+    let saved = await publish(bytes, session.encodeState());
+    session.destroy();
+    for (let publication = 0; publication < 3; publication += 1) {
+      expect(view(saved)).toBe(expected);
+      const reopened = await open(saved);
+      edit(reopened, "22222222", "x");
+      saved = await publish(saved, reopened.encodeState());
+      reopened.destroy();
+    }
+    expect(await rebased(bytes, resolveAll(mode))).toBe(`y${expected}`);
+  }
+);
+
 test.each([
   [
     "w:del holding its field's end",
@@ -399,21 +465,29 @@ const toc = (first: string) =>
       tail
   );
 test.each([
-  ["w:del", `${del(deleted("Old"))}${run("Entry1 1")}`, "-{Old}Entry1 1"],
-  ["w:ins", `${ins(run("Entry1"))}${run(" 1")}`, "+{Entry1} 1"],
-  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}"],
-  ["w:sdt", `${run("En")}${sdt(run("try1"))}${run(" 1")}`, "EnS{try1} 1"],
+  ["w:del", `${del(deleted("Old"))}${run("Entry1 1")}`, "-{Old}Entry1 1", "Entry1 1", "OldEntry1 1"],
+  ["w:ins", `${ins(run("Entry1"))}${run(" 1")}`, "+{Entry1} 1", "Entry1 1", " 1"],
+  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}", "H(Entry1 1)", ""],
+  ["w:sdt", `${run("En")}${sdt(run("try1"))}${run(" 1")}`, "EnS{try1} 1", "EnS{try1} 1", "EnS{try1} 1"],
 ])(
-  "a field result spanning paragraphs keeps %s in its first paragraph",
-  async (_, first, kept) => {
+  "a field result spanning paragraphs keeps %s in its first paragraph, and Accept or Reject All resolves it",
+  async (_, first, kept, accepted, rejected) => {
+    const bytes = toc(first);
     const result = (saved: Uint8Array) => view(saved).match(/\|(.*)\]/)?.[1];
-    let saved = toc(first);
-    for (let publication = 0; publication < 3; publication += 1) {
-      const session = await open(saved);
-      edit(session, "22222222", "x");
-      saved = await publish(saved, session.encodeState());
-      session.destroy();
-      expect(result(saved)).toBe(kept);
+    for (const [resolve, expected] of [
+      [() => {}, kept],
+      [resolveAll("accept"), accepted],
+      [resolveAll("reject"), rejected],
+    ] as const) {
+      let saved = bytes;
+      for (let publication = 0; publication < 3; publication += 1) {
+        const session = await open(saved);
+        if (publication === 0) resolve(session);
+        edit(session, "22222222", "x");
+        saved = await publish(saved, session.encodeState());
+        session.destroy();
+        expect(result(saved)).toBe(expected);
+      }
     }
   }
 );

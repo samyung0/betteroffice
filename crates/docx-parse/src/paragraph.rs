@@ -25,7 +25,10 @@ use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_fr
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
 use crate::vml::{parse_horizontal_rule, parse_vml_image_content};
-use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
+use crate::xml::{
+    ParseBudget, ParseError, ParseLimits, XmlElement, XmlNode, parse_javascript_integer_prefix,
+    parse_xml_strict,
+};
 
 const MAX_FIELD_NESTING: usize = 32;
 const MAX_HEX_ID_EXCLUSIVE: u32 = 0x7fff_ffff;
@@ -1039,6 +1042,104 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
     }))
 }
 
+/// Raw inline markup a field keeps with its tracked changes resolved:
+/// accepting keeps insertions and removes deletions, rejecting the reverse.
+/// One fragment per element left, in order; `None` when it holds no change.
+pub fn resolve_raw_changes(xml: &str, accept: bool) -> Option<Vec<String>> {
+    fn change(element: &XmlElement) -> Option<bool> {
+        match element.local_name() {
+            "ins" | "moveTo" => Some(false),
+            "del" | "moveFrom" => Some(true),
+            _ => None,
+        }
+    }
+    fn holds_change(element: &XmlElement) -> bool {
+        change(element).is_some()
+            || element.local_name() != "rPr" && element.child_elements().any(holds_change)
+    }
+    fn resolve(element: &XmlElement, accept: bool) -> Vec<XmlElement> {
+        match change(element) {
+            Some(deletion) if deletion == accept => Vec::new(),
+            Some(deletion) => {
+                let content = if deletion {
+                    normalize_deletion_element(element)
+                } else {
+                    element.clone()
+                };
+                content
+                    .child_elements()
+                    .flat_map(|child| resolve(child, accept))
+                    .collect()
+            }
+            None if element.local_name() == "rPr" => vec![element.clone()],
+            None => vec![XmlElement {
+                name: element.name.clone(),
+                attributes: element.attributes.clone(),
+                children: element
+                    .children
+                    .iter()
+                    .flat_map(|node| match node {
+                        XmlNode::Element(child) => resolve(child, accept)
+                            .into_iter()
+                            .map(XmlNode::Element)
+                            .collect(),
+                        node => vec![node.clone()],
+                    })
+                    .collect(),
+            }],
+        }
+    }
+    let limits = ParseLimits::default();
+    let document =
+        parse_xml_strict(xml.as_bytes(), "raw-inline", &mut ParseBudget::new(&limits)).ok()?;
+    let root = document.root().filter(|root| holds_change(root))?;
+    Some(
+        resolve(root, accept)
+            .iter()
+            .map(XmlElement::to_raw_inline_xml)
+            .collect(),
+    )
+}
+
+/// The runs raw inline markup a field keeps shows, parsed without styles.
+pub fn shown_raw_runs(xml: &str) -> Vec<Run> {
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let Some(root) = parse_xml_strict(xml.as_bytes(), "raw-inline", &mut budget)
+        .ok()
+        .and_then(|document| document.root().cloned())
+    else {
+        return Vec::new();
+    };
+    let paragraph = XmlElement {
+        name: "w:p".to_owned(),
+        attributes: Default::default(),
+        children: vec![XmlNode::Element(root)],
+    };
+    let Ok(content) = parse_paragraph_contents(
+        &paragraph,
+        None,
+        None,
+        None,
+        None,
+        "raw-inline",
+        &mut budget,
+        None,
+        0,
+        false,
+    ) else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .flat_map(|item| match item {
+            ParagraphContent::Inline(node) => shown_runs(std::slice::from_ref(node)),
+            ParagraphContent::Tracked(change) => shown_change_runs(change),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
     content
         .into_iter()
@@ -1976,6 +2077,30 @@ mod tests {
             r#"<w:ins w:id="5"><w:r><w:t>20</w:t></w:r></w:ins>"#
         );
         assert_eq!(field.field_result.len(), 1);
+    }
+
+    #[test]
+    fn kept_changes_resolve_to_their_accepted_or_rejected_markup() {
+        let xml = r#"<w:del w:id="1"><w:r><w:delText>old</w:delText></w:r><w:r><w:delInstrText>x</w:delInstrText></w:r></w:del>"#;
+        assert_eq!(resolve_raw_changes(xml, true), Some(Vec::new()));
+        assert_eq!(
+            resolve_raw_changes(xml, false),
+            Some(vec![
+                "<w:r><w:t>old</w:t></w:r>".to_owned(),
+                "<w:r><w:instrText>x</w:instrText></w:r>".to_owned()
+            ])
+        );
+        let nested = r#"<w:hyperlink w:anchor="a"><w:ins w:id="2"><w:r><w:t>new</w:t></w:r></w:ins></w:hyperlink>"#;
+        assert_eq!(
+            resolve_raw_changes(nested, true),
+            Some(vec![
+                r#"<w:hyperlink w:anchor="a"><w:r><w:t>new</w:t></w:r></w:hyperlink>"#.to_owned()
+            ])
+        );
+        assert_eq!(
+            resolve_raw_changes("<w:r><w:t>plain</w:t></w:r>", true),
+            None
+        );
     }
 
     #[test]
