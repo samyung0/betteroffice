@@ -1639,3 +1639,62 @@ describe.each(EVERY)(
     );
   }
 );
+
+describe.each(EVERY)(
+  "a story-opening bookmark handed to a text-less column-break paragraph, in %s",
+  (where) => {
+    const holder = `<w:p w14:paraId="55555555"><w:bookmarkStart w:id="5" w:name="Target"/><w:bookmarkEnd w:id="5"/></w:p>`;
+    const shapes = [
+      ["a column break", COL],
+      ["page then column", `${BR}${COL}`],
+      ["two pages then column", `${BR}${BR}${COL}`],
+      ["tracked page then column", `${tracked("ins", BR)}${COL}`],
+      ["column, page, column", `${COL}${BR}${COL}`],
+    ] as const;
+    test.each(
+      shapes.flatMap(([name, breaks]) =>
+        (["forward", "backward"] as const).flatMap((direction) =>
+          (["end", "start"] as const).map(
+            (at) => [name, direction, at, breaks] as const
+          )
+        )
+      )
+    )(
+      "saves the same with or without a publication before the typing: %s, %s, typing at the %s",
+      async (_, direction, at, breaks) => {
+        const [story, part] = STORY[where];
+        const bytes = docx(
+          where,
+          `${holder}${p("44444444", breaks)}${p("45454545", run("next"))}`
+        );
+        const handOff = (session: YrsSession) =>
+          direction === "forward"
+            ? void session.deleteAt(
+                { story, paraId: "55555555", offset: 0 },
+                "forward"
+              )
+            : void session.deleteAt(
+                { story, paraId: "44444444", offset: 0 },
+                "backward"
+              );
+        const type = (session: YrsSession) => {
+          const end = session
+            .paragraphSpans(story)
+            .find(({ paraId }) => paraId === "44444444")!.length;
+          session.insertText(
+            { story, paraId: "44444444", offset: at === "end" ? end : 0 },
+            "Q"
+          );
+        };
+        const session = await open(bytes);
+        handOff(session);
+        type(session);
+        const direct = order(await publish(bytes, session), part, "44444444");
+        session.destroy();
+        const { next } = await rebase(bytes, story, handOff, type);
+        expect(order(next, part, "44444444")).toBe(direct);
+        expect(direct).toMatch(/^B+SET$/);
+      }
+    );
+  }
+);

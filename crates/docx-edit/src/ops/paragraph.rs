@@ -674,18 +674,29 @@ impl EditingDoc {
             };
             // A removed empty paragraph's bookmarks move to the paragraph that
             // stays, ahead of its slot's breaks (a suggested deletion keeps them).
+            // At a story's start, a survivor holding only breaks that end in a
+            // column break takes them after its breaks, where its save writes
+            // them, so the file does not depend on a publication in between.
             if from == start && from < to && (!ctx.is_suggesting() || own_insert.is_some()) {
-                let breaks =
+                let kinds: Vec<Option<String>> =
                     snapshot_range(&story, &txn, survivor.bounds.start, survivor.bounds.pilcrow)
                         .iter()
-                        .map_while(|chunk| match &chunk.kind {
-                            ChunkKind::Embed(Some(map)) => map_string(map, &txn, KIND_KEY)
-                                .filter(|kind| is_block_embed(kind))
-                                .map(|kind| usize::from(kind.ends_with("Break"))),
+                        .map(|chunk| match &chunk.kind {
+                            ChunkKind::Embed(Some(map)) => map_string(map, &txn, KIND_KEY),
                             _ => None,
                         })
-                        .sum();
-                move_bookmarks(&mut txn, &boundary.map, &survivor.map, breaks);
+                        .collect();
+                let breaks = kinds
+                    .iter()
+                    .map_while(|kind| kind.as_deref().filter(|kind| is_block_embed(kind)))
+                    .filter(|kind| kind.ends_with("Break"))
+                    .count();
+                let only_breaks = breaks == kinds.len()
+                    && kinds
+                        .last()
+                        .is_some_and(|kind| kind.as_deref() == Some("columnBreak"));
+                let ahead = if start == 0 && only_breaks { 0 } else { breaks };
+                move_bookmarks(&mut txn, &boundary.map, &survivor.map, ahead);
             }
             let mut revision_id = None;
             // Units removed ahead of the paragraph mark: the caret shifts by them.
