@@ -26,11 +26,13 @@ export interface Lineage {
       id: (value: string) => string
     ): unknown;
   };
+  /** Brings the rebased state in line with what its export writes, once every change landed. */
+  settle?(doc: Y.Doc): void;
   /**
-   * Brings the rebased state in line with what its export writes, once every
-   * change landed: `later` is the latest state, `id` maps its entity ids.
+   * Refuses a settled rebased state whose export would write what the latest
+   * state `later` holds otherwise; `id` maps its entity ids.
    */
-  settle?(doc: Y.Doc, later: Y.Doc, id: (value: string) => string): void;
+  check?(doc: Y.Doc, later: Y.Doc, id: (value: string) => string): void;
 }
 
 export class RebaseError extends Error {}
@@ -107,12 +109,9 @@ export const DOCX_LINEAGE: Lineage = {
   },
   // A comment the later edits removed takes its reference field with it, as
   // removing it in the editor does: an export drops a field naming no comment.
-  // A field result's projected children pair with their fields as in the
-  // latest state.
-  settle(doc, later, id) {
+  settle(doc) {
     const comments = doc.getMap("comments");
-    const stories = doc.getMap("stories");
-    for (const text of stories.values())
+    for (const text of doc.getMap("stories").values())
       if (text instanceof Y.Text)
         for (const [offset, embed] of embeds(text).reverse())
           if (
@@ -120,10 +119,13 @@ export const DOCX_LINEAGE: Lineage = {
             !comments.has(String(embed.get("commentId")))
           )
             text.delete(offset, 1);
+  },
+  check(doc, later, id) {
+    const stories = doc.getMap("stories");
     for (const [key, source] of later.getMap("stories").entries()) {
       const target = stories.get(id(key));
       if (source instanceof Y.Text && target instanceof Y.Text)
-        pairAsLatest(source, target);
+        assertChildrenLanded(source, target);
     }
   },
 };
@@ -133,18 +135,16 @@ type Marker = { id: number; index: number };
 /**
  * A text's projected field children as the export pairs them with their
  * fields (`restoreProjectedFieldResults`): each unit's `fieldResult` marker
- * and the offset of the field it is a child of (-1 for none), and each
- * field's number by offset. A field's children are the units right before
- * its embed that carry its number, at an index it records.
+ * and the offset of the field it is a child of (-1 for none). A field's
+ * children are the units right before its embed that carry its number at an
+ * index it records.
  */
 function projectedChildren(text: Y.Text): {
   markers: Array<Marker | undefined>;
   owners: Int32Array;
-  fields: Map<number, number>;
 } {
   const markers: Array<Marker | undefined> = [];
   const owners = new Int32Array(text.length).fill(-1);
-  const fields = new Map<number, number>();
   let run = 0;
   for (const { insert, attributes } of text.toDelta() as Array<{
     insert: unknown;
@@ -165,29 +165,28 @@ function projectedChildren(text: Y.Text): {
         : undefined;
     const at = markers.length - 1;
     if (typeof projection?.id === "number") {
-      fields.set(at, projection.id);
       const indices = new Set(projection.children?.map(({ index }) => index));
       for (let child = at - 1; child >= at - run; child--) {
         const { id, index } = markers[child]!;
-        if (id !== projection.id) break;
-        if (indices.has(index)) owners[child] = at;
+        if (id !== projection.id || !indices.has(index)) break;
+        owners[child] = at;
       }
     }
     run = 0;
   }
-  return { markers, owners, fields };
+  return { markers, owners };
 }
 
 /**
- * Pairs each projected child in `target`, the rebased story, with the field
- * the latest state's `source` pairs it with, and no other: a field's number
- * is its place in its saved paragraph, so text typed in a child after the
- * capture carries the capture's number, the export's seed may number the
- * field otherwise, and a child whose field was deleted joins none. A child
- * takes the index its field records for it. Fails when the export would
- * still pair them otherwise.
+ * Refuses unless the rebased story `target` holds each projected child of
+ * the latest state's `source` in the field and result slot it has there,
+ * one to one. A rebase never re-pairs them: a field's number is its place
+ * in its saved paragraph, so text typed in a child after the capture carries
+ * the capture's number, and the export's seed may number the field
+ * otherwise. A child with no unit in `target` is one the export wrote
+ * inside its field's result, which the field must still hold.
  */
-function pairAsLatest(source: Y.Text, target: Y.Text): void {
+function assertChildrenLanded(source: Y.Text, target: Y.Text): void {
   const from = projectedChildren(source);
   const to = projectedChildren(target);
   if (!from.markers.some(Boolean) && !to.markers.some(Boolean)) return;
@@ -197,51 +196,30 @@ function pairAsLatest(source: Y.Text, target: Y.Text): void {
   } catch {
     return; // Changes inside it cannot land and fail the rebase.
   }
-  const field = (owner: number) =>
-    owner < 0 || f.map[owner] < 0 ? undefined : to.fields.get(f.map[owner]);
-  // The index the target records for a source child, from its units that
-  // already carry their field's number.
-  const indices = new Map<string, number>();
+  const slots = new Map<string, string>();
+  const taken = new Map<string, string>();
   for (const [unit, owner] of from.owners.entries()) {
     const at = f.map[unit];
-    if (at >= 0 && owner >= 0 && to.markers[at]?.id === field(owner))
-      indices.set(
-        `${owner}:${from.markers[unit]!.index}`,
-        to.markers[at]!.index
-      );
-  }
-  const fixes: Array<[at: number, length: number, marker: Marker | null]> = [];
-  for (const [unit, owner] of from.owners.entries()) {
-    const at = f.map[unit];
-    if (at < 0 || !(from.markers[unit] || to.markers[at])) continue;
-    let marker: Marker | null = null;
-    if (owner >= 0) {
-      const id = field(owner);
-      if (id === undefined)
-        fail("a field result's child lands where its field did not");
-      const index = from.markers[unit]!.index;
-      marker = { id: id!, index: indices.get(`${owner}:${index}`) ?? index };
-    }
-    const current = to.markers[at];
-    if (marker?.id === current?.id && marker?.index === current?.index)
+    const field = owner < 0 ? -1 : f.map[owner];
+    if (owner >= 0 && field < 0)
+      fail("a field result's child lands where its field did not");
+    if (at < 0) {
+      if (from.markers[unit] && owner < 0)
+        fail("a field result's child has no place in the export");
       continue;
-    const last = fixes.at(-1);
+    }
+    if (to.owners[at] !== field)
+      fail("a field result's child would not export in its field");
+    if (owner < 0) continue;
+    const slot = `${owner}:${from.markers[unit]!.index}`;
+    const place = `${field}:${to.markers[at]!.index}`;
     if (
-      last &&
-      last[0] + last[1] === at &&
-      last[2]?.id === marker?.id &&
-      last[2]?.index === marker?.index
+      (slots.get(slot) ?? place) !== place ||
+      (taken.get(place) ?? slot) !== slot
     )
-      last[1]++;
-    else fixes.push([at, 1, marker]);
-  }
-  for (const [at, length, marker] of fixes)
-    target.format(at, length, { fieldResult: marker });
-  const paired = projectedChildren(target).owners;
-  for (const [unit, owner] of from.owners.entries()) {
-    const at = f.map[unit];
-    if (at >= 0 && (owner < 0 ? -1 : f.map[owner]) !== paired[at])
-      fail("a field result's child would not export where it stands");
+      fail("two field result children would land in one result slot");
+    slots.set(slot, place);
+    taken.set(place, slot);
   }
 }
 
@@ -468,6 +446,7 @@ function pointAt(f: Alignment, c: number): number | undefined {
 function landDelta(
   f: Alignment,
   delta: Delta[],
+  had: ReadonlyArray<Record<string, unknown>>,
   copy: (value: unknown) => unknown,
   where: string
 ): Delta[] {
@@ -519,13 +498,36 @@ function landDelta(
     } else if (op.delete !== undefined)
       range(op.delete, (length) => ({ delete: length }), true);
     else if (op.attributes)
-      range(op.retain!, (length) => ({
-        retain: length,
-        attributes: op.attributes,
-      }));
+      // Next to a formatting change Yjs repeats attributes the captured units
+      // already had; only those that change land (a projected child's
+      // `fieldResult` in particular, which the seed numbers its own way).
+      for (let end = c + op.retain!; c < end; ) {
+        let run = 1;
+        while (c + run < end && had[c + run] === had[c]) run++;
+        const changed = Object.entries(op.attributes).filter(
+          ([key, value]) =>
+            JSON.stringify(value ?? null) !==
+            JSON.stringify(had[c]?.[key] ?? null)
+        );
+        if (changed.length)
+          range(run, (length) => ({
+            retain: length,
+            attributes: Object.fromEntries(changed),
+          }));
+        else c += run;
+      }
     else c += op.retain!;
   }
   return out;
+}
+
+/** Each unit's attributes in a text (one object per run of them). */
+function unitAttributes(text: Y.Text): Array<Record<string, unknown>> {
+  return (text.toDelta() as Delta[]).flatMap(({ insert, attributes = {} }) =>
+    Array<Record<string, unknown>>(
+      typeof insert === "string" ? insert.length : 1
+    ).fill(attributes)
+  );
 }
 
 /** A text's unit keys apart from the units it shares with nothing on the other side. */
@@ -728,10 +730,12 @@ export function transplant(
           const f = alignments.get(`${step.root}\u0000${step.path[0]}`);
           if (step.path.length !== 1 || !f)
             fail(`unexpected text at ${[step.root, ...step.path].join("/")}`);
+          const captured = before.getMap(step.root).get(step.path[0] as string);
           (target as Y.Text).applyDelta(
             landDelta(
               f!,
               step.delta,
+              unitAttributes(captured as Y.Text),
               (value) => copy(value),
               [step.root, ...step.path].join("/")
             ),
@@ -763,7 +767,8 @@ export function transplant(
           lineage.positions!.key,
           lineage.positions!.rewrite(value, edited, result, id)
         );
-      lineage.settle?.(result, later, id);
+      lineage.settle?.(result);
+      lineage.check?.(result, later, id);
     });
 
     // Every touched entity reads as in the latest state, but for what the

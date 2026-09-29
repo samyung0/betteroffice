@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
+import { RebaseError } from "./office-rebase";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -696,8 +697,17 @@ const splitRuns = ["00A1", "00B2", "00C3"]
   .join("");
 const refField = (text: string, bookmark: string) => field(link(run(text)), ` REF ${bookmark} \\h `);
 const uncovered = field(`${run("20")}${ins(link(run("26")))}`);
+// A rebase never re-pairs a projected child: text typed in one after the
+// capture carries the capture's number for its field, and lands only when the
+// export's seed numbers the field the same way.
 test.each([
-  ["a tab inside the run before a projected field", `<w:r><w:t>x</w:t><w:tab/></w:r>${refField("20", "a")}`, () => {}, "20"],
+  ["nothing before the capture", refField("20", "a"), () => {}, "20"],
+  ["Accept All after a Word comment", `${ref5}${uncovered}`, resolveAll("accept"), "26"],
+] as const)("text typed in a projected child after the capture lands in its field: %s", async (_, xml, before, text) => {
+  const { next, direct } = await landed(paragraph(xml), before, typeIn(text));
+  expect(next).toBe(direct);
+});
+test.each([
   ["Word's split runs before it", `${splitRuns}${refField("20", "a")}${run(" ")}${refField("xy", "b")}`, () => {}, "20"],
   [
     "bold added before the capture",
@@ -718,18 +728,13 @@ test.each([
       ),
     "20",
   ],
-  ["Accept All after a Word comment", `${ref5}${uncovered}`, resolveAll("accept"), "26"],
   ["Accept All after a tab", `<w:r><w:t>x</w:t><w:tab/></w:r>${uncovered}`, resolveAll("accept"), "26"],
   ["Accept All after a bookmark", `<w:bookmarkStart w:id="7" w:name="m"/>${run("x")}<w:bookmarkEnd w:id="7"/>${uncovered}`, resolveAll("accept"), "26"],
   ["Accept All beside a mid-paragraph break", `${pageBreak}${uncovered}${refField("30", "b")}`, resolveAll("accept"), "30"],
   ["Reject All of a tracked leading break", `${ins(pageBreak)}${uncovered}${refField("30", "b")}`, resolveAll("reject"), "30"],
-] as const)(
-  "text typed in a projected child after the capture stays in its field: %s",
-  async (_, xml, before, text) => {
-    const { next, direct } = await landed(paragraph(xml), before, typeIn(text));
-    expect(next).toBe(direct);
-  }
-);
+] as const)("text typed in a projected child after the capture refuses the rebase: %s", async (_, xml, before, text) => {
+  await expect(landed(paragraph(xml), before, typeIn(text))).rejects.toBeInstanceOf(RebaseError);
+});
 
 test.each([
   ["a deleted projected link stays deleted", field(`${link(run("20"))}${ins(run("26"))}`), "20", "delete", "a [«DATE»|26] b"],
@@ -873,8 +878,8 @@ function locate(session: YrsSession, match: (segment: ReturnType<YrsSession["sto
 }
 const fieldAt = (session: YrsSession, instruction: string) =>
   locate(session, (segment) => segment.kind === "embed" && String(segment.payload.instruction ?? "").includes(instruction));
-const childText = (session: YrsSession, text: string) => {
-  const at = locate(session, (segment) => segment.kind === "text" && !!segment.attributes.fieldResult && segment.text.includes(text));
+const textAt = (session: YrsSession, text: string) => {
+  const at = locate(session, (segment) => segment.kind === "text" && segment.text.includes(text));
   const segment = session.storySegments(at.story).find((entry) => entry.kind === "text" && entry.text.includes(text));
   return { ...at, offset: at.offset + (segment as { text: string }).text.indexOf(text) };
 };
@@ -883,13 +888,14 @@ const backspaceField = (instruction: string): Edit => (session) => {
   const { story, paraId, offset } = fieldAt(session, instruction);
   session.deleteAt({ story, paraId, offset: offset + 1 }, "backward");
 };
-const typeInChild = (text: string): Edit => (session) => {
-  const { story, paraId, offset } = childText(session, text);
-  session.insertText({ story, paraId, offset: offset + 1 }, "Z");
+/** Types Z `after` units into the first text holding `text`. */
+const typeInText = (text: string, after = 1): Edit => (session) => {
+  const { story, paraId, offset } = textAt(session, text);
+  session.insertText({ story, paraId, offset: offset + after }, "Z");
 };
-/** Deletes from inside the child holding `text` through its field's embed and the unit after. */
+/** Deletes from inside the text holding `text` through its field's embed and the unit after. */
 const deleteAcrossEnd = (text: string, instruction: string): Edit => (session) => {
-  const { story, paraId, offset } = childText(session, text);
+  const { story, paraId, offset } = textAt(session, text);
   const end = fieldAt(session, instruction).offset + 2;
   session.deleteRange({ story, start: { paraId, offset: offset + 1 }, end: { paraId, offset: end } });
 };
@@ -899,7 +905,7 @@ const orphaned = "a H(20) mid [«REF b \\h»|H(30)] b";
 test.each([
   ["Backspace removes its embed", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
   ["a delete across its end", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, deleteAcrossEnd("20", "REF a"), "a H(2)mid [«REF b \\h»|H(30)] b"],
-  ["text is typed in it, its embed gone before the capture", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), backspaceField("REF a"), typeInChild("20"), "a H(2Z0) mid [«REF b \\h»|H(30)] b"],
+  ["text is typed in it, its embed gone before the capture", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), backspaceField("REF a"), typeInText("20"), "a H(2Z0) mid [«REF b \\h»|H(30)] b"],
   ["the next field follows at once", paragraph(`${refField("20", "a")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), "a H(20)[«REF b \\h»|H(30)] b"],
   ["the next field has no child at its index", paragraph(`${field(`${run("q")}${link(run("20"))}`, " REF a \\h ")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
   ["Accept All uncovered it", paragraph(`${uncovered}${run(" mid ")}${field(`${run("20")}${ins(link(run("27")))}`, " REF b ")}`), resolveAll("accept"), deleteAcrossEnd("26", "DATE"), "a H(2)mid [«REF b»|20H(27)] b"],
@@ -926,7 +932,7 @@ test("a field's child stays where it is when one user types in it while another 
   const captured = a.encodeState();
   const exported = await publish(bytes, captured);
   const b = await open(bytes, captured);
-  typeInChild("20")(a);
+  typeInText("20")(a);
   backspaceField("REF a")(b);
   a.applyUpdate(b.encodeStateAsUpdate(a.encodeStateVector()));
   const latest = a.encodeState();
@@ -975,14 +981,79 @@ test.each([
   const bytes = rezipContainer(parts);
   const session = await open(bytes);
   resolveAll("accept")(session);
-  const { story } = childText(session, "26");
+  const { story } = textAt(session, "26");
   const hrefs = session.storySegments(story).flatMap((segment) => {
     const link = segment.attributes.hyperlink as { href?: string } | undefined;
     return link ? [link.href] : [];
   });
   session.destroy();
   expect(hrefs).toEqual(["https://part.example/"]);
-  const { next, direct } = await landed(bytes, resolveAll("accept"), typeInChild("26"), (out) => view(out, paraId, path));
+  const { next, direct } = await landed(bytes, resolveAll("accept"), typeInText("26"), (out) => view(out, paraId, path));
   expect(direct).toBe("[«DATE»|20H(2Z6)]");
   expect(next).toBe(direct);
+});
+
+/** A link to its own bookmark: links out of a field merge only when they share a target. */
+const linkTo = (text: string) => `<w:hyperlink w:anchor="${text}">${run(text)}</w:hyperlink>`;
+const joinNext = (paraId: string): Edit => (session) => {
+  const { length } = session.paragraphSpans("body").find((span) => span.paraId === paraId)!;
+  session.deleteAt({ story: "body", paraId, offset: length }, "forward");
+};
+test.each([
+  ["one link", field(link(run("BB")), " REF b \\h "), "BB"],
+  ["two links", field(`${linkTo("AA")}${linkTo("BB")}`, " REF b \\h "), "AA"],
+])("text typed at a link's end before the capture refuses a rebase that deletes its field (%s)", async (_, xml, text) => {
+  const landing = landed(paragraph(xml), typeInText(text, text.length), backspaceField("REF b"));
+  await expect(landing).rejects.toBeInstanceOf(RebaseError);
+});
+
+test("text typed at a link's end before the capture lands when the field is left alone", async () => {
+  const bytes = paragraph(field(link(run("BB")), " REF b \\h "));
+  const { next, direct } = await landed(bytes, typeInText("BB", 2), (session) => edit(session, "22222222", "y"));
+  expect(direct).toBe("a [«REF b \\h»|H(BB)Z] b");
+  expect(next).toBe(direct);
+});
+
+const threeLinks = paragraph(field(`${linkTo("AA")}${linkTo("BB")}${linkTo("CC")}`));
+const deleteText = (text: string): Edit => (session) => {
+  const { story, paraId, offset } = textAt(session, text);
+  session.deleteRange({ story, start: { paraId, offset }, end: { paraId, offset: offset + text.length } });
+};
+test.each([
+  [
+    "a split between two links before the capture and a join after",
+    (session: YrsSession) => session.splitParagraph({ story: "body", paraId: "11111111", offset: textAt(session, "BB").offset }),
+    joinNext("11111111"),
+  ],
+  ["a link deleted before the capture and typing at the end of the next after", deleteText("AA"), typeInText("BB", 2)],
+  [
+    "a link deleted before the capture and the next retyped after",
+    deleteText("AA"),
+    (session: YrsSession) => {
+      typeInText("BB", 2)(session);
+      deleteText("BB")(session);
+    },
+  ],
+] as const)("a rebase refuses to land two of a field's links in one result slot: %s", async (_, before, after) => {
+  await expect(landed(threeLinks, before, after)).rejects.toBeInstanceOf(RebaseError);
+});
+
+test("a rebase fails as a RebaseError when a child's field stops projecting in the export", async () => {
+  const bytes = paragraph(field(`${link(run("AA"))}${link(run("BB"))}`));
+  const split: Edit = (session) =>
+    void session.splitParagraph({ story: "body", paraId: "11111111", offset: fieldAt(session, "DATE").offset });
+  await expect(landed(bytes, split, joinNext("11111111"))).rejects.toBeInstanceOf(RebaseError);
+});
+
+// The refusal a UAT journey reproduces: the export writes a run holding
+// text and a tab as two runs, so its seed numbers the TOC field otherwise
+// than the capture, and typing in the TOC's first entry after the capture
+// carries the capture's number.
+test("typing in a TOC's first entry after the capture refuses when a text and tab run leads its paragraph", async () => {
+  const bytes = docx(
+    p("11111111", `<w:r><w:t>Contents</w:t><w:tab/></w:r>${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Intro 1"))}`) +
+      p("33333333", `${link(run("Entry2 2"))}${char("end")}`) +
+      tail
+  );
+  await expect(landed(bytes, () => {}, typeIn("Intro"))).rejects.toBeInstanceOf(RebaseError);
 });
