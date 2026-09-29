@@ -620,14 +620,10 @@ impl EditingDoc {
                 .filter(|chunk| chunk.start < pilcrow_index)
                 .all(|chunk| is_comment_reference(chunk, &txn));
             let (from, to) = match lead.as_str() {
-                // Delete in an empty paragraph before a break removes the
-                // paragraph, so Enter at a break's slot then Delete restores;
-                // suggesting mode still suggests the break's deletion.
-                "pageBreak" | "columnBreak"
-                    if !(empty && direction == MergeDirection::Forward && !ctx.is_suggesting()) =>
-                {
-                    (pilcrow_index + 1, pilcrow_index + 2)
-                }
+                // Before a break it removes the break, unless the paragraph
+                // before is empty: that paragraph goes, as before a table, so
+                // Enter at the slot then Delete or Backspace restores.
+                "pageBreak" | "columnBreak" if !empty => (pilcrow_index + 1, pilcrow_index + 2),
                 // An empty paragraph before a table or content control goes;
                 // one with content stays, and so do the paragraph and table
                 // between two tables, which are never joined.

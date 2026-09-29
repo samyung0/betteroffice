@@ -1718,19 +1718,35 @@ fn a_replacement_from_a_paragraph_start_to_a_block_led_slot_keeps_the_mark() {
 }
 
 #[test]
-fn delete_in_an_empty_paragraph_before_a_break_removes_the_paragraph() {
+fn delete_or_backspace_beside_an_empty_paragraph_before_a_break_removes_the_paragraph() {
     for kind in ["pageBreak", "columnBreak"] {
-        let (doc, _) = block_slot(kind);
-        let split = doc
-            .split_paragraph(&ctx(), Position::new("body", 7), None)
-            .unwrap();
-        assert_eq!(
-            slot_units(&doc),
-            format!("Before¶¶[{kind}]After¶"),
-            "{kind}"
-        );
-        merge(&doc, &ctx(), &split.first_para_id, true);
-        assert_eq!(slot_units(&doc), format!("Before¶[{kind}]After¶"), "{kind}");
+        for forward in [true, false] {
+            for (suggesting, context) in [(false, ctx()), (true, sug("Bob"))] {
+                // Enter at the break's slot, then Delete or Backspace.
+                let (doc, _) = block_slot(kind);
+                let split = doc
+                    .split_paragraph(&context, Position::new("body", 7), None)
+                    .unwrap();
+                assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
+                let target = if forward {
+                    &split.first_para_id
+                } else {
+                    &split.second_para_id
+                };
+                let receipt = merge(&doc, &context, target, forward);
+                let case = format!("{kind} forward={forward} suggesting={suggesting}");
+                assert_eq!(slot_units(&doc), format!("Before¶[{kind}]After¶"), "{case}");
+                // Suggesting mode withdraws the author's own pending paragraph.
+                assert!(receipt.revision_ids.is_empty(), "{case}");
+                assert!(
+                    doc.story_segments("body")
+                        .unwrap()
+                        .iter()
+                        .all(|segment| revision_id_of(&segment.attributes, "del").is_none()),
+                    "{case}"
+                );
+            }
+        }
         // With text before the break, Delete still removes the break.
         let (doc, first) = block_slot(kind);
         merge(&doc, &ctx(), &first, true);
@@ -1739,26 +1755,16 @@ fn delete_in_an_empty_paragraph_before_a_break_removes_the_paragraph() {
 }
 
 #[test]
-fn a_suggested_delete_in_an_own_paragraph_before_a_break_tracks_the_break() {
+fn a_suggested_delete_in_an_original_empty_paragraph_before_a_break_marks_it_deleted() {
     let (doc, _, _) = page_break_slot();
     let split = doc
-        .split_paragraph(&sug("Bob"), Position::new("body", 7), None)
+        .split_paragraph(&ctx(), Position::new("body", 7), None)
         .unwrap();
-    assert_eq!(slot_units(&doc), "Before¶¶[pageBreak]Chapter¶");
     let receipt = merge(&doc, &sug("Bob"), &split.first_para_id, true);
-    // The break is the original's: its deletion is suggested, not carried out.
     assert_eq!(slot_units(&doc), "Before¶¶[pageBreak]Chapter¶");
-    let marked = doc
-        .story_segments("body")
-        .unwrap()
-        .into_iter()
-        .find(|segment| matches!(segment.content, SegmentContent::OtherEmbed { .. }))
-        .unwrap();
     assert_eq!(receipt.revision_ids.len(), 1);
-    assert_eq!(
-        revision_id_of(&marked.attributes, "del"),
-        receipt.revision_ids.first().cloned()
-    );
+    let paragraph = &doc.paragraphs("body").unwrap()[1];
+    assert!(paragraph.properties.contains_key("pPrDel"));
 }
 
 #[test]

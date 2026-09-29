@@ -677,9 +677,9 @@ const covered = (session: YrsSession, story: string) =>
   );
 
 describe.each(EVERY)(
-  "Enter at the start of a break's paragraph, then Delete, in %s",
+  "Enter at the start of a break's paragraph, then Delete or Backspace, in %s",
   (where) => {
-    test.each([
+    const xmls = [
       [
         "a break leading the paragraph's text",
         `${p("33333333", run("prev"))}${p(
@@ -694,17 +694,44 @@ describe.each(EVERY)(
           run("abcdef")
         )}`,
       ],
-    ])("restores the document: %s", async (_, xml) => {
+    ] as const;
+    const author = { name: "Reviewer", date: "2026-09-29T00:00:00Z" };
+    test.each(
+      xmls.flatMap(([name, xml]) =>
+        (["forward", "backward"] as const).flatMap((direction) =>
+          (["plain", "suggesting"] as const).map(
+            (mode) => [name, direction, mode, xml] as const
+          )
+        )
+      )
+    )("restores the document: %s, %s, %s", async (_, direction, mode, xml) => {
       const [story] = STORY[where];
       const session = await open(docx(where, xml));
       const before = units(session, story);
-      const { firstParaId } = session.splitParagraph({
-        story,
-        paraId: "44444444",
-        offset: 0,
-      });
-      session.deleteAt({ story, paraId: firstParaId, offset: 0 }, "forward");
+      const by = mode === "suggesting" ? author : undefined;
+      const { firstParaId } = session.splitParagraph(
+        { story, paraId: "44444444", offset: 0 },
+        by
+      );
+      if (direction === "forward")
+        session.deleteAt(
+          { story, paraId: firstParaId, offset: 0 },
+          "forward",
+          by
+        );
+      else
+        session.deleteAt(
+          { story, paraId: "44444444", offset: 0 },
+          "backward",
+          by
+        );
       expect(units(session, story)).toBe(before);
+      // Suggesting mode withdraws the author's own pending paragraph.
+      expect(
+        session
+          .paragraphs(story)
+          .filter(({ properties }) => properties.pPrIns || properties.pPrDel)
+      ).toEqual([]);
       session.destroy();
     });
   }
