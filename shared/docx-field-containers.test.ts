@@ -929,3 +929,19 @@ test("a field's child stays where it is when one user types in it while another 
   expect(view(await publish(bytes, latest))).toBe("a H(2Z0) mid [«REF b \\h»|H(30)] b");
   expect(next).toBe("a H(2Z0) mid [«REF b \\h»|H(30)] b");
 });
+
+test.each([
+  ["Accept All", paragraph(field(`${link(run("20"))}${ins(run("26"))}`)), "20", resolveAll("accept"), "a [«DATE»|H(2Z0)26] b"],
+  ["Reject All", paragraph(field(`${link(run("20"))}${ins(run("26"))}`)), "20", resolveAll("reject"), "a [«DATE»|H(2Z0)] b"],
+  [
+    "Reject All of a TOC",
+    docx(p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Intro 1"))}${del(deleted("Old"))}`) + p("33333333", `${run("Entry2 2")}${char("end")}`) + tail),
+    "Intro",
+    resolveAll("reject"),
+    "[«TOC \\o \\h»|H(IZntro 1)Old]",
+  ],
+] as const)("%s after a capture lands exactly when a projected child was edited before it", async (_, bytes, text, after, expected) => {
+  const { next, direct } = await landed(bytes, typeIn(text), after);
+  expect(direct).toBe(expected);
+  expect(next).toBe(direct);
+});

@@ -1132,11 +1132,22 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
       stored.fieldTree.result = { ...stored.fieldTree.result, inline };
       if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
     }
-    stored.fieldResult = inline.flatMap((child) => child.type === 'run' ? [child]
-      : child.type === 'hyperlink' ? child.children.filter((entry): entry is Run => entry.type === 'run') : []);
+    stored.fieldResult = shownRuns(inline);
     owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
   }
   return remaining;
+}
+
+/** The runs field result `nodes` show, as the parser reads them (`shown_runs` in docx-parse). */
+function shownRuns(nodes: readonly { type: string }[]): Run[] {
+  return nodes.flatMap((node): Run[] => {
+    if (node.type === 'run') return [node as Run];
+    if (node.type === 'hyperlink') return shownRuns((node as Hyperlink).children);
+    if (node.type === 'simpleField') return shownRuns((node as SimpleField).content);
+    if (node.type === 'complexField') return (node as ComplexField).fieldResult;
+    if (node.type === 'inlineSdt') return shownRuns((node as InlineSdt).content);
+    return isRawXml(node) ? (node.shown ?? []) : [];
+  });
 }
 
 function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
@@ -2506,6 +2517,9 @@ class SaveContext {
     let contentStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
+    // Inline embeds are reported once their paragraph is built, which writes
+    // a field's projected children back into its payload.
+    const inlineEmbeds: Array<[offset: number, item: EmbedItem]> = [];
     let candidatesByKey: Map<string, BlockContent[]> | null = null;
 
     const candidatesFor = (key: string): BlockContent[] => {
@@ -2861,7 +2875,7 @@ class SaveContext {
         }
       } else {
         items.push(segment as EmbedItem);
-        if (this.onEmbed) projectedEmbed = ordinaryContentForItem(segment as EmbedItem);
+        if (this.onEmbed) inlineEmbeds.push([storyOffset, segment as EmbedItem]);
       }
       if (projectedEmbed) this.onEmbed?.(storyId, storyOffset, projectedEmbed);
       storyOffset += 1;
@@ -2875,6 +2889,10 @@ class SaveContext {
     if (items.length > 0) {
       const trailing = buildParagraphContent(items);
       if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
+    }
+    for (const [offset, item] of inlineEmbeds) {
+      const content = ordinaryContentForItem(item);
+      if (content) this.onEmbed?.(storyId, offset, content);
     }
     const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
     for (const block of projected) this.storyOwners.set(block, storyId);
