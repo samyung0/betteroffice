@@ -1060,7 +1060,14 @@ function paragraphAttrs(
   const bookmarks: Attrs[] = [];
   let contentIndex = 0;
   let pmOffset = 0;
-  for (const content of paragraph.content) {
+  // A bookmark ahead of some of the paragraph's leading breaks records how
+  // many follow it, so the save writes it back before them.
+  const leadingItems = paragraphFlowBreaks(paragraph)[0].map(({ item }) => item);
+  const breaksAfter = (index: number) => {
+    const after = leadingItems.filter((item) => item > index).length;
+    return after > 0 ? { breaksAfter: after } : {};
+  };
+  for (const [index, content] of paragraph.content.entries()) {
     if (content.type === 'bookmarkStart') {
       bookmarks.push({
         id: content.id,
@@ -1069,9 +1076,10 @@ function paragraphAttrs(
         offset: pmOffset,
         ...(content.colFirst !== undefined ? { colFirst: content.colFirst } : {}),
         ...(content.colLast !== undefined ? { colLast: content.colLast } : {}),
+        ...breaksAfter(index),
       });
     } else if (content.type === 'bookmarkEnd') {
-      bookmarks.push({ id: content.id, kind: 'end', offset: pmOffset });
+      bookmarks.push({ id: content.id, kind: 'end', offset: pmOffset, ...breaksAfter(index) });
     } else {
       const count = unitsForParagraphContent(content);
       for (let index = 0; index < count; index += 1) {
@@ -1170,7 +1178,7 @@ function paragraphUnits(
 
 /** A page or column break (with the tracked change around it), or visible content. */
 type FlowToken = {
-  kind: 'pageBreak' | 'columnBreak' | 'visible';
+  kind: 'pageBreak' | 'columnBreak' | 'visible' | 'mark';
   marker?: MarkDescriptor;
   /** The paragraph content item holding it. */
   item?: number;
@@ -1191,7 +1199,12 @@ function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[])
     if (item.type === 'run') runTokens(item, tokens);
     else if (item.type === 'hyperlink') linkTokens(item, tokens);
     else if (item.type === 'simpleField') {
+      // A field is a unit, text however empty its result.
+      tokens.push({ kind: 'visible' });
       for (const child of item.content) if (child.type === 'run') runTokens(child, tokens);
+    } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd') {
+      // A bookmark is no text, but a break before one leads it.
+      tokens.push({ kind: 'mark' });
     } else if (item.type === 'complexField') {
       for (const child of [...item.fieldCode, ...item.fieldResult]) runTokens(child, tokens);
     } else if (item.type === 'inlineSdt') inlineTokens(item.content as ParagraphContent[], tokens);
@@ -1209,7 +1222,7 @@ function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[])
       for (const child of item.content) {
         if (child.type === 'run') runTokens(child, tokens, marker);
         else if (child.type === 'hyperlink') linkTokens(child, tokens, marker);
-        else tokens.push({ kind: 'visible' });
+        else if (child.type === 'simpleField') tokens.push({ kind: 'visible' });
       }
     } else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
   }
@@ -1237,29 +1250,34 @@ function paragraphFlowBreaks(
     inlineTokens([content], tokens);
     for (const token of tokens.slice(start)) token.item = item;
   });
+  // Breaks lead the content that follows them: the text, or without text
+  // the last bookmark. Without text, those up to the last column break lead too.
   const text = tokens.findIndex((token) => token.kind === 'visible');
+  const lastMark = tokens.map(({ kind }) => kind).lastIndexOf('mark');
+  const content = text >= 0 ? text : lastMark;
   let split = text;
   if (text < 0) {
-    split = 0;
+    split = Math.max(content, 0);
     tokens.forEach((token, index) => {
-      if (token.kind === 'columnBreak') split = index + 1;
+      if (token.kind === 'columnBreak') split = Math.max(split, index + 1);
     });
   }
-  const units = (part: FlowToken[], leading: boolean) =>
-    part.flatMap(({ kind, marker, item }) =>
-      kind === 'visible'
+  const units = (from: number, to: number) =>
+    tokens.slice(from, to).flatMap(({ kind, marker, item }, offset) =>
+      kind === 'visible' || kind === 'mark'
         ? []
         : [
             {
-              unit: embedUnit(kind, leading ? { leading: true } : {}, marker ? [marker] : []),
+              unit: embedUnit(
+                kind,
+                from + offset < content ? { leading: true } : {},
+                marker ? [marker] : []
+              ),
               item: item!,
             },
           ]
     );
-  return [
-    units(tokens.slice(0, split), text >= 0),
-    units(tokens.slice(split), false).map(({ unit }) => unit),
-  ];
+  return [units(0, split), units(split, tokens.length).map(({ unit }) => unit)];
 }
 
 type RowSpanInfo = { rowSpan: number; skip: boolean };

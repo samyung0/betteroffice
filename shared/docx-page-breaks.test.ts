@@ -1174,3 +1174,86 @@ describe.each(["body", "cell", "header", "footnote"] as Where[])(
     });
   }
 );
+
+/** The paragraph `paraId`'s content in order: B break, S/E bookmark start/end, F simple field, T text. */
+function order(bytes: Uint8Array, part: string, paraId: string): string {
+  const xml = new TextDecoder().decode(unzipContainer(bytes)[part]);
+  const at = xml.indexOf(`w14:paraId="${paraId}"`);
+  const paragraph = xml.slice(at, xml.indexOf("</w:p>", at));
+  return [
+    ...paragraph.matchAll(/<w:(br|bookmarkStart|bookmarkEnd|fldSimple|t)\b/g),
+  ]
+    .map(
+      ([, tag]) =>
+        ({
+          br: "B",
+          bookmarkStart: "S",
+          bookmarkEnd: "E",
+          fldSimple: "F",
+          t: "T",
+        }[tag!])
+    )
+    .join("")
+    .replace(/T+/g, "T");
+}
+
+describe.each(EVERY)(
+  "bookmarks and empty fields around a leading break in %s",
+  (where) => {
+    const bookmark = (id: number, kind: "Start" | "End") =>
+      kind === "Start"
+        ? `<w:bookmarkStart w:id="${id}" w:name="_Toc${id}"/>`
+        : `<w:bookmarkEnd w:id="${id}"/>`;
+    const seq = `<w:fldSimple w:instr=" SEQ Figure "/>`;
+    test.each([
+      [
+        "a bookmark after a break with no text",
+        `${BR}${bookmark(5, "Start")}${bookmark(5, "End")}`,
+        "BSE",
+        "BSE",
+      ],
+      ["an empty field after a break with no text", `${BR}${seq}`, "BF", "BFT"],
+      ["an empty field before a break", `${seq}${BR}${run("x")}`, "FBT", "FTB"],
+      [
+        "a bookmark opening before a leading break",
+        `${bookmark(5, "Start")}${BR}${run("Chapter")}${bookmark(5, "End")}`,
+        "SBTE",
+        "SBTET",
+      ],
+      [
+        "a bookmark opening after a leading break",
+        `${BR}${bookmark(5, "Start")}${run("Chapter")}${bookmark(5, "End")}`,
+        "BSTE",
+        "BSTET",
+      ],
+    ])("%s keeps its place", async (_, content, untouched, edited) => {
+      const [story, part] = STORY[where];
+      let bytes = docx(
+        where,
+        `${p("33333333", run("prev"))}${p("44444444", content)}`
+      );
+      const seen: string[] = [];
+      for (let publication = 0; publication < 3; publication += 1) {
+        const session = await open(bytes);
+        session.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "z"
+        );
+        bytes = await publish(bytes, session);
+        session.destroy();
+        seen.push(order(bytes, part, "44444444"));
+      }
+      expect(seen).toEqual(Array(3).fill(untouched));
+      // Typing at the paragraph's end moves a break after text to its end, as for any text.
+      const session = await open(bytes);
+      const end = session
+        .paragraphSpans(story)
+        .find(({ paraId }) => paraId === "44444444")!.length;
+      if (end > 1)
+        session.insertText({ story, paraId: "44444444", offset: end }, "Q");
+      const out = await publish(bytes, session);
+      session.destroy();
+      expect(order(out, part, "44444444")).toBe(end > 1 ? edited : untouched);
+    });
+  }
+);

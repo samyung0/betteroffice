@@ -208,6 +208,8 @@ interface BookmarkBoundary extends CommentBoundary {
   name?: string;
   colFirst?: number;
   colLast?: number;
+  /** How many of the paragraph's leading breaks follow it. */
+  breaksAfter?: number;
 }
 
 interface OriginalRunBoundary {
@@ -1550,6 +1552,37 @@ function insertBoundaries(
   return result;
 }
 
+/** `properties` without the bookmarks at its content's start when `slot` holds breaks, and those bookmarks. */
+function splitSlotBookmarks(properties: Attrs, slot: boolean): [Attrs, BookmarkBoundary[]] {
+  if (!slot || !Array.isArray(properties.bookmarks)) return [properties, []];
+  const atStart = (raw: unknown) => {
+    const bookmark = asObject(raw);
+    return (
+      (bookmark?.kind === 'start' || bookmark?.kind === 'end') &&
+      (asFiniteNumber(bookmark.offset) ?? 0) === 0
+    );
+  };
+  const slotted = properties.bookmarks.filter(atStart);
+  if (slotted.length === 0) return [properties, []];
+  return [
+    { ...properties, bookmarks: properties.bookmarks.filter((raw) => !atStart(raw)) },
+    bookmarkBoundaries({ bookmarks: slotted }),
+  ];
+}
+
+function bookmarkNode(boundary: BookmarkBoundary): ParagraphContent {
+  return boundary.kind === 'start'
+    ? {
+        type: 'bookmarkStart',
+        id: boundary.id,
+        name: boundary.name || '',
+        ...(boundary.colFirst !== undefined ? { colFirst: boundary.colFirst } : {}),
+        ...(boundary.colLast !== undefined ? { colLast: boundary.colLast } : {}),
+        position: { offset: boundary.offset },
+      }
+    : { type: 'bookmarkEnd', id: boundary.id, position: { offset: boundary.offset } };
+}
+
 function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
   if (!Array.isArray(properties.bookmarks)) return [];
   const result: CommentBoundary[] = [];
@@ -1562,6 +1595,7 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
       name: asString(bookmark.name),
       colFirst: asFiniteNumber(bookmark.colFirst),
       colLast: asFiniteNumber(bookmark.colLast),
+      breaksAfter: asFiniteNumber(bookmark.breaksAfter),
     };
     if (bookmark.kind === 'start') result.push({ id, kind: 'start', offset, ...metadata });
     else if (bookmark.kind === 'end') result.push({ id, kind: 'end', offset, ...metadata });
@@ -1626,19 +1660,9 @@ function paragraphFromStory(
         : boundary.offset,
   }));
   if (bookmarks.length > 0) {
-    content = insertBoundaries(content, bookmarks, bookmarkUnits, (rawBoundary) => {
-      const boundary = rawBoundary as BookmarkBoundary;
-      return boundary.kind === 'start'
-        ? {
-            type: 'bookmarkStart',
-            id: boundary.id,
-            name: boundary.name || '',
-            ...(boundary.colFirst !== undefined ? { colFirst: boundary.colFirst } : {}),
-            ...(boundary.colLast !== undefined ? { colLast: boundary.colLast } : {}),
-            position: { offset: boundary.offset },
-          }
-        : { type: 'bookmarkEnd', id: boundary.id, position: { offset: boundary.offset } };
-    });
+    content = insertBoundaries(content, bookmarks, bookmarkUnits, (boundary) =>
+      bookmarkNode(boundary as BookmarkBoundary)
+    );
   }
 
   const paragraph: Paragraph = {
@@ -1905,7 +1929,8 @@ function pageBreakParagraph(): Paragraph {
 type FlowBreak = 'page' | 'column';
 type Tracked = 'ins' | 'del' | undefined;
 interface FlowToken {
-  kind: FlowBreak | 'visible';
+  /** A break, text, or a bookmark (no text, but a break before one leads it). */
+  kind: FlowBreak | 'visible' | 'mark';
   run?: Run;
   index?: number;
   /** The tracked change around a break. */
@@ -1979,7 +2004,12 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
     for (const item of items) {
       if (item.type === 'run') run(item);
       else if (item.type === 'hyperlink') children(item.structuredChildren ?? item.children);
-      else if (item.type === 'simpleField') runs(item.content);
+      else if (item.type === 'simpleField') {
+        // A field is a unit, text however empty its result.
+        tokens.push({ kind: 'visible' });
+        runs(item.content);
+      } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd')
+        tokens.push({ kind: 'mark' });
       else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
       else if (item.type === 'inlineSdt') inline(item.content);
       else if (item.type === 'insertion' || item.type === 'moveTo') children(item.content, 'ins');
@@ -1997,14 +2027,17 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
  * Without text, the breaks up to its last column break lead.
  */
 function splitFlow(tokens: FlowToken[]): { leading: FlowToken[]; trailing: FlowToken[] } {
+  // Breaks lead the content that follows them: the text, or without text
+  // the last bookmark. Without text, those up to the last column break lead too.
   let split = tokens.findIndex((token) => token.kind === 'visible');
   if (split < 0) {
-    split = 0;
+    split = Math.max(tokens.map(({ kind }) => kind).lastIndexOf('mark'), 0);
     tokens.forEach((token, index) => {
-      if (token.kind === 'column') split = index + 1;
+      if (token.kind === 'column') split = Math.max(split, index + 1);
     });
   }
-  const breaks = (part: FlowToken[]) => part.filter((token) => token.kind !== 'visible');
+  const breaks = (part: FlowToken[]) =>
+    part.filter((token) => token.kind === 'page' || token.kind === 'column');
   return { leading: breaks(tokens.slice(0, split)), trailing: breaks(tokens.slice(split)) };
 }
 
@@ -2049,8 +2082,8 @@ function placeTrailing(
   for (const item of base.content) {
     if (item.type !== 'run') {
       const tokens = flowTokens([item]);
-      if (tokens.some(({ kind }) => kind !== 'visible')) return appended;
-      visible ||= tokens.length > 0;
+      if (tokens.some(({ kind }) => kind === 'page' || kind === 'column')) return appended;
+      visible ||= tokens.some(({ kind }) => kind === 'visible');
       offset += storyUnits(item);
       continue;
     }
@@ -2518,15 +2551,25 @@ class SaveContext {
     let carried: SlotBreak[] = [];
     let previous = -1;
     let previousBase: Paragraph | undefined;
-    const settle = (next?: Paragraph, marks: CommentBoundary[] = []): Paragraph | undefined => {
+    // `marks` are comment boundaries and `bookmarks` bookmarks at the slot,
+    // which the paragraph's content leaves out for this to place.
+    const settle = (
+      next?: Paragraph,
+      marks: CommentBoundary[] = [],
+      bookmarks: BookmarkBoundary[] = []
+    ): Paragraph | undefined => {
       const expected = [...carried, ...slotBreaks];
       carried = [];
       slotBreaks = [];
       const before = previous >= 0 ? (blocks[previous] as Paragraph) : undefined;
       const beforeFlow = before && splitFlow(flowTokens(before.content));
-      const nextFlow = next && splitFlow(flowTokens(next.content));
+      const nextTokens = next ? flowTokens(next.content) : [];
+      const nextFlow = next && splitFlow(nextTokens);
+      // Content for the breaks to lead: text, or a bookmark after them.
       const text =
-        next !== undefined && flowTokens(next.content).some(({ kind }) => kind === 'visible');
+        next !== undefined &&
+        (nextTokens.some(({ kind }) => kind === 'visible' || kind === 'mark') ||
+          bookmarks.some(({ breaksAfter }) => !breaksAfter));
       // From the first leading break on they open the text (all of them with no
       // paragraph before); the rest close the paragraph before.
       const leading = expected.findIndex((entry) => entry.leading);
@@ -2542,32 +2585,48 @@ class SaveContext {
             ((token.kind === 'column' && !expected[index]!.leading) ||
               index < trailing === index < split)
         ) &&
-        // Comment boundaries at the slot's breaks are placed among them below.
-        marks.length === 0
+        // Boundaries at the slot's breaks are placed among them below.
+        marks.length === 0 &&
+        bookmarks.length === 0
       )
         return next;
+      // Breaks the content holds ahead of its text are the slot's (all of them
+      // without text: a closing one is placed again by the next slot).
+      const first = nextTokens.findIndex(({ kind }) => kind === 'visible');
+      const held =
+        bookmarks.length > 0
+          ? nextTokens
+              .slice(0, first < 0 ? nextTokens.length : first)
+              .filter(({ kind }) => kind === 'page' || kind === 'column')
+          : (nextFlow?.leading ?? []);
       const rest =
-        next && nextFlow && nextFlow.leading.length > 0
-          ? { ...next, content: withoutBreaks(next.content, nextFlow.leading) }
-          : next;
+        next && held.length > 0 ? { ...next, content: withoutBreaks(next.content, held) } : next;
       // A boundary at a break the paragraph leads with goes just before it;
       // others at the slot (before a table, or at a break the paragraph
       // before closes with) open the paragraph.
+      // A bookmark goes before the breaks it preceded (`breaksAfter`).
       const lead = (paragraph: Paragraph | undefined, entries: SlotBreak[]) => {
-        if (!paragraph || (entries.length === 0 && marks.length === 0)) return paragraph;
+        if (!paragraph || (entries.length === 0 && marks.length === 0 && bookmarks.length === 0))
+          return paragraph;
         const head: ParagraphContent[] = [];
         let mark = 0;
-        const markTo = (at: number) => {
+        const placed = new Set<BookmarkBoundary>();
+        const markTo = (at: number, index: number) => {
+          for (const bookmark of bookmarks)
+            if (!placed.has(bookmark) && entries.length - (bookmark.breaksAfter ?? 0) <= index) {
+              placed.add(bookmark);
+              head.push(bookmarkNode(bookmark));
+            }
           while (mark < marks.length && marks[mark]!.offset <= at) {
             const { id, kind } = marks[mark++]!;
             head.push({ type: kind === 'start' ? 'commentRangeStart' : 'commentRangeEnd', id });
           }
         };
-        for (const entry of entries) {
-          markTo(entry.at);
+        entries.forEach((entry, index) => {
+          markTo(entry.at, index);
           head.push(slotBreakContent(entry));
-        }
-        markTo(Number.POSITIVE_INFINITY);
+        });
+        markTo(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         return { ...paragraph, content: [...head, ...paragraph.content] };
       };
       if (before && beforeFlow) {
@@ -2625,6 +2684,11 @@ class SaveContext {
           this.baseParagraphs.get(segment.paraId) ??
           (Number.isInteger(seeded) ? baseParagraphBlocks?.[seeded] : undefined);
         const { boundaries, slot } = paragraphCommentBoundaries(storyOffset);
+        // Bookmarks at a slot of breaks are placed among them by settle.
+        const [properties, slotBookmarks] = splitSlotBookmarks(
+          segment.properties,
+          slotBreaks.length > 0
+        );
         const inputs = [
           segment.paraId,
           savedParaId,
@@ -2632,6 +2696,7 @@ class SaveContext {
           segment.attributes,
           items,
           boundaries,
+          slotBookmarks.length,
         ] as const;
         const priorMemo =
           baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
@@ -2648,16 +2713,10 @@ class SaveContext {
           const snapshot = inputs.map((input, index) =>
             index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
           );
-          paragraph = paragraphFromStory(
-            savedParaId,
-            segment.properties,
-            items,
-            boundaries,
-            baseParagraph
-          );
+          paragraph = paragraphFromStory(savedParaId, properties, items, boundaries, baseParagraph);
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
-        paragraph = settle(paragraph, slot) ?? paragraph;
+        paragraph = settle(paragraph, slot, slotBookmarks) ?? paragraph;
         carried = slotInlineBreaks;
         slotInlineBreaks = [];
         blocks.push(paragraph);

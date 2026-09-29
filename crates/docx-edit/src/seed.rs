@@ -2161,6 +2161,22 @@ fn paragraph_attrs(
     let mut bookmarks = Vec::new();
     let mut unit_index = 0usize;
     let mut pm_offset = 0u32;
+    // A bookmark ahead of some of the paragraph's leading breaks records how
+    // many follow it, so the save writes it back before them.
+    let leading_items: Vec<usize> = paragraph_flow_breaks(paragraph)
+        .0
+        .iter()
+        .map(|flow| flow.item)
+        .collect();
+    let breaks_after = |bookmark: &mut Value, content_index: usize| {
+        let after = leading_items
+            .iter()
+            .filter(|&&item| item > content_index)
+            .count();
+        if after > 0 {
+            bookmark["breaksAfter"] = json!(after);
+        }
+    };
     for (content_index, content) in array(field(Some(paragraph), "content")).iter().enumerate() {
         match string(field(Some(content), "type")).unwrap_or_default() {
             "bookmarkStart" => {
@@ -2178,13 +2194,18 @@ fn paragraph_attrs(
                             .insert(key.to_owned(), value.clone());
                     }
                 }
+                breaks_after(&mut bookmark, content_index);
                 bookmarks.push(bookmark);
             }
-            "bookmarkEnd" => bookmarks.push(json!({
-                "id": nullish(field(Some(content), "id")),
-                "kind": "end",
-                "offset": pm_offset
-            })),
+            "bookmarkEnd" => {
+                let mut bookmark = json!({
+                    "id": nullish(field(Some(content), "id")),
+                    "kind": "end",
+                    "offset": pm_offset
+                });
+                breaks_after(&mut bookmark, content_index);
+                bookmarks.push(bookmark);
+            }
             _ => {
                 for _ in 0..unit_counts.get(content_index).copied().unwrap_or_default() {
                     pm_offset += units.get(unit_index).map(|unit| unit.pm_size).unwrap_or(0);
@@ -2390,12 +2411,16 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
             "run" => run_tokens(item, None, tokens),
             "hyperlink" => link_tokens(item, None, tokens),
             "simpleField" => {
+                // A field is a unit, text however empty its result.
+                tokens.push(("visible", None));
                 for child in array(field(Some(item), "content")) {
                     if string(field(Some(child), "type")) == Some("run") {
                         run_tokens(child, None, tokens);
                     }
                 }
             }
+            // A bookmark is no text, but a break before one leads it.
+            "bookmarkStart" | "bookmarkEnd" => tokens.push(("mark", None)),
             "complexField" => {
                 for key in ["fieldCode", "fieldResult"] {
                     for child in array(field(Some(item), key)) {
@@ -2472,28 +2497,30 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) 
         inline_tokens(std::slice::from_ref(item), &mut tokens);
         items.resize(tokens.len(), index);
     }
+    let is_break = |index: &usize| matches!(tokens[*index].0, "pageBreak" | "columnBreak");
+    // Breaks lead the content that follows them: the text, or without text
+    // the last bookmark. Without text, those up to the last column break lead too.
     let text = tokens.iter().position(|(kind, _)| *kind == "visible");
+    let content = text.or_else(|| tokens.iter().rposition(|(kind, _)| *kind == "mark"));
     let split = text.unwrap_or_else(|| {
-        tokens
+        let column = tokens
             .iter()
             .rposition(|(kind, _)| *kind == "columnBreak")
-            .map_or(0, |index| index + 1)
+            .map_or(0, |index| index + 1);
+        column.max(content.unwrap_or(0))
     });
-    let breaks = |range: std::ops::Range<usize>, leading: bool| {
+    let breaks = |range: std::ops::Range<usize>| {
         range
-            .filter(|&index| tokens[index].0 != "visible")
+            .filter(is_break)
             .map(|index| FlowBreak {
                 kind: tokens[index].0,
-                leading,
+                leading: content.is_some_and(|content| index < content),
                 marker: tokens[index].1.clone(),
                 item: items[index],
             })
             .collect()
     };
-    (
-        breaks(0..split, text.is_some()),
-        breaks(split..tokens.len(), false),
-    )
+    (breaks(0..split), breaks(split..tokens.len()))
 }
 
 fn modifier(value: &str) -> f64 {

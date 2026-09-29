@@ -149,7 +149,9 @@ describe('page break save projection', () => {
     const tracked = `<w:ins w:id="9" w:author="A">${PAGE_BREAK}</w:ins>`;
     const paragraphs =
       `<w:p>${PAGE_BREAK}${tracked}<w:r><w:t>LEAD</w:t></w:r></w:p>` +
-      `<w:p><w:r><w:t>END</w:t><w:br w:type="column"/></w:r></w:p><w:p>${PAGE_BREAK}</w:p>`;
+      `<w:p><w:r><w:t>END</w:t><w:br w:type="column"/></w:r></w:p><w:p>${PAGE_BREAK}</w:p>` +
+      `<w:p><w:bookmarkStart w:id="5" w:name="b"/>${PAGE_BREAK}<w:r><w:t>BM</w:t></w:r>` +
+      `<w:bookmarkEnd w:id="5"/></w:p><w:p>${PAGE_BREAK}<w:fldSimple w:instr=" SEQ x "/></w:p>`;
     const cell =
       `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>` +
       `<w:tr><w:tc>${paragraphs}</w:tc></w:tr></w:tbl>`;
@@ -176,6 +178,9 @@ describe('page break save projection', () => {
           ['pageBreak', true, true],
           ['columnBreak', false, false],
           ['pageBreak', false, false],
+          ['pageBreak', true, false],
+          ['pageBreak', true, false],
+          ['field', false, false],
           ...(story === 'body' ? [['table', false, false]] : []),
         ]);
       }
