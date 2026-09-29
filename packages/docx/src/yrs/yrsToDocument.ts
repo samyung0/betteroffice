@@ -2028,12 +2028,13 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
  */
 function splitFlow(tokens: FlowToken[]): { leading: FlowToken[]; trailing: FlowToken[] } {
   // Breaks lead the content that follows them: the text, or without text
-  // the last bookmark. Without text, those up to the last column break lead too.
+  // the last bookmark. Without either, those up to the last column break lead.
   let split = tokens.findIndex((token) => token.kind === 'visible');
+  if (split < 0) split = tokens.map(({ kind }) => kind).lastIndexOf('mark');
   if (split < 0) {
-    split = Math.max(tokens.map(({ kind }) => kind).lastIndexOf('mark'), 0);
+    split = 0;
     tokens.forEach((token, index) => {
-      if (token.kind === 'column') split = Math.max(split, index + 1);
+      if (token.kind === 'column') split = index + 1;
     });
   }
   const breaks = (part: FlowToken[]) =>

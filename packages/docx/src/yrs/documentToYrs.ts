@@ -1251,15 +1251,15 @@ function paragraphFlowBreaks(
     for (const token of tokens.slice(start)) token.item = item;
   });
   // Breaks lead the content that follows them: the text, or without text
-  // the last bookmark. Without text, those up to the last column break lead too.
+  // the last bookmark. Without either, those up to the last column break lead.
   const text = tokens.findIndex((token) => token.kind === 'visible');
   const lastMark = tokens.map(({ kind }) => kind).lastIndexOf('mark');
   const content = text >= 0 ? text : lastMark;
-  let split = text;
-  if (text < 0) {
-    split = Math.max(content, 0);
+  let split = content;
+  if (content < 0) {
+    split = 0;
     tokens.forEach((token, index) => {
-      if (token.kind === 'columnBreak') split = Math.max(split, index + 1);
+      if (token.kind === 'columnBreak') split = index + 1;
     });
   }
   const units = (from: number, to: number) =>

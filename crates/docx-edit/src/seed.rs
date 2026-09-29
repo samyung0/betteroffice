@@ -2499,15 +2499,14 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) 
     }
     let is_break = |index: &usize| matches!(tokens[*index].0, "pageBreak" | "columnBreak");
     // Breaks lead the content that follows them: the text, or without text
-    // the last bookmark. Without text, those up to the last column break lead too.
+    // the last bookmark. Without either, those up to the last column break lead.
     let text = tokens.iter().position(|(kind, _)| *kind == "visible");
     let content = text.or_else(|| tokens.iter().rposition(|(kind, _)| *kind == "mark"));
-    let split = text.unwrap_or_else(|| {
-        let column = tokens
+    let split = content.unwrap_or_else(|| {
+        tokens
             .iter()
             .rposition(|(kind, _)| *kind == "columnBreak")
-            .map_or(0, |index| index + 1);
-        column.max(content.unwrap_or(0))
+            .map_or(0, |index| index + 1)
     });
     let breaks = |range: std::ops::Range<usize>| {
         range

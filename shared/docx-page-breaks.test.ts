@@ -1398,3 +1398,47 @@ describe.each(EVERY)(
     });
   }
 );
+
+describe.each(EVERY)(
+  "a column break after a bookmark in a paragraph without text, in %s",
+  (where) => {
+    const bookmark = `<w:bookmarkStart w:id="5" w:name="_Toc5"/><w:bookmarkEnd w:id="5"/>`;
+    test.each([
+      [
+        "after another paragraph",
+        (content: string) => `${p("33333333", run("prev"))}${content}`,
+        "SEB",
+      ],
+      ["opening the story", (content: string) => content, "SEB"],
+      [
+        "with a page break before it",
+        (content: string) => `${p("33333333", run("prev"))}${content}`,
+        "SEBB",
+      ],
+    ] as const)("%s stays in its paragraph", async (name, around, expected) => {
+      const [story, part] = STORY[where];
+      const breaks =
+        name === "with a page break before it" ? `${BR}${COL}` : COL;
+      let bytes = docx(where, around(p("44444444", `${bookmark}${breaks}`)));
+      const session = await open(bytes);
+      const seeded = units(session, story);
+      session.destroy();
+      for (let publication = 0; publication < 2; publication += 1) {
+        const reopened = await open(bytes);
+        reopened.insertText(
+          { story: "body", paraId: "22222222", offset: 0 },
+          "z"
+        );
+        bytes = await publish(bytes, reopened);
+        reopened.destroy();
+        expect(order(bytes, part, "44444444")).toBe(expected);
+        const again = await open(bytes);
+        // The body's tail paragraph takes the typing.
+        expect(units(again, story).replace(/z*tail¶$/, "")).toBe(
+          seeded.replace(/tail¶$/, "")
+        );
+        again.destroy();
+      }
+    });
+  }
+);
