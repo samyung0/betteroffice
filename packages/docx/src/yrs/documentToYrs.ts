@@ -12,6 +12,7 @@ import type {
   Chart,
   ComplexField,
   Document,
+  FieldInlineContent,
   Hyperlink,
   Image,
   InlineSdt,
@@ -570,12 +571,41 @@ function fieldToUnits(
     for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
     units.push(...projected);
   });
-  const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
+  // The field shows the result its projected children leave: runs, and a
+  // kept change's or content control's text.
+  const visible = {
+    ...value,
+    fieldResult: shownRuns(
+      result.filter((child) => child.type === 'run' || child.type === 'rawXml' || child.type === 'inlineSdt')
+    ),
+  };
   const field = fieldPayload(visible, styleFormatting);
   field.payload.fieldData = JSON.stringify(value);
   field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
   return units;
+}
+
+/** The runs field result `nodes` show (seed.rs `shown_runs`). */
+function shownRuns(nodes: readonly FieldInlineContent[]): Run[] {
+  return nodes.flatMap((node): Run[] => {
+    switch (node.type) {
+      case 'run':
+        return [node];
+      case 'hyperlink':
+        return shownRuns(node.children.filter((child) => child.type === 'run'));
+      case 'simpleField':
+        return node.content.filter((child): child is Run => child.type === 'run');
+      case 'complexField':
+        return node.fieldResult;
+      case 'inlineSdt':
+        return shownRuns(node.content);
+      case 'rawXml':
+        return node.shown ?? [];
+      default:
+        return [];
+    }
+  });
 }
 
 function noteRefUnit(

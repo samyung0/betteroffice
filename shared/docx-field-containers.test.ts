@@ -18,19 +18,27 @@ const deleted = (text: string) =>
 const p = (id: string, xml: string) => `<w:p w14:paraId="${id}">${xml}</w:p>`;
 const ref = (id: number) =>
   `<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="${id}"/></w:r>`;
-const ins = (xml: string) =>
-  `<w:ins w:id="90" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:ins>`;
-const del = (xml: string) =>
-  `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:del>`;
-const fs = (xml: string) => `<w:fldSimple w:instr=" DATE ">${xml}</w:fldSimple>`;
+const change = (tag: string, id: number) => (xml: string) =>
+  `<w:${tag} w:id="${id}" w:author="A" w:date="2026-09-01T00:00:00Z">${xml}</w:${tag}>`;
+const ins = change("ins", 90);
+const del = change("del", 91);
+const moveFrom = change("moveFrom", 92);
+const moveTo = change("moveTo", 93);
+const fs = (xml: string, instruction = " DATE ") =>
+  `<w:fldSimple w:instr="${instruction}">${xml}</w:fldSimple>`;
 const link = (xml: string) =>
   `<w:hyperlink w:anchor="target">${xml}</w:hyperlink>`;
 const sdt = (xml: string) =>
   `<w:sdt><w:sdtPr><w:id w:val="8"/></w:sdtPr><w:sdtContent>${xml}</w:sdtContent></w:sdt>`;
 const bm = (xml: string) =>
   `<w:bookmarkStart w:id="5" w:name="mark"/>${xml}<w:bookmarkEnd w:id="5"/>`;
-const field = (result: string) =>
-  `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+const char = (type: string) =>
+  `<w:r><w:fldChar w:fldCharType="${type}"/></w:r>`;
+const instr = (text: string) =>
+  `<w:r><w:instrText xml:space="preserve">${text}</w:instrText></w:r>`;
+const field = (result: string, instruction = " DATE ") =>
+  `${char("begin")}${instr(instruction)}${char("separate")}${result}${char("end")}`;
+const foreign = `<x:ext xmlns:x="urn:x" x:v="1"/>`;
 
 function docx(body: string): Uint8Array {
   const parts: Record<string, string> = {
@@ -78,23 +86,38 @@ const documentXml = (bytes: Uint8Array) =>
   new TextDecoder().decode(unzipContainer(bytes)["word/document.xml"]);
 
 /**
- * The first paragraph's markup as text: F<> simple field, H() link, +{} and
- * -{} tracked changes, S{} content control, {bm bm} bookmark.
+ * A paragraph's markup as text: F<> simple field, [«code»|result] complex
+ * field, H() link, +{} -{} M+{} M-{} tracked changes, S{} content control,
+ * {bm bm} bookmark, X foreign markup.
  */
-function view(bytes: Uint8Array): string {
-  const xml = documentXml(bytes);
-  const first = xml.slice(xml.indexOf("<w:body>"), xml.indexOf("</w:p>"));
-  return [
-    ...first.matchAll(
-      /<(\/?)w:(t|delText|ins|del|fldSimple|hyperlink|bookmarkStart|bookmarkEnd|sdt)\b([^>]*?)(\/?)>([^<]*)/g
-    ),
-  ]
-    .map(([, close, tag, , , text]) => {
+function view(bytes: Uint8Array, paraId = "11111111"): string {
+  const paragraph = documentXml(bytes).match(
+    new RegExp(`<w:p [^>]*"${paraId}"[\\s\\S]*?</w:p>`)
+  )![0];
+  const tags =
+    /<(\/?)(?:w:(t|delText|instrText|fldChar|ins|del|moveFrom|moveTo|fldSimple|hyperlink|bookmarkStart|bookmarkEnd|sdt)|x:(ext))\b([^>]*?)(\/?)>([^<]*)/g;
+  const opening: Record<string, string> = {
+    fldSimple: "F<",
+    hyperlink: "H(",
+    ins: "+{",
+    del: "-{",
+    moveTo: "M+{",
+    moveFrom: "M-{",
+    sdt: "S{",
+  };
+  return [...paragraph.matchAll(tags)]
+    .map(([, close, tag, ext, attrs, , text]) => {
+      if (ext) return "X";
       if (tag === "t" || tag === "delText") return close ? "" : text;
+      if (tag === "instrText") return close ? "" : `«${text.trim()}»`;
+      if (tag === "fldChar")
+        return { begin: "[", separate: "|", end: "]" }[
+          attrs.match(/fldCharType="(\w+)"/)![1]
+        ];
       if (tag === "bookmarkStart") return "{bm";
       if (tag === "bookmarkEnd") return "bm}";
       if (close) return tag === "fldSimple" ? ">" : tag === "hyperlink" ? ")" : "}";
-      return { fldSimple: "F<", hyperlink: "H(", ins: "+{", del: "-{", sdt: "S{" }[tag];
+      return opening[tag];
     })
     .join("");
 }
@@ -145,56 +168,78 @@ const edit = (session: YrsSession, paraId: string, text: string) =>
  */
 type Build = (wrap: (xml: string) => string) => string;
 const cases: Array<[string, Build, string, string]> = [
-  [
-    "a bookmark inside w:fldSimple",
-    (wrap) => fs(bm(wrap(run("2026")))),
-    "a F<{bm2026bm}> b",
-    "2026",
-  ],
-  [
-    "w:fldSimple inside a hyperlink",
-    (wrap) => link(fs(wrap(run("2026")))),
-    "a H(F<2026>) b",
-    "2026",
-  ],
-  [
-    "w:fldSimple inside w:ins",
-    (wrap) => ins(fs(wrap(run("2026")))),
-    "a +{F<2026>} b",
-    "2026",
-  ],
-  [
-    "w:ins inside w:fldSimple",
-    (wrap) => fs(ins(wrap(run("2026")))),
-    "a F<+{2026}> b",
-    "2026",
-  ],
-  [
-    "w:sdt inside w:fldSimple",
-    (wrap) => fs(sdt(wrap(run("2026")))),
-    "a F<S{2026}> b",
-    "2026",
-  ],
+  ["a bookmark inside w:fldSimple", (wrap) => fs(bm(wrap(run("2026")))), "a F<{bm2026bm}> b", "a 2026 b"],
+  ["w:fldSimple inside a hyperlink", (wrap) => link(fs(wrap(run("2026")))), "a H(F<2026>) b", "a 2026 b"],
+  ["w:fldSimple inside w:ins", (wrap) => ins(fs(wrap(run("2026")))), "a +{F<2026>} b", "a 2026 b"],
+  ["w:ins inside w:fldSimple", (wrap) => fs(ins(wrap(run("2026")))), "a F<+{2026}> b", "a 2026 b"],
+  ["w:sdt inside w:fldSimple", (wrap) => fs(sdt(wrap(run("2026")))), "a F<S{2026}> b", "a 2026 b"],
   [
     "w:ins inside a complex field result",
     (wrap) => field(`${run("20")}${ins(wrap(run("26")))}`),
-    "a 20+{26} b",
-    "2026",
+    "a [«DATE»|20+{26}] b",
+    "a 2026 b",
   ],
   [
     "w:del inside a complex field result",
     (wrap) => field(`${run("20")}${del(wrap(deleted("26")))}`),
-    "a 20-{26} b",
-    "20",
+    "a [«DATE»|20-{26}] b",
+    "a 20 b",
+  ],
+  [
+    "w:moveFrom and w:moveTo inside a complex field result",
+    (wrap) => field(`${run("20")}${moveFrom(deleted("x"))}${moveTo(wrap(run("26")))}`),
+    "a [«DATE»|20M-{x}M+{26}] b",
+    "a 2026 b",
   ],
   [
     "w:sdt inside a complex field result",
     (wrap) => field(`${run("20")}${sdt(wrap(run("26")))}`),
-    "a 20S{26} b",
-    "2026",
+    "a [«DATE»|20S{26}] b",
+    "a 2026 b",
+  ],
+  [
+    "w:ins beside a hyperlink in a complex field result",
+    (wrap) => field(`${link(run("20"))}${ins(wrap(run("26")))}`),
+    "a [«DATE»|H(20)+{26}] b",
+    "a 2026 b",
+  ],
+  [
+    "w:sdt beside a simple field in a complex field result",
+    (wrap) => field(`${fs(run("20"), " PAGE ")}${sdt(wrap(run("26")))}`),
+    "a [«DATE»|F<20>S{26}] b",
+    "a 2026 b",
+  ],
+  [
+    "foreign markup inside a complex field result",
+    (wrap) => field(`${run("20")}${foreign}${wrap(run("26"))}`),
+    "a [«DATE»|20X26] b",
+    "a 2026 b",
+  ],
+  [
+    "a complex field inside w:fldSimple",
+    (wrap) => fs(`${run("20")}${field(wrap(run("26")), " PAGE ")}`),
+    "a F<20[«PAGE»|26]> b",
+    "a 2026 b",
+  ],
+  [
+    "w:ins in the code of a complex field inside w:fldSimple",
+    (wrap) => fs(`${char("begin")}${ins(wrap(instr(" PAGE ")))}${char("separate")}${run("26")}${char("end")}`),
+    "a F<[+{«PAGE»}|26]> b",
+    "a 26 b",
   ],
 ];
 const plain = (xml: string) => xml;
+/** The first paragraph as the editor shows it: its text and its fields' texts. */
+function shownText(session: YrsSession): string {
+  let text = "";
+  for (const segment of session.storySegments("body")) {
+    if (segment.kind === "pilcrow") break;
+    if (segment.kind === "text") text += segment.text;
+    else if (segment.embedKind === "field")
+      text += String(segment.payload.displayText ?? "");
+  }
+  return text;
+}
 
 test.each(cases)(
   "%s round-trips through three publications, its paragraph untouched",
@@ -203,12 +248,7 @@ test.each(cases)(
     let saved = "";
     for (let publication = 0; publication < 3; publication += 1) {
       const session = await open(bytes);
-      const fields = session
-        .storySegments("body")
-        .flatMap((segment) =>
-          segment.kind === "embed" ? [segment.payload.displayText] : []
-        );
-      expect(fields).toEqual([shown]);
+      expect(shownText(session)).toBe(shown);
       edit(session, "22222222", "x");
       bytes = await publish(bytes, session.encodeState());
       session.destroy();
@@ -236,35 +276,49 @@ test.each(cases)(
   }
 );
 
+/**
+ * Captures after `before`, publishes, makes an edit to the field's paragraph
+ * after the capture and rebases it onto the export; returns the paragraph's
+ * next saved view once the rebased units match the latest ones.
+ */
+async function rebased(bytes: Uint8Array, before: (session: YrsSession) => void) {
+  const session = await open(bytes);
+  before(session);
+  edit(session, "22222222", "x");
+  const captured = session.encodeState();
+  const exported = await publish(bytes, captured);
+  edit(session, "11111111", "y");
+  const latest = session.encodeState();
+  const latestUnits = units(session).join("");
+  session.destroy();
+  const { state } = await rebaseOffice(
+    bytes,
+    checkpoint(bytes, captured),
+    checkpoint(bytes, latest),
+    exported
+  );
+  const rebased = await open(exported, state);
+  expect(units(rebased).join("")).toBe(latestUnits);
+  const next = await publish(exported, rebased.encodeState());
+  rebased.destroy();
+  return view(next);
+}
+
 test.each(cases)(
   "%s rebases an edit to its paragraph made after the capture",
   async (_, build, expected) => {
-    const bytes = paragraph(build(plain));
-    const session = await open(bytes);
-    edit(session, "22222222", "x");
-    const captured = session.encodeState();
-    const exported = await publish(bytes, captured);
-    edit(session, "11111111", "y");
-    const latest = session.encodeState();
-    const latestUnits = units(session).join("");
-    session.destroy();
-    const { state } = await rebaseOffice(
-      bytes,
-      checkpoint(bytes, captured),
-      checkpoint(bytes, latest),
-      exported
-    );
-    const rebased = await open(exported, state);
-    expect(units(rebased).join("")).toBe(latestUnits);
-    const next = await publish(exported, rebased.encodeState());
-    rebased.destroy();
-    expect(view(next)).toBe(`y${expected}`);
+    expect(await rebased(paragraph(build(plain)), () => {})).toBe(`y${expected}`);
   }
 );
 
+/** A projected field's units: its projected children, then the field. */
+const projectedUnits: Record<string, string> = {
+  "w:ins beside a hyperlink in a complex field result": "20[field]",
+  "w:sdt beside a simple field in a complex field result": "[field][field]",
+};
 test.each(cases)(
   "a Word comment range inside %s holds the whole field across publications",
-  async (_, build, expected) => {
+  async (name, build, expected) => {
     const wrap = (xml: string) =>
       `<w:commentRangeStart w:id="5"/>${xml}<w:commentRangeEnd w:id="5"/>`;
     let bytes = docx(
@@ -272,11 +326,94 @@ test.each(cases)(
     );
     for (let publication = 0; publication < 3; publication += 1) {
       const session = await open(bytes);
-      expect(covered(session)).toBe("[field]");
+      expect(covered(session)).toBe(projectedUnits[name] ?? "[field]");
       bytes = await publish(bytes, session.encodeState());
       session.destroy();
       expect(marks(bytes)).toEqual(["E5", "R5", "S5"]);
       expect(view(bytes)).toBe(expected);
+    }
+  }
+);
+
+test.each([
+  [
+    "w:del holding its field's end",
+    field(run("20")).replace(char("end"), del(`${deleted("26")}${char("end")}`)),
+  ],
+  ["w:ins holding its field's end", field(run("2026")).replace(char("end"), ins(char("end")))],
+  [
+    "w:ins opening a nested field",
+    field(`${run("20")}${ins(`${char("begin")}${instr(" PAGE ")}${char("separate")}`)}${run("26")}${char("end")}`),
+  ],
+])("a %s leaves its field balanced and byte-stable", async (_, xml) => {
+  let bytes = paragraph(xml);
+  let saved = "";
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const fields = view(bytes).replace(/[^[\]]/g, "");
+    expect(fields.split("[").length).toBe(fields.split("]").length);
+    if (publication > 0) expect(view(bytes)).toBe(saved);
+    saved = view(bytes);
+  }
+});
+
+test.each([
+  ["a complex field result", (xml: string) => field(`${run("20")}${ins(xml)}`)],
+  ["w:fldSimple", (xml: string) => fs(ins(xml))],
+])(
+  "a Word comment reference inside a kept change in %s is written once and goes with its comment",
+  async (_, build) => {
+    const bytes = docx(
+      p(
+        "11111111",
+        `${run("a ")}<w:commentRangeStart w:id="5"/>${build(
+          `${run("26")}<w:commentRangeEnd w:id="5"/>${ref(5)}`
+        )}${run(" b")}`
+      ) + tail
+    );
+    let saved = bytes;
+    for (let publication = 0; publication < 3; publication += 1) {
+      const session = await open(saved);
+      saved = await publish(saved, session.encodeState());
+      session.destroy();
+      expect(marks(saved)).toEqual(["E5", "R5", "S5"]);
+    }
+    expect(await rebased(bytes, () => {})).toStartWith("ya ");
+    const session = await open(bytes);
+    session.applyRawOps("body", [
+      { op: "removeComment", id: session.listComments()[0].id },
+    ]);
+    const removed = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(marks(removed)).toEqual([]);
+  }
+);
+
+const toc = (first: string) =>
+  docx(
+    p("11111111", `${char("begin")}${instr(" TOC \\o ")}${char("separate")}${first}`) +
+      p("33333333", `${run("Entry2 2")}${char("end")}`) +
+      tail
+  );
+test.each([
+  ["w:del", `${del(deleted("Old"))}${run("Entry1 1")}`, "-{Old}Entry1 1"],
+  ["w:ins", `${ins(run("Entry1"))}${run(" 1")}`, "+{Entry1} 1"],
+  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}"],
+  ["w:sdt", `${run("En")}${sdt(run("try1"))}${run(" 1")}`, "EnS{try1} 1"],
+])(
+  "a field result spanning paragraphs keeps %s in its first paragraph",
+  async (_, first, kept) => {
+    const result = (saved: Uint8Array) => view(saved).match(/\|(.*)\]/)?.[1];
+    let saved = toc(first);
+    for (let publication = 0; publication < 3; publication += 1) {
+      const session = await open(saved);
+      edit(session, "22222222", "x");
+      saved = await publish(saved, session.encodeState());
+      session.destroy();
+      expect(result(saved)).toBe(kept);
     }
   }
 );

@@ -268,11 +268,7 @@ fn serialize_hyperlink(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    for child in hyperlink
-        .structured_children
-        .as_ref()
-        .unwrap_or(&hyperlink.children)
-    {
+    for child in hyperlink.written_children() {
         match child {
             InlineNode::Run(run) => children.push_str(&serialize_run(run, context)?),
             InlineNode::SimpleField(field) => {
@@ -330,12 +326,7 @@ fn serialize_simple_field(
         output.push_str(" w:dirty=\"true\"");
     }
     output.push('>');
-    let structured = field
-        .structured_result
-        .as_ref()
-        .filter(|content| content.blocks.is_none())
-        .and_then(|content| content.inline.as_ref());
-    if let Some(nodes) = structured {
+    if let Some(nodes) = field.written_result() {
         for node in nodes {
             output.push_str(&serialize_inline_node(node, context)?);
         }
@@ -366,7 +357,11 @@ fn serialize_complex_field(
         output.push_str(" w:fldLock=\"true\"");
     }
     output.push_str("/></w:r>");
-    if field.field_code.is_empty() {
+    if let Some(nodes) = field.written_code() {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else if field.field_code.is_empty() {
         output.push_str("<w:r>");
         output.push_str(&properties);
         output.push_str("<w:instrText");
@@ -385,12 +380,7 @@ fn serialize_complex_field(
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
     // Run-level fallback: multi-block results and fields rebuilt by the edit path.
-    let structured = field
-        .structured_result
-        .as_ref()
-        .filter(|content| content.blocks.is_none())
-        .and_then(|content| content.inline.as_ref());
-    if let Some(nodes) = structured {
+    if let Some(nodes) = field.written_result() {
         for node in nodes {
             output.push_str(&serialize_inline_node(node, context)?);
         }
@@ -607,9 +597,9 @@ fn comment_references(node: &InlineNode, found: &mut impl FnMut(f64)) {
     match node {
         InlineNode::Run(run) => run_comment_references(run, found),
         InlineNode::Hyperlink(hyperlink) => {
-            for node in &hyperlink.children {
-                if let InlineNode::Run(run) = node {
-                    run_comment_references(run, found);
+            for node in hyperlink.written_children() {
+                if matches!(node, InlineNode::Run(_) | InlineNode::SimpleField(_)) {
+                    comment_references(node, found);
                 }
             }
         }
@@ -618,21 +608,26 @@ fn comment_references(node: &InlineNode, found: &mut impl FnMut(f64)) {
                 comment_references(node, found);
             }
         }
-        InlineNode::SimpleField(field) => {
-            for run in &field.content {
-                run_comment_references(run, found);
-            }
-        }
+        InlineNode::SimpleField(field) => match field.written_result() {
+            Some(nodes) => nodes
+                .iter()
+                .for_each(|node| comment_references(node, found)),
+            None => field
+                .content
+                .iter()
+                .for_each(|run| run_comment_references(run, found)),
+        },
         InlineNode::ComplexField(field) => {
-            for run in &field.field_code {
-                run_comment_references(run, found);
+            match field.written_code() {
+                Some(nodes) => nodes
+                    .iter()
+                    .for_each(|node| comment_references(node, found)),
+                None => field
+                    .field_code
+                    .iter()
+                    .for_each(|run| run_comment_references(run, found)),
             }
-            match field
-                .structured_result
-                .as_ref()
-                .filter(|content| content.blocks.is_none())
-                .and_then(|content| content.inline.as_ref())
-            {
+            match field.written_result() {
                 Some(nodes) => nodes
                     .iter()
                     .for_each(|node| comment_references(node, found)),
@@ -651,8 +646,11 @@ fn paragraph_comment_references(paragraph: &Paragraph, found: &mut impl FnMut(f6
         match content {
             ParagraphContent::Inline(node) => comment_references(node, found),
             ParagraphContent::Tracked(change) => {
+                let deletion = matches!(change.node_type.as_str(), "deletion" | "moveFrom");
                 for node in &change.content {
-                    if matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_)) {
+                    if matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_))
+                        || matches!(node, InlineNode::SimpleField(_) if !deletion)
+                    {
                         comment_references(node, found);
                     }
                 }

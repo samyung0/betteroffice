@@ -1837,10 +1837,12 @@ impl<'a> SelectiveParagraphIndex<'a> {
                         change.node_type.as_str(),
                         "insertion" | "deletion" | "moveFrom" | "moveTo"
                     ) {
+                        let deletion = matches!(change.node_type.as_str(), "deletion" | "moveFrom");
                         for item in &change.content {
                             match item {
                                 InlineNode::Run(run) => self.run(run)?,
                                 InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink)?,
+                                InlineNode::SimpleField(_) if !deletion => self.inline(item)?,
                                 _ => {}
                             }
                         }
@@ -1858,21 +1860,34 @@ impl<'a> SelectiveParagraphIndex<'a> {
             InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink),
             InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => Some(()),
             InlineNode::SimpleField(field) => {
-                for run in &field.content {
-                    self.run(run)?;
+                match field.written_result() {
+                    Some(nodes) => {
+                        for node in nodes {
+                            self.inline(node)?;
+                        }
+                    }
+                    None => {
+                        for run in &field.content {
+                            self.run(run)?;
+                        }
+                    }
                 }
                 Some(())
             }
             InlineNode::ComplexField(field) => {
-                for run in &field.field_code {
-                    self.run(run)?;
+                match field.written_code() {
+                    Some(nodes) => {
+                        for node in nodes {
+                            self.inline(node)?;
+                        }
+                    }
+                    None => {
+                        for run in &field.field_code {
+                            self.run(run)?;
+                        }
+                    }
                 }
-                match field
-                    .structured_result
-                    .as_ref()
-                    .filter(|result| result.blocks.is_none())
-                    .and_then(|result| result.inline.as_ref())
-                {
+                match field.written_result() {
                     Some(nodes) => {
                         for node in nodes {
                             self.inline(node)?;
@@ -1905,12 +1920,14 @@ impl<'a> SelectiveParagraphIndex<'a> {
         }
     }
 
-    /// Hyperlink serialization only emits Run/BookmarkStart/BookmarkEnd
-    /// children; only runs can carry nested paragraphs or generated ids.
+    /// Hyperlink serialization only emits Run, SimpleField and bookmark
+    /// children; only runs and fields can carry nested paragraphs or generated ids.
     fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
-        for child in &hyperlink.children {
-            if let InlineNode::Run(run) = child {
-                self.run(run)?;
+        for child in hyperlink.written_children() {
+            match child {
+                InlineNode::Run(run) => self.run(run)?,
+                InlineNode::SimpleField(_) => self.inline(child)?,
+                _ => {}
             }
         }
         Some(())

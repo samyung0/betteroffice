@@ -613,19 +613,22 @@ fn parse_paragraph_contents(
                     info: parse_tracked_change_info(child),
                     content,
                 };
-                // A field result has no tracked change in its grammar: the change
-                // stays there as its markup, and what it inserts shows as the result.
-                match fields.last_mut().filter(|field| field.in_result()) {
-                    Some(active) => {
-                        let shown = shown_change_runs(&change);
-                        active.absorb(raw_change(child), shown);
+                // A field has no tracked change in its grammar: a change whose field
+                // characters balance stays inside it as its markup, and what it
+                // inserts shows as the field's code or result.
+                let shown = shown_change_runs(&change);
+                let kept = balanced_field_chars(child).then(|| raw_change(child, shown.clone()));
+                match (fields.last_mut(), kept) {
+                    (Some(active), Some(raw)) => {
+                        if !active.in_result() {
+                            active.append_instruction(&instruction_text(&shown));
+                        }
+                        active.absorb(raw, shown);
                     }
-                    None if element.local_name() == "fldSimple" => {
-                        // `parse_simple_field_composed` shows the change and saves the markup.
-                        output.push(ParagraphContent::Tracked(change));
-                        output.push(ParagraphContent::Inline(raw_change(child)));
+                    (None, Some(raw)) if element.local_name() == "fldSimple" => {
+                        output.push(ParagraphContent::Inline(raw));
                     }
-                    None => output.push(ParagraphContent::Tracked(change)),
+                    _ => output.push(ParagraphContent::Tracked(change)),
                 }
                 close_ranges(ends, &fields, &mut output, &mut field_ends);
             }
@@ -664,7 +667,10 @@ fn parse_paragraph_contents(
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
             _ => {
                 if let Some(node) = crate::inline::raw_foreign_inline(child) {
-                    output.push(ParagraphContent::Inline(node));
+                    match fields.last_mut() {
+                        Some(active) => active.absorb(node, Vec::new()),
+                        None => output.push(ParagraphContent::Inline(node)),
+                    }
                 }
             }
         }
@@ -770,12 +776,8 @@ fn parse_simple_field_composed(
         false,
     )? {
         match item {
-            // The change's markup follows it and is what saves.
-            ParagraphContent::Tracked(change) => content.extend(shown_change_runs(&change)),
             ParagraphContent::Inline(
-                node @ (InlineNode::BookmarkStart(_)
-                | InlineNode::BookmarkEnd(_)
-                | InlineNode::RawXml(_)),
+                node @ (InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)),
             ) => result.push(node),
             ParagraphContent::Inline(node) => {
                 content.extend(shown_runs(std::slice::from_ref(&node)));
@@ -940,24 +942,73 @@ fn shown_runs(nodes: &[InlineNode]) -> Vec<Run> {
             InlineNode::Run(run) => runs.push(run.clone()),
             InlineNode::Hyperlink(hyperlink) => runs.extend(shown_runs(&hyperlink.children)),
             InlineNode::SimpleField(field) => runs.extend(field.content.iter().cloned()),
+            InlineNode::ComplexField(field) => runs.extend(field.field_result.iter().cloned()),
             InlineNode::InlineSdt(sdt) => runs.extend(shown_runs(&sdt.content)),
+            InlineNode::RawXml(raw) => runs.extend(raw.shown.iter().cloned()),
             _ => {}
         }
     }
     runs
 }
 
-/// What a tracked change shows: its insertions, not its deletions.
+/// What a tracked change shows: its insertions, not its deletions nor the
+/// comment references `raw_change` leaves out.
 fn shown_change_runs(change: &TrackedInline) -> Vec<Run> {
     match change.node_type.as_str() {
         "deletion" | "moveFrom" => Vec::new(),
-        _ => shown_runs(&change.content),
+        _ => shown_runs(&change.content)
+            .into_iter()
+            .filter(|run| {
+                !run.content
+                    .iter()
+                    .all(|content| matches!(content, RunContent::CommentReference { .. }))
+                    || run.content.is_empty()
+            })
+            .collect(),
     }
 }
 
-/// A tracked change as the raw markup a field result keeps, less the comment
-/// markers `nested_comment_ranges` moved to the field's edges.
-fn raw_change(element: &XmlElement) -> InlineNode {
+/// The field instruction text `runs` carry.
+fn instruction_text(runs: &[Run]) -> String {
+    runs.iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| match content {
+            RunContent::InstrText { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the field characters inside `element` open and close whole fields,
+/// so keeping it as markup leaves its own field balanced.
+fn balanced_field_chars(element: &XmlElement) -> bool {
+    fn visit(element: &XmlElement, depth: &mut usize) -> bool {
+        if element.local_name() == "fldChar" {
+            match element.attribute(Some("w"), "fldCharType") {
+                Some("begin") => *depth += 1,
+                Some("separate") if *depth == 0 => return false,
+                Some("end") if *depth == 0 => return false,
+                Some("end") => *depth -= 1,
+                _ => {}
+            }
+        }
+        element.child_elements().all(|child| visit(child, depth))
+    }
+    let mut depth = 0;
+    visit(element, &mut depth) && depth == 0
+}
+
+/// A tracked change as the raw markup a field keeps, less the comment markers
+/// `nested_comment_ranges` moved to the field's edges and the comment
+/// references the export writes with their comments.
+fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
+    fn reference_run(run: &XmlElement) -> bool {
+        let mut children = run
+            .child_elements()
+            .filter(|child| child.local_name() != "rPr")
+            .peekable();
+        children.peek().is_some() && children.all(|child| child.local_name() == "commentReference")
+    }
     fn without_comment_ranges(element: &XmlElement) -> XmlElement {
         let children = element
             .children
@@ -965,6 +1016,7 @@ fn raw_change(element: &XmlElement) -> InlineNode {
             .filter_map(|node| match node {
                 XmlNode::Element(child) => match child.local_name() {
                     "commentRangeStart" | "commentRangeEnd" => None,
+                    "r" if reference_run(child) => None,
                     "customXml" | "smartTag" | "sdt" | "sdtContent" | "hyperlink" | "ins"
                     | "del" | "moveFrom" | "moveTo" | "fldSimple" => {
                         Some(XmlNode::Element(without_comment_ranges(child)))
@@ -983,6 +1035,7 @@ fn raw_change(element: &XmlElement) -> InlineNode {
     InlineNode::RawXml(Box::new(RawInlineXml {
         node_type: RawInlineXmlType::RawXml,
         xml: without_comment_ranges(element).to_raw_inline_xml(),
+        shown,
     }))
 }
 
@@ -1923,6 +1976,23 @@ mod tests {
             r#"<w:ins w:id="5"><w:r><w:t>20</w:t></w:r></w:ins>"#
         );
         assert_eq!(field.field_result.len(), 1);
+    }
+
+    #[test]
+    fn a_change_holding_its_fields_own_field_character_moves_out_as_before() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+              <w:r><w:instrText> DATE </w:instrText></w:r>
+              <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:r><w:t>20</w:t></w:r>
+              <w:del w:id="5"><w:r><w:delText>26</w:delText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:del>
+            </w:p>"#,
+        );
+        let ParagraphContent::Tracked(change) = &paragraph.content[0] else {
+            panic!("the deletion moves in front of its field")
+        };
+        assert_eq!(change.node_type, "deletion");
     }
 
     fn run_texts(paragraph: &Paragraph) -> Vec<&str> {

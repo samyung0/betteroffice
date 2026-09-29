@@ -869,6 +869,9 @@ pub struct RawInlineXml {
     #[serde(rename = "type")]
     pub node_type: RawInlineXmlType,
     pub xml: String,
+    /// The runs it shows in a field that keeps it in place of a tracked change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown: Vec<Run>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +898,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     Some(InlineNode::RawXml(Box::new(RawInlineXml {
         node_type: RawInlineXmlType::RawXml,
         xml: element.to_raw_inline_xml(),
+        shown: Vec::new(),
     })))
 }
 
@@ -998,6 +1002,46 @@ pub struct ComplexField {
     pub structured_result: Option<StructuredFieldContent>,
     #[serde(rename = "fieldTree", skip_serializing_if = "Option::is_none")]
     pub field_tree: Option<StructuredFieldTree>,
+}
+
+impl StructuredFieldContent {
+    /// Whether it holds markup a field's run view cannot write: a tracked
+    /// change, content control or foreign markup kept in place.
+    pub fn keeps_markup(&self) -> bool {
+        self.inline
+            .iter()
+            .flatten()
+            .any(|node| matches!(node, InlineNode::RawXml(_) | InlineNode::InlineSdt(_)))
+    }
+}
+
+impl SimpleField {
+    /// The result nodes a save writes; `None` writes `content`.
+    pub fn written_result(&self) -> Option<&[InlineNode]> {
+        self.structured_result
+            .as_ref()
+            .filter(|content| content.blocks.is_none())
+            .and_then(|content| content.inline.as_deref())
+    }
+}
+
+impl ComplexField {
+    /// The code nodes a save writes; `None` writes `field_code` or the instruction.
+    pub fn written_code(&self) -> Option<&[InlineNode]> {
+        self.structured_code
+            .as_ref()
+            .filter(|content| content.keeps_markup())
+            .and_then(|content| content.inline.as_deref())
+    }
+
+    /// The result nodes a save writes; `None` writes `field_result`, as for a
+    /// result spanning paragraphs that keeps no markup.
+    pub fn written_result(&self) -> Option<&[InlineNode]> {
+        self.structured_result
+            .as_ref()
+            .filter(|content| content.blocks.is_none() || content.keeps_markup())
+            .and_then(|content| content.inline.as_deref())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1170,6 +1214,15 @@ pub struct Hyperlink {
     pub children: Vec<InlineNode>,
     #[serde(rename = "structuredChildren", skip_serializing_if = "Option::is_none")]
     pub structured_children: Option<Vec<InlineNode>>,
+}
+
+impl Hyperlink {
+    /// The children a save writes.
+    pub fn written_children(&self) -> &[InlineNode] {
+        self.structured_children
+            .as_deref()
+            .unwrap_or(&self.children)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

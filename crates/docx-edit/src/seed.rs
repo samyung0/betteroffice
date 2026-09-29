@@ -1555,12 +1555,19 @@ fn field_to_units(
         }
         units.extend(projected);
     }
+    // The field shows the result its projected children leave: runs, and a
+    // kept change's or content control's text.
     let mut visible = value.clone();
     visible["fieldResult"] = Value::Array(
         result
             .iter()
-            .filter(|child| string(field(Some(child), "type")) == Some("run"))
-            .cloned()
+            .filter(|child| {
+                matches!(
+                    string(field(Some(child), "type")),
+                    Some("run" | "rawXml" | "inlineSdt")
+                )
+            })
+            .flat_map(|child| shown_runs(std::slice::from_ref(child)))
             .collect(),
     );
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
@@ -1574,6 +1581,22 @@ fn field_to_units(
     );
     units.push(embed_unit("field", payload, &marks, 1));
     units
+}
+
+/// The runs field result `nodes` show (`shown_runs` in docx-parse's paragraph module).
+pub(crate) fn shown_runs(nodes: &[Value]) -> Vec<Value> {
+    nodes
+        .iter()
+        .flat_map(|node| match string(field(Some(node), "type")) {
+            Some("run") => vec![node.clone()],
+            Some("hyperlink") => shown_runs(array(field(Some(node), "children"))),
+            Some("simpleField") => array(field(Some(node), "content")).to_vec(),
+            Some("complexField") => array(field(Some(node), "fieldResult")).to_vec(),
+            Some("inlineSdt") => shown_runs(array(field(Some(node), "content"))),
+            Some("rawXml") => array(field(Some(node), "shown")).to_vec(),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 fn tracked_mark(info: &Value, kind: &str, is_move_pair: bool) -> Mark {
