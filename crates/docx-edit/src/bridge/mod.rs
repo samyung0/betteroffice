@@ -255,15 +255,17 @@ fn lower_story<T: ReadTxn>(
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
                     // A comment's own reference mark, which the save writes
-                    // after the end of a comment no story holds one for, is
-                    // content for the slot's breaks to lead as well.
+                    // for a comment no story holds one for (after its end, or
+                    // after the breaks when it ends before one), is content
+                    // for the slot's breaks to lead as well.
+                    let from = slot.start.unwrap_or(paragraph_start);
                     let text = !paragraph_runs.is_empty()
                         || !paragraph_drawings.is_empty()
                         || (!slot.breaks.is_empty()
                             && crate::comment_boundaries(txn).get(story_id).is_some_and(
                                 |boundaries| {
                                     boundaries.iter().any(|&(at, writes)| {
-                                        writes && (paragraph_start..=story_index).contains(&at)
+                                        writes && (from..=story_index).contains(&at)
                                     })
                                 },
                             ));
@@ -370,6 +372,7 @@ fn lower_story<T: ReadTxn>(
                         page_break.get(txn, "leading"),
                         Some(Out::Any(Any::Bool(true)))
                     );
+                    slot.start.get_or_insert(story_index);
                     if kind == "pageBreak"
                         && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last()
                         && paragraph.runs.is_empty()
@@ -816,6 +819,8 @@ fn lower_story<T: ReadTxn>(
 struct Slot {
     /// A break flagged `leading` opened the slot's leading breaks.
     leading: bool,
+    /// The story offset of the slot's first break.
+    start: Option<u32>,
     /// Breaks that keep the next paragraph's space-before if text follows.
     breaks: Vec<usize>,
     /// An empty list item just before the breaks.

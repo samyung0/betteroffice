@@ -36,10 +36,14 @@ const STORY = {
   header: ["hf:rId20", "word/header1.xml"],
   footer: ["hf:rId21", "word/footer1.xml"],
   footnote: ["fn:1", "word/footnotes.xml"],
+  nested: ["body:t0:r0c0:t0:r0c0", "word/document.xml"],
+  headerCell: ["hf:rId20:t0:r0c0", "word/header1.xml"],
+  endnote: ["en:1", "word/endnotes.xml"],
 } as const;
 type Where = keyof typeof STORY;
 const OUTSIDE: Where[] = ["cell", "header", "footer", "footnote"];
 const EVERY: Where[] = ["body", "control", ...OUTSIDE];
+const NINE: Where[] = [...EVERY, "nested", "headerCell", "endnote"];
 
 /** A package holding `content` in story `where`, with `tail` in the body. */
 function docx(where: Where, content: string): Uint8Array {
@@ -50,19 +54,34 @@ function docx(where: Where, content: string): Uint8Array {
       ? `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`
       : where === "cell"
       ? table(content)
+      : where === "nested"
+      ? table(`${table(content)}${p("5B5B5B5B", "")}`)
       : where === "footnote"
       ? p("11111111", `${run("x")}<w:r><w:footnoteReference w:id="1"/></w:r>`)
+      : where === "endnote"
+      ? p("11111111", `${run("x")}<w:r><w:endnoteReference w:id="1"/></w:r>`)
       : "";
+  const notes =
+    where === "endnote"
+      ? {
+          type: `<Override PartName="/word/endnotes.xml" ContentType="${OFFICE}.endnotes+xml"/>`,
+          rel: `<Relationship Id="rId24" Type="${REL}/endnotes" Target="endnotes.xml"/>`,
+        }
+      : { type: "", rel: "" };
   const parts: Record<string, string> = {
-    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footer1.xml" ContentType="${OFFICE}.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/><Override PartName="/word/numbering.xml" ContentType="${OFFICE}.numbering+xml"/></Types>`,
+    "[Content_Types].xml": `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/><Override PartName="/word/comments.xml" ContentType="${OFFICE}.comments+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footer1.xml" ContentType="${OFFICE}.footer+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/><Override PartName="/word/numbering.xml" ContentType="${OFFICE}.numbering+xml"/>${notes.type}</Types>`,
     "_rels/.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
-    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId21" Type="${REL}/footer" Target="footer1.xml"/><Relationship Id="rId22" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId23" Type="${REL}/numbering" Target="numbering.xml"/></Relationships>`,
+    "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/><Relationship Id="rId20" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId21" Type="${REL}/footer" Target="footer1.xml"/><Relationship Id="rId22" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId23" Type="${REL}/numbering" Target="numbering.xml"/>${notes.rel}</Relationships>`,
     "word/document.xml": `<w:document ${W}><w:body>${body}${tail}<w:sectPr><w:headerReference w:type="default" r:id="rId20"/><w:footerReference w:type="default" r:id="rId21"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`,
     // One comment keeps the comments part, which a rebase requires the export to keep.
     "word/comments.xml": `<w:comments ${W}><w:comment w:id="1" w:author="R" w:date="2026-09-01T00:00:00Z"><w:p><w:r><w:t>c1</w:t></w:r></w:p></w:comment></w:comments>`,
     "word/numbering.xml": `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
     "word/header1.xml": `<w:hdr ${W}>${
-      where === "header" ? content : p("66666666", run("head"))
+      where === "header"
+        ? content
+        : where === "headerCell"
+        ? `${table(content)}${p("66666665", "")}`
+        : p("66666666", run("head"))
     }</w:hdr>`,
     "word/footer1.xml": `<w:ftr ${W}>${
       where === "footer" ? content : p("77777777", run("foot"))
@@ -70,6 +89,9 @@ function docx(where: Where, content: string): Uint8Array {
     "word/footnotes.xml": `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1">${
       where === "footnote" ? content : p("88888888", run("note"))
     }</w:footnote></w:footnotes>`,
+    ...(where === "endnote" && {
+      "word/endnotes.xml": `<w:endnotes ${W}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote><w:endnote w:id="1">${content}</w:endnote></w:endnotes>`,
+    }),
   };
   return rezipContainer(
     Object.fromEntries(
@@ -119,6 +141,7 @@ function view(bytes: Uint8Array, part: string): string {
   const from = Math.max(
     xml.indexOf("<w:body>"),
     xml.indexOf('<w:footnote w:id="1"'),
+    xml.indexOf('<w:endnote w:id="1"'),
     0
   );
   return [
@@ -678,6 +701,28 @@ const covered = (session: YrsSession, story: string) =>
     )
   );
 
+/** An editor comment in `story` from `start` to `end` (paragraph id, offset). */
+const editorComment =
+  (story: string, start: [string, number], end: [string, number]) =>
+  (session: YrsSession) =>
+    void session.addComment(
+      [
+        {
+          story,
+          start: { paraId: start[0], offset: start[1] },
+          end: { paraId: end[0], offset: end[1] },
+        },
+      ],
+      "R",
+      "2026-09-29T00:00:00Z",
+      [
+        {
+          type: "paragraph",
+          content: [{ type: "run", content: [{ type: "text", text: "c" }] }],
+        },
+      ]
+    );
+
 describe.each(EVERY)(
   "Enter at the start of a break's paragraph, then Delete or Backspace, in %s",
   (where) => {
@@ -794,6 +839,20 @@ describe.each(["body", "control", "cell"] as Where[])(
               },
             ]
           );
+          s.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: 1 },
+            end: { paraId: "44444444", offset: 4 },
+          });
+        },
+        [true],
+      ],
+      [
+        // Its reference mark goes after the break, which leads it.
+        "an editor comment ending before a leading break, the text after it deleted",
+        lead,
+        (s, story) => {
+          editorComment(story, ["33333333", 0], ["44444444", 0])(s);
           s.deleteRange({
             story,
             start: { paraId: "44444444", offset: 1 },
@@ -1994,6 +2053,194 @@ describe.each(EVERY)(
       // The save writes the source's paragraphs in its own form, then the same bytes.
       expect(seen.map(marked)).toEqual(Array(3).fill(marked(source)));
       expect(new Set(seen).size).toBe(1);
+    });
+  }
+);
+
+/**
+ * The story's units (without their breaks' flags unless `flags`) and what
+ * its comments cover: after `edit`, then after each of three publications.
+ */
+async function kept(
+  bytes: Uint8Array,
+  story: string,
+  edit: (session: YrsSession) => void,
+  flags = true
+) {
+  let session = await open(bytes);
+  edit(session);
+  const state = () => {
+    const seen = units(session, story);
+    return `${flags ? seen : seen.replaceAll("^", "")} ${covered(
+      session,
+      story
+    )}`;
+  };
+  const seen = [state()];
+  for (let publication = 0; publication < 3; publication += 1) {
+    bytes = await publish(bytes, session);
+    session.destroy();
+    session = await open(bytes);
+    seen.push(state());
+  }
+  session.destroy();
+  return seen;
+}
+
+/** Types `text` at the end of paragraph `paraId`. */
+const typeAtEnd =
+  (story: string, paraId: string, text: string) => (session: YrsSession) =>
+    session.insertText(
+      {
+        story,
+        paraId,
+        offset: session
+          .paragraphSpans(story)
+          .find((span) => span.paraId === paraId)!.length,
+      },
+      text
+    );
+
+/**
+ * The comment's breaks and range stay as they are over three publications,
+ * and an edit after a capture lands as it saves directly.
+ */
+async function keepsBreaks(
+  bytes: Uint8Array,
+  story: string,
+  cover: (session: YrsSession) => void,
+  edit: (session: YrsSession) => void,
+  flags = true
+) {
+  const commented = await kept(bytes, story, cover, flags);
+  expect(commented).toEqual(Array(4).fill(commented[0]));
+  const direct = await kept(
+    bytes,
+    story,
+    (session) => {
+      cover(session);
+      edit(session);
+    },
+    flags
+  );
+  const { next } = await rebase(bytes, story, cover, edit);
+  expect((await kept(next, story, () => {}, flags)).slice(0, 3)).toEqual(
+    direct.slice(1)
+  );
+}
+
+describe.each(NINE)(
+  "an editor comment ending at a break a paragraph opens with keeps every break, in %s",
+  (where) => {
+    const [story] = STORY[where];
+    const heading = (breaks: string) =>
+      `${p("33333333", run("prev"))}${p(
+        "44444444",
+        `${breaks}${run("Heading")}`
+      )}`;
+    test.each([
+      [
+        "from the paragraph before to the page break",
+        heading(BR),
+        ["33333333", 0],
+        ["44444444", 0],
+      ],
+      [
+        "from inside the paragraph before to the column break",
+        heading(COL),
+        ["33333333", 2],
+        ["44444444", 0],
+      ],
+      [
+        "from the paragraph before to two breaks",
+        heading(`${BR}${COL}`),
+        ["33333333", 0],
+        ["44444444", 0],
+      ],
+      [
+        "over the page break of two",
+        heading(`${BR}${COL}`),
+        ["44444444", 0],
+        ["44444444", 1],
+      ],
+      [
+        "over the column break of two at the story's start",
+        `${p("44444444", `${COL}${BR}${run("Heading")}`)}${p(
+          "45454545",
+          run("next")
+        )}`,
+        ["44444444", 0],
+        ["44444444", 1],
+      ],
+    ] as const)("%s", async (_, xml, start, end) => {
+      await keepsBreaks(
+        docx(where, xml),
+        story,
+        editorComment(story, [...start], [...end]),
+        typeAtEnd(story, "44444444", "Q")
+      );
+    });
+
+    test("from the paragraph before to the page break, the heading's text removed", async () => {
+      // The reference mark the save writes after the break is content for it
+      // to lead, so it stays in the emptied heading's paragraph.
+      await keepsBreaks(
+        docx(where, heading(BR)),
+        story,
+        (session) => {
+          editorComment(story, ["33333333", 0], ["44444444", 0])(session);
+          session.deleteRange({
+            story,
+            start: { paraId: "44444444", offset: 1 },
+            end: { paraId: "44444444", offset: 8 },
+          });
+        },
+        typeAtEnd(story, "33333333", "Q")
+      );
+    });
+  }
+);
+
+describe.each(NINE)(
+  "a comment over a paragraph holding only a column break keeps the break its own, in %s",
+  (where) => {
+    const [story] = STORY[where];
+    const only = (breaks: string) =>
+      `${p("33333333", run("prev"))}${p("44444444", breaks)}${p(
+        "45454545",
+        run("next")
+      )}`;
+    test.each([
+      [
+        "an editor comment over the break",
+        only(COL),
+        editorComment(story, ["44444444", 0], ["44444444", 1]),
+      ],
+      [
+        "an editor comment over a page and a column break",
+        only(`${BR}${COL}`),
+        editorComment(story, ["44444444", 0], ["44444444", 2]),
+      ],
+      [
+        "an editor comment over the column break after a page break",
+        only(`${BR}${COL}`),
+        editorComment(story, ["44444444", 1], ["44444444", 2]),
+      ],
+      [
+        "a comment of the file with no reference mark",
+        only(`${S(1)}${COL}${E(1)}`),
+        () => {},
+      ],
+    ] as const)("%s", async (_, xml, cover) => {
+      // The breaks read back as leading the comment's reference mark, as
+      // they did before the reference counted as content.
+      await keepsBreaks(
+        docx(where, xml),
+        story,
+        cover,
+        typeAtEnd(story, "45454545", "Q"),
+        false
+      );
     });
   }
 );

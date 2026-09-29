@@ -2071,13 +2071,16 @@ function splitFlow(
   tokens: FlowToken[],
   referenced: (id: number) => boolean
 ): { leading: FlowToken[]; trailing: FlowToken[] } {
-  // Breaks lead the content that follows them: the text (a comment's own
-  // reference mark included), or without text the last bookmark. Without
-  // either, those up to the last column break lead.
-  if (!tokens.some(({ kind }) => kind === 'page' || kind === 'column'))
-    return { leading: [], trailing: [] };
+  // Breaks lead the content that follows them: the text (with the reference
+  // mark the save writes after a comment's end when no break follows it), or
+  // without text the last bookmark. Without either, those up to the last
+  // column break lead.
+  const isBreak = ({ kind }: FlowToken) => kind === 'page' || kind === 'column';
+  if (!tokens.some(isBreak)) return { leading: [], trailing: [] };
   let split = tokens.findIndex(
-    ({ kind, id }) => kind === 'visible' || (kind === 'end' && !referenced(id!))
+    ({ kind, id }, index) =>
+      kind === 'visible' ||
+      (kind === 'end' && !referenced(id!) && !tokens.slice(index + 1).some(isBreak))
   );
   if (split < 0) split = tokens.map(({ kind }) => kind).lastIndexOf('mark');
   if (split < 0) {
@@ -2640,15 +2643,24 @@ class SaveContext {
       const beforeFlow = before && splitFlow(flowTokens(before.content), this.referenced);
       const nextTokens = next ? flowTokens(next.content) : [];
       const nextFlow = next && splitFlow(nextTokens, this.referenced);
-      // Content for the breaks to lead: text, a bookmark after them, or a
-      // comment's own reference mark, which the save writes after the end of
-      // a comment no story holds one for.
-      const text =
+      // Content for the breaks to lead: text, or a bookmark after them.
+      const content =
         next !== undefined &&
         (nextTokens.some(({ kind }) => kind === 'visible' || kind === 'mark') ||
-          bookmarks.some(({ breaksAfter }) => !breaksAfter) ||
-          (expected.length > 0 &&
-            nextTokens.some(({ kind, id }) => kind === 'end' && !this.referenced(id!))));
+          bookmarks.some(({ breaksAfter }) => !breaksAfter));
+      // Or a comment's own reference mark, written for a comment no story
+      // holds one for: after its end, or after the breaks when it ends
+      // before one of them (see `lead`).
+      const lastBreak = expected.at(-1)?.at;
+      const text =
+        content ||
+        (next !== undefined &&
+          lastBreak !== undefined &&
+          (nextTokens.some(({ kind, id }) => kind === 'end' && !this.referenced(id!)) ||
+            marks.some(
+              ({ id, kind, offset }) =>
+                kind === 'end' && offset <= lastBreak && !this.referenced(id)
+            )));
       // From the first leading break on they open the text (all of them with no
       // paragraph before); the rest close the paragraph before. A paragraph
       // without text or bookmarks keeps breaks ending in a column break as its
@@ -2657,7 +2669,7 @@ class SaveContext {
       // breaks so the seed reads the breaks as leading them.
       const leading = expected.findIndex((entry) => entry.leading);
       const own =
-        !text &&
+        !content &&
         next !== undefined &&
         (bookmarks.length === 0 || !before) &&
         expected.at(-1)?.kind === 'column';
@@ -2716,6 +2728,10 @@ class SaveContext {
         const head: ParagraphContent[] = [];
         let mark = 0;
         const placed = new Set<BookmarkBoundary>();
+        // Comments ending before a break that no story holds a reference for:
+        // their reference marks go after the breaks, which lead them as the
+        // seed reads it (the save would write each one right after its end).
+        const references: number[] = [];
         const markTo = (at: number, index: number) => {
           for (const bookmark of bookmarks)
             if (
@@ -2730,12 +2746,20 @@ class SaveContext {
           while (mark < marks.length && marks[mark]!.offset <= at) {
             const { id, kind } = marks[mark++]!;
             head.push({ type: kind === 'start' ? 'commentRangeStart' : 'commentRangeEnd', id });
+            if (kind === 'end' && index < entries.length && !this.referenced(id))
+              references.push(id);
           }
         };
         entries.forEach((entry, index) => {
           markTo(entry.at, index);
           head.push(slotBreakContent(entry));
         });
+        for (const id of references)
+          head.push({
+            type: 'run',
+            formatting: { styleId: 'CommentReference' },
+            content: [{ type: 'commentReference', id }],
+          });
         markTo(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
         return { ...paragraph, content: [...head, ...paragraph.content] };
       };
