@@ -8,6 +8,7 @@ import type { TextFormatting } from '../formatting';
 import type { InlineSdt } from './sdt';
 import type { MathEquation } from './math';
 import type { BlockContent } from './section';
+import type { RawXml } from './rawXml';
 
 /** Stable document position used by bookmark and field range contracts. */
 export interface ContentPosition {
@@ -167,14 +168,20 @@ export interface StructuredFieldContent {
   blocks?: BlockContent[];
 }
 
-/** Field-capable inline grammar used by nested field code/results. */
+/**
+ * Field-capable inline grammar used by nested field code/results. A tracked
+ * change in a result stays as its markup (`RawXml`).
+ */
 export type FieldInlineContent =
   | Run
   | Hyperlink
   | InlineSdt
   | MathEquation
   | SimpleField
-  | ComplexField;
+  | ComplexField
+  | BookmarkStart
+  | BookmarkEnd
+  | RawXml;
 
 /** Versioned structured field node; missing version means legacy v0 fields. */
 export interface StructuredFieldTree {

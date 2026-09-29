@@ -1004,9 +1004,12 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
   if (item.attributes.ins) {
-    return isMovePair
-      ? { type: 'moveTo', info, content: [run] }
-      : { type: 'insertion', info, content: [run] };
+    const field =
+      item.kind === 'embed' && item.embedKind === 'field' && item.payload.modelKind !== 'commentReference'
+        ? fieldFromPayload(item.payload, item.attributes)
+        : undefined;
+    const content = field?.type === 'simpleField' ? [field] : [run];
+    return isMovePair ? { type: 'moveTo', info, content } : { type: 'insertion', info, content };
   }
   return isMovePair
     ? { type: 'moveFrom', info, content: [run] }
@@ -1014,26 +1017,26 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
 }
 
 function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
+  // Once a field or equation joins the link, its full child list is structuredChildren.
+  const add = (child: Run | SimpleField | ComplexField | MathEquation): void => {
+    if (child.type === 'run') hyperlink.children.push(child);
+    else hyperlink.structuredChildren ??= [...hyperlink.children];
+    hyperlink.structuredChildren?.push(child);
+  };
   if (item.kind === 'text') {
-    hyperlink.children.push(createTextRun(item.text, item.attributes));
+    add(createTextRun(item.text, item.attributes));
     return;
   }
   if (item.embedKind === 'break') {
-    hyperlink.children.push({
-      type: 'run',
-      content: [{ type: 'break', breakType: 'textWrapping' }],
-    });
+    add({ type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] });
   } else if (item.embedKind === 'tab') {
-    hyperlink.children.push({ type: 'run', content: [{ type: 'tab' }] });
+    add({ type: 'run', content: [{ type: 'tab' }] });
   } else if (item.embedKind === 'horizontalRule') {
-    hyperlink.children.push(horizontalRuleRun(item.payload, item.attributes));
+    add(horizontalRuleRun(item.payload, item.attributes));
   } else if (item.embedKind === 'field') {
-    const child =
-      commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes);
-    if (child.type === 'run') hyperlink.children.push(child);
-    else (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
+    add(commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes));
   } else if (item.embedKind === 'math') {
-    (hyperlink.structuredChildren ??= [...hyperlink.children]).push(mathFromPayload(item.payload));
+    add(mathFromPayload(item.payload));
   }
 }
 

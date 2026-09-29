@@ -13,7 +13,7 @@ import type {
   TableCellFormatting,
 } from '../formatting';
 import type { Run } from './run';
-import type { Hyperlink } from './link';
+import type { Hyperlink, SimpleField } from './link';
 
 /**
  * Tracked change metadata (w:ins, w:del attributes)
@@ -70,7 +70,7 @@ export interface Insertion {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Inserted content */
-  content: (Run | Hyperlink)[];
+  content: (Run | Hyperlink | SimpleField)[];
 }
 
 /**
@@ -103,7 +103,7 @@ export interface MoveTo {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Moved content */
-  content: (Run | Hyperlink)[];
+  content: (Run | Hyperlink | SimpleField)[];
 }
 
 /**

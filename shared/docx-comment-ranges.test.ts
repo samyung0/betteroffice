@@ -577,11 +577,10 @@ test.each([
     )}</w:fldSimple>`,
     "[field]",
   ],
-  // The parser still moves the insertion out in front of its field.
   [
     "a change in a field result",
     field(`${inserted(`${S(5)}${run("20")}${E(5)}`)}${run("26")}`),
-    "20[field]",
+    "[field]",
   ],
 ])(
   "a Word range inside %s holds the whole field across publications",

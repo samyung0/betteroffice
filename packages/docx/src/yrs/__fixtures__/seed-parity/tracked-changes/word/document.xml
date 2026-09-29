@@ -10,6 +10,9 @@
       <w:del w:id="102" w:author="Grace Hopper" w:date="2026-01-03T04:05:06Z">
         <w:r><w:delText xml:space="preserve">deleted words </w:delText></w:r>
       </w:del>
+      <w:ins w:id="105" w:author="Ada Lovelace" w:date="2026-01-02T03:04:05Z">
+        <w:fldSimple w:instr=" DATE "><w:r><w:t>2026</w:t></w:r></w:fldSimple>
+      </w:ins>
       <w:r><w:t>tail.</w:t></w:r>
     </w:p>
     <w:p>

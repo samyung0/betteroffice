@@ -268,9 +268,16 @@ fn serialize_hyperlink(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    for child in &hyperlink.children {
+    for child in hyperlink
+        .structured_children
+        .as_ref()
+        .unwrap_or(&hyperlink.children)
+    {
         match child {
             InlineNode::Run(run) => children.push_str(&serialize_run(run, context)?),
+            InlineNode::SimpleField(field) => {
+                children.push_str(&serialize_simple_field(field, context)?)
+            }
             InlineNode::BookmarkStart(bookmark) => {
                 children.push_str(&serialize_bookmark_start(bookmark))
             }
@@ -323,8 +330,19 @@ fn serialize_simple_field(
         output.push_str(" w:dirty=\"true\"");
     }
     output.push('>');
-    for run in &field.content {
-        output.push_str(&serialize_run(run, context)?);
+    let structured = field
+        .structured_result
+        .as_ref()
+        .filter(|content| content.blocks.is_none())
+        .and_then(|content| content.inline.as_ref());
+    if let Some(nodes) = structured {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else {
+        for run in &field.content {
+            output.push_str(&serialize_run(run, context)?);
+        }
     }
     output.push_str("</w:fldSimple>");
     Ok(output)
@@ -536,6 +554,9 @@ fn serialize_tracked_change(
             ),
             InlineNode::Hyperlink(hyperlink) => {
                 append_generated(&mut writer, &serialize_hyperlink(hyperlink, context)?)
+            }
+            InlineNode::SimpleField(field) if !deletion => {
+                append_generated(&mut writer, &serialize_simple_field(field, context)?)
             }
             _ => {}
         };

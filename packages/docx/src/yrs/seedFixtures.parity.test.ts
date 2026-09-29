@@ -32,7 +32,7 @@ const REQUIRED_NODES: Record<string, string[]> = {
   'sections-headers': ['paragraph'],
   shapes: ['shape', 'table'],
   tables: ['table', 'tableRow', 'tableCell'],
-  'tracked-changes': ['insertion', 'deletion', 'paragraphPropertyChange', 'runPropertyChange'],
+  'tracked-changes': ['insertion', 'deletion', 'paragraphPropertyChange', 'runPropertyChange', 'simpleField'],
   'tracked-moves': ['moveFrom', 'moveTo'],
 };
 

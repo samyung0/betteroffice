@@ -1607,7 +1607,8 @@ fn tracked_to_units(
     );
     let mut units = Vec::new();
     for child in array(field(Some(content), "content")) {
-        if string(field(Some(child), "type")) == Some("run") {
+        let child_type = string(field(Some(child), "type"));
+        if child_type == Some("run") {
             units.extend(run_to_units(
                 child,
                 style_formatting,
@@ -1615,6 +1616,10 @@ fn tracked_to_units(
                 std::slice::from_ref(&marker),
                 source,
             ));
+        } else if child_type == Some("simpleField") {
+            let (payload, mut marks) = field_payload(child, style_formatting, source);
+            marks.push(marker.clone());
+            units.push(embed_unit("field", payload, &marks, 1));
         } else {
             units.extend(hyperlink_to_units(
                 child,

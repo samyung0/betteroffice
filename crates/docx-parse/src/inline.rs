@@ -1873,6 +1873,10 @@ impl OpenComplexField {
         self.mode = FieldMode::Result;
     }
 
+    pub(crate) fn in_result(&self) -> bool {
+        self.mode == FieldMode::Result
+    }
+
     /// A node inside an open field joins the field's structure in place; its
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.

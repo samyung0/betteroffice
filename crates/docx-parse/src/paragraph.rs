@@ -10,9 +10,9 @@ use crate::formatting::{
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
-    OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
-    StructuredFieldTree, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties,
+    OpenComplexField, RawInlineXml, RawInlineXmlType, Run, RunContent, SimpleField,
+    SimpleFieldType, StructuredFieldContent, StructuredFieldTree, parse_bookmark_end,
+    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -556,17 +556,18 @@ fn parse_paragraph_contents(
                     )?;
                     let (starts, ends) = nested_comment_ranges(container);
                     output.extend(starts);
-                    output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
-                        InlineSdt {
-                            node_type: InlineSdtType::InlineSdt,
-                            properties: parse_sdt_properties(
-                                child.child("w", "sdtPr"),
-                                None,
-                                theme,
-                            ),
-                            content: filter_field_inline(parsed),
-                        },
-                    ))));
+                    let sdt = InlineNode::InlineSdt(Box::new(InlineSdt {
+                        node_type: InlineSdtType::InlineSdt,
+                        properties: parse_sdt_properties(child.child("w", "sdtPr"), None, theme),
+                        content: filter_field_inline(parsed),
+                    }));
+                    match fields.last_mut().filter(|field| field.in_result()) {
+                        Some(active) => {
+                            let runs = shown_runs(std::slice::from_ref(&sdt));
+                            active.absorb(sdt, runs);
+                        }
+                        None => output.push(ParagraphContent::Inline(sdt)),
+                    }
                     close_ranges(ends, &fields, &mut output, &mut field_ends);
                 }
             }
@@ -584,12 +585,18 @@ fn parse_paragraph_contents(
                     depth + 1,
                     is_deletion,
                 )?;
-                let content = content
+                let content: Vec<InlineNode> = content
                     .into_iter()
                     .filter_map(|content| match content {
                         ParagraphContent::Inline(
                             node @ (InlineNode::Run(_) | InlineNode::Hyperlink(_)),
                         ) => Some(node),
+                        // A deletion's field would need its deleted form on save.
+                        ParagraphContent::Inline(node @ InlineNode::SimpleField(_))
+                            if !is_deletion =>
+                        {
+                            Some(node)
+                        }
                         _ => None,
                     })
                     .collect();
@@ -601,11 +608,25 @@ fn parse_paragraph_contents(
                 };
                 let (starts, ends) = nested_comment_ranges(child);
                 output.extend(starts);
-                output.push(ParagraphContent::Tracked(TrackedInline {
+                let change = TrackedInline {
                     node_type: node_type.to_owned(),
                     info: parse_tracked_change_info(child),
                     content,
-                }));
+                };
+                // A field result has no tracked change in its grammar: the change
+                // stays there as its markup, and what it inserts shows as the result.
+                match fields.last_mut().filter(|field| field.in_result()) {
+                    Some(active) => {
+                        let shown = shown_change_runs(&change);
+                        active.absorb(raw_change(child), shown);
+                    }
+                    None if element.local_name() == "fldSimple" => {
+                        // `parse_simple_field_composed` shows the change and saves the markup.
+                        output.push(ParagraphContent::Tracked(change));
+                        output.push(ParagraphContent::Inline(raw_change(child)));
+                    }
+                    None => output.push(ParagraphContent::Tracked(change)),
+                }
                 close_ranges(ends, &fields, &mut output, &mut field_ends);
             }
             "moveFromRangeStart" | "moveToRangeStart" => {
@@ -734,7 +755,9 @@ fn parse_simple_field_composed(
         .attribute(Some("w"), "instr")
         .unwrap_or_default()
         .to_owned();
-    let result = filter_field_inline(parse_paragraph_contents(
+    let mut content = Vec::new();
+    let mut result = Vec::new();
+    for item in parse_paragraph_contents(
         element,
         relationships,
         theme,
@@ -745,14 +768,22 @@ fn parse_simple_field_composed(
         drawing,
         depth,
         false,
-    )?);
-    let content = result
-        .iter()
-        .filter_map(|node| match node {
-            InlineNode::Run(run) => Some(run.clone()),
-            _ => None,
-        })
-        .collect();
+    )? {
+        match item {
+            // The change's markup follows it and is what saves.
+            ParagraphContent::Tracked(change) => content.extend(shown_change_runs(&change)),
+            ParagraphContent::Inline(
+                node @ (InlineNode::BookmarkStart(_)
+                | InlineNode::BookmarkEnd(_)
+                | InlineNode::RawXml(_)),
+            ) => result.push(node),
+            ParagraphContent::Inline(node) => {
+                content.extend(shown_runs(std::slice::from_ref(&node)));
+                result.push(node);
+            }
+            _ => {}
+        }
+    }
     let structured_result = (!result.is_empty()).then(|| StructuredFieldContent {
         inline: Some(result),
         blocks: None,
@@ -898,6 +929,60 @@ fn parse_inline_sdt_composed(
             property_theme.then_some(theme).flatten(),
         ),
         content,
+    }))
+}
+
+/// The runs `nodes` show, in order: what a field result containing them reads as.
+fn shown_runs(nodes: &[InlineNode]) -> Vec<Run> {
+    let mut runs = Vec::new();
+    for node in nodes {
+        match node {
+            InlineNode::Run(run) => runs.push(run.clone()),
+            InlineNode::Hyperlink(hyperlink) => runs.extend(shown_runs(&hyperlink.children)),
+            InlineNode::SimpleField(field) => runs.extend(field.content.iter().cloned()),
+            InlineNode::InlineSdt(sdt) => runs.extend(shown_runs(&sdt.content)),
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// What a tracked change shows: its insertions, not its deletions.
+fn shown_change_runs(change: &TrackedInline) -> Vec<Run> {
+    match change.node_type.as_str() {
+        "deletion" | "moveFrom" => Vec::new(),
+        _ => shown_runs(&change.content),
+    }
+}
+
+/// A tracked change as the raw markup a field result keeps, less the comment
+/// markers `nested_comment_ranges` moved to the field's edges.
+fn raw_change(element: &XmlElement) -> InlineNode {
+    fn without_comment_ranges(element: &XmlElement) -> XmlElement {
+        let children = element
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                XmlNode::Element(child) => match child.local_name() {
+                    "commentRangeStart" | "commentRangeEnd" => None,
+                    "customXml" | "smartTag" | "sdt" | "sdtContent" | "hyperlink" | "ins"
+                    | "del" | "moveFrom" | "moveTo" | "fldSimple" => {
+                        Some(XmlNode::Element(without_comment_ranges(child)))
+                    }
+                    _ => Some(node.clone()),
+                },
+                _ => Some(node.clone()),
+            })
+            .collect();
+        XmlElement {
+            name: element.name.clone(),
+            attributes: element.attributes.clone(),
+            children,
+        }
+    }
+    InlineNode::RawXml(Box::new(RawInlineXml {
+        node_type: RawInlineXmlType::RawXml,
+        xml: without_comment_ranges(element).to_raw_inline_xml(),
     }))
 }
 
@@ -1817,11 +1902,27 @@ mod tests {
                 _ => "other".into(),
             })
             .collect();
-        // The insertion itself still moves out in front of its field (existing behaviour).
+        assert_eq!(layout, ["S1", "simple", "E1", "S2", "field", "E2"]);
+        // The insertion stays in the result as its markup, less the markers.
+        let ParagraphContent::Inline(InlineNode::ComplexField(field)) = &paragraph.content[4]
+        else {
+            panic!("complex field")
+        };
+        let result = field
+            .structured_result
+            .as_ref()
+            .unwrap()
+            .inline
+            .as_ref()
+            .unwrap();
+        let [InlineNode::RawXml(raw)] = result.as_slice() else {
+            panic!("raw insertion")
+        };
         assert_eq!(
-            layout,
-            ["S1", "simple", "E1", "S2", "insertion", "field", "E2"]
+            raw.xml,
+            r#"<w:ins w:id="5"><w:r><w:t>20</w:t></w:r></w:ins>"#
         );
+        assert_eq!(field.field_result.len(), 1);
     }
 
     fn run_texts(paragraph: &Paragraph) -> Vec<&str> {

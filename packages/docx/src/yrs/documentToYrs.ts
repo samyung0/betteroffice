@@ -724,6 +724,9 @@ function trackedToUnits(
   for (const child of content.content) {
     if (child.type === 'run') {
       units.push(...runToUnits(child, styleFormatting, styleResolver, [mark]));
+    } else if (child.type === 'simpleField') {
+      const field = fieldPayload(child, styleFormatting);
+      units.push(embedUnit('field', field.payload, [...field.marks, mark]));
     } else {
       units.push(...hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]));
     }
