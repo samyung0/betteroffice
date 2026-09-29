@@ -26,8 +26,11 @@ export interface Lineage {
       id: (value: string) => string
     ): unknown;
   };
-  /** Brings the rebased state in line with what its export writes, once every change landed. */
-  settle?(doc: Y.Doc): void;
+  /**
+   * Brings the rebased state in line with what its export writes, once every
+   * change landed: `later` is the latest state, `id` maps its entity ids.
+   */
+  settle?(doc: Y.Doc, later: Y.Doc, id: (value: string) => string): void;
 }
 
 export class RebaseError extends Error {}
@@ -104,52 +107,142 @@ export const DOCX_LINEAGE: Lineage = {
   },
   // A comment the later edits removed takes its reference field with it, as
   // removing it in the editor does: an export drops a field naming no comment.
-  settle(doc) {
+  // A field result's projected children pair with their fields as in the
+  // latest state.
+  settle(doc, later, id) {
     const comments = doc.getMap("comments");
-    for (const text of doc.getMap("stories").values())
-      if (text instanceof Y.Text) {
+    const stories = doc.getMap("stories");
+    for (const text of stories.values())
+      if (text instanceof Y.Text)
         for (const [offset, embed] of embeds(text).reverse())
           if (
             embed.get("modelKind") === "commentReference" &&
             !comments.has(String(embed.get("commentId")))
           )
             text.delete(offset, 1);
-        pairProjectedChildren(text);
-      }
+    for (const [key, source] of later.getMap("stories").entries()) {
+      const target = stories.get(id(key));
+      if (source instanceof Y.Text && target instanceof Y.Text)
+        pairAsLatest(source, target);
+    }
   },
 };
 
+type Marker = { id: number; index: number };
+
 /**
- * Gives each projected child of a field result the number of the field that
- * closes it, which the export pairs them by (`restoreProjectedFieldResults`):
- * text the later edits typed there carries the capture's number, and the
- * export's seed may number that field otherwise.
+ * A text's projected field children as the export pairs them with their
+ * fields (`restoreProjectedFieldResults`): each unit's `fieldResult` marker
+ * and the offset of the field it is a child of (-1 for none), and each
+ * field's number by offset. A field's children are the units right before
+ * its embed that carry its number, at an index it records.
  */
-function pairProjectedChildren(text: Y.Text): void {
-  type Marker = { id: number; index: number };
-  const pending: Array<[offset: number, length: number, marker: Marker]> = [];
-  const fixes: Array<[offset: number, length: number, marker: Marker]> = [];
-  let offset = 0;
+function projectedChildren(text: Y.Text): {
+  markers: Array<Marker | undefined>;
+  owners: Int32Array;
+  fields: Map<number, number>;
+} {
+  const markers: Array<Marker | undefined> = [];
+  const owners = new Int32Array(text.length).fill(-1);
+  const fields = new Map<number, number>();
+  let run = 0;
   for (const { insert, attributes } of text.toDelta() as Array<{
     insert: unknown;
-    attributes?: { fieldResult?: Marker };
+    attributes?: { fieldResult?: Marker | null };
   }>) {
     const length = typeof insert === "string" ? insert.length : 1;
-    const marker = attributes?.fieldResult;
-    if (marker) pending.push([offset, length, marker]);
-    else if (insert instanceof Y.Map) {
-      const projection = insert.get("resultProjection") as { id?: number } | undefined;
-      if (insert.get("_kind") === "pilcrow") pending.length = 0;
-      else if (typeof projection?.id === "number") {
-        for (const [at, units, child] of pending)
-          if (child.id !== projection.id)
-            fixes.push([at, units, { ...child, id: projection.id }]);
-        pending.length = 0;
+    const marker = attributes?.fieldResult ?? undefined;
+    for (let unit = 0; unit < length; unit++) markers.push(marker);
+    if (marker) {
+      run += length;
+      continue;
+    }
+    const projection =
+      insert instanceof Y.Map
+        ? (insert.get("resultProjection") as
+            | { id?: number; children?: Array<{ index?: number }> }
+            | undefined)
+        : undefined;
+    const at = markers.length - 1;
+    if (typeof projection?.id === "number") {
+      fields.set(at, projection.id);
+      const indices = new Set(projection.children?.map(({ index }) => index));
+      for (let child = at - 1; child >= at - run; child--) {
+        const { id, index } = markers[child]!;
+        if (id !== projection.id) break;
+        if (indices.has(index)) owners[child] = at;
       }
     }
-    offset += length;
+    run = 0;
   }
-  for (const [at, units, marker] of fixes) text.format(at, units, { fieldResult: marker });
+  return { markers, owners, fields };
+}
+
+/**
+ * Pairs each projected child in `target`, the rebased story, with the field
+ * the latest state's `source` pairs it with, and no other: a field's number
+ * is its place in its saved paragraph, so text typed in a child after the
+ * capture carries the capture's number, the export's seed may number the
+ * field otherwise, and a child whose field was deleted joins none. A child
+ * takes the index its field records for it. Fails when the export would
+ * still pair them otherwise.
+ */
+function pairAsLatest(source: Y.Text, target: Y.Text): void {
+  const from = projectedChildren(source);
+  const to = projectedChildren(target);
+  if (!from.markers.some(Boolean) && !to.markers.some(Boolean)) return;
+  let f: Alignment;
+  try {
+    f = align(units(source), units(target));
+  } catch {
+    return; // Changes inside it cannot land and fail the rebase.
+  }
+  const field = (owner: number) =>
+    owner < 0 || f.map[owner] < 0 ? undefined : to.fields.get(f.map[owner]);
+  // The index the target records for a source child, from its units that
+  // already carry their field's number.
+  const indices = new Map<string, number>();
+  for (const [unit, owner] of from.owners.entries()) {
+    const at = f.map[unit];
+    if (at >= 0 && owner >= 0 && to.markers[at]?.id === field(owner))
+      indices.set(
+        `${owner}:${from.markers[unit]!.index}`,
+        to.markers[at]!.index
+      );
+  }
+  const fixes: Array<[at: number, length: number, marker: Marker | null]> = [];
+  for (const [unit, owner] of from.owners.entries()) {
+    const at = f.map[unit];
+    if (at < 0 || !(from.markers[unit] || to.markers[at])) continue;
+    let marker: Marker | null = null;
+    if (owner >= 0) {
+      const id = field(owner);
+      if (id === undefined)
+        fail("a field result's child lands where its field did not");
+      const index = from.markers[unit]!.index;
+      marker = { id: id!, index: indices.get(`${owner}:${index}`) ?? index };
+    }
+    const current = to.markers[at];
+    if (marker?.id === current?.id && marker?.index === current?.index)
+      continue;
+    const last = fixes.at(-1);
+    if (
+      last &&
+      last[0] + last[1] === at &&
+      last[2]?.id === marker?.id &&
+      last[2]?.index === marker?.index
+    )
+      last[1]++;
+    else fixes.push([at, 1, marker]);
+  }
+  for (const [at, length, marker] of fixes)
+    target.format(at, length, { fieldResult: marker });
+  const paired = projectedChildren(target).owners;
+  for (const [unit, owner] of from.owners.entries()) {
+    const at = f.map[unit];
+    if (at >= 0 && (owner < 0 ? -1 : f.map[owner]) !== paired[at])
+      fail("a field result's child would not export where it stands");
+  }
 }
 
 export const PPTX_LINEAGE: Lineage = {
@@ -670,7 +763,7 @@ export function transplant(
           lineage.positions!.key,
           lineage.positions!.rewrite(value, edited, result, id)
         );
-      lineage.settle?.(result);
+      lineage.settle?.(result, later, id);
     });
 
     // Every touched entity reads as in the latest state, but for what the

@@ -317,16 +317,6 @@ fn unit_op(
     })
 }
 
-fn projection_id<T: ReadTxn>(txn: &T, chunk: &Chunk) -> Option<i64> {
-    let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-        return None;
-    };
-    match map.get(txn, "resultProjection") {
-        Some(Out::Any(value)) => any_value(&value)["id"].as_i64(),
-        _ => None,
-    }
-}
-
 /// The index the seed gives the field at `position` among its paragraph's
 /// content once saved, which names its projection (`field_to_units`): a run,
 /// link, tracked change or embed per chunk the export writes before it (as
@@ -583,16 +573,17 @@ fn resolve_owner(
         .as_ref()
         .and_then(|value| value["id"].as_i64());
     let id = content_index(txn, chunks, first, position, last, comments) as i64;
-    let start = chunks[first..position]
-        .iter()
-        .rposition(|chunk| old_id.is_some() && projection_id(txn, chunk) == old_id)
-        .map_or(first, |offset| first + offset + 1);
-    let children: Vec<&Chunk> = chunks[start..position]
-        .iter()
-        .filter(|chunk| {
-            field_result_attr(chunk).is_some_and(|(chunk_id, _)| Some(chunk_id) == old_id)
-        })
-        .collect();
+    // Its children: the chunks right before it that carry its number, as the
+    // export pairs them (`restoreProjectedFieldResults`).
+    let start = position
+        - chunks[first..position]
+            .iter()
+            .rev()
+            .take_while(|chunk| {
+                old_id.is_some() && field_result_attr(chunk).map(|(id, _)| id) == old_id
+            })
+            .count();
+    let children: Vec<&Chunk> = chunks[start..position].iter().collect();
     let mut spans: BTreeMap<i64, (u32, u32)> = BTreeMap::new();
     for chunk in &children {
         let (_, index) = field_result_attr(chunk).unwrap_or_default();

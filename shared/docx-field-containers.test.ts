@@ -82,16 +82,16 @@ const checkpoint = (base: Uint8Array, state: Uint8Array) => ({
 const publish = (bytes: Uint8Array, state: Uint8Array) =>
   exportOffice(bytes, checkpoint(bytes, state), fixed);
 
-const documentXml = (bytes: Uint8Array) =>
-  new TextDecoder().decode(unzipContainer(bytes)["word/document.xml"]);
+const documentXml = (bytes: Uint8Array, path = "word/document.xml") =>
+  new TextDecoder().decode(unzipContainer(bytes)[path]);
 
 /**
  * A paragraph's markup as text: F<> simple field, [«code»|result] complex
  * field, H() link, +{} -{} M+{} M-{} tracked changes, S{} content control,
  * {bm bm} bookmark, X foreign markup.
  */
-function view(bytes: Uint8Array, paraId = "11111111"): string {
-  const paragraph = documentXml(bytes).match(
+function view(bytes: Uint8Array, paraId = "11111111", path?: string): string {
+  const paragraph = documentXml(bytes, path).match(
     new RegExp(`<w:p [^>]*"${paraId}"[\\s\\S]*?</w:p>`)
   )![0];
   const tags =
@@ -664,27 +664,30 @@ function childAt(session: YrsSession, text: string): number {
   throw new Error(`no projected child holds ${text}`);
 }
 
+type Edit = (session: YrsSession) => void;
 /**
- * Makes `before` ahead of a capture, types Z inside the projected child
- * holding `text` after it, and returns the rebased next publication's
- * first paragraph beside the latest state's direct publication.
+ * Makes `before` ahead of a capture and `after` behind it, and returns the
+ * rebased next publication beside the latest state's direct publication,
+ * as `show` reads them.
  */
-async function typedInChild(bytes: Uint8Array, before: (session: YrsSession) => void, text: string) {
+async function landed(bytes: Uint8Array, before: Edit, after: Edit, show: (bytes: Uint8Array) => string = view) {
   const session = await open(bytes);
   before(session);
   edit(session, "22222222", "x");
   const captured = session.encodeState();
   const exported = await publish(bytes, captured);
-  session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 }, "Z");
+  after(session);
   const latest = session.encodeState();
   session.destroy();
-  const direct = view(await publish(bytes, latest));
+  const direct = show(await publish(bytes, latest));
   const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
   const rebased = await open(exported, state);
-  const next = view(await publish(exported, rebased.encodeState()));
+  const next = show(await publish(exported, rebased.encodeState()));
   rebased.destroy();
   return { next, direct };
 }
+const typeIn = (text: string): Edit => (session) =>
+  session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 }, "Z");
 
 const ref5 = `<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${ref(5)}`;
 const pageBreak = `<w:r><w:br w:type="page"/></w:r>`;
@@ -723,7 +726,7 @@ test.each([
 ] as const)(
   "text typed in a projected child after the capture stays in its field: %s",
   async (_, xml, before, text) => {
-    const { next, direct } = await typedInChild(paragraph(xml), before, text);
+    const { next, direct } = await landed(paragraph(xml), before, typeIn(text));
     expect(next).toBe(direct);
   }
 );
@@ -801,4 +804,128 @@ test("an external link Accept All uncovers carries its URL at once", async () =>
     });
   session.destroy();
   expect(hrefs).toEqual(["https://example.com/x"]);
+});
+
+/**
+ * `docx(body)` with a default header (rId10) and footnote 1 holding
+ * `header` and `footnote`, and each part's own relationships `rels`.
+ */
+function withStories(body: string, header: string, footnote: string, rels = { header: "", footnotes: "" }): Uint8Array {
+  const parts = unzipContainer(docx(body));
+  const text = (path: string) => new TextDecoder().decode(parts[path]);
+  const set = (path: string, xml: string) => (parts[path] = new TextEncoder().encode(xml));
+  const relationships = (xml: string) =>
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${xml}</Relationships>`;
+  set("word/header1.xml", `<w:hdr ${W}>${header}</w:hdr>`);
+  set(
+    "word/footnotes.xml",
+    `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="1">${footnote}</w:footnote></w:footnotes>`
+  );
+  set("word/_rels/header1.xml.rels", relationships(rels.header));
+  set("word/_rels/footnotes.xml.rels", relationships(rels.footnotes));
+  set(
+    "word/_rels/document.xml.rels",
+    text("word/_rels/document.xml.rels").replace(
+      "</Relationships>",
+      `<Relationship Id="rId10" Type="${REL}/header" Target="header1.xml"/><Relationship Id="rId11" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`
+    )
+  );
+  set(
+    "[Content_Types].xml",
+    text("[Content_Types].xml").replace(
+      "</Types>",
+      `<Override PartName="/word/header1.xml" ContentType="${OFFICE}.header+xml"/><Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.footnotes+xml"/></Types>`
+    )
+  );
+  set("word/document.xml", text("word/document.xml").replace("<w:sectPr>", `<w:sectPr><w:headerReference w:type="default" r:id="rId10"/>`));
+  return rezipContainer(parts);
+}
+const noteRef = `<w:r><w:footnoteReference w:id="1"/></w:r>`;
+const cell = (xml: string) =>
+  `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>${xml}</w:tc></w:tr></w:tbl>`;
+
+/** The story, paragraph and offset in it of the first unit `match` picks. */
+function locate(session: YrsSession, match: (segment: ReturnType<YrsSession["storySegments"]>[number]) => boolean) {
+  for (const story of session.storyIds()) {
+    let offset = 0;
+    let found: number | undefined;
+    for (const segment of session.storySegments(story)) {
+      if (segment.kind === "pilcrow") {
+        if (found !== undefined) return { story, paraId: segment.paraId, offset: found };
+        offset = 0;
+        continue;
+      }
+      if (found === undefined && match(segment)) found = offset;
+      offset += segment.kind === "text" ? segment.text.length : 1;
+    }
+  }
+  throw new Error("no such unit");
+}
+const fieldAt = (session: YrsSession, instruction: string) =>
+  locate(session, (segment) => segment.kind === "embed" && String(segment.payload.instruction ?? "").includes(instruction));
+const childText = (session: YrsSession, text: string) => {
+  const at = locate(session, (segment) => segment.kind === "text" && !!segment.attributes.fieldResult && segment.text.includes(text));
+  const segment = session.storySegments(at.story).find((entry) => entry.kind === "text" && entry.text.includes(text));
+  return { ...at, offset: at.offset + (segment as { text: string }).text.indexOf(text) };
+};
+/** Backspace just after the field whose instruction holds `instruction`: its embed goes. */
+const backspaceField = (instruction: string): Edit => (session) => {
+  const { story, paraId, offset } = fieldAt(session, instruction);
+  session.deleteAt({ story, paraId, offset: offset + 1 }, "backward");
+};
+const typeInChild = (text: string): Edit => (session) => {
+  const { story, paraId, offset } = childText(session, text);
+  session.insertText({ story, paraId, offset: offset + 1 }, "Z");
+};
+/** Deletes from inside the child holding `text` through its field's embed and the unit after. */
+const deleteAcrossEnd = (text: string, instruction: string): Edit => (session) => {
+  const { story, paraId, offset } = childText(session, text);
+  const end = fieldAt(session, instruction).offset + 2;
+  session.deleteRange({ story, start: { paraId, offset: offset + 1 }, end: { paraId, offset: end } });
+};
+
+const twoFields = `${run("a ")}${refField("20", "a")}${run(" mid ")}${refField("30", "b")}${run(" b")}`;
+const orphaned = "a H(20) mid [«REF b \\h»|H(30)] b";
+test.each([
+  ["Backspace removes its embed", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
+  ["a delete across its end", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, deleteAcrossEnd("20", "REF a"), "a H(2)mid [«REF b \\h»|H(30)] b"],
+  ["text is typed in it, its embed gone before the capture", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), backspaceField("REF a"), typeInChild("20"), "a H(2Z0) mid [«REF b \\h»|H(30)] b"],
+  ["the next field follows at once", paragraph(`${refField("20", "a")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), "a H(20)[«REF b \\h»|H(30)] b"],
+  ["the next field has no child at its index", paragraph(`${field(`${run("q")}${link(run("20"))}`, " REF a \\h ")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
+  ["Accept All uncovered it", paragraph(`${uncovered}${run(" mid ")}${field(`${run("20")}${ins(link(run("27")))}`, " REF b ")}`), resolveAll("accept"), deleteAcrossEnd("26", "DATE"), "a H(2)mid [«REF b»|20H(27)] b"],
+] as const)("a field's child stays where it is when %s", async (_, bytes, before, after, expected) => {
+  const { next, direct } = await landed(bytes, before, after);
+  expect(direct).toBe(expected);
+  expect(next).toBe(direct);
+});
+
+test.each([
+  ["a table cell", withStories(cell(p("66666666", twoFields)) + tail, p("44444444", run("h")), p("55555555", run("n"))), "66666666", undefined],
+  ["a header", withStories(tail, p("44444444", twoFields), p("55555555", run("n"))), "44444444", "word/header1.xml"],
+  ["a footnote", withStories(p("22222222", `${run("tail")}${noteRef}`), p("44444444", run("h")), p("55555555", twoFields)), "55555555", "word/footnotes.xml"],
+])("a field's child in %s stays where it is when its embed goes", async (_, bytes, paraId, path) => {
+  const { next, direct } = await landed(bytes, () => {}, backspaceField("REF a"), (out) => view(out, paraId, path));
+  expect(direct).toBe(orphaned);
+  expect(next).toBe(direct);
+});
+
+test("a field's child stays where it is when one user types in it while another deletes its embed", async () => {
+  const bytes = paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`);
+  const a = await open(bytes);
+  edit(a, "22222222", "x");
+  const captured = a.encodeState();
+  const exported = await publish(bytes, captured);
+  const b = await open(bytes, captured);
+  typeInChild("20")(a);
+  backspaceField("REF a")(b);
+  a.applyUpdate(b.encodeStateAsUpdate(a.encodeStateVector()));
+  const latest = a.encodeState();
+  a.destroy();
+  b.destroy();
+  const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+  const rebased = await open(exported, state);
+  const next = view(await publish(exported, rebased.encodeState()));
+  rebased.destroy();
+  expect(view(await publish(bytes, latest))).toBe("a H(2Z0) mid [«REF b \\h»|H(30)] b");
+  expect(next).toBe("a H(2Z0) mid [«REF b \\h»|H(30)] b");
 });

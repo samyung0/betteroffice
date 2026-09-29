@@ -1060,31 +1060,51 @@ function projectionSignature(items: InlineItem[]): string {
   return stableStringify(normalized);
 }
 
+/**
+ * Moves each field's projected children back into its result. A field's
+ * children are the items right before its embed that carry its number
+ * (`fieldResult.id`) at an index it records, as `settle` in office-rebase.ts
+ * pairs them. Any other item keeps its place as plain content: a child whose
+ * field was deleted never joins another field.
+ */
 function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
-  const owners: { id: number; owner: EmbedItem; position: number }[] = [];
+  const owners: EmbedItem[] = [];
+  const ownerAt = new Map<number, EmbedItem>();
+  let run = 0;
   for (const [position, item] of items.entries()) {
-    if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
-    const id = asFiniteNumber(asObject(item.payload.resultProjection)?.id);
-    if (id !== undefined) owners.push({ id, owner: item, position });
+    if (item.attributes.fieldResult) {
+      run++;
+      continue;
+    }
+    const id = item.kind === 'embed' ? asFiniteNumber(asObject(item.payload.resultProjection)?.id) : undefined;
+    if (item.kind === 'embed' && id !== undefined) {
+      owners.push(item);
+      for (let at = position - 1; at >= position - run && asFiniteNumber(asObject(items[at]!.attributes.fieldResult)?.id) === id; at--)
+        ownerAt.set(at, item);
+    }
+    run = 0;
   }
   if (owners.length === 0) return items;
+  const recorded = (owner: EmbedItem, index: number) => {
+    const children = asObject(owner.payload.resultProjection)?.children;
+    return Array.isArray(children) && children.some((child) => asFiniteNumber(asObject(child)?.index) === index);
+  };
   const groups = new Map<EmbedItem, Map<number, InlineItem[]>>();
-  const remaining = items.filter((item, position) => {
-    const marker = asObject(item.attributes.fieldResult);
-    const id = asFiniteNumber(marker?.id);
-    const index = asFiniteNumber(marker?.index);
-    const owner = owners.find((entry) => entry.id === id && entry.position > position)?.owner;
-    if (index === undefined || !owner) return true;
-    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
-    const group = children.get(index) ?? [];
+  const remaining = items.flatMap((item, position) => {
+    if (!item.attributes.fieldResult) return [item];
+    const index = asFiniteNumber(asObject(item.attributes.fieldResult)?.index);
+    const owner = ownerAt.get(position);
     const attributes = { ...item.attributes };
     delete attributes.fieldResult;
+    if (index === undefined || !owner || !recorded(owner, index)) return [{ ...item, attributes }];
+    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
+    const group = children.get(index) ?? [];
     group.push({ ...item, attributes });
     children.set(index, group);
     groups.set(owner, children);
-    return false;
+    return [];
   });
-  for (const { owner } of owners) {
+  for (const owner of owners) {
     const stored = fieldFromPayload(owner.payload, owner.attributes);
     if (stored.type !== 'complexField') continue;
     const projection = asObject(owner.payload.resultProjection);
