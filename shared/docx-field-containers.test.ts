@@ -1057,6 +1057,29 @@ test.each([
   expect(await directly(bytes, ...edits)).toBe(expected);
 });
 
+/** Types or pastes `text` over the units from `from` into the text holding `start` through the embed of `instruction`. */
+const typeOver = (start: string, from: number, instruction: string, text = "Q"): Edit => (session) => {
+  const at = textAt(session, start);
+  const field = fieldAt(session, instruction);
+  session.replaceRange({ story: "body", start: { paraId: at.paraId, offset: at.offset + from }, end: { paraId: field.paraId, offset: field.offset + 1 } }, text);
+};
+test.each([
+  [
+    "part of its link and its end, then a join",
+    docx(p("11111111", field(linkTo("BB"), " REF b \\h ")) + p("33333333", field(linkTo("CC"), " REF c \\h ")) + tail),
+    [typeOver("BB", 1, "REF b"), joinNext("11111111")],
+    "H(BQ)[«REF c \\h»|H(CC)]",
+  ],
+  [
+    "the whole field, pasting, then Accept All renumbering the next",
+    paragraph(`${field(linkTo("AA"), " REF a \\h ")}${field(`${linkTo("BB")}${ins(run("26"))}`, " REF b \\h ")}`),
+    [typeOver("AA", 0, "REF a", "pasted"), resolveAll("accept")],
+    "a H(pasted)[«REF b \\h»|H(BB)26] b",
+  ],
+] as const)("text typed over a field it removes joins no other field: %s", async (_, bytes, edits, expected) => {
+  expect(await directly(bytes, ...edits)).toBe(expected);
+});
+
 test.each([
   ["a REF field's link", paragraph(field(linkTo("BB"), " REF b \\h ")), "BB", 1, "a [«REF b \\h»|H(BB)] b"],
   [

@@ -403,18 +403,38 @@ fn content_index<T: ReadTxn>(
     last: usize,
     comments: &[(u32, bool)],
 ) -> usize {
+    // The chunks the export writes inside a field's result: the children
+    // right before each field embed that carry its number at an index it
+    // records. Any other chunk is written in place.
+    let mut paired = vec![false; position - first];
+    for owner in first..=position {
+        let Some((id, indices)) = projection(txn, &chunks[owner]) else {
+            continue;
+        };
+        for child in (first..owner).rev() {
+            match field_result_attr(&chunks[child]) {
+                Some((child_id, index)) if child_id == id && indices.contains(&index) => {
+                    paired[child - first] = true;
+                }
+                _ => break,
+            }
+        }
+    }
     let paragraph = chunks[first].start..=chunks[position].start;
     let comments: usize = comments
         .iter()
         .filter(|(at, _)| paragraph.contains(at))
         .map(|&(at, adds_reference)| {
-            let splits = chunks[first..position].iter().any(|chunk| {
-                matches!(chunk.kind, ChunkKind::Text(_))
-                    && field_result_attr(chunk).is_none()
-                    && !chunk.attr_active("hyperlink")
-                    && chunk.start < at
-                    && at < chunk.end()
-            });
+            let splits = chunks[first..position]
+                .iter()
+                .zip(&paired)
+                .any(|(chunk, &paired)| {
+                    matches!(chunk.kind, ChunkKind::Text(_))
+                        && !paired
+                        && !chunk.attr_active("hyperlink")
+                        && chunk.start < at
+                        && at < chunk.end()
+                });
             1 + usize::from(adds_reference) + usize::from(splits)
         })
         .sum();
@@ -447,7 +467,7 @@ fn content_index<T: ReadTxn>(
         }
         head += 1;
     }
-    for chunk in &chunks[head..position] {
+    for (chunk, &paired) in chunks[head..position].iter().zip(&paired[head - first..]) {
         offset += match &chunk.kind {
             ChunkKind::Embed(Some(map))
                 if map_string(map, txn, KIND_KEY).as_deref() == Some("sdt") =>
@@ -456,7 +476,7 @@ fn content_index<T: ReadTxn>(
             }
             _ => chunk.len,
         };
-        if field_result_attr(chunk).is_some() {
+        if paired {
             continue;
         }
         let href = chunk

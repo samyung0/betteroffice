@@ -6,9 +6,9 @@ use std::sync::Arc;
 use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
 
-use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
+use crate::format::{FIELD_RESULT, FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::field_changes::release_children;
+use crate::ops::field_changes::{projection, release_children};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
@@ -377,7 +377,7 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
                 .unwrap_or_else(|| self.next_id())
         });
-        let formatting = chunks
+        let mut formatting: Vec<(String, Any)> = chunks
             .iter()
             .find(|chunk| {
                 matches!(chunk.kind, ChunkKind::Text(_))
@@ -395,6 +395,15 @@ impl EditingDoc {
                     .collect()
             })
             .unwrap_or_else(|| policy_attrs(&chunks, range.start, &FormatPolicy::Inherit));
+        // Text typed over a field it removes is no child of that field: its
+        // number could pair it with another field after a join or Accept All.
+        if !ctx.is_suggesting()
+            && chunks.iter().any(|chunk| {
+                (range.start..range.end).contains(&chunk.start) && projection(&txn, chunk).is_some()
+            })
+        {
+            formatting.retain(|(key, _)| key != FIELD_RESULT);
+        }
 
         let revision = revision_id
             .as_ref()
