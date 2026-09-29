@@ -8,6 +8,7 @@ use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
 
 use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::ops::field_changes::release_children;
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
@@ -141,6 +142,13 @@ pub(crate) fn suggest_delete(
                 if chunk.attr_active(INS)
                     && chunk.revision_author(INS).as_deref() == Some(ctx.author.as_str())
                 {
+                    release_children(
+                        txn,
+                        story,
+                        std::slice::from_ref(chunk),
+                        overlap_start,
+                        overlap_end,
+                    );
                     story.remove_range(txn, overlap_start, overlap);
                     removed += overlap;
                 } else if !chunk.attr_active(DEL) {
@@ -167,6 +175,7 @@ pub(crate) fn plain_delete(
     end: u32,
     chunks: &[Chunk],
 ) -> DeleteOutcome {
+    release_children(txn, story, chunks, start, end);
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
         .filter_map(|chunk| match &chunk.kind {

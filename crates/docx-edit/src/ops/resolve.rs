@@ -41,7 +41,7 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::field_changes::{self, resolve_field_changes};
+use crate::ops::field_changes::{self, release_children, resolve_field_changes};
 use crate::ops::table::resolve_table_row_revisions;
 use crate::ops::{Chunk, ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
@@ -359,6 +359,13 @@ fn resolve_story(
                         ResolveMode::Accept => record(resolved, del.as_ref()),
                         ResolveMode::Reject => record(resolved, ins.as_ref()),
                     }
+                    release_children(
+                        txn,
+                        story,
+                        std::slice::from_ref(chunk),
+                        overlap_start,
+                        overlap_end,
+                    );
                     story.remove_range(txn, overlap_start, overlap_end - overlap_start);
                     removed += overlap_end - overlap_start;
                 } else {

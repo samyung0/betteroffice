@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde_json::Value;
+use yrs::types::Attrs;
 use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult};
@@ -265,6 +266,57 @@ fn field_result_attr(chunk: &Chunk) -> Option<(i64, i64)> {
         _ => None,
     };
     Some((number("id")?, number("index")?))
+}
+
+/// Clears the `fieldResult` markers of the children of each projecting field
+/// embed among `chunks` in `start..end` of `story`, which a delete is about
+/// to remove: the children right before it that carry its number. A child
+/// whose field is deleted is plain content written in place, which no other
+/// field pairs, even one that comes to share its number after a join or
+/// Accept All.
+pub(crate) fn release_children(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    chunks: &[Chunk],
+    start: u32,
+    end: u32,
+) {
+    let owners: Vec<(u32, i64)> = chunks
+        .iter()
+        .filter(|chunk| (start..end).contains(&chunk.start) && field_result_attr(chunk).is_none())
+        .filter_map(|chunk| {
+            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+                return None;
+            };
+            match map.get(txn, "resultProjection") {
+                Some(Out::Any(value)) => Some((chunk.start, any_value(&value)["id"].as_i64()?)),
+                _ => None,
+            }
+        })
+        .collect();
+    if owners.is_empty() {
+        return;
+    }
+    let chunks = snapshot(story, txn);
+    for (at, id) in owners {
+        let Some(position) = chunks.iter().position(|chunk| chunk.start == at) else {
+            continue;
+        };
+        let children = chunks[..position]
+            .iter()
+            .rev()
+            .take_while(|chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == id))
+            .count();
+        if children > 0 {
+            let from = chunks[position - children].start;
+            story.format(
+                txn,
+                from,
+                at - from,
+                Attrs::from([(Arc::from("fieldResult"), Any::Null)]),
+            );
+        }
+    }
 }
 
 /// Formatting attributes: those a field's marks set, less what its owner
@@ -579,14 +631,23 @@ fn resolve_owner(
         .as_ref()
         .and_then(|value| value["id"].as_i64());
     let id = content_index(txn, chunks, first, position, last, comments) as i64;
-    // Its children: the chunks right before it that carry its number, as the
-    // export pairs them (`restoreProjectedFieldResults`).
+    let mut old_items: HashMap<i64, Value> = old_projection
+        .as_ref()
+        .and_then(|value| value["children"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|child| Some((child["index"].as_i64()?, child["items"].clone())))
+        .collect();
+    // Its children: the chunks right before it that carry its number at an
+    // index it records, as the export pairs them (`restoreProjectedFieldResults`).
     let start = position
         - chunks[first..position]
             .iter()
             .rev()
             .take_while(|chunk| {
-                old_id.is_some() && field_result_attr(chunk).map(|(id, _)| id) == old_id
+                field_result_attr(chunk).is_some_and(|(chunk_id, index)| {
+                    Some(chunk_id) == old_id && old_items.contains_key(&index)
+                })
             })
             .count();
     let children: Vec<&Chunk> = chunks[start..position].iter().collect();
@@ -597,13 +658,6 @@ fn resolve_owner(
         span.0 = span.0.min(chunk.start);
         span.1 = span.1.max(chunk.end());
     }
-    let mut old_items: HashMap<i64, Value> = old_projection
-        .as_ref()
-        .and_then(|value| value["children"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|child| Some((child["index"].as_i64()?, child["items"].clone())))
-        .collect();
     // Where an old child now sits, and whether a field inside it resolved.
     let moved = |index: i64| -> Option<(i64, bool)> {
         if index >= 0 {

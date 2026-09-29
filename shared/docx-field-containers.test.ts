@@ -999,6 +999,18 @@ const joinNext = (paraId: string): Edit => (session) => {
   const { length } = session.paragraphSpans("body").find((span) => span.paraId === paraId)!;
   session.deleteAt({ story: "body", paraId, offset: length }, "forward");
 };
+/** A paragraph opening with `REF a` over link AA, then one opening with `REF b` over `second`. */
+const twoParagraphs = (second: string) =>
+  docx(p("11111111", refField("AA", "a")) + p("33333333", field(second, " REF b \\h ")) + tail);
+/** Publishes `bytes` after `edits` in one session, without a rebase. */
+async function directly(bytes: Uint8Array, ...edits: Edit[]) {
+  const session = await open(bytes);
+  for (const change of edits) change(session);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  return view(out);
+}
+
 test.each([
   ["one link", field(link(run("BB")), " REF b \\h "), "BB"],
   ["two links", field(`${linkTo("AA")}${linkTo("BB")}`, " REF b \\h "), "AA"],
@@ -1012,6 +1024,48 @@ test("text typed at a link's end before the capture lands when the field is left
   const { next, direct } = await landed(bytes, typeInText("BB", 2), (session) => edit(session, "22222222", "y"));
   expect(direct).toBe("a [«REF b \\h»|H(BB)Z] b");
   expect(next).toBe(direct);
+});
+
+test.each(["accept", "reject"] as const)(
+  "%s all keeps where it stands the link of a field deleted after a join, which shares the next field's number",
+  async (mode) => {
+    const out = await directly(
+      twoParagraphs(`${run("x")}${link(run("BB"))}${ins(run("26"))}`),
+      joinNext("11111111"),
+      backspaceField("REF a"),
+      resolveAll(mode)
+    );
+    expect(out).toBe(mode === "accept" ? "H(AA)[«REF b \\h»|xH(BB)26]" : "H(AA)[«REF b \\h»|xH(BB)]");
+  }
+);
+
+test.each([
+  [
+    "Accept All renumbers the next field",
+    paragraph(`${refField("AA", "a")}${field(`${link(run("BB"))}${ins(run("26"))}`, " REF b \\h ")}`),
+    [backspaceField("REF a"), resolveAll("accept")],
+    "a H(AA)[«REF b \\h»|H(BB)26] b",
+  ],
+  [
+    "Accept All renumbers the next field, its links kept in order",
+    paragraph(`${field(`${linkTo("AA")}${linkTo("CC")}`, " REF a \\h ")}${field(`${link(run("BB"))}${ins(run("26"))}`, " REF b \\h ")}`),
+    [backspaceField("REF a"), resolveAll("accept")],
+    "a H(AA)H(CC)[«REF b \\h»|H(BB)26] b",
+  ],
+  ["a join gives both fields one number", twoParagraphs(link(run("BB"))), [joinNext("11111111"), backspaceField("REF a")], "H(AA)[«REF b \\h»|H(BB)]"],
+] as const)("a deleted field's link joins no other field when %s", async (_, bytes, edits, expected) => {
+  expect(await directly(bytes, ...edits)).toBe(expected);
+});
+
+test("undoing a field embed's deletion gives the field its link back", async () => {
+  const bytes = paragraph(`${refField("AA", "a")}${run(" mid ")}${refField("BB", "b")}`);
+  const session = await open(bytes);
+  session.beginUndoCapture();
+  backspaceField("REF a")(session);
+  session.undo();
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(out)).toBe("a [«REF a \\h»|H(AA)] mid [«REF b \\h»|H(BB)] b");
 });
 
 const threeLinks = paragraph(field(`${linkTo("AA")}${linkTo("BB")}${linkTo("CC")}`));
