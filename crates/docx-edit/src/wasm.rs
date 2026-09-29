@@ -1030,6 +1030,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
         font_table_relationships_xml: envelope.font_table_relationships_xml.clone(),
         canonical_base64: None,
         canonical_sha256: None,
+        story_relationships: docx_parse::StoryRelationships::default(),
     }
 }
 

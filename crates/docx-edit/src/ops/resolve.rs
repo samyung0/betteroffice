@@ -479,8 +479,6 @@ impl EditingDoc {
                 })
             }
             ChangeTarget::All => {
-                let package = self.package();
-                let comments = crate::comment_boundaries(&txn);
                 for (story_id, story) in &sorted_stories(&txn) {
                     resolve_table_row_revisions(
                         &mut txn,
@@ -492,9 +490,16 @@ impl EditingDoc {
                         &mut resolved,
                     )?;
                     resolve_story(&mut txn, story, mode, None, None, &mut resolved);
+                }
+                // Fields number themselves by the comment boundaries of the
+                // resolved stories, as the seed of their export reads them.
+                let package = self.package();
+                let comments = crate::comment_boundaries(&txn);
+                for (story_id, story) in &sorted_stories(&txn) {
                     resolve_field_changes(
                         &mut txn,
                         story,
+                        story_id,
                         mode == ResolveMode::Accept,
                         package.as_deref(),
                         comments.get(story_id).map_or(&[], Vec::as_slice),

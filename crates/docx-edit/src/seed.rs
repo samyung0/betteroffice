@@ -3737,7 +3737,8 @@ pub(crate) fn referenced_fonts(
 pub struct PackageContext {
     styles: StyleResolver,
     pub(crate) theme: docx_parse::Theme,
-    pub(crate) relationships: docx_parse::RelationshipMap,
+    relationships: docx_parse::RelationshipMap,
+    stories: docx_parse::StoryRelationships,
 }
 
 impl PackageContext {
@@ -3748,7 +3749,26 @@ impl PackageContext {
             styles: StyleResolver::new(styles.as_ref()),
             theme: package.theme.clone(),
             relationships: package.relationship_entries.iter().cloned().collect(),
+            stories: envelope.story_relationships.clone(),
         }
+    }
+
+    /// The relationships markup in story `story_id` resolves with: its
+    /// header, footer or notes part's own, or the document's.
+    pub(crate) fn relationships(&self, story_id: &str) -> &docx_parse::RelationshipMap {
+        let mut parts = story_id.split(':');
+        let own = match (parts.next(), parts.next()) {
+            (Some("hf"), Some(id)) => self
+                .stories
+                .header_footers
+                .iter()
+                .find(|(key, _)| key == id)
+                .map(|(_, relationships)| relationships),
+            (Some("fn"), _) => self.stories.footnotes.as_ref(),
+            (Some("en"), _) => self.stories.endnotes.as_ref(),
+            _ => None,
+        };
+        own.unwrap_or(&self.relationships)
     }
 }
 

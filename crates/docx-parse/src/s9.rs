@@ -19,7 +19,10 @@ use crate::media::{MediaFile, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
-use crate::relationships::{Relationship, RelationshipMap, parse_relationships};
+use crate::relationships::{
+    Relationship, RelationshipMap, RelationshipTarget, is_footer_relationship,
+    is_header_relationship, parse_relationships, resolve_relationship_target,
+};
 use crate::s8::{find_part, parse_comment_part, parse_note_part, partition_notes};
 use crate::settings::{DocumentSettings, is_valid_utf8_xml_text, parse_settings};
 use crate::smart_art::create_smart_art_context;
@@ -172,6 +175,54 @@ pub struct S9WireEnvelope {
     pub canonical_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_sha256: Option<String>,
+    /// What links in headers, footers and notes resolve with; not on the wire.
+    #[serde(skip)]
+    pub story_relationships: StoryRelationships,
+}
+
+/// The relationships of each header, footer and note part that has its own
+/// (a story without one resolves with the document's).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StoryRelationships {
+    /// Each header's and footer's, by its document relationship id.
+    pub header_footers: Vec<(String, RelationshipMap)>,
+    pub footnotes: Option<RelationshipMap>,
+    pub endnotes: Option<RelationshipMap>,
+}
+
+impl StoryRelationships {
+    fn parse(
+        parts: &[(String, Vec<u8>)],
+        document_path: &str,
+        document_relationships: &RelationshipMap,
+        budget: &mut ParseBudget<'_>,
+    ) -> Result<Self, ParseError> {
+        let mut own = |path: &str| -> Result<Option<RelationshipMap>, ParseError> {
+            let Some((path, _)) = find_part(parts, path) else {
+                return Ok(None);
+            };
+            find_part(parts, &crate::relationships::relationship_part_path(path))
+                .map(|(path, xml)| parse_relationships(xml, path, budget))
+                .transpose()
+        };
+        let mut header_footers = Vec::new();
+        for (id, relationship) in document_relationships {
+            if !is_header_relationship(relationship) && !is_footer_relationship(relationship) {
+                continue;
+            }
+            if let RelationshipTarget::Internal(path) =
+                resolve_relationship_target(document_path, relationship)?
+                && let Some(relationships) = own(&path)?
+            {
+                header_footers.push((id.clone(), relationships));
+            }
+        }
+        Ok(Self {
+            header_footers,
+            footnotes: own("word/footnotes.xml")?,
+            endnotes: own("word/endnotes.xml")?,
+        })
+    }
 }
 
 pub fn parse_docx_s9_wire(
@@ -365,6 +416,8 @@ fn parse_s9_package(
             (None, None, None, None)
         };
 
+    let story_relationships =
+        StoryRelationships::parse(parts, &document_path, &relationships, &mut budget)?;
     let comments = parse_comment_part(
         parts,
         &relationships,
@@ -485,6 +538,7 @@ fn parse_s9_package(
         font_table_relationships_xml,
         canonical_base64,
         canonical_sha256,
+        story_relationships,
     })
 }
 

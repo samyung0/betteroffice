@@ -72,11 +72,12 @@ pub(crate) fn sdt_keeps_changes(content: &Any) -> bool {
 }
 
 /// How a resolve goes: accepting or rejecting, reading markup with the
-/// source package's relationships and theme.
+/// source package's theme and the relationships of the story's part.
 #[derive(Clone, Copy)]
 struct Resolve<'a> {
     accept: bool,
     package: Option<&'a PackageContext>,
+    relationships: Option<&'a docx_parse::RelationshipMap>,
 }
 
 /// Resolves the changes `field` (a field node) and the fields inside it keep,
@@ -125,7 +126,7 @@ fn resolve_nodes(nodes: &mut Vec<Value>, how: Resolve<'_>) -> (Places, bool) {
                 docx_parse::paragraph::resolve_raw_inline(
                     xml,
                     how.accept,
-                    how.package.map(|package| &package.relationships),
+                    how.relationships,
                     how.package.map(|package| &package.theme),
                 )
             });
@@ -429,11 +430,16 @@ fn content_index<T: ReadTxn>(
 pub(crate) fn resolve_field_changes(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
+    story_id: &str,
     accept: bool,
     package: Option<&PackageContext>,
     comments: &[(u32, bool)],
 ) -> OpResult<()> {
-    let how = Resolve { accept, package };
+    let how = Resolve {
+        accept,
+        package,
+        relationships: package.map(|package| package.relationships(story_id)),
+    };
     let chunks = snapshot(story, txn);
     for position in (0..chunks.len()).rev() {
         let ChunkKind::Embed(Some(map)) = &chunks[position].kind else {

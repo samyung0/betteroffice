@@ -767,8 +767,18 @@ test("typing in a TOC's first-paragraph entry is kept by Accept All, which keeps
   expect(view(out)).toBe("[«TOC \\o \\h»|H(InZtro 1)X]");
 });
 
-test("Accept All numbers the field it projects as its export's seed does after a comment", async () => {
-  const bytes = paragraph(`<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${uncovered}`);
+const deletedRun = del(deleted("xy"));
+test.each([
+  ["after a comment", paragraph(`<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${uncovered}`)],
+  [
+    "after a comment and deleted text before it",
+    paragraph(`${deletedRun}<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${ref(5)}${uncovered}`),
+  ],
+  [
+    "below a paragraph with deleted text and a comment",
+    docx(p("33333333", `${deletedRun}<w:commentRangeStart w:id="5"/>${run("c")}<w:commentRangeEnd w:id="5"/>${ref(5)}`) + p("11111111", `${uncovered}${refField("30", "b")}`) + tail),
+  ],
+])("Accept All numbers the fields it projects as its export's seed does %s", async (_, bytes) => {
   const ids = (session: YrsSession) =>
     session.storySegments("body").flatMap((segment) =>
       segment.kind === "embed" && segment.payload.resultProjection
@@ -943,5 +953,36 @@ test.each([
 ] as const)("%s after a capture lands exactly when a projected child was edited before it", async (_, bytes, text, after, expected) => {
   const { next, direct } = await landed(bytes, typeIn(text), after);
   expect(direct).toBe(expected);
+  expect(next).toBe(direct);
+});
+
+const hyperlinkTo = (url: string) =>
+  `<Relationship Id="rId30" Type="${REL}/hyperlink" Target="${url}" TargetMode="External"/>`;
+const partLink = field(`${run("20")}${ins(`<w:hyperlink r:id="rId30">${run("26")}</w:hyperlink>`)}`);
+test.each([
+  ["a header", withStories(tail, p("44444444", partLink), p("55555555", run("n")), { header: hyperlinkTo("https://part.example/"), footnotes: "" }), "44444444", "word/header1.xml"],
+  [
+    "a footnote",
+    withStories(p("22222222", `${run("tail")}${noteRef}`), p("44444444", run("h")), p("55555555", partLink), { header: "", footnotes: hyperlinkTo("https://part.example/") }),
+    "55555555",
+    "word/footnotes.xml",
+  ],
+])("a link Accept All uncovers in %s resolves with its part's relationships", async (_, source, paraId, path) => {
+  const parts = unzipContainer(source);
+  parts["word/_rels/document.xml.rels"] = new TextEncoder().encode(
+    new TextDecoder().decode(parts["word/_rels/document.xml.rels"]).replace("</Relationships>", `${hyperlinkTo("https://document.example/")}</Relationships>`)
+  );
+  const bytes = rezipContainer(parts);
+  const session = await open(bytes);
+  resolveAll("accept")(session);
+  const { story } = childText(session, "26");
+  const hrefs = session.storySegments(story).flatMap((segment) => {
+    const link = segment.attributes.hyperlink as { href?: string } | undefined;
+    return link ? [link.href] : [];
+  });
+  session.destroy();
+  expect(hrefs).toEqual(["https://part.example/"]);
+  const { next, direct } = await landed(bytes, resolveAll("accept"), typeInChild("26"), (out) => view(out, paraId, path));
+  expect(direct).toBe("[«DATE»|20H(2Z6)]");
   expect(next).toBe(direct);
 });
