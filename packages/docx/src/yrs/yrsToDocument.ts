@@ -1998,6 +1998,70 @@ function splitFlow(tokens: FlowToken[]): { leading: FlowToken[]; trailing: FlowT
   return { leading: breaks(tokens.slice(0, split)), trailing: breaks(tokens.slice(split)) };
 }
 
+/** The text a paragraph's content shows, and its story units: equal while the text is unchanged. */
+function textSignature(content: readonly ParagraphContent[]): string {
+  const texts: string[] = [];
+  const walk = (items: readonly { type: string }[]): void => {
+    for (const item of items as ParagraphContent[]) {
+      if (item.type === 'run') {
+        for (const entry of item.content) if (entry.type === 'text') texts.push(entry.text);
+      } else if (item.type === 'hyperlink') walk(item.structuredChildren ?? item.children);
+      else if (item.type === 'simpleField' || item.type === 'inlineSdt') walk(item.content);
+      else if (item.type === 'complexField') walk(item.fieldResult);
+      else if (
+        item.type === 'insertion' ||
+        item.type === 'deletion' ||
+        item.type === 'moveFrom' ||
+        item.type === 'moveTo'
+      )
+        walk(item.content);
+    }
+  };
+  walk(content);
+  return JSON.stringify([content.reduce((sum, item) => sum + storyUnits(item), 0), texts.join('')]);
+}
+
+/**
+ * The paragraph's trailing breaks where its base paragraph held them while
+ * its text is unchanged (the run cache does this for plain runs; a field,
+ * link or tracked change beside the break keeps none), otherwise at its end.
+ */
+function placeTrailing(
+  content: ParagraphContent[],
+  entries: SlotBreak[],
+  base: Paragraph | undefined
+): ParagraphContent[] {
+  const appended = [...content, ...entries.map(slotBreakContent)];
+  if (!base || entries.length === 0) return appended;
+  const places: CommentBoundary[] = [];
+  let offset = 0;
+  let visible = false;
+  for (const item of base.content) {
+    if (item.type !== 'run') {
+      const tokens = flowTokens([item]);
+      if (tokens.some(({ kind }) => kind !== 'visible')) return appended;
+      visible ||= tokens.length > 0;
+      offset += storyUnits(item);
+      continue;
+    }
+    for (const entry of item.content) {
+      if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column')) {
+        const index = places.length;
+        if (!visible) continue;
+        const expected = entries[index];
+        if (expected?.kind !== entry.breakType || trackedKind(expected.attributes)) return appended;
+        places.push({ id: index, kind: 'start', offset });
+        continue;
+      }
+      visible ||= entry.type !== 'text' || entry.text !== '';
+      offset += runContentUnits(entry);
+    }
+  }
+  if (places.length !== entries.length || textSignature(content) !== textSignature(base.content))
+    return appended;
+  return insertBoundaries(content, places, storyUnits, ({ id }) => slotBreakContent(entries[id]!));
+}
+
 /** `content` without the given break tokens; runs left empty are dropped. */
 function withoutBreaks(
   content: readonly ParagraphContent[],
@@ -2436,6 +2500,7 @@ class SaveContext {
     let slotInlineBreaks: SlotBreak[] = [];
     let carried: SlotBreak[] = [];
     let previous = -1;
+    let previousBase: Paragraph | undefined;
     const settle = (next?: Paragraph, marks: CommentBoundary[] = []): Paragraph | undefined => {
       const expected = [...carried, ...slotBreaks];
       carried = [];
@@ -2491,10 +2556,11 @@ class SaveContext {
       if (before && beforeFlow) {
         blocks[previous] = {
           ...before,
-          content: [
-            ...withoutBreaks(before.content, beforeFlow.trailing),
-            ...expected.slice(0, split).map(slotBreakContent),
-          ],
+          content: placeTrailing(
+            withoutBreaks(before.content, beforeFlow.trailing),
+            expected.slice(0, split),
+            previousBase
+          ),
         };
         return lead(rest, expected.slice(split));
       }
@@ -2507,6 +2573,7 @@ class SaveContext {
     const openBlock = (): void => {
       settle();
       previous = -1;
+      previousBase = undefined;
     };
 
     const pushText = (text: string, attributes: Attrs): void => {
@@ -2574,6 +2641,7 @@ class SaveContext {
         slotInlineBreaks = [];
         blocks.push(paragraph);
         previous = blocks.length - 1;
+        previousBase = baseParagraph;
         this.onParagraph?.(storyId, storyOffset, paragraph, segment.paraId);
         items = [];
         paragraphIndex += 1;

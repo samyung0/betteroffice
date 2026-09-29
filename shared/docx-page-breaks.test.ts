@@ -895,6 +895,51 @@ test("an empty list item before a paragraph a break leads keeps its number", asy
   expect(markers).toEqual([false, false]);
 });
 
+/** The part's view without tracked-change marks. */
+const plain = (bytes: Uint8Array, part: string) =>
+  view(bytes, part).replace(/[+-]\{|\}/g, "");
+const field = (result: string) =>
+  `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+describe.each(EVERY)("a page break between a paragraph's %s", (where) => {
+  test.each([
+    [
+      "simple field and text",
+      `<w:fldSimple w:instr=" DATE ">${run("2026")}</w:fldSimple>`,
+    ],
+    ["complex field and text", field(run("2026"))],
+    [
+      "hyperlink and text",
+      `<w:hyperlink w:anchor="target">${run("2026")}</w:hyperlink>`,
+    ],
+    ["tracked insertion and text", tracked("ins", run("2026"))],
+  ])(
+    "%s stays in place until the paragraph's text changes",
+    async (_, before) => {
+      const [story, part] = STORY[where];
+      const bytes = docx(
+        where,
+        p("44444444", `${run("a ")}${before}${BR}${run("x")}`)
+      );
+      const session = await open(bytes);
+      session.insertText({ story: "body", paraId: "22222222", offset: 0 }, "z");
+      const untouched = await publish(bytes, session);
+      const end = session
+        .paragraphSpans(story)
+        .find(({ paraId }) => paraId === "44444444")!.length;
+      session.insertText({ story, paraId: "44444444", offset: end }, "X");
+      const edited = await publish(bytes, session);
+      session.destroy();
+      expect(plain(untouched, part)).toContain("2026[PB]x¶");
+      expect(plain(edited, part)).toContain("2026xX[PB]¶");
+      const reopened = await open(untouched);
+      expect(plain(await publish(untouched, reopened), part)).toContain(
+        "2026[PB]x¶"
+      );
+      reopened.destroy();
+    }
+  );
+});
+
 test.each(EVERY)(
   "a comment from the paragraph before, closing at a break leading the next, keeps its range in %s",
   async (where) => {
