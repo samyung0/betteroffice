@@ -363,9 +363,9 @@ describe.each(EVERY)("breaks from the file in %s", (where) => {
     ],
     [
       "a leading column break",
-      p("44444444", `${COL}${run("abc")}`),
-      "[columnBreak]abc¶",
-      "[CB]abcX¶",
+      `${p("33333333", run("prev"))}${p("44444444", `${COL}${run("abc")}`)}`,
+      "prev¶[columnBreak^]abc¶",
+      "prev¶[CB]abcX¶",
     ],
     [
       "a break-only paragraph",
@@ -654,6 +654,28 @@ describe("a break with no paragraph before it and no text to lead", () => {
   });
 });
 
+const S = (id: number) => `<w:commentRangeStart w:id="${id}"/>`;
+const E = (id: number) => `<w:commentRangeEnd w:id="${id}"/>`;
+const ref = (id: number) =>
+  `<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="${id}"/></w:r>`;
+/** What each comment covers: its story units, `#` for an embed. */
+const covered = (session: YrsSession, story: string) =>
+  session.listComments().flatMap(({ id }) =>
+    session.resolveComment(id).map(({ start, end }) =>
+      session
+        .storySegments(story)
+        .flatMap((segment) =>
+          segment.kind === "text"
+            ? [...segment.text]
+            : segment.kind === "pilcrow"
+            ? ["¶"]
+            : [segment.payload.modelKind === "commentReference" ? "" : "#"]
+        )
+        .slice(start, end)
+        .join("")
+    )
+  );
+
 describe.each(EVERY)(
   "Enter at the start of a break's paragraph, then Delete, in %s",
   (where) => {
@@ -768,6 +790,88 @@ describe.each(["body", "control", "cell"] as Where[])(
   }
 );
 
+describe.each(EVERY)(
+  "comments around a break leading a paragraph in %s",
+  (where) => {
+    test.each([
+      [
+        "opening before the break",
+        `${S(1)}${BR}${run("abc")}${E(1)}${ref(1)}${run("def")}`,
+        "#abc",
+      ],
+      ["over only the break", `${S(1)}${BR}${E(1)}${ref(1)}${run("abc")}`, "#"],
+      [
+        "opening after the break",
+        `${BR}${S(1)}${run("abc")}${E(1)}${ref(1)}`,
+        "abc",
+      ],
+      [
+        // An empty range resolves to no range.
+        "closing before the break",
+        `${S(1)}${E(1)}${ref(1)}${BR}${run("abc")}`,
+        null,
+      ],
+    ])(
+      "a comment %s keeps its range across publications",
+      async (_, xml, range) => {
+        const [story] = STORY[where];
+        let bytes = docx(
+          where,
+          `${p("33333333", run("prev"))}${p("44444444", xml)}`
+        );
+        const seen: string[][] = [];
+        for (let publication = 0; publication < 3; publication += 1) {
+          const session = await open(bytes);
+          seen.push(covered(session, story));
+          session.insertText(
+            { story: "body", paraId: "22222222", offset: 0 },
+            "x"
+          );
+          bytes = await publish(bytes, session);
+          session.destroy();
+        }
+        expect(seen).toEqual(Array(3).fill(range === null ? [] : [range]));
+      }
+    );
+  }
+);
+
+test.each(EVERY)(
+  "an editor comment starting at the toolbar's break in %s saves starting after the break",
+  async (where) => {
+    const [story] = STORY[where];
+    let bytes = docx(where, p("44444444", run("abcdef")));
+    let session = await open(bytes);
+    const second = toolbarBreak(session, story, "44444444", 3);
+    session.addComment(
+      [
+        {
+          story,
+          start: { paraId: second, offset: 0 },
+          end: { paraId: second, offset: 3 },
+        },
+      ],
+      "R",
+      "2026-09-29T00:00:00Z",
+      [
+        {
+          type: "paragraph",
+          content: [{ type: "run", content: [{ type: "text", text: "c" }] }],
+        },
+      ]
+    );
+    const seen = [covered(session, story).filter((range) => range !== "")];
+    for (let publication = 0; publication < 2; publication += 1) {
+      bytes = await publish(bytes, session);
+      session.destroy();
+      session = await open(bytes);
+      seen.push(covered(session, story).filter((range) => range !== ""));
+    }
+    session.destroy();
+    expect(seen).toEqual([["#de"], ["de"], ["de"]]);
+  }
+);
+
 test("an empty list item before a paragraph a break leads keeps its number", async () => {
   const num = `<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>`;
   const session = await open(
@@ -790,6 +894,29 @@ test("an empty list item before a paragraph a break leads keeps its number", asy
   session.destroy();
   expect(markers).toEqual([false, false]);
 });
+
+test.each(EVERY)(
+  "a comment from the paragraph before, closing at a break leading the next, keeps its range in %s",
+  async (where) => {
+    const [story] = STORY[where];
+    let bytes = docx(
+      where,
+      `${p("33333333", `${S(1)}${run("prev")}`)}${p(
+        "44444444",
+        `${E(1)}${BR}${run("abc")}${ref(1)}`
+      )}`
+    );
+    const seen: string[][] = [];
+    for (let publication = 0; publication < 3; publication += 1) {
+      const session = await open(bytes);
+      seen.push(covered(session, story));
+      session.insertText({ story: "body", paraId: "22222222", offset: 0 }, "x");
+      bytes = await publish(bytes, session);
+      session.destroy();
+    }
+    expect(seen).toEqual(Array(3).fill(["prev¶"]));
+  }
+);
 
 test("a heading retyped after its break's paragraph was published empty keeps no space-before, in the editor and the save", async () => {
   const bytes = docx(

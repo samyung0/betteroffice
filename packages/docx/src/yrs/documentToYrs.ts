@@ -1092,6 +1092,20 @@ function unitsForParagraphContent(content: ParagraphContent): number {
   return paragraphContentUnitCounts.get(content as object) ?? 0;
 }
 
+/** Opens or closes the range a comment marker marks. */
+function markComment(
+  openComments: LoweringContext['openComments'],
+  content: ParagraphContent,
+  plan: number
+): void {
+  if (content.type === 'commentRangeStart') {
+    if (!openComments.some(([id]) => id === content.id)) openComments.push([content.id, plan]);
+  } else if (content.type === 'commentRangeEnd') {
+    const open = openComments.findIndex(([id]) => id === content.id);
+    if (open >= 0) openComments.splice(open, 1);
+  }
+}
+
 function paragraphUnits(
   context: LoweringContext,
   plan: number,
@@ -1106,11 +1120,8 @@ function paragraphUnits(
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
-    if (content.type === 'commentRangeStart') {
-      if (!openComments.some(([id]) => id === content.id)) openComments.push([content.id, plan]);
-    } else if (content.type === 'commentRangeEnd') {
-      const open = openComments.findIndex(([id]) => id === content.id);
-      if (open >= 0) openComments.splice(open, 1);
+    if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
+      markComment(openComments, content, plan);
     } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
@@ -1158,7 +1169,12 @@ function paragraphUnits(
 }
 
 /** A page or column break (with the tracked change around it), or visible content. */
-type FlowToken = { kind: 'pageBreak' | 'columnBreak' | 'visible'; marker?: MarkDescriptor };
+type FlowToken = {
+  kind: 'pageBreak' | 'columnBreak' | 'visible';
+  marker?: MarkDescriptor;
+  /** The paragraph content item holding it. */
+  item?: number;
+};
 
 function runTokens(run: Run, tokens: FlowToken[], marker?: MarkDescriptor): void {
   for (const content of run.content) {
@@ -1200,9 +1216,15 @@ function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[])
  * The break units before a paragraph's text (page ones flagged `leading`) and
  * after its pilcrow, as `paragraph_flow_breaks` in crates/docx-edit/src/seed.rs.
  */
-function paragraphFlowBreaks(paragraph: Paragraph): [EmbedUnit[], EmbedUnit[]] {
+function paragraphFlowBreaks(
+  paragraph: Paragraph
+): [Array<{ unit: EmbedUnit; item: number }>, EmbedUnit[]] {
   const tokens: FlowToken[] = [];
-  inlineTokens(paragraph.content, tokens);
+  paragraph.content.forEach((content, item) => {
+    const start = tokens.length;
+    inlineTokens([content], tokens);
+    for (const token of tokens.slice(start)) token.item = item;
+  });
   const text = tokens.findIndex((token) => token.kind === 'visible');
   let split = text;
   if (text < 0) {
@@ -1212,18 +1234,20 @@ function paragraphFlowBreaks(paragraph: Paragraph): [EmbedUnit[], EmbedUnit[]] {
     });
   }
   const units = (part: FlowToken[], leading: boolean) =>
-    part.flatMap(({ kind, marker }) =>
+    part.flatMap(({ kind, marker, item }) =>
       kind === 'visible'
         ? []
         : [
-            embedUnit(
-              kind,
-              leading && kind === 'pageBreak' ? { leading: true } : {},
-              marker ? [marker] : []
-            ),
+            {
+              unit: embedUnit(kind, leading ? { leading: true } : {}, marker ? [marker] : []),
+              item: item!,
+            },
           ]
     );
-  return [units(tokens.slice(0, split), text >= 0), units(tokens.slice(split), false)];
+  return [
+    units(tokens.slice(0, split), text >= 0),
+    units(tokens.slice(split), false).map(({ unit }) => unit),
+  ];
 }
 
 type RowSpanInfo = { rowSpan: number; skip: boolean };
@@ -1694,7 +1718,14 @@ function visitStory(
     if (blockId === null) continue;
     if (block.type === 'paragraph') {
       const [leadingBreaks, trailingBreaks] = paragraphFlowBreaks(block);
-      for (const unit of leadingBreaks) push(unit);
+      // Comment markers ahead of a leading break take it into their range.
+      let marked = 0;
+      for (const { unit, item } of leadingBreaks) {
+        for (const marker of block.content.slice(marked, item))
+          markComment(context.openComments, marker, planIndex);
+        marked = item;
+        push(unit);
+      }
       const paragraph = paragraphUnits(
         context,
         planIndex,

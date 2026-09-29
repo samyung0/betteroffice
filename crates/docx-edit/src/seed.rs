@@ -2246,6 +2246,18 @@ impl OpenComments {
         self.0.retain(|(open, _)| open != id);
     }
 
+    /// Opens or closes the range a `commentRangeStart`/`commentRangeEnd` marks.
+    fn mark(&mut self, marker: &Value, story: usize) {
+        let Some(id) = field(Some(marker), "id") else {
+            return;
+        };
+        match string(field(Some(marker), "type")) {
+            Some("commentRangeStart") => self.open(js_string(id), story),
+            Some("commentRangeEnd") => self.close(&js_string(id)),
+            _ => {}
+        }
+    }
+
     /// The comments a unit of `story` falls inside: a range covers only the story it opened in.
     fn covering(&self, story: usize) -> Vec<String> {
         self.0
@@ -2271,16 +2283,7 @@ fn paragraph_units(
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
         match string(field(Some(content), "type")).unwrap_or_default() {
-            "commentRangeStart" => {
-                if let Some(id) = field(Some(content), "id") {
-                    comments.open(js_string(id), story);
-                }
-            }
-            "commentRangeEnd" => {
-                if let Some(id) = field(Some(content), "id") {
-                    comments.close(&js_string(id));
-                }
-            }
+            "commentRangeStart" | "commentRangeEnd" => comments.mark(content, story),
             "run" => {
                 let run_units =
                     run_to_units(content, style_formatting.as_ref(), styles, &[], source);
@@ -2430,12 +2433,13 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
 }
 
 /// A break unit the seed places around its paragraph, `leading` when Word
-/// wrote it as a page break opening the paragraph's text (which keeps the
-/// paragraph's space-before).
+/// wrote it before the paragraph's text (which keeps the paragraph's
+/// space-before), from the paragraph's content item `item`.
 struct FlowBreak {
     kind: &'static str,
     leading: bool,
     marker: Option<Mark>,
+    item: usize,
 }
 
 impl FlowBreak {
@@ -2453,7 +2457,11 @@ impl FlowBreak {
 /// breaks after its pilcrow, except those up to its last column break.
 fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) {
     let mut tokens = Vec::new();
-    inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
+    let mut items = Vec::new();
+    for (index, item) in array(field(Some(paragraph), "content")).iter().enumerate() {
+        inline_tokens(std::slice::from_ref(item), &mut tokens);
+        items.resize(tokens.len(), index);
+    }
     let text = tokens.iter().position(|(kind, _)| *kind == "visible");
     let split = text.unwrap_or_else(|| {
         tokens
@@ -2461,20 +2469,20 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) 
             .rposition(|(kind, _)| *kind == "columnBreak")
             .map_or(0, |index| index + 1)
     });
-    let breaks = |tokens: &[FlowToken], leading: bool| {
-        tokens
-            .iter()
-            .filter(|(kind, _)| *kind != "visible")
-            .map(|(kind, marker)| FlowBreak {
-                kind,
-                leading: leading && *kind == "pageBreak",
-                marker: marker.clone(),
+    let breaks = |range: std::ops::Range<usize>, leading: bool| {
+        range
+            .filter(|&index| tokens[index].0 != "visible")
+            .map(|index| FlowBreak {
+                kind: tokens[index].0,
+                leading,
+                marker: tokens[index].1.clone(),
+                item: items[index],
             })
             .collect()
     };
     (
-        breaks(&tokens[..split], text.is_some()),
-        breaks(&tokens[split..], false),
+        breaks(0..split, text.is_some()),
+        breaks(split..tokens.len(), false),
     )
 }
 
@@ -3344,7 +3352,14 @@ fn visit_story(
         match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
+                // Comment markers ahead of a leading break take it into their range.
+                let content = array(field(Some(block), "content"));
+                let mut marked = 0;
                 for flow in leading_breaks {
+                    for marker in &content[marked..flow.item] {
+                        context.open_comments.mark(marker, plan_index);
+                    }
+                    marked = flow.item;
                     context.push(plan_index, flow.unit());
                 }
                 let (mut units, mut ppr) = paragraph_units(
@@ -4710,7 +4725,7 @@ mod tests {
             {"type": "run", "content": [column, {"type": "text", "text": "x"}, page]},
         ]});
         let (leading, trailing) = paragraph_flow_breaks(&paragraph);
-        assert_eq!(describe(leading), ["pageBreak^-", "columnBreak"]);
+        assert_eq!(describe(leading), ["pageBreak^-", "columnBreak^"]);
         assert_eq!(describe(trailing), ["pageBreak"]);
 
         // Without text the breaks follow the paragraph's mark.

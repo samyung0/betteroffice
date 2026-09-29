@@ -1486,6 +1486,22 @@ function splitContent(
  * boundary inside content that cannot split moves to that content's edge, so
  * its range widens to hold the content whole.
  */
+/** Boundaries by offset: an empty range opens before it closes, ranges meeting close first. */
+function boundaryOrder(left: CommentBoundary, right: CommentBoundary): number {
+  return (
+    left.offset - right.offset ||
+    (left.kind === right.kind
+      ? left.id - right.id
+      : left.id === right.id
+        ? left.kind === 'start'
+          ? -1
+          : 1
+        : left.kind === 'end'
+          ? -1
+          : 1)
+  );
+}
+
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
@@ -1496,20 +1512,7 @@ function insertBoundaries(
       : { type: 'commentRangeEnd', id: boundary.id }
 ): ParagraphContent[] {
   if (boundaries.length === 0) return content;
-  const sorted = [...boundaries].sort(
-    (left, right) =>
-      left.offset - right.offset ||
-      (left.kind === right.kind
-        ? left.id - right.id
-        : // An empty range opens before it closes; ranges meeting there close first.
-          left.id === right.id
-          ? left.kind === 'start'
-            ? -1
-            : 1
-          : left.kind === 'end'
-            ? -1
-            : 1)
-  );
+  const sorted = [...boundaries].sort(boundaryOrder);
   const result: ParagraphContent[] = [];
   let cursor = 0;
   let boundaryIndex = 0;
@@ -1911,6 +1914,8 @@ interface FlowToken {
 /** A break unit opening a paragraph slot. */
 interface SlotBreak {
   kind: FlowBreak;
+  /** Its story offset. */
+  at: number;
   /** Seeded from a page break opening its paragraph's text: it stays that text's first run. */
   leading: boolean;
   attributes: Attrs;
@@ -2406,20 +2411,21 @@ class SaveContext {
       if (segment.kind === 'pilcrow') lastPilcrow = offset;
       return offset + (segment.kind === 'text' ? segment.text.length : 1);
     }, 0);
-    const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
+    // Boundaries in the paragraph's text, and those at the units opening its
+    // slot (offset: the story offset), which settle places among its breaks.
+    const paragraphCommentBoundaries = (end: number) => {
       const boundaries: CommentBoundary[] = [];
+      const slot: CommentBoundary[] = [];
+      const add = (id: number, kind: 'start' | 'end', at: number) => {
+        if (at < paragraphStart || at > end) return;
+        if (at < contentStart) slot.push({ id, kind, offset: at });
+        else boundaries.push({ id, kind, offset: at - contentStart });
+      };
       for (const range of storyComments) {
-        if (range.start >= paragraphStart && range.start <= end) {
-          const offset = Math.max(0, range.start - contentStart);
-          boundaries.push({ id: range.id, kind: 'start', offset });
-        }
-        const rangeEnd = Math.min(range.end, lastPilcrow);
-        if (rangeEnd >= paragraphStart && rangeEnd <= end) {
-          const offset = Math.max(0, rangeEnd - contentStart);
-          boundaries.push({ id: range.id, kind: 'end', offset });
-        }
+        add(range.id, 'start', range.start);
+        add(range.id, 'end', Math.min(range.end, lastPilcrow));
       }
-      return boundaries;
+      return { boundaries, slot: slot.sort(boundaryOrder) };
     };
 
     // Break units opening a slot are where the seed put the trailing breaks of
@@ -2430,7 +2436,7 @@ class SaveContext {
     let slotInlineBreaks: SlotBreak[] = [];
     let carried: SlotBreak[] = [];
     let previous = -1;
-    const settle = (next?: Paragraph): Paragraph | undefined => {
+    const settle = (next?: Paragraph, marks: CommentBoundary[] = []): Paragraph | undefined => {
       const expected = [...carried, ...slotBreaks];
       carried = [];
       slotBreaks = [];
@@ -2451,18 +2457,37 @@ class SaveContext {
           (token, index) =>
             token.kind === expected[index]!.kind &&
             token.tracked === trackedKind(expected[index]!.attributes) &&
-            (token.kind === 'column' || index < trailing === index < split)
-        )
+            ((token.kind === 'column' && !expected[index]!.leading) ||
+              index < trailing === index < split)
+        ) &&
+        // Comment boundaries at the slot's breaks are placed among them below.
+        marks.length === 0
       )
         return next;
       const rest =
         next && nextFlow && nextFlow.leading.length > 0
           ? { ...next, content: withoutBreaks(next.content, nextFlow.leading) }
           : next;
-      const lead = (paragraph: Paragraph | undefined, entries: SlotBreak[]) =>
-        paragraph && entries.length > 0
-          ? { ...paragraph, content: [...entries.map(slotBreakContent), ...paragraph.content] }
-          : paragraph;
+      // A boundary at a break the paragraph leads with goes just before it;
+      // others at the slot (before a table, or at a break the paragraph
+      // before closes with) open the paragraph.
+      const lead = (paragraph: Paragraph | undefined, entries: SlotBreak[]) => {
+        if (!paragraph || (entries.length === 0 && marks.length === 0)) return paragraph;
+        const head: ParagraphContent[] = [];
+        let mark = 0;
+        const markTo = (at: number) => {
+          while (mark < marks.length && marks[mark]!.offset <= at) {
+            const { id, kind } = marks[mark++]!;
+            head.push({ type: kind === 'start' ? 'commentRangeStart' : 'commentRangeEnd', id });
+          }
+        };
+        for (const entry of entries) {
+          markTo(entry.at);
+          head.push(slotBreakContent(entry));
+        }
+        markTo(Number.POSITIVE_INFINITY);
+        return { ...paragraph, content: [...head, ...paragraph.content] };
+      };
       if (before && beforeFlow) {
         blocks[previous] = {
           ...before,
@@ -2477,7 +2502,7 @@ class SaveContext {
       // No paragraph before them and no text to lead: a paragraph of their own.
       if (expected.length > 0)
         blocks.push({ type: 'paragraph', content: expected.map(slotBreakContent) });
-      return rest;
+      return lead(rest, []);
     };
     const openBlock = (): void => {
       settle();
@@ -2511,7 +2536,7 @@ class SaveContext {
         const baseParagraph =
           this.baseParagraphs.get(segment.paraId) ??
           (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
-        const boundaries = paragraphCommentBoundaries(storyOffset);
+        const { boundaries, slot } = paragraphCommentBoundaries(storyOffset);
         const inputs = [
           segment.paraId,
           savedParaId,
@@ -2544,7 +2569,7 @@ class SaveContext {
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
-        paragraph = settle(paragraph) ?? paragraph;
+        paragraph = settle(paragraph, slot) ?? paragraph;
         carried = slotInlineBreaks;
         slotInlineBreaks = [];
         blocks.push(paragraph);
@@ -2648,6 +2673,7 @@ class SaveContext {
         }
       } else if (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak') {
         const entry: SlotBreak = {
+          at: storyOffset,
           kind: segment.embedKind === 'pageBreak' ? 'page' : 'column',
           leading: segment.payload.leading === true,
           attributes: segment.attributes,
