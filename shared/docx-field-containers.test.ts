@@ -1057,6 +1057,27 @@ test.each([
   expect(await directly(bytes, ...edits)).toBe(expected);
 });
 
+test.each([
+  ["a REF field's link", paragraph(field(linkTo("BB"), " REF b \\h ")), "BB", 1, "a [«REF b \\h»|H(BB)] b"],
+  [
+    "a TOC's first entry",
+    docx(p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Introduction 1"))}`) + p("33333333", `${link(run("Entry2 2"))}${char("end")}`) + tail),
+    "Introduction",
+    2,
+    "[«TOC \\o \\h»|H(Introduction 1)]",
+  ],
+] as const)("Clear formatting on part of %s keeps it in its field", async (_, bytes, text, from, expected) => {
+  const clear: Edit = (session) => {
+    const at = textAt(session, text);
+    session.clearFormatting({
+      story: "body",
+      start: { paraId: at.paraId, offset: at.offset + from },
+      end: { paraId: at.paraId, offset: at.offset + from + 2 },
+    });
+  };
+  expect(await directly(bytes, clear)).toBe(expected);
+});
+
 test("undoing a field embed's deletion gives the field its link back", async () => {
   const bytes = paragraph(`${refField("AA", "a")}${run(" mid ")}${refField("BB", "b")}`);
   const session = await open(bytes);

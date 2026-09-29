@@ -13,8 +13,12 @@ use crate::{DEL, EditCtx, EditingDoc, INS, StoryRange, out_len, story_ref};
 /// The hyperlink text attribute; retained by [`EditingDoc::clear_formatting`].
 pub const HYPERLINK: &str = "hyperlink";
 
+/// The text attribute that makes a unit a projected child of a field's
+/// result: `{id, index}`, the field's number and the child's place in it.
+pub(crate) const FIELD_RESULT: &str = "fieldResult";
+
 /// Attributes protected from formatting sweeps.
-pub(crate) const PROTECTED_ATTRS: [&str; 3] = [INS, DEL, HYPERLINK];
+pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, FIELD_RESULT];
 
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [

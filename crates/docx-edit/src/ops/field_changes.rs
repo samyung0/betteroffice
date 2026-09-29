@@ -9,6 +9,7 @@ use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, TransactionMut};
 
+use crate::format::FIELD_RESULT;
 use crate::op::{OpError, OpResult};
 use crate::ops::{Chunk, ChunkKind, snapshot};
 use crate::seed::{
@@ -257,7 +258,7 @@ fn any_value(value: &Any) -> Value {
 }
 
 fn field_result_attr(chunk: &Chunk) -> Option<(i64, i64)> {
-    let Any::Map(marker) = chunk.attrs.get("fieldResult")? else {
+    let Any::Map(marker) = chunk.attrs.get(FIELD_RESULT)? else {
         return None;
     };
     let number = |key: &str| match marker.get(key) {
@@ -313,7 +314,7 @@ pub(crate) fn release_children(
                 txn,
                 from,
                 at - from,
-                Attrs::from([(Arc::from("fieldResult"), Any::Null)]),
+                Attrs::from([(Arc::from(FIELD_RESULT), Any::Null)]),
             );
         }
     }
@@ -343,7 +344,7 @@ fn paragraph_style<T: ReadTxn>(txn: &T, chunks: &[Chunk], position: usize) -> Op
 type Units = Vec<(Result<String, (String, JsonObject)>, JsonObject)>;
 
 fn unit_index(attrs: &JsonObject) -> Option<i64> {
-    attrs.get("fieldResult")?["index"].as_i64()
+    attrs.get(FIELD_RESULT)?["index"].as_i64()
 }
 
 fn unit_op(
@@ -735,7 +736,7 @@ fn resolve_owner(
         };
         if new_index != old_index || Some(id) != old_id {
             let attrs = yrs_attrs(JsonObject::from([(
-                "fieldResult".to_owned(),
+                FIELD_RESULT.to_owned(),
                 serde_json::json!({ "id": id, "index": new_index }),
             )]))
             .map_err(error)?;
