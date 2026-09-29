@@ -928,25 +928,47 @@ const plain = (bytes: Uint8Array, part: string) =>
 const field = (result: string) =>
   `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
 describe.each(EVERY)("a page break between a paragraph's %s", (where) => {
-  test.each([
+  test.each(
     [
-      "simple field and text",
-      `<w:fldSimple w:instr=" DATE ">${run("2026")}</w:fldSimple>`,
-    ],
-    ["complex field and text", field(run("2026"))],
-    [
-      "hyperlink and text",
-      `<w:hyperlink w:anchor="target">${run("2026")}</w:hyperlink>`,
-    ],
-    ["tracked insertion and text", tracked("ins", run("2026"))],
-  ])(
-    "%s stays in place until the paragraph's text changes",
-    async (_, before) => {
+      [
+        "simple field and text",
+        `<w:fldSimple w:instr=" DATE ">${run("2026")}</w:fldSimple>`,
+      ],
+      ["complex field and text", field(run("2026"))],
+      [
+        "hyperlink and text",
+        `<w:hyperlink w:anchor="target">${run("2026")}</w:hyperlink>`,
+      ],
+      ["tracked insertion and text", tracked("ins", run("2026"))],
+      [
+        "simple field in a tracked insertion and text",
+        tracked(
+          "ins",
+          `<w:fldSimple w:instr=" DATE ">${run("2026")}</w:fldSimple>`
+        ),
+      ],
+      [
+        "simple field in a hyperlink and text",
+        `<w:hyperlink w:anchor="target"><w:fldSimple w:instr=" DATE ">${run(
+          "2026"
+        )}</w:fldSimple></w:hyperlink>`,
+      ],
+      [
+        "hyperlink in a tracked insertion and text",
+        tracked(
+          "ins",
+          `<w:hyperlink w:anchor="target">${run("2026")}</w:hyperlink>`
+        ),
+      ],
+    ].flatMap(([name, before]) => [
+      [name, "after text", `${run("a ")}${before}`],
+      [name, "opening the paragraph", before],
+    ])
+  )(
+    "%s, %s, stays in place until the paragraph's text changes",
+    async (_, __, before) => {
       const [story, part] = STORY[where];
-      const bytes = docx(
-        where,
-        p("44444444", `${run("a ")}${before}${BR}${run("x")}`)
-      );
+      const bytes = docx(where, p("44444444", `${before}${BR}${run("x")}`));
       const session = await open(bytes);
       session.insertText({ story: "body", paraId: "22222222", offset: 0 }, "z");
       const untouched = await publish(bytes, session);

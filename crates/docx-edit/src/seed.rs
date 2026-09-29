@@ -2388,13 +2388,7 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
     for item in content {
         match string(field(Some(item), "type")).unwrap_or_default() {
             "run" => run_tokens(item, None, tokens),
-            "hyperlink" => {
-                for child in array(field(Some(item), "children")) {
-                    if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, None, tokens);
-                    }
-                }
-            }
+            "hyperlink" => link_tokens(item, None, tokens),
             "simpleField" => {
                 for child in array(field(Some(item), "content")) {
                     if string(field(Some(child), "type")) == Some("run") {
@@ -2421,12 +2415,28 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
                     matches!(kind, "moveFrom" | "moveTo"),
                 );
                 for child in array(field(Some(item), "content")) {
-                    if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, Some(&marker), tokens);
+                    match string(field(Some(child), "type")) {
+                        Some("run") => run_tokens(child, Some(&marker), tokens),
+                        Some("hyperlink") => link_tokens(child, Some(&marker), tokens),
+                        Some("simpleField") => tokens.push(("visible", None)),
+                        _ => {}
                     }
                 }
             }
             "mathEquation" => tokens.push(("visible", None)),
+            _ => {}
+        }
+    }
+}
+
+/// A hyperlink's tokens: its runs', and a field or equation it holds as visible.
+fn link_tokens(link: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
+    let children =
+        field(Some(link), "structuredChildren").or_else(|| field(Some(link), "children"));
+    for child in array(children) {
+        match string(field(Some(child), "type")) {
+            Some("run") => run_tokens(child, marker, tokens),
+            Some("simpleField" | "complexField" | "mathEquation") => tokens.push(("visible", None)),
             _ => {}
         }
     }

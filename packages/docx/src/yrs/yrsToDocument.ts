@@ -1965,15 +1965,25 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
   const runs = (items: readonly { type: string }[], tracked?: Tracked): void => {
     for (const item of items) if (item.type === 'run') run(item as Run, tracked);
   };
+  // A field or equation inside a link or tracked change is one visible unit.
+  const children = (items: readonly { type: string }[], tracked?: Tracked): void => {
+    for (const item of items as ParagraphContent[]) {
+      if (item.type === 'run') run(item, tracked);
+      else if (item.type === 'hyperlink')
+        children(item.structuredChildren ?? item.children, tracked);
+      else if (['simpleField', 'complexField', 'mathEquation'].includes(item.type))
+        tokens.push({ kind: 'visible' });
+    }
+  };
   const inline = (items: readonly ParagraphContent[]): void => {
     for (const item of items) {
       if (item.type === 'run') run(item);
-      else if (item.type === 'hyperlink') runs(item.children);
+      else if (item.type === 'hyperlink') children(item.structuredChildren ?? item.children);
       else if (item.type === 'simpleField') runs(item.content);
       else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
       else if (item.type === 'inlineSdt') inline(item.content);
-      else if (item.type === 'insertion' || item.type === 'moveTo') runs(item.content, 'ins');
-      else if (item.type === 'deletion' || item.type === 'moveFrom') runs(item.content, 'del');
+      else if (item.type === 'insertion' || item.type === 'moveTo') children(item.content, 'ins');
+      else if (item.type === 'deletion' || item.type === 'moveFrom') children(item.content, 'del');
       else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
     }
   };
@@ -2089,7 +2099,14 @@ function withoutBreaks(
   const inline = <T extends ParagraphContent>(items: readonly T[]): T[] =>
     items.flatMap((item): T[] => {
       if (item.type === 'run') return runs([item]);
-      if (item.type === 'hyperlink') return [{ ...item, children: runs(item.children) }];
+      if (item.type === 'hyperlink')
+        return [
+          {
+            ...item,
+            children: runs(item.children),
+            ...(item.structuredChildren && { structuredChildren: runs(item.structuredChildren) }),
+          },
+        ];
       if (item.type === 'simpleField') return [{ ...item, content: runs(item.content) }];
       if (item.type === 'complexField')
         return [{ ...item, fieldCode: runs(item.fieldCode), fieldResult: runs(item.fieldResult) }];

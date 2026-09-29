@@ -1189,9 +1189,8 @@ function runTokens(run: Run, tokens: FlowToken[], marker?: MarkDescriptor): void
 function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[]): void {
   for (const item of content) {
     if (item.type === 'run') runTokens(item, tokens);
-    else if (item.type === 'hyperlink') {
-      for (const child of item.children) if (child.type === 'run') runTokens(child, tokens);
-    } else if (item.type === 'simpleField') {
+    else if (item.type === 'hyperlink') linkTokens(item, tokens);
+    else if (item.type === 'simpleField') {
       for (const child of item.content) if (child.type === 'run') runTokens(child, tokens);
     } else if (item.type === 'complexField') {
       for (const child of [...item.fieldCode, ...item.fieldResult]) runTokens(child, tokens);
@@ -1207,8 +1206,21 @@ function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[])
         item.type === 'insertion' || item.type === 'moveTo' ? 'insertion' : 'deletion',
         item.type === 'moveFrom' || item.type === 'moveTo'
       );
-      for (const child of item.content) if (child.type === 'run') runTokens(child, tokens, marker);
+      for (const child of item.content) {
+        if (child.type === 'run') runTokens(child, tokens, marker);
+        else if (child.type === 'hyperlink') linkTokens(child, tokens, marker);
+        else tokens.push({ kind: 'visible' });
+      }
     } else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
+  }
+}
+
+/** A hyperlink's tokens: its runs', and a field or equation it holds as visible. */
+function linkTokens(link: Hyperlink, tokens: FlowToken[], marker?: MarkDescriptor): void {
+  for (const child of link.structuredChildren ?? link.children) {
+    if (child.type === 'run') runTokens(child, tokens, marker);
+    else if (['simpleField', 'complexField', 'mathEquation'].includes(child.type))
+      tokens.push({ kind: 'visible' });
   }
 }
 
