@@ -269,12 +269,33 @@ fn field_result_attr(chunk: &Chunk) -> Option<(i64, i64)> {
     Some((number("id")?, number("index")?))
 }
 
-/// Clears the `fieldResult` markers of the children of each projecting field
-/// embed among `chunks` in `start..end` of `story`, which a delete is about
-/// to remove: the children right before it that carry its number. A child
-/// whose field is deleted is plain content written in place, which no other
-/// field pairs, even one that comes to share its number after a join or
-/// Accept All.
+/// A projecting field embed's number and the child indices it records.
+pub(crate) fn projection<T: ReadTxn>(txn: &T, chunk: &Chunk) -> Option<(i64, Vec<i64>)> {
+    if field_result_attr(chunk).is_some() {
+        return None;
+    }
+    let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+        return None;
+    };
+    let Some(Out::Any(value)) = map.get(txn, "resultProjection") else {
+        return None;
+    };
+    let value = any_value(&value);
+    let indices = value["children"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|child| child["index"].as_i64())
+        .collect();
+    Some((value["id"].as_i64()?, indices))
+}
+
+/// Clears the `fieldResult` markers of the children of the projecting field
+/// embeds in `start..end` of `story`, which a delete is about to remove: the
+/// children right before each that carry its number. A child whose field is
+/// deleted is plain content written in place, which no other field pairs,
+/// even one that comes to share its number after a join or Accept All.
+/// `chunks` covers the range and may start before it.
 pub(crate) fn release_children(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -282,41 +303,37 @@ pub(crate) fn release_children(
     start: u32,
     end: u32,
 ) {
-    let owners: Vec<(u32, i64)> = chunks
-        .iter()
-        .filter(|chunk| (start..end).contains(&chunk.start) && field_result_attr(chunk).is_none())
-        .filter_map(|chunk| {
-            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-                return None;
-            };
-            match map.get(txn, "resultProjection") {
-                Some(Out::Any(value)) => Some((chunk.start, any_value(&value)["id"].as_i64()?)),
-                _ => None,
-            }
-        })
-        .collect();
-    if owners.is_empty() {
+    // Only the first field in the range can have children before it; the
+    // others' lie in the range and go with it.
+    let Some((first, id)) = chunks.iter().enumerate().find_map(|(index, chunk)| {
+        let (id, _) = projection(txn, chunk).filter(|_| (start..end).contains(&chunk.start))?;
+        Some((index, id))
+    }) else {
         return;
-    }
-    let chunks = snapshot(story, txn);
-    for (at, id) in owners {
-        let Some(position) = chunks.iter().position(|chunk| chunk.start == at) else {
-            continue;
-        };
-        let children = chunks[..position]
+    };
+    let at = chunks[first].start;
+    let child = |chunk: &&Chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == id);
+    let run = chunks[..first].iter().rev().take_while(child).count();
+    let from = if run < first {
+        chunks[first - run].start
+    } else {
+        // The children may begin before the chunks at hand.
+        let all = snapshot(story, txn);
+        let position = all.partition_point(|chunk| chunk.start < at);
+        all[..position]
             .iter()
             .rev()
-            .take_while(|chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == id))
-            .count();
-        if children > 0 {
-            let from = chunks[position - children].start;
-            story.format(
-                txn,
-                from,
-                at - from,
-                Attrs::from([(Arc::from(FIELD_RESULT), Any::Null)]),
-            );
-        }
+            .take_while(child)
+            .last()
+            .map_or(at, |chunk| chunk.start)
+    };
+    if from < start {
+        story.format(
+            txn,
+            from,
+            start - from,
+            Attrs::from([(Arc::from(FIELD_RESULT), Any::Null)]),
+        );
     }
 }
 
