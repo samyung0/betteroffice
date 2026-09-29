@@ -1583,26 +1583,27 @@ fn field_to_units(
 }
 
 /// A field's story units as the seed makes them in a paragraph styled
-/// `style_id` under the package `styles`: its projected children, each
+/// `style_id` in `package`: its projected children, each
 /// marked with `fieldResult`, then its embed. An inline content control's
 /// field (`project` false) is its embed alone, as `sdt_payload` seeds it.
 /// Each unit is its text or embed kind and payload, and its attributes.
 pub(crate) fn field_units(
     value: &Value,
-    styles: Option<&Value>,
+    package: Option<&PackageContext>,
     style_id: Option<&str>,
     projection_id: usize,
     project: bool,
 ) -> Vec<(Result<String, (String, JsonObject)>, JsonObject)> {
-    let styles = StyleResolver::new(styles);
+    let none = StyleResolver::new(None);
+    let styles = package.map_or(&none, |package| &package.styles);
     let paragraph = json!({ "formatting": { "styleId": style_id } });
-    let style_formatting = paragraph_style_formatting(&paragraph, &styles, None);
+    let style_formatting = paragraph_style_formatting(&paragraph, styles, None);
     let source = BTreeMap::new();
     let units = if project {
         field_to_units(
             value,
             style_formatting.as_ref(),
-            &styles,
+            styles,
             &source,
             projection_id,
         )
@@ -3731,9 +3732,24 @@ pub(crate) fn referenced_fonts(
     Ok(fonts.into_iter().collect())
 }
 
-/// The package's style definitions, as the seed reads them.
-pub fn package_styles(envelope: &docx_parse::S9WireEnvelope) -> Option<Value> {
-    serde_json::to_value(&envelope.document.package.styles).ok()
+/// What reseeding a field needs from its source package: the style lookup
+/// the seed reads it with, and the theme and relationships its markup parses with.
+pub struct PackageContext {
+    styles: StyleResolver,
+    pub(crate) theme: docx_parse::Theme,
+    pub(crate) relationships: docx_parse::RelationshipMap,
+}
+
+impl PackageContext {
+    pub fn new(envelope: &docx_parse::S9WireEnvelope) -> Self {
+        let package = &envelope.document.package;
+        let styles = serde_json::to_value(&package.styles).ok();
+        Self {
+            styles: StyleResolver::new(styles.as_ref()),
+            theme: package.theme.clone(),
+            relationships: package.relationship_entries.iter().cloned().collect(),
+        }
+    }
 }
 
 /// Every seed is written under this client, so a package seeds to the same
@@ -3747,7 +3763,7 @@ pub fn seed_parsed_docx(
 ) -> Result<Vec<String>, String> {
     use yrs::Transact;
     use yrs::updates::decoder::Decode;
-    document.set_styles(package_styles(&envelope));
+    document.set_package(Some(PackageContext::new(&envelope)));
     let seed = EditingDoc::new(SEED_CLIENT_ID);
     let fonts = seed_parsed_docx_in_place(&seed, envelope)?;
     let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())

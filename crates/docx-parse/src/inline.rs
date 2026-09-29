@@ -1044,11 +1044,18 @@ impl ComplexField {
     }
 
     /// The result nodes a save writes; `None` writes `field_result`, as for a
-    /// result spanning paragraphs that keeps no markup.
+    /// result spanning paragraphs whose first paragraph holds runs alone.
     pub fn written_result(&self) -> Option<&[InlineNode]> {
         self.structured_result
             .as_ref()
-            .filter(|content| content.blocks.is_none() || content.keeps_markup())
+            .filter(|content| {
+                content.blocks.is_none()
+                    || content
+                        .inline
+                        .iter()
+                        .flatten()
+                        .any(|node| !matches!(node, InlineNode::Run(_)))
+            })
             .and_then(|content| content.inline.as_deref())
     }
 }

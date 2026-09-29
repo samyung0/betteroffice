@@ -479,7 +479,8 @@ impl EditingDoc {
                 })
             }
             ChangeTarget::All => {
-                let styles = self.styles();
+                let package = self.package();
+                let comments = crate::comment_boundaries(&txn);
                 for (story_id, story) in &sorted_stories(&txn) {
                     resolve_table_row_revisions(
                         &mut txn,
@@ -493,10 +494,10 @@ impl EditingDoc {
                     resolve_story(&mut txn, story, mode, None, None, &mut resolved);
                     resolve_field_changes(
                         &mut txn,
-                        story_id,
                         story,
                         mode == ResolveMode::Accept,
-                        styles.as_deref(),
+                        package.as_deref(),
+                        comments.get(story_id).map_or(&[], Vec::as_slice),
                     )?;
                 }
                 Ok(Receipt {

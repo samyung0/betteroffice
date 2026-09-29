@@ -467,8 +467,7 @@ const toc = (first: string) =>
 test.each([
   ["w:del", `${del(deleted("Old"))}${run("Entry1 1")}`, "-{Old}Entry1 1", "Entry1 1", "OldEntry1 1"],
   ["w:ins", `${ins(run("Entry1"))}${run(" 1")}`, "+{Entry1} 1", "Entry1 1", " 1"],
-  // Accepted, the link is a plain first-paragraph link, which such a result saves as its text.
-  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}", "Entry1 1", ""],
+  ["w:ins around a hyperlink", ins(link(run("Entry1 1"))), "+{H(Entry1 1)}", "H(Entry1 1)", ""],
   ["w:sdt", `${run("En")}${sdt(run("try1"))}${run(" 1")}`, "EnS{try1} 1", "EnS{try1} 1", "EnS{try1} 1"],
 ])(
   "a field result spanning paragraphs keeps %s in its first paragraph, and Accept or Reject All resolves it",
@@ -651,4 +650,155 @@ test("Accept All of a formatted kept run settles the field's formatting in one p
     saved.push(documentXml(bytes).match(/<w:p [^>]*"11111111"[\s\S]*?<\/w:p>/)![0]);
   }
   expect(saved[1]).toBe(saved[0]);
+});
+
+/** The offset of the first projected-child text holding `text` in the first paragraph. */
+function childAt(session: YrsSession, text: string): number {
+  let offset = 0;
+  for (const segment of session.storySegments("body")) {
+    if (segment.kind === "pilcrow") break;
+    if (segment.kind === "text" && segment.attributes.fieldResult && segment.text.includes(text))
+      return offset + segment.text.indexOf(text);
+    offset += segment.kind === "text" ? segment.text.length : 1;
+  }
+  throw new Error(`no projected child holds ${text}`);
+}
+
+/**
+ * Makes `before` ahead of a capture, types Z inside the projected child
+ * holding `text` after it, and returns the rebased next publication's
+ * first paragraph beside the latest state's direct publication.
+ */
+async function typedInChild(bytes: Uint8Array, before: (session: YrsSession) => void, text: string) {
+  const session = await open(bytes);
+  before(session);
+  edit(session, "22222222", "x");
+  const captured = session.encodeState();
+  const exported = await publish(bytes, captured);
+  session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 }, "Z");
+  const latest = session.encodeState();
+  session.destroy();
+  const direct = view(await publish(bytes, latest));
+  const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+  const rebased = await open(exported, state);
+  const next = view(await publish(exported, rebased.encodeState()));
+  rebased.destroy();
+  return { next, direct };
+}
+
+const ref5 = `<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${ref(5)}`;
+const pageBreak = `<w:r><w:br w:type="page"/></w:r>`;
+const splitRuns = ["00A1", "00B2", "00C3"]
+  .map((rsid, index) => `<w:r w:rsidR="${rsid}"><w:t>${"abc"[index]}</w:t></w:r>`)
+  .join("");
+const refField = (text: string, bookmark: string) => field(link(run(text)), ` REF ${bookmark} \\h `);
+const uncovered = field(`${run("20")}${ins(link(run("26")))}`);
+test.each([
+  ["a tab inside the run before a projected field", `<w:r><w:t>x</w:t><w:tab/></w:r>${refField("20", "a")}`, () => {}, "20"],
+  ["Word's split runs before it", `${splitRuns}${refField("20", "a")}${run(" ")}${refField("xy", "b")}`, () => {}, "20"],
+  [
+    "bold added before the capture",
+    refField("20", "a"),
+    (session: YrsSession) =>
+      session.formatRange({ story: "body", start: { paraId: "11111111", offset: 0 }, end: { paraId: "11111111", offset: 1 } }, { bold: true }),
+    "20",
+  ],
+  [
+    "a comment added before the capture",
+    refField("20", "a"),
+    (session: YrsSession) =>
+      session.addComment(
+        [{ story: "body", start: { paraId: "11111111", offset: 0 }, end: { paraId: "11111111", offset: 1 } }],
+        "Reviewer",
+        "2026-09-29T00:00:00Z",
+        [{ type: "paragraph", content: [{ type: "run", content: [{ type: "text", text: "c" }] }] }]
+      ),
+    "20",
+  ],
+  ["Accept All after a Word comment", `${ref5}${uncovered}`, resolveAll("accept"), "26"],
+  ["Accept All after a tab", `<w:r><w:t>x</w:t><w:tab/></w:r>${uncovered}`, resolveAll("accept"), "26"],
+  ["Accept All after a bookmark", `<w:bookmarkStart w:id="7" w:name="m"/>${run("x")}<w:bookmarkEnd w:id="7"/>${uncovered}`, resolveAll("accept"), "26"],
+  ["Accept All beside a mid-paragraph break", `${pageBreak}${uncovered}${refField("30", "b")}`, resolveAll("accept"), "30"],
+  ["Reject All of a tracked leading break", `${ins(pageBreak)}${uncovered}${refField("30", "b")}`, resolveAll("reject"), "30"],
+] as const)(
+  "text typed in a projected child after the capture stays in its field: %s",
+  async (_, xml, before, text) => {
+    const { next, direct } = await typedInChild(paragraph(xml), before, text);
+    expect(next).toBe(direct);
+  }
+);
+
+test.each([
+  ["a deleted projected link stays deleted", field(`${link(run("20"))}${ins(run("26"))}`), "20", "delete", "a [«DATE»|26] b"],
+  ["a deleted projected simple field stays deleted", field(`${fs(run("20"), " PAGE ")}${ins(run("26"))}`), "", "deleteField", "a [«DATE»|26] b"],
+  ["typing in a link whose nested field resolves is kept", field(`${link(`${run("20")}${fs(ins(run("1")), " PAGE ")}`)}${run("x")}`), "20", "type", "a [«DATE»|H(2Z0F<1>)x] b"],
+] as const)("Accept All resolves changes only: %s", async (_, xml, text, kind, expected) => {
+  const bytes = paragraph(xml);
+  const session = await open(bytes);
+  if (kind === "type") session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 }, "Z");
+  else {
+    const at = kind === "delete" ? childAt(session, text) : 2;
+    session.deleteRange({
+      story: "body",
+      start: { paraId: "11111111", offset: at },
+      end: { paraId: "11111111", offset: at + (kind === "delete" ? text.length : 1) },
+    });
+  }
+  resolveAll("accept")(session);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(out)).toBe(expected);
+});
+
+test("typing in a TOC's first-paragraph entry is kept by Accept All, which keeps the entry a link", async () => {
+  const bytes = docx(
+    p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Intro 1"))}${ins(run("X"))}`) +
+      p("33333333", `${run("Entry2 2")}${char("end")}`) +
+      tail
+  );
+  const session = await open(bytes);
+  session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, "Intro") + 2 }, "Z");
+  resolveAll("accept")(session);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(out)).toBe("[«TOC \\o \\h»|H(InZtro 1)X]");
+});
+
+test("Accept All numbers the field it projects as its export's seed does after a comment", async () => {
+  const bytes = paragraph(`<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${uncovered}`);
+  const ids = (session: YrsSession) =>
+    session.storySegments("body").flatMap((segment) =>
+      segment.kind === "embed" && segment.payload.resultProjection
+        ? [(segment.payload.resultProjection as { id: number }).id]
+        : []
+    );
+  const session = await open(bytes);
+  resolveAll("accept")(session);
+  const resolved = ids(session);
+  const out = await publish(bytes, session.encodeState());
+  session.destroy();
+  const reopened = await open(out);
+  expect(resolved).toEqual(ids(reopened));
+  reopened.destroy();
+});
+
+test("an external link Accept All uncovers carries its URL at once", async () => {
+  const parts = unzipContainer(
+    paragraph(field(`${run("20")}${ins(`<w:hyperlink r:id="rId20">${run("26")}</w:hyperlink>`)}`))
+  );
+  const rels = new TextDecoder().decode(parts["word/_rels/document.xml.rels"]).replace(
+    "</Relationships>",
+    `<Relationship Id="rId20" Type="${REL}/hyperlink" Target="https://example.com/x" TargetMode="External"/></Relationships>`
+  );
+  parts["word/_rels/document.xml.rels"] = new TextEncoder().encode(rels);
+  const session = await open(rezipContainer(parts));
+  resolveAll("accept")(session);
+  const hrefs = session
+    .storySegments("body")
+    .flatMap((segment) => {
+      const link = segment.attributes.hyperlink as { href?: string } | undefined;
+      return link ? [link.href] : [];
+    });
+  session.destroy();
+  expect(hrefs).toEqual(["https://example.com/x"]);
 });

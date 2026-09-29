@@ -6,13 +6,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde_json::Value;
-use yrs::{Any, Map, Out, ReadTxn, TextRef, TransactionMut};
+use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult};
 use crate::ops::{Chunk, ChunkKind, snapshot};
-use crate::raw::{RawOp, apply_raw_ops_to_story};
-use crate::seed::{JsonObject, any_from_value, field_units, payload, shown_runs, yrs_attrs};
-use crate::{KIND_KEY, map_string};
+use crate::seed::{
+    JsonObject, PackageContext, any_from_value, field_units, payload, shown_runs, yrs_attrs,
+};
+use crate::{KIND_KEY, RawOp, map_string};
 
 /// Whether a field's data keeps a tracked change as markup where resolving
 /// reaches it: its code and result, and the fields inside them.
@@ -70,12 +71,20 @@ pub(crate) fn sdt_keeps_changes(content: &Any) -> bool {
     })
 }
 
+/// How a resolve goes: accepting or rejecting, reading markup with the
+/// source package's relationships and theme.
+#[derive(Clone, Copy)]
+struct Resolve<'a> {
+    accept: bool,
+    package: Option<&'a PackageContext>,
+}
+
 /// Resolves the changes `field` (a field node) and the fields inside it keep,
 /// re-reading what each shows as the parser reads its export. Returns each
 /// old node's new place in the field's own code and result and whether a
 /// field inside it resolved (`None` for a resolved change), or `None` when it
 /// kept no change.
-fn resolve_field(field: &mut Value, accept: bool) -> Option<[Places; 2]> {
+fn resolve_field(field: &mut Value, how: Resolve<'_>) -> Option<[Places; 2]> {
     let mut moved = [Vec::new(), Vec::new()];
     let mut changed = false;
     for (slot, key) in ["structuredCode", "structuredResult"]
@@ -87,7 +96,7 @@ fn resolve_field(field: &mut Value, accept: bool) -> Option<[Places; 2]> {
             .and_then(|content| content.get_mut("inline"))
             .and_then(Value::as_array_mut)
         {
-            let (places, resolved) = resolve_nodes(nodes, accept);
+            let (places, resolved) = resolve_nodes(nodes, how);
             moved[slot] = places;
             changed |= resolved;
         }
@@ -104,7 +113,7 @@ fn resolve_field(field: &mut Value, accept: bool) -> Option<[Places; 2]> {
 type Places = Vec<Option<(usize, bool)>>;
 
 /// Replaces each kept change among `nodes` by what it resolves to.
-fn resolve_nodes(nodes: &mut Vec<Value>, accept: bool) -> (Places, bool) {
+fn resolve_nodes(nodes: &mut Vec<Value>, how: Resolve<'_>) -> (Places, bool) {
     let mut places = Vec::with_capacity(nodes.len());
     let mut resolved = Vec::with_capacity(nodes.len());
     let mut changed = false;
@@ -112,7 +121,14 @@ fn resolve_nodes(nodes: &mut Vec<Value>, accept: bool) -> (Places, bool) {
         let parsed = (node["type"] == "rawXml")
             .then(|| node["xml"].as_str())
             .flatten()
-            .and_then(|xml| docx_parse::paragraph::resolve_raw_inline(xml, accept));
+            .and_then(|xml| {
+                docx_parse::paragraph::resolve_raw_inline(
+                    xml,
+                    how.accept,
+                    how.package.map(|package| &package.relationships),
+                    how.package.map(|package| &package.theme),
+                )
+            });
         match parsed {
             Some(parsed) => {
                 changed = true;
@@ -124,7 +140,7 @@ fn resolve_nodes(nodes: &mut Vec<Value>, accept: bool) -> (Places, bool) {
                 );
             }
             None => {
-                let nested = resolve_nested(&mut node, accept);
+                let nested = resolve_nested(&mut node, how);
                 changed |= nested;
                 places.push(Some((resolved.len(), nested)));
                 resolved.push(node);
@@ -136,7 +152,7 @@ fn resolve_nodes(nodes: &mut Vec<Value>, accept: bool) -> (Places, bool) {
 }
 
 /// Resolves the changes kept by the fields `value` holds.
-fn resolve_nested(value: &mut Value, accept: bool) -> bool {
+fn resolve_nested(value: &mut Value, how: Resolve<'_>) -> bool {
     let items: Vec<&mut Value> = match value {
         Value::Object(entries)
             if matches!(
@@ -144,7 +160,7 @@ fn resolve_nested(value: &mut Value, accept: bool) -> bool {
                 Some("simpleField" | "complexField")
             ) =>
         {
-            return resolve_field(value, accept).is_some();
+            return resolve_field(value, how).is_some();
         }
         Value::Array(items) => items.iter_mut().collect(),
         Value::Object(entries) => entries.values_mut().collect(),
@@ -152,7 +168,7 @@ fn resolve_nested(value: &mut Value, accept: bool) -> bool {
     };
     let mut changed = false;
     for item in items {
-        changed |= resolve_nested(item, accept);
+        changed |= resolve_nested(item, how);
     }
     changed
 }
@@ -209,20 +225,6 @@ fn refresh_field(field: &mut serde_json::Map<String, Value>) {
             field.insert("formatting".to_owned(), formatting.clone());
         }
     }
-    // A result spanning paragraphs that keeps no markup saves its runs
-    // (`ComplexField::written_result`), so its first paragraph reads back as them.
-    let spans_paragraphs = field
-        .get("structuredResult")
-        .is_some_and(|content| !content["blocks"].is_null());
-    let keeps_markup = result
-        .iter()
-        .any(|node| matches!(node["type"].as_str(), Some("rawXml" | "inlineSdt")));
-    if field["type"] == "complexField" && spans_paragraphs && !keeps_markup {
-        let runs = field["fieldResult"].clone();
-        if let Some(content) = field.get_mut("structuredResult") {
-            content["inline"] = runs;
-        }
-    }
     if let Some(Value::Object(mut tree)) = field.get("fieldTree").cloned() {
         for (content, key) in [("structuredCode", "code"), ("structuredResult", "result")] {
             if let Some(value) = field.get(content) {
@@ -273,42 +275,6 @@ fn marks_diff(old: &JsonObject, new: &JsonObject) -> Result<yrs::types::Attrs, S
     }
     diff.extend(new.iter().map(|(key, value)| (key.clone(), value.clone())));
     yrs_attrs(diff)
-}
-
-/// Resolves the changes the fields in `story` keep, last field first so the
-/// offsets of those before stay put. A field embed becomes the units the seed
-/// makes of the resolved field: a result hyperlink or simple field the change
-/// uncovered is projected before it, and projected children it kept stay as
-/// they are (edited ones included), renumbered.
-pub(crate) fn resolve_field_changes(
-    txn: &mut TransactionMut<'_>,
-    story_id: &str,
-    story: &TextRef,
-    accept: bool,
-    styles: Option<&Value>,
-) -> OpResult<()> {
-    let chunks = snapshot(story, txn);
-    for position in (0..chunks.len()).rev() {
-        let ChunkKind::Embed(Some(map)) = &chunks[position].kind else {
-            continue;
-        };
-        match map_string(map, txn, KIND_KEY).as_deref() {
-            Some("field") if field_result_attr(&chunks[position]).is_none() => {
-                resolve_owner(txn, story_id, &chunks, position, accept, styles)?
-            }
-            Some("sdt") => {
-                let style = paragraph_style(txn, &chunks, position);
-                if let Some(Out::Any(content)) = map.get(txn, "content")
-                    && let Some(content) =
-                        resolved_sdt_content(&content, accept, styles, style.as_deref())
-                {
-                    map.insert(txn, "content", content);
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// The style of the paragraph the chunk at `position` sits in.
@@ -365,14 +331,32 @@ fn projection_id<T: ReadTxn>(txn: &T, chunk: &Chunk) -> Option<i64> {
 /// content once saved, which names its projection (`field_to_units`): a run,
 /// link, tracked change or embed per chunk the export writes before it (as
 /// `buildParagraphContent` groups them; a projected child joins its field),
-/// and a marker per bookmark boundary there.
+/// and a marker per bookmark or comment boundary there (`comments`, the
+/// story's comment boundaries): a comment marker splits the run it falls in,
+/// and the export writes a reference after the end of a comment with none.
 fn content_index<T: ReadTxn>(
     txn: &T,
     chunks: &[Chunk],
     first: usize,
     position: usize,
     last: usize,
+    comments: &[(u32, bool)],
 ) -> usize {
+    let paragraph = chunks[first].start..=chunks[position].start;
+    let comments: usize = comments
+        .iter()
+        .filter(|(at, _)| paragraph.contains(at))
+        .map(|&(at, adds_reference)| {
+            let splits = chunks[first..position].iter().any(|chunk| {
+                matches!(chunk.kind, ChunkKind::Text(_))
+                    && field_result_attr(chunk).is_none()
+                    && !chunk.attr_active("hyperlink")
+                    && chunk.start < at
+                    && at < chunk.end()
+            });
+            1 + usize::from(adds_reference) + usize::from(splits)
+        })
+        .sum();
     let mut count = 0;
     let mut offset = 0;
     let mut link: Option<&Any> = None;
@@ -432,6 +416,7 @@ fn content_index<T: ReadTxn>(
         _ => Value::Null,
     };
     count
+        + comments
         + bookmarks
             .as_array()
             .into_iter()
@@ -445,14 +430,126 @@ fn content_index<T: ReadTxn>(
             .count()
 }
 
+/// Resolves the changes the fields in `story` keep, last field first so the
+/// offsets of those before stay put. Only the changes resolve: each field
+/// embed becomes what the seed makes of the resolved field, where a result
+/// hyperlink or simple field a change uncovered is projected before it, while
+/// the projected children the user edited keep their edits, those the user
+/// deleted stay deleted, and a field inside a kept child resolves in place.
+pub(crate) fn resolve_field_changes(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    accept: bool,
+    package: Option<&PackageContext>,
+    comments: &[(u32, bool)],
+) -> OpResult<()> {
+    let how = Resolve { accept, package };
+    let chunks = snapshot(story, txn);
+    for position in (0..chunks.len()).rev() {
+        let ChunkKind::Embed(Some(map)) = &chunks[position].kind else {
+            continue;
+        };
+        match map_string(map, txn, KIND_KEY).as_deref() {
+            Some("field") if field_result_attr(&chunks[position]).is_none() => {
+                resolve_owner(txn, story, &chunks, position, how, comments)?
+            }
+            Some("sdt") => {
+                let style = paragraph_style(txn, &chunks, position);
+                if let Some(Out::Any(content)) = map.get(txn, "content")
+                    && let Some(content) = resolved_sdt_content(&content, how, style.as_deref())
+                {
+                    map.insert(txn, "content", content);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A field embed's payload and marks once its kept changes resolve, as an
+/// embed that is not projected (a projected child, or one in a content
+/// control); `None` when it kept none.
+fn resolved_embed(
+    data: &str,
+    how: Resolve<'_>,
+    style: Option<&str>,
+) -> Option<(JsonObject, JsonObject, JsonObject)> {
+    let old: Value = serde_json::from_str(data).ok()?;
+    let mut field = old.clone();
+    resolve_field(&mut field, how)?;
+    let unit = |field: &Value| field_units(field, how.package, style, 0, false).pop();
+    let (Some((_, old_marks)), Some((Err((_, payload)), marks))) = (unit(&old), unit(&field))
+    else {
+        return None;
+    };
+    Some((payload, old_marks, marks))
+}
+
+/// Applies `edits` (offset, order, op) last first; at one offset the lower
+/// order goes first.
+fn apply(txn: &mut TransactionMut<'_>, story: &TextRef, mut edits: Vec<(u32, usize, RawOp)>) {
+    edits.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    for (_, _, op) in edits {
+        match op {
+            RawOp::Insert { index, text, attrs } => {
+                story.insert_with_attributes(txn, index, &text, attrs)
+            }
+            RawOp::InsertEmbed {
+                index,
+                kind,
+                payload,
+                attrs,
+            } => {
+                let embed = story.insert_embed_with_attributes(
+                    txn,
+                    index,
+                    yrs::MapPrelim::default(),
+                    attrs,
+                );
+                embed.insert(txn, KIND_KEY, kind.as_str());
+                for (key, value) in payload {
+                    embed.insert(txn, key, value);
+                }
+            }
+            RawOp::Format { index, len, attrs } => story.format(txn, index, len, attrs),
+            RawOp::Delete { index, len } => story.remove_range(txn, index, len),
+            _ => {}
+        }
+    }
+}
+
+/// The embed's payload entries replaced by `payload`, keeping its kind.
+fn set_payload(
+    txn: &mut TransactionMut<'_>,
+    map: &yrs::MapRef,
+    payload: JsonObject,
+) -> OpResult<()> {
+    let keys: Vec<String> = map.keys(txn).map(str::to_owned).collect();
+    for key in keys
+        .iter()
+        .filter(|key| *key != KIND_KEY && !payload.contains_key(*key))
+    {
+        map.remove(txn, key);
+    }
+    for (key, value) in payload {
+        map.insert(
+            txn,
+            key,
+            any_from_value(value).map_err(OpError::InvalidUpdate)?,
+        );
+    }
+    Ok(())
+}
+
 /// Resolves the changes the field embed at `position` keeps (see `resolve_field_changes`).
 fn resolve_owner(
     txn: &mut TransactionMut<'_>,
-    story_id: &str,
+    story: &TextRef,
     chunks: &[Chunk],
     position: usize,
-    accept: bool,
-    styles: Option<&Value>,
+    how: Resolve<'_>,
+    comments: &[(u32, bool)],
 ) -> OpResult<()> {
     let error = OpError::InvalidUpdate;
     let chunk = &chunks[position];
@@ -465,7 +562,7 @@ fn resolve_owner(
         return Ok(());
     };
     let mut field = old.clone();
-    let Some([code_moved, result_moved]) = resolve_field(&mut field, accept) else {
+    let Some([code_moved, result_moved]) = resolve_field(&mut field, how) else {
         return Ok(());
     };
 
@@ -485,43 +582,52 @@ fn resolve_owner(
     let old_id = old_projection
         .as_ref()
         .and_then(|value| value["id"].as_i64());
-    let id = content_index(txn, chunks, first, position, last) as i64;
+    let id = content_index(txn, chunks, first, position, last, comments) as i64;
     let start = chunks[first..position]
         .iter()
         .rposition(|chunk| old_id.is_some() && projection_id(txn, chunk) == old_id)
         .map_or(first, |offset| first + offset + 1);
+    let children: Vec<&Chunk> = chunks[start..position]
+        .iter()
+        .filter(|chunk| {
+            field_result_attr(chunk).is_some_and(|(chunk_id, _)| Some(chunk_id) == old_id)
+        })
+        .collect();
     let mut spans: BTreeMap<i64, (u32, u32)> = BTreeMap::new();
-    for chunk in &chunks[start..position] {
-        if let Some((chunk_id, index)) = field_result_attr(chunk)
-            && Some(chunk_id) == old_id
-        {
-            let span = spans.entry(index).or_insert((chunk.start, chunk.end()));
-            span.0 = span.0.min(chunk.start);
-            span.1 = span.1.max(chunk.end());
-        }
+    for chunk in &children {
+        let (_, index) = field_result_attr(chunk).unwrap_or_default();
+        let span = spans.entry(index).or_insert((chunk.start, chunk.end()));
+        span.0 = span.0.min(chunk.start);
+        span.1 = span.1.max(chunk.end());
     }
-    // Where an old child now sits, unless a field inside it resolved too.
-    let moved = |index: i64| -> Option<i64> {
-        let (at, nested) = if index >= 0 {
+    let mut old_items: HashMap<i64, Value> = old_projection
+        .as_ref()
+        .and_then(|value| value["children"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|child| Some((child["index"].as_i64()?, child["items"].clone())))
+        .collect();
+    // Where an old child now sits, and whether a field inside it resolved.
+    let moved = |index: i64| -> Option<(i64, bool)> {
+        if index >= 0 {
             let (at, nested) = result_moved.get(index as usize).copied().flatten()?;
-            (at as i64, nested)
+            Some((at as i64, nested))
         } else {
             let (at, nested) = code_moved.get((-index - 1) as usize).copied().flatten()?;
-            (-(at as i64) - 1, nested)
-        };
-        (!nested).then_some(at)
+            Some((-(at as i64) - 1, nested))
+        }
     };
 
     // The units the seed makes of the resolved field: children, then the field.
     let style = paragraph_style(txn, chunks, position);
     let old_units = field_units(
         &old,
-        styles,
+        how.package,
         style.as_deref(),
         old_id.unwrap_or(0) as usize,
         true,
     );
-    let mut units = field_units(&field, styles, style.as_deref(), id as usize, true);
+    let mut units = field_units(&field, how.package, style.as_deref(), id as usize, true);
     let (Some((_, old_marks)), Some((Err((_, mut owner_payload)), owner_marks))) =
         (old_units.last().cloned(), units.pop())
     else {
@@ -535,124 +641,154 @@ fn resolve_owner(
             _ => groups.push((index, vec![unit])),
         }
     }
-    // Projected children the field keeps, by new index: they stay as they are.
-    let kept: BTreeMap<i64, i64> = spans
+    // Old children by new index. One with a span stays as it is; one the
+    // user deleted keeps its recorded items, so the export keeps it deleted.
+    let from_old: BTreeMap<i64, (i64, bool)> = old_items
         .keys()
+        .chain(spans.keys())
         .filter_map(|&old_index| {
-            let new_index = moved(old_index)?;
+            let (new_index, nested) = moved(old_index)?;
             groups
                 .iter()
                 .any(|(index, _)| *index == new_index)
-                .then_some((new_index, old_index))
+                .then_some((new_index, (old_index, nested)))
         })
         .collect();
-    // A kept child keeps its recorded items, so an edit to it still shows on export.
-    let old_items: HashMap<i64, Value> = old_projection
-        .as_ref()
-        .and_then(|value| value["children"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|child| Some((child["index"].as_i64()?, child["items"].clone())))
-        .collect();
-    if let Some(Value::Array(children)) = owner_payload
-        .get_mut("resultProjection")
-        .and_then(|value| value.get_mut("children"))
-    {
-        for child in children {
-            let items = child["index"]
-                .as_i64()
-                .and_then(|index| kept.get(&index))
-                .and_then(|old_index| old_items.get(old_index));
-            if let Some(items) = items {
-                child["items"] = items.clone();
-            }
-        }
-    }
 
-    // Edits at their offsets now, applied last first; at one offset a format
-    // goes before the inserts, and a later child before an earlier one.
-    let mut edits: Vec<(u32, usize, Vec<RawOp>)> = Vec::new();
+    let mut edits: Vec<(u32, usize, RawOp)> = Vec::new();
     let marks = marks_diff(&old_marks, &owner_marks).map_err(error)?;
     if !marks.is_empty() {
         edits.push((
             chunk.start,
             0,
-            vec![RawOp::Format {
+            RawOp::Format {
                 index: chunk.start,
                 len: 1,
                 attrs: marks,
-            }],
+            },
         ));
     }
     for (&old_index, &(from, to)) in &spans {
-        let op = match kept.iter().find(|(_, kept)| **kept == old_index) {
-            Some((&new_index, _)) if new_index == old_index && Some(id) == old_id => continue,
-            Some((&new_index, _)) => RawOp::Format {
-                index: from,
-                len: to - from,
-                attrs: yrs_attrs(JsonObject::from([(
-                    "fieldResult".to_owned(),
-                    serde_json::json!({ "id": id, "index": new_index }),
-                )]))
-                .map_err(error)?,
-            },
-            None => RawOp::Delete {
-                index: from,
-                len: to - from,
-            },
+        let Some((&new_index, &(_, nested))) =
+            from_old.iter().find(|(_, (kept, _))| *kept == old_index)
+        else {
+            edits.push((
+                from,
+                0,
+                RawOp::Delete {
+                    index: from,
+                    len: to - from,
+                },
+            ));
+            continue;
         };
-        edits.push((from, 0, vec![op]));
+        if new_index != old_index || Some(id) != old_id {
+            let attrs = yrs_attrs(JsonObject::from([(
+                "fieldResult".to_owned(),
+                serde_json::json!({ "id": id, "index": new_index }),
+            )]))
+            .map_err(error)?;
+            edits.push((
+                from,
+                0,
+                RawOp::Format {
+                    index: from,
+                    len: to - from,
+                    attrs,
+                },
+            ));
+        }
+        if !nested {
+            continue;
+        }
+        // A field inside the kept child resolves in place, in its recorded items too.
+        for inner in children
+            .iter()
+            .filter(|chunk| field_result_attr(chunk).map(|(_, index)| index) == Some(old_index))
+        {
+            let ChunkKind::Embed(Some(inner_map)) = &inner.kind else {
+                continue;
+            };
+            let Some(data) = map_string(inner_map, txn, "fieldData") else {
+                continue;
+            };
+            let Some((payload, old_marks, marks)) = resolved_embed(&data, how, style.as_deref())
+            else {
+                continue;
+            };
+            if let Some(Value::Array(items)) = old_items.get_mut(&old_index) {
+                for item in items
+                    .iter_mut()
+                    .filter(|item| item["payload"]["fieldData"] == data.as_str())
+                {
+                    item["payload"] = Value::Object(payload.clone().into_iter().collect());
+                    if let Some(Value::Object(attributes)) = item.get_mut("attributes") {
+                        for key in old_marks.keys() {
+                            attributes.remove(key);
+                        }
+                        attributes.extend(marks.clone());
+                    }
+                }
+            }
+            let diff = marks_diff(&old_marks, &marks).map_err(error)?;
+            if !diff.is_empty() {
+                edits.push((
+                    inner.start,
+                    0,
+                    RawOp::Format {
+                        index: inner.start,
+                        len: 1,
+                        attrs: diff,
+                    },
+                ));
+            }
+            set_payload(txn, inner_map, payload)?;
+        }
+    }
+    if let Some(Value::Array(projected)) = owner_payload
+        .get_mut("resultProjection")
+        .and_then(|value| value.get_mut("children"))
+    {
+        for child in projected {
+            let items = child["index"]
+                .as_i64()
+                .and_then(|index| from_old.get(&index))
+                .and_then(|(old_index, _)| old_items.get(old_index));
+            if let Some(items) = items {
+                child["items"] = items.clone();
+            }
+        }
     }
     let count = groups.len();
     let anchors: Vec<u32> = (0..count)
         .map(|order| {
             groups[order + 1..]
                 .iter()
-                .find_map(|(index, _)| kept.get(index).map(|old_index| spans[old_index].0))
+                .find_map(|(index, _)| {
+                    let (old_index, _) = from_old.get(index)?;
+                    spans.get(old_index).map(|span| span.0)
+                })
                 .unwrap_or(chunk.start)
         })
         .collect();
     for (order, (index, group)) in groups.into_iter().enumerate() {
-        if kept.contains_key(&index) {
+        // Only what a change uncovered is new; the user's children stay as they are.
+        if from_old.contains_key(&index) {
             continue;
         }
-        let anchor = anchors[order];
-        let mut at = anchor;
-        let mut ops = Vec::new();
+        let mut at = anchors[order];
         for unit in group {
             let (len, op) = unit_op(at, unit)?;
+            edits.push((anchors[order], 1 + count - order, op));
             at += len;
-            ops.push(op);
         }
-        edits.push((anchor, 1 + count - order, ops));
     }
-    edits.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
-    let ops: Vec<RawOp> = edits.into_iter().flat_map(|(_, _, ops)| ops).collect();
-    if !ops.is_empty() {
-        apply_raw_ops_to_story(txn, story_id, ops, false)?;
-    }
-
-    // The field embed takes the resolved field's payload.
-    let keys: Vec<String> = map.keys(txn).map(str::to_owned).collect();
-    for key in keys
-        .iter()
-        .filter(|key| *key != KIND_KEY && !owner_payload.contains_key(*key))
-    {
-        map.remove(txn, key);
-    }
-    for (key, value) in owner_payload {
-        map.insert(txn, key, any_from_value(value).map_err(error)?);
-    }
-    Ok(())
+    apply(txn, story, edits);
+    set_payload(txn, map, owner_payload)
 }
 
 /// An inline content control's content with its fields' kept changes resolved.
-fn resolved_sdt_content(
-    content: &Any,
-    accept: bool,
-    styles: Option<&Value>,
-    style: Option<&str>,
-) -> Option<Any> {
+fn resolved_sdt_content(content: &Any, how: Resolve<'_>, style: Option<&str>) -> Option<Any> {
     let Any::Array(items) = content else {
         return None;
     };
@@ -667,54 +803,45 @@ fn resolved_sdt_content(
                 return item.clone();
             };
             let mut entry = entry.as_ref().clone();
-            let kind = match entry.get("kind") {
-                Some(Any::String(kind)) => kind.to_string(),
-                _ => return item.clone(),
-            };
-            if kind == "sdt" {
-                let Some(inner) = payload
-                    .get("content")
-                    .and_then(|inner| resolved_sdt_content(inner, accept, styles, style))
-                else {
-                    return item.clone();
-                };
-                let mut payload = payload.as_ref().clone();
-                payload.insert("content".to_owned(), inner);
-                entry.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
-            } else {
-                let Some(Any::String(data)) = payload.get("fieldData") else {
-                    return item.clone();
-                };
-                let Ok(old) = serde_json::from_str::<Value>(data) else {
-                    return item.clone();
-                };
-                let mut field = old.clone();
-                if kind != "field" || resolve_field(&mut field, accept).is_none() {
-                    return item.clone();
+            match entry.get("kind") {
+                Some(Any::String(kind)) if kind.as_ref() == "sdt" => {
+                    let Some(inner) = payload
+                        .get("content")
+                        .and_then(|inner| resolved_sdt_content(inner, how, style))
+                    else {
+                        return item.clone();
+                    };
+                    let mut payload = payload.as_ref().clone();
+                    payload.insert("content".to_owned(), inner);
+                    entry.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
                 }
-                let unit = |field: &Value| field_units(field, styles, style, 0, false).pop();
-                let (Some((_, old_marks)), Some((Err((_, values)), marks))) =
-                    (unit(&old), unit(&field))
-                else {
-                    return item.clone();
-                };
-                let mut attrs = match entry.get("attrs") {
-                    Some(Any::Map(attrs)) => attrs.as_ref().clone(),
-                    _ => HashMap::new(),
-                };
-                for key in old_marks.keys() {
-                    attrs.remove(key);
-                }
-                for (key, value) in marks {
-                    if let Ok(value) = any_from_value(value) {
-                        attrs.insert(key, value);
+                Some(Any::String(kind)) if kind.as_ref() == "field" => {
+                    let Some((values, old_marks, marks)) = (match payload.get("fieldData") {
+                        Some(Any::String(data)) => resolved_embed(data, how, style),
+                        _ => None,
+                    }) else {
+                        return item.clone();
+                    };
+                    let mut attrs = match entry.get("attrs") {
+                        Some(Any::Map(attrs)) => attrs.as_ref().clone(),
+                        _ => HashMap::new(),
+                    };
+                    for key in old_marks.keys() {
+                        attrs.remove(key);
                     }
+                    for (key, value) in marks {
+                        if let Ok(value) = any_from_value(value) {
+                            attrs.insert(key, value);
+                        }
+                    }
+                    let Ok(values) = any_from_value(Value::Object(values.into_iter().collect()))
+                    else {
+                        return item.clone();
+                    };
+                    entry.insert("payload".to_owned(), values);
+                    entry.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
                 }
-                let Ok(values) = any_from_value(Value::Object(values.into_iter().collect())) else {
-                    return item.clone();
-                };
-                entry.insert("payload".to_owned(), values);
-                entry.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
+                _ => return item.clone(),
             }
             changed = true;
             Any::Map(Arc::new(entry))

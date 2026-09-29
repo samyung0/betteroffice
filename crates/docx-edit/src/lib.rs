@@ -308,8 +308,8 @@ pub struct EditingDoc {
     epoch: Arc<AtomicU64>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
-    /// The source package's style definitions, which reseeding a field needs.
-    styles: Mutex<Option<Arc<serde_json::Value>>>,
+    /// What reseeding a field needs from the source package.
+    package: Mutex<Option<Arc<seed::PackageContext>>>,
     _update_sub: Subscription,
 }
 
@@ -340,18 +340,18 @@ impl EditingDoc {
             epoch,
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
-            styles: Mutex::new(None),
+            package: Mutex::new(None),
             _update_sub: update_sub,
         }
     }
 
-    /// Records the source package's style definitions (`package.styles`).
-    pub fn set_styles(&self, styles: Option<serde_json::Value>) {
-        *self.styles.lock().unwrap() = styles.map(Arc::new);
+    /// Records what reseeding a field needs from the source package.
+    pub(crate) fn set_package(&self, package: Option<seed::PackageContext>) {
+        *self.package.lock().unwrap() = package.map(Arc::new);
     }
 
-    pub(crate) fn styles(&self) -> Option<Arc<serde_json::Value>> {
-        self.styles.lock().unwrap().clone()
+    pub(crate) fn package(&self) -> Option<Arc<seed::PackageContext>> {
+        self.package.lock().unwrap().clone()
     }
 
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
@@ -1003,6 +1003,53 @@ fn anchor_value(story: &str, start: &StickyIndex, end: &StickyIndex) -> Any {
         ("start".into(), Any::from(start.encode_v1())),
         ("end".into(), Any::from(end.encode_v1())),
     ])))
+}
+
+/// Every comment range boundary, by story: its offset, and for an end
+/// whether the export writes a reference run after it (a comment with no
+/// reference mark anywhere).
+pub(crate) fn comment_boundaries<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u32, bool)>> {
+    let mut boundaries: HashMap<String, Vec<(u32, bool)>> = HashMap::new();
+    let (Some(comments), Some(stories)) = (txn.get_map(COMMENTS), txn.get_map(STORIES)) else {
+        return boundaries;
+    };
+    let mut referenced = std::collections::HashSet::new();
+    for (_, story) in stories.iter(txn) {
+        let Out::YText(story) = story else {
+            continue;
+        };
+        for diff in story.diff(txn, YChange::identity) {
+            if let Out::YMap(embed) = diff.insert
+                && map_string(&embed, txn, "modelKind").as_deref() == Some("commentReference")
+                && let Some(Out::Any(id)) = embed.get(txn, "commentId")
+            {
+                referenced.insert(id.to_string());
+            }
+        }
+    }
+    for (id, comment) in comments.iter(txn) {
+        let Out::YMap(comment) = comment else {
+            continue;
+        };
+        let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
+            continue;
+        };
+        let referenced = referenced.contains(id);
+        for anchor in anchors
+            .iter()
+            .filter_map(|anchor| decode_anchor(anchor).ok())
+        {
+            let (Some(start), Some(end)) =
+                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
+            else {
+                continue;
+            };
+            let story = boundaries.entry(anchor.story).or_default();
+            story.push((start.index, false));
+            story.push((end.index, !referenced));
+        }
+    }
+    boundaries
 }
 
 fn decode_anchor(value: &Any) -> EditResult<CommentAnchor> {

@@ -1039,7 +1039,7 @@ impl EditSession {
         self.engine.set_media(crate::seed::package_media(&envelope));
         self.engine
             .doc()
-            .set_styles(crate::seed::package_styles(&envelope));
+            .set_package(Some(crate::seed::PackageContext::new(&envelope)));
         let host_envelope = thin_docx_envelope(&envelope);
         let referenced_fonts = if seed_stories {
             crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?

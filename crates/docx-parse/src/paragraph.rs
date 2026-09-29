@@ -1091,9 +1091,14 @@ pub fn raw_holds_changes(xml: &str) -> bool {
 
 /// Raw inline markup a field keeps, its tracked changes resolved (accepting
 /// keeps insertions and removes deletions, rejecting the reverse) and parsed,
-/// without styles, into what a field holding it in a file reads as; `None`
-/// when it holds no change.
-pub fn resolve_raw_inline(xml: &str, accept: bool) -> Option<Vec<InlineNode>> {
+/// with its part's `relationships` and the package `theme` but no styles, into
+/// what a field holding it in a file reads as; `None` when it holds no change.
+pub fn resolve_raw_inline(
+    xml: &str,
+    accept: bool,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+) -> Option<Vec<InlineNode>> {
     fn resolve(element: &XmlElement, accept: bool) -> Vec<XmlElement> {
         match raw_change_kind(element) {
             Some(deletion) if deletion == accept => Vec::new(),
@@ -1138,8 +1143,8 @@ pub fn resolve_raw_inline(xml: &str, accept: bool) -> Option<Vec<InlineNode>> {
     let limits = ParseLimits::default();
     let content = parse_paragraph_contents(
         &paragraph,
-        None,
-        None,
+        relationships,
+        theme,
         None,
         None,
         "raw-inline",
@@ -2119,24 +2124,27 @@ mod tests {
                 .collect()
         };
         let xml = r#"<w:del w:id="1"><w:r><w:delText>old</w:delText></w:r></w:del>"#;
-        assert_eq!(resolve_raw_inline(xml, true).map(texts), Some(Vec::new()));
         assert_eq!(
-            resolve_raw_inline(xml, false).map(texts),
+            resolve_raw_inline(xml, true, None, None).map(texts),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            resolve_raw_inline(xml, false, None, None).map(texts),
             Some(vec!["old".to_owned()])
         );
         let link = r#"<w:hyperlink w:anchor="a"><w:ins w:id="2"><w:r><w:t>new</w:t></w:r></w:ins></w:hyperlink>"#;
         assert_eq!(
-            resolve_raw_inline(link, true).map(texts),
+            resolve_raw_inline(link, true, None, None).map(texts),
             Some(vec!["H(new)".to_owned()])
         );
         let field = r#"<w:ins w:id="3"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins>"#;
         assert_eq!(
-            resolve_raw_inline(field, true).map(texts),
+            resolve_raw_inline(field, true, None, None).map(texts),
             Some(vec!["[PAGE|2]".to_owned()])
         );
         assert!(!raw_holds_changes("<w:r><w:t>plain</w:t></w:r>"));
         assert_eq!(
-            resolve_raw_inline("<w:r><w:t>plain</w:t></w:r>", true),
+            resolve_raw_inline("<w:r><w:t>plain</w:t></w:r>", true, None, None),
             None
         );
     }
