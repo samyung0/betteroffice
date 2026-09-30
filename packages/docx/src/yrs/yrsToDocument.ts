@@ -1976,6 +1976,7 @@ interface FlowToken {
   /** The comment an `end` closes. */
   id?: number;
 }
+const isBreak = ({ kind }: FlowToken) => kind === 'page' || kind === 'column';
 /** A break unit opening a paragraph slot. */
 interface SlotBreak {
   kind: FlowBreak;
@@ -2075,7 +2076,6 @@ function splitFlow(
   // mark the save writes after a comment's end when no break follows it), or
   // without text the last bookmark. Without either, those up to the last
   // column break lead.
-  const isBreak = ({ kind }: FlowToken) => kind === 'page' || kind === 'column';
   if (!tokens.some(isBreak)) return { leading: [], trailing: [] };
   let split = tokens.findIndex(
     ({ kind, id }, index) =>
@@ -2701,10 +2701,15 @@ class SaveContext {
               (!text && !commented) ||
               index < trailing === index < split)
         ) &&
-        // Boundaries at the slot's breaks are placed among them below.
+        // Boundaries at the slot's breaks are placed among them below, as is
+        // a comment's end the content holds ahead of a break (it sits after
+        // the break in the story).
         marks.length === 0 &&
         bookmarks.length === 0 &&
-        !commented
+        !commented &&
+        !nextTokens.some(
+          ({ kind }, index) => kind === 'end' && nextTokens.slice(index + 1).some(isBreak)
+        )
       )
         return next;
       // Breaks the content holds ahead of its text are the slot's (all of them

@@ -2103,31 +2103,39 @@ const typeAtEnd =
 
 /**
  * The comment's breaks and range stay as they are over three publications,
- * and an edit after a capture lands as it saves directly.
+ * and each edit after a capture lands as it saves directly.
  */
 async function keepsBreaks(
   bytes: Uint8Array,
   story: string,
   cover: (session: YrsSession) => void,
-  edit: (session: YrsSession) => void,
+  edits: Array<(session: YrsSession) => void>,
   flags = true
 ) {
   const commented = await kept(bytes, story, cover, flags);
   expect(commented).toEqual(Array(4).fill(commented[0]));
-  const direct = await kept(
-    bytes,
-    story,
-    (session) => {
-      cover(session);
-      edit(session);
-    },
-    flags
-  );
-  const { next } = await rebase(bytes, story, cover, edit);
-  expect((await kept(next, story, () => {}, flags)).slice(0, 3)).toEqual(
-    direct.slice(1)
-  );
+  for (const edit of edits) {
+    const direct = await kept(
+      bytes,
+      story,
+      (session) => {
+        cover(session);
+        edit(session);
+      },
+      flags
+    );
+    const { next } = await rebase(bytes, story, cover, edit);
+    expect((await kept(next, story, () => {}, flags)).slice(0, 3)).toEqual(
+      direct.slice(1)
+    );
+  }
 }
+
+/** Removes every comment. */
+const removeComments = (session: YrsSession) => {
+  for (const { id } of session.listComments())
+    session.applyRawOps("body", [{ op: "removeComment", id }]);
+};
 
 describe.each(NINE)(
   "an editor comment ending at a break a paragraph opens with keeps every break, in %s",
@@ -2177,7 +2185,7 @@ describe.each(NINE)(
         docx(where, xml),
         story,
         editorComment(story, [...start], [...end]),
-        typeAtEnd(story, "44444444", "Q")
+        [typeAtEnd(story, "44444444", "Q")]
       );
     });
 
@@ -2195,7 +2203,7 @@ describe.each(NINE)(
             end: { paraId: "44444444", offset: 8 },
           });
         },
-        typeAtEnd(story, "33333333", "Q")
+        [typeAtEnd(story, "33333333", "Q")]
       );
     });
   }
@@ -2238,8 +2246,47 @@ describe.each(NINE)(
         docx(where, xml),
         story,
         cover,
-        typeAtEnd(story, "45454545", "Q"),
+        [typeAtEnd(story, "45454545", "Q")],
         false
+      );
+    });
+  }
+);
+
+describe.each(NINE)(
+  "a comment ending at the text a break opens keeps covering the break, in %s",
+  (where) => {
+    const [story] = STORY[where];
+    const opens = (breaks: string, text = run("Heading")) =>
+      `${p("33333333", run("prev"))}${p("44444444", `${breaks}${text}`)}${p(
+        "45454545",
+        run("next")
+      )}`;
+    const upTo = (offset: number) =>
+      editorComment(story, ["33333333", 0], ["44444444", offset]);
+    // A column break alone in its paragraph reads back as leading the
+    // comment's reference mark, as it did before (see the tests above).
+    test.each([
+      ["a page break", opens(BR), upTo(1), true],
+      ["a column break", opens(COL), upTo(1), true],
+      ["a page and a column break", opens(`${BR}${COL}`), upTo(2), true],
+      ["a column break alone in its paragraph", opens(COL, ""), upTo(1), false],
+      [
+        "a page break, a comment of the file with no reference mark",
+        `${p("33333333", `${S(1)}${run("prev")}`)}${p(
+          "44444444",
+          `${BR}${E(1)}${run("Heading")}`
+        )}${p("45454545", run("next"))}`,
+        () => {},
+        true,
+      ],
+    ] as const)("%s", async (_, xml, cover, flags) => {
+      await keepsBreaks(
+        docx(where, xml),
+        story,
+        cover,
+        [typeAtEnd(story, "44444444", "Q"), removeComments],
+        flags
       );
     });
   }
