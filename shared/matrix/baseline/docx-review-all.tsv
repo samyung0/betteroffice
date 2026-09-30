@@ -1,0 +1,25 @@
+# docx-review-all: 752 rows, ids 50b03d3e4b23fd12; rows not listed are exact
+body | fs child+ins +tab | before=accept | after=type	refused
+body | fs child+ins +tab | before=accept | after=type+accept	refused
+body | fs child+ins +tab | before=reject | after=type	refused
+body | fs child+ins +tab | before=reject | after=type+accept	refused
+body | ins>link +tab | before=accept | after=type	refused
+body | ins>link +tab | before=accept | after=type+accept	refused
+body | ins>link +tab | before=type+accept | after=type	refused
+body | ins>link +tab | before=type+accept | after=type+accept	refused
+body | link+del +tab | before=accept | after=type	refused
+body | link+del +tab | before=accept | after=type+accept	refused
+body | link+del +tab | before=reject | after=type	refused
+body | link+del +tab | before=reject | after=type+accept	refused
+body | link+ins +tab | before=accept | after=type	refused
+body | link+ins +tab | before=accept | after=type+accept	refused
+body | link+ins +tab | before=reject | after=type	refused
+body | link+ins +tab | before=reject | after=type+accept	refused
+body | nested fs>ins in link +tab | before=accept | after=type	refused
+body | nested fs>ins in link +tab | before=accept | after=type+accept	refused
+body | nested fs>ins in link +tab | before=reject | after=type	refused
+body | nested fs>ins in link +tab | before=reject | after=type+accept	refused
+body | two links, ins between +tab | before=accept | after=type	refused
+body | two links, ins between +tab | before=accept | after=type+accept	refused
+body | two links, ins between +tab | before=reject | after=type	refused
+body | two links, ins between +tab | before=reject | after=type+accept	refused
