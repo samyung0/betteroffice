@@ -481,6 +481,9 @@ fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
     let mut next_field = 0;
     let mut stack = vec![root];
     while let Some(element) = stack.pop() {
+        if element.matches_name("w", "txbxContent") {
+            continue;
+        }
         if element.local_name() == "fldChar" {
             match element.attribute(Some("w"), "fldCharType") {
                 Some("begin") => {

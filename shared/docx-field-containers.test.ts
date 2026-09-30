@@ -432,6 +432,25 @@ test("a continued field's cached paragraphs do not restore a deleted nested fiel
   }
 });
 
+test("a text-box field does not shift a host paragraph's continued field", async () => {
+  const drawing = `<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Text Box 41"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>${field(run("1"), " PAGE ")}</w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  const parts = unzipContainer(docx(p("11111111", drawing + char("begin") + instr(" IF ")) + p("33333333", char("separate") + run("yes") + char("end")) + tail));
+  parts["word/document.xml"] = new TextEncoder().encode(new TextDecoder().decode(parts["word/document.xml"]).replace("<w:document ", '<w:document xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '));
+  let bytes = rezipContainer(parts);
+  for (let publication = 0; publication < 3; publication++) {
+    const session = await open(bytes);
+    if (publication) edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const xml = documentXml(bytes);
+    const first = xml.slice(xml.indexOf('w14:paraId="11111111"'), xml.indexOf('w14:paraId="33333333"'));
+    const second = xml.slice(xml.indexOf('w14:paraId="33333333"'), xml.indexOf('w14:paraId="22222222"'));
+    const markers = (value: string) => [...value.matchAll(/w:fldCharType="([^"]+)"/g)].map((match) => match[1]);
+    expect(markers(first)).toEqual(["begin", "separate", "end", "begin"]);
+    expect(markers(second)).toEqual(["separate", "end"]);
+  }
+});
+
 for (const [name, wrap] of [["link", link], ["insertion", ins], ["control", sdt]] as const) {
   test(`a continued field inside a ${name} keeps its markers when its captured owner is renumbered`, async () => {
     const bytes = docx(p("11111111", run("prefix") + wrap(char("begin") + instr(" TOC "))) + p("33333333", ins(char("separate") + run("result") + char("end"))) + tail);

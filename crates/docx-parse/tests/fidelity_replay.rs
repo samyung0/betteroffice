@@ -232,6 +232,31 @@ fn nested_field_continuations_keep_their_paragraphs() {
 }
 
 #[test]
+fn text_box_fields_do_not_number_their_host_paragraphs_fields() {
+    let boxed_field = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let drawing = format!(
+        r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Text Box 41"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{boxed_field}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+    );
+    let body = format!(
+        r#"<w:p>{drawing}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF </w:instrText></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+    );
+    let mut bytes = package(
+        &body,
+        r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#,
+        None,
+    );
+    for _ in 0..3 {
+        bytes = roundtrip(&bytes);
+        python_check(
+            &bytes,
+            &format!(
+                "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nparagraphs=root.find(w+'body').findall(w+'p')\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[0].iter(w+'fldChar')]==['begin','separate','end','begin'],E.tostring(paragraphs[0])\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[1].iter(w+'fldChar')]==['separate','end'],E.tostring(paragraphs[1])"
+            ),
+        );
+    }
+}
+
+#[test]
 fn nested_complex_fields_keep_each_continuation_owner() {
     let begin = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
     let separate = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
