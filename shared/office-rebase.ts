@@ -179,9 +179,11 @@ function assertBreaksLead(source: Y.Text, target: Y.Text): void {
     slot.some(([, unit]) => !leads(unit))
   );
   if (!slots.length) return;
+  // Aligned afresh: `settle` may have changed the story since the anchors
+  // were rewritten with their cached alignment.
   let f: Alignment;
   try {
-    f = aligned(source, target);
+    f = align(units(source), units(target));
   } catch {
     return; // Changes inside it cannot land and fail the rebase.
   }
@@ -484,9 +486,10 @@ function myers(from: Units, to: Units): Omit<Alignment, "matched"> {
 }
 
 /**
- * A story's alignment with its rebased counterpart, made once: comment
- * anchors are rewritten after every text has landed, so the rebased story no
- * longer changes, and each transplant's stories are new objects.
+ * A story's alignment with its rebased counterpart, made once for the
+ * comment anchors: they are rewritten after every text has landed, and each
+ * transplant's stories are new objects. `settle` changes the story after
+ * that, so later checks align afresh.
  */
 const anchorAlignments = new WeakMap<Y.Text, Alignment>();
 function aligned(source: Y.Text, target: Y.Text): Alignment {

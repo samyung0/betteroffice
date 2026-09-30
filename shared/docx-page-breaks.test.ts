@@ -2371,3 +2371,89 @@ describe.each(NINE)(
     );
   }
 );
+
+describe.each(NINE)(
+  "a comment removed and another added after a capture, ahead of breaks, in %s",
+  (where) => {
+    const [story] = STORY[where];
+    /** A comment by `author` in `story` from `start` to `end`. */
+    const by =
+      (author: string, start: [string, number], end: [string, number]) =>
+      (session: YrsSession) =>
+        void session.addComment(
+          [
+            {
+              story,
+              start: { paraId: start[0], offset: start[1] },
+              end: { paraId: end[0], offset: end[1] },
+            },
+          ],
+          author,
+          "2026-09-29T00:00:00Z",
+          [
+            {
+              type: "paragraph",
+              content: [
+                { type: "run", content: [{ type: "text", text: "c" }] },
+              ],
+            },
+          ]
+        );
+    const all =
+      (...edits: Array<(session: YrsSession) => void>) =>
+      (session: YrsSession) =>
+        edits.forEach((edit) => edit(session));
+    // B, made before the capture, is removed after it and C is added: the
+    // export's reference for B leaves the rebased story before the check.
+    const B = by("B", ["33333333", 0], ["33333333", 2]);
+    const reviewed = all((session: YrsSession) => {
+      for (const { id, author } of session.listComments())
+        if (author === "B")
+          session.applyRawOps("body", [{ op: "removeComment", id }]);
+    }, by("C", ["33333333", 2], ["33333333", 4]));
+    const type = typeAtEnd(story, "44444444", "Q");
+    const only = `${p("33333333", run("prev"))}${p("44444444", COL)}${p(
+      "45454545",
+      run("next")
+    )}`;
+
+    test.each([
+      ["a comment ending before it", by("A", ["33333333", 0], ["44444444", 0])],
+      ["a comment over it", by("A", ["44444444", 0], ["44444444", 1])],
+      [
+        "two comments ending before it",
+        all(
+          by("A", ["33333333", 2], ["44444444", 0]),
+          by("D", ["33333333", 0], ["44444444", 0])
+        ),
+      ],
+    ] as const)(
+      "a column break alone in its paragraph, %s, then text typed there: the rebase refuses",
+      async (_, cover) => {
+        await expect(
+          rebase(docx(where, only), story, all(B, cover), all(reviewed, type))
+        ).rejects.toThrow("Office rebase:");
+      }
+    );
+
+    test.each([
+      [
+        "a column break closing the paragraph before, then a page break opening the next",
+        `${p("33333333", `${run("prev")}${COL}`)}${p(
+          "44444444",
+          `${BR}${run("Heading")}`
+        )}`,
+      ],
+      [
+        "a page break closing the paragraph before, then a column break opening the next",
+        `${p("33333333", `${run("prev")}${BR}`)}${p(
+          "44444444",
+          `${COL}${run("Heading")}`
+        )}`,
+      ],
+    ])("%s: the rebase lands", async (_, xml) => {
+      await keepsBreaks(docx(where, xml), story, B, [reviewed]);
+      await rebase(docx(where, xml), story, B, all(reviewed, type));
+    });
+  }
+);
