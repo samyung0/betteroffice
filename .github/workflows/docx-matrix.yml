@@ -1,0 +1,64 @@
+name: DOCX matrices
+
+# The DOCX edit/publish/rebase regression suite (shared/matrix/README.md). Run by hand before landing Office changes;
+# it is not part of the per-push gates.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  matrices:
+    name: DOCX matrices
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.14'
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: wasm
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The checkpoint bundle imports the docx, xlsx and pptx cores.
+      - name: Build the wasm cores
+        run: bun run build:xlsx-wasm && bun run build:docx-wasm && bun run build:pptx-wasm
+
+      - name: Run the matrices
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bun run test:matrix
+
+      - name: Upload the rows that are not exact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: docx-matrix-report
+          path: ${{ runner.temp }}/docx-matrix-*/report.txt
+          if-no-files-found: ignore
