@@ -2264,13 +2264,27 @@ describe.each(NINE)(
       )}`;
     const upTo = (offset: number) =>
       editorComment(story, ["33333333", 0], ["44444444", offset]);
+    const type = typeAtEnd(story, "44444444", "Q");
     // A column break alone in its paragraph reads back as leading the
-    // comment's reference mark, as it did before (see the tests above).
+    // comment's reference mark, as it did before (see the tests above), and
+    // text typed after it following a capture refuses the rebase (below).
     test.each([
-      ["a page break", opens(BR), upTo(1), true],
-      ["a column break", opens(COL), upTo(1), true],
-      ["a page and a column break", opens(`${BR}${COL}`), upTo(2), true],
-      ["a column break alone in its paragraph", opens(COL, ""), upTo(1), false],
+      ["a page break", opens(BR), upTo(1), [type, removeComments], true],
+      ["a column break", opens(COL), upTo(1), [type, removeComments], true],
+      [
+        "a page and a column break",
+        opens(`${BR}${COL}`),
+        upTo(2),
+        [type, removeComments],
+        true,
+      ],
+      [
+        "a column break alone in its paragraph",
+        opens(COL, ""),
+        upTo(1),
+        [removeComments],
+        false,
+      ],
       [
         "a page break, a comment of the file with no reference mark",
         `${p("33333333", `${S(1)}${run("prev")}`)}${p(
@@ -2278,16 +2292,82 @@ describe.each(NINE)(
           `${BR}${E(1)}${run("Heading")}`
         )}${p("45454545", run("next"))}`,
         () => {},
+        [type, removeComments],
         true,
       ],
-    ] as const)("%s", async (_, xml, cover, flags) => {
-      await keepsBreaks(
-        docx(where, xml),
-        story,
-        cover,
-        [typeAtEnd(story, "44444444", "Q"), removeComments],
-        flags
-      );
+    ] as const)("%s", async (_, xml, cover, edits, flags) => {
+      await keepsBreaks(docx(where, xml), story, cover, [...edits], flags);
     });
+  }
+);
+
+describe.each(NINE)(
+  "text typed after a capture into a paragraph holding only breaks and a comment's end, in %s",
+  (where) => {
+    const [story] = STORY[where];
+    const only = (breaks: string, prev = run("prev")) =>
+      `${p("33333333", prev)}${p("44444444", breaks)}${p(
+        "45454545",
+        run("next")
+      )}`;
+    const upTo = (start: [string, number], end: number) =>
+      editorComment(story, start, ["44444444", end]);
+    const type = typeAtEnd(story, "44444444", "Q");
+    // The capture's save writes the comment's reference after the breaks,
+    // so the seed reads them as leading it; the latest state does not.
+    test.each([
+      [
+        "a column break, a comment ending before it",
+        only(COL),
+        upTo(["33333333", 0], 0),
+      ],
+      [
+        "a column break, two comments ending before it",
+        only(COL),
+        (session: YrsSession) => {
+          upTo(["33333333", 2], 0)(session);
+          upTo(["33333333", 0], 0)(session);
+        },
+      ],
+      [
+        "a column break, a comment over it",
+        only(COL),
+        upTo(["44444444", 0], 1),
+      ],
+      [
+        "a column break, a comment from the paragraph before over it",
+        only(COL),
+        upTo(["33333333", 0], 1),
+      ],
+      [
+        "a page and a column break, a comment ending before them",
+        only(`${BR}${COL}`),
+        upTo(["33333333", 0], 0),
+      ],
+      [
+        "a page and a column break, a comment over them",
+        only(`${BR}${COL}`),
+        upTo(["44444444", 0], 2),
+      ],
+      [
+        "a column break, a comment of the file with no reference mark ending before it",
+        only(`${E(1)}${COL}`, `${S(1)}${run("prev")}`),
+        () => {},
+      ],
+    ] as const)("%s: the rebase refuses", async (_, xml, cover) => {
+      await expect(
+        rebase(docx(where, xml), story, cover, type)
+      ).rejects.toThrow("Office rebase:");
+    });
+
+    test.each([
+      ["a column break", COL],
+      ["a page and a column break", `${BR}${COL}`],
+    ])(
+      "%s with no comment: the typing lands as saved directly",
+      async (_, breaks) => {
+        await keepsBreaks(docx(where, only(breaks)), story, () => {}, [type]);
+      }
+    );
   }
 );

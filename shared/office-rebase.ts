@@ -124,11 +124,78 @@ export const DOCX_LINEAGE: Lineage = {
     const stories = doc.getMap("stories");
     for (const [key, source] of later.getMap("stories").entries()) {
       const target = stories.get(id(key));
-      if (source instanceof Y.Text && target instanceof Y.Text)
+      if (source instanceof Y.Text && target instanceof Y.Text) {
         assertChildrenLanded(source, target);
+        assertBreaksLead(source, target);
+      }
     }
   },
 };
+
+/**
+ * The page and column break units opening each paragraph that follows
+ * another paragraph and holds something after them.
+ */
+function breakSlots(text: Y.Text): Array<Array<[number, Y.Map<unknown>]>> {
+  const slots: Array<Array<[number, Y.Map<unknown>]>> = [];
+  let slot: Array<[number, Y.Map<unknown>]> = [];
+  let afterParagraph = false;
+  let content = false;
+  for (const [offset, item] of items(text))
+    item.content.getContent().forEach((unit, index) => {
+      const kind = unit instanceof Y.Map ? unit.get("_kind") : undefined;
+      if (kind === "pilcrow") {
+        if (content && slot.length) slots.push(slot);
+        [slot, afterParagraph, content] = [[], true, false];
+      } else if (kind === "table" || kind === "blockSdt")
+        // Breaks before a block close the paragraph before it, and none
+        // precede the paragraph after it.
+        [slot, afterParagraph] = [[], false];
+      else if (
+        (kind === "pageBreak" || kind === "columnBreak") &&
+        !content &&
+        afterParagraph
+      )
+        slot.push([offset + index, unit as Y.Map<unknown>]);
+      else if (
+        !(unit instanceof Y.Map && unit.get("modelKind") === "commentReference")
+      )
+        content = true;
+    });
+  return slots;
+}
+
+/**
+ * Refuses when the seed reads a break opening a paragraph as leading its
+ * text where the latest state does not: the capture's save wrote a comment's
+ * reference mark after the paragraph's breaks while it held nothing else, and
+ * text followed them only later. Saved directly, such breaks close the
+ * paragraph before; the rebased state would keep them opening this one.
+ */
+function assertBreaksLead(source: Y.Text, target: Y.Text): void {
+  const leads = (unit: unknown) =>
+    unit instanceof Y.Map && unit.get("leading") === true;
+  const slots = breakSlots(source).filter((slot) =>
+    slot.some(([, unit]) => !leads(unit))
+  );
+  if (!slots.length) return;
+  let f: Alignment;
+  try {
+    f = aligned(source, target);
+  } catch {
+    return; // Changes inside it cannot land and fail the rebase.
+  }
+  for (const slot of slots) {
+    const latest = slot.findIndex(([, unit]) => leads(unit));
+    const rebased = slot.findIndex(
+      ([at]) => f.map[at] >= 0 && leads(childAtOffset(target, f.map[at]))
+    );
+    if (rebased >= 0 && (latest < 0 || rebased < latest))
+      fail(
+        "text follows breaks the export reads as leading it and the latest state does not"
+      );
+  }
+}
 
 type Marker = { id: number; index: number };
 
