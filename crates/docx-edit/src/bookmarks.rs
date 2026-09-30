@@ -188,11 +188,29 @@ pub(crate) fn paragraph_properties<T: ReadTxn>(
                 {
                     fields.insert(id.to_string());
                 }
-                for value in values.values() {
-                    nested_fields(value, fields);
+                if matches!(values.get("type"), Some(Any::String(kind)) if kind.as_ref() == "complexField")
+                    && let Some(Any::Map(continuation)) = values.get("continuation")
+                    && let Some(Any::String(id)) = continuation.get("id")
+                {
+                    fields.insert(id.to_string());
+                }
+                if let Some(Any::String(data)) = values.get("fieldData") {
+                    field_data_continuations(data, fields);
+                }
+                for (key, value) in values.iter() {
+                    if !matches!(key.as_str(), "blocks" | "fieldTree") {
+                        nested_fields(value, fields);
+                    }
                 }
             }
             _ => {}
+        }
+    }
+    fn field_data_continuations(data: &str, fields: &mut HashSet<String>) {
+        if data.contains("\"continuation\"")
+            && let Ok(value) = Any::from_json(data)
+        {
+            nested_fields(&value, fields);
         }
     }
     let mut fields = HashSet::new();
@@ -200,6 +218,9 @@ pub(crate) fn paragraph_properties<T: ReadTxn>(
         if let ChunkKind::Embed(Some(map)) = &chunk.kind {
             if let Some(id) = map_string(map, txn, "continuationId") {
                 fields.insert(id);
+            }
+            if let Some(data) = map_string(map, txn, "fieldData") {
+                field_data_continuations(&data, &mut fields);
             }
             if let Some(Out::Any(content)) = map.get(txn, "content") {
                 nested_fields(&content, &mut fields);

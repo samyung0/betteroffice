@@ -173,6 +173,45 @@ fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
 }
 
 #[test]
+fn nested_continued_fields_keep_both_owners_boundaries() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let Some(Any::Array(markers)) = paragraphs[1].properties.get("bookmarks") else {
+        panic!("nested field boundaries are missing");
+    };
+    assert_eq!(markers.len(), 4);
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    assert!(
+        !doc.paragraphs("body").unwrap()[1]
+            .properties
+            .contains_key("bookmarks")
+    );
+}
+
+#[test]
+fn a_continued_fields_cached_blocks_do_not_keep_deleted_owners_alive() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r></w:p><w:p w14:paraId="33333333"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 2, 3))
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let Some(Any::Array(markers)) = paragraphs[2].properties.get("bookmarks") else {
+        panic!("outer field's end is missing");
+    };
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        map_get(&markers[0], "kind"),
+        Some(&Any::String("fieldend".into()))
+    );
+}
+
+#[test]
 fn continued_field_boundaries_keep_and_resolve_their_revision() {
     let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:sdt><w:sdtContent><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r></w:sdtContent></w:sdt></w:p><w:p w14:paraId="22222222"><w:ins w:id="9" w:author="Ada"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins></w:p></w:body></w:document>"#;
     let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();

@@ -232,6 +232,51 @@ fn nested_field_continuations_keep_their_paragraphs() {
 }
 
 #[test]
+fn nested_complex_fields_keep_each_continuation_owner() {
+    let begin = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
+    let separate = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let outer = r#"<w:r><w:instrText> IF </w:instrText></w:r>"#;
+    let inner = r#"<w:r><w:instrText> PAGE </w:instrText></w:r>"#;
+    let result = r#"<w:r><w:t>1</w:t></w:r>"#;
+    for (opening, closing, first, second) in [
+        (
+            format!("{begin}{outer}{begin}{inner}"),
+            format!("{separate}{result}{end}{separate}{result}{end}"),
+            "['begin','begin']",
+            "['separate','end','separate','end']",
+        ),
+        (
+            format!("{begin}{outer}{separate}{begin}{inner}"),
+            format!("{separate}{result}{end}{end}"),
+            "['begin','separate','begin']",
+            "['separate','end','end']",
+        ),
+        (
+            format!("{begin}{outer}{begin}{inner}{separate}{result}{end}"),
+            format!("{separate}{result}{end}"),
+            "['begin','begin','separate','end']",
+            "['separate','end']",
+        ),
+    ] {
+        let mut bytes = package(
+            &format!("<w:p>{opening}</w:p><w:p>{closing}</w:p>"),
+            "",
+            None,
+        );
+        for _ in 0..3 {
+            bytes = roundtrip(&bytes);
+            python_check(
+                &bytes,
+                &format!(
+                    "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nparagraphs=list(root.iter(w+'p'))\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[0].iter(w+'fldChar')]=={first},E.tostring(paragraphs[0])\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[1].iter(w+'fldChar')]=={second},E.tostring(paragraphs[1])"
+                ),
+            );
+        }
+    }
+}
+
+#[test]
 fn foreign_fragment_values_roundtrip_in_inline_block_and_cell_xml() {
     let fragment = r#"<bofx:marker bofx:q="a&amp;&lt;&gt;&quot;b">a&amp;&lt;&gt;"b</bofx:marker>"#;
     for body in [

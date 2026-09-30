@@ -980,13 +980,23 @@ export function docxIds(
     const ids = new Map<string, string>();
     const stories = [from.getMap("stories"), to.getMap("stories")] as const;
     const continuedFields = (value: unknown): Array<readonly [string, string]> => {
-      if (Array.isArray(value)) return value.flatMap(continuedFields);
-      if (!value || typeof value !== "object") return [];
-      const payload = value as Record<string, unknown>;
-      if (payload.modelKind === "field" && typeof payload.continuationId === "string" && typeof payload.instruction === "string") {
-        return [[payload.continuationId, payload.instruction]];
-      }
-      return Object.values(payload).flatMap(continuedFields);
+      const found = new Map<string, string>();
+      const visit = (value: unknown): void => {
+        if (Array.isArray(value)) return value.forEach(visit);
+        if (!value || typeof value !== "object") return;
+        const payload = value as Record<string, unknown>;
+        let id = payload.modelKind === "field" ? payload.continuationId : undefined;
+        if (payload.type === "complexField" && payload.continuation && typeof payload.continuation === "object") {
+          id = (payload.continuation as Record<string, unknown>).id;
+        }
+        if (typeof id === "string" && typeof payload.instruction === "string") found.set(id, payload.instruction);
+        if (typeof payload.fieldData === "string" && payload.fieldData.includes('"continuation"')) visit(JSON.parse(payload.fieldData));
+        for (const [key, child] of Object.entries(payload)) {
+          if (key !== "blocks" && key !== "fieldTree") visit(child);
+        }
+      };
+      visit(value);
+      return [...found];
     };
     const pair = (a: unknown, b: unknown) => {
       if (typeof a !== "string" || typeof b !== "string" || ids.has(a)) return;
@@ -1005,14 +1015,9 @@ export function docxIds(
         const other = theirs.get(f.map[index]);
         const kind = embed.get("_kind");
         if (!other || other.get("_kind") !== kind) continue;
-        if (kind === "field") {
-          const original = embed.get("continuationId");
-          const saved = other.get("continuationId");
-          if (typeof original === "string" && typeof saved === "string") ids.set(original, saved);
-        }
-        if (kind === "sdt") {
-          const original = continuedFields(embed.get("content"));
-          const saved = continuedFields(other.get("content"));
+        if (kind === "field" || kind === "sdt") {
+          const original = continuedFields(embed.toJSON());
+          const saved = continuedFields(other.toJSON());
           if (original.length === saved.length && original.every(([, instruction], index) => instruction === saved[index]![1])) {
             original.forEach(([id], index) => ids.set(id, saved[index]![0]));
           }

@@ -381,6 +381,57 @@ test("a field's separate and end characters stay in their later paragraphs", asy
   }
 });
 
+for (const [name, opening, closing, firstMarkers, lastMarkers] of [
+  ["nested code", char("begin") + instr(" IF ") + char("begin") + instr(" PAGE "), char("separate") + run("12") + char("end") + char("separate") + run("yes") + char("end"), ["begin", "begin"], ["separate", "end", "separate", "end"]],
+  ["nested result", char("begin") + instr(" IF ") + char("separate") + char("begin") + instr(" PAGE "), char("separate") + run("12") + char("end") + char("end"), ["begin", "separate", "begin"], ["separate", "end", "end"]],
+  ["closed child", char("begin") + instr(" IF ") + field(run("1"), " PAGE "), char("separate") + run("yes") + char("end"), ["begin", "begin", "separate", "end"], ["separate", "end"]],
+] as const) {
+  for (const [container, wrap] of [["paragraph", (xml: string) => xml], ["link", link], ["control", sdt]] as const) {
+    test(`continued ${name} fields in a ${container} keep their own markers through publications`, async () => {
+      let bytes = docx(p("11111111", wrap(opening)) + p("33333333", closing) + tail);
+      for (let publication = 0; publication < 3; publication++) {
+        const session = await open(bytes);
+        edit(session, "22222222", "x");
+        bytes = await publish(bytes, session.encodeState());
+        session.destroy();
+        const paragraphs = [...documentXml(bytes).matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)];
+        const markers = (xml: string) => [...xml.matchAll(/w:fldCharType="([^"]+)"/g)].map((match) => match[1]);
+        expect(markers(paragraphs[0][1])).toEqual(firstMarkers);
+        expect(markers(paragraphs[1][1])).toEqual(lastMarkers);
+        expect(documentXml(bytes)).toContain("PAGE");
+      }
+    });
+    if (name === "closed child") continue;
+    test(`continued ${name} fields in a ${container} rebase their renumbered markers`, async () => {
+      const bytes = docx(p("11111111", run("prefix") + wrap(opening)) + p("33333333", ins(closing)) + tail);
+      const { next, direct } = await landed(bytes, (session) => session.deleteRange({
+        story: "body", start: { paraId: "11111111", offset: 0 }, end: { paraId: "11111111", offset: 6 },
+      }), (session) => {
+        resolveAll("accept")(session);
+        session.insertText({ story: "body", paraId: "33333333", offset: 1 }, "Z");
+      }, (saved) => `${view(saved, "11111111")}|${view(saved, "33333333")}`);
+      expect(next).toBe(direct);
+      expect(next).toContain("|1Z2]");
+    });
+  }
+}
+
+test("a continued field's cached paragraphs do not restore a deleted nested field's markers", async () => {
+  let bytes = docx(p("11111111", char("begin") + instr(" IF ") + char("separate")) + p("33333333", char("begin") + instr(" PAGE ")) + p("44444444", char("separate") + run("1") + char("end") + char("end")) + tail);
+  const session = await open(bytes);
+  session.deleteRange({ story: "body", start: { paraId: "33333333", offset: 0 }, end: { paraId: "33333333", offset: 1 } });
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  for (let publication = 0; publication < 3; publication++) {
+    expect(view(bytes, "44444444")).toBe("1]");
+    expect([...documentXml(bytes).matchAll(/w:fldCharType="begin"/g)]).toHaveLength(1);
+    const reopened = await open(bytes);
+    edit(reopened, "22222222", "x");
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
+
 for (const [name, wrap] of [["link", link], ["insertion", ins], ["control", sdt]] as const) {
   test(`a continued field inside a ${name} keeps its markers when its captured owner is renumbered`, async () => {
     const bytes = docx(p("11111111", run("prefix") + wrap(char("begin") + instr(" TOC "))) + p("33333333", ins(char("separate") + run("result") + char("end"))) + tail);

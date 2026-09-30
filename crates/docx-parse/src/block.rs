@@ -70,7 +70,7 @@ enum FieldMode {
 struct FieldEvents {
     external_separates: usize,
     external_ends: usize,
-    unmatched_modes: Vec<FieldMode>,
+    unmatched_fields: Vec<(usize, FieldMode)>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,16 +197,12 @@ impl StoryParser<'_, '_> {
             }
             content.push(parsed);
 
-            if !events.unmatched_modes.is_empty() {
+            if !events.unmatched_fields.is_empty() {
                 let candidates = complex_field_paths(&content[parsed_index]);
-                let start = candidates
-                    .len()
-                    .saturating_sub(events.unmatched_modes.len());
-                for (content_index, mode) in candidates[start..]
-                    .iter()
-                    .cloned()
-                    .zip(events.unmatched_modes.iter().copied())
-                {
+                for (index, mode) in events.unmatched_fields {
+                    let Some(content_index) = candidates.get(index).cloned() else {
+                        continue;
+                    };
                     let record = records.len();
                     records.push(FieldRecord {
                         owner_block: parsed_index,
@@ -482,13 +478,17 @@ fn collect_transparent_children<'a>(
 fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
     let mut events = FieldEvents::default();
     let mut modes = Vec::new();
+    let mut next_field = 0;
     let mut stack = vec![root];
     while let Some(element) = stack.pop() {
         if element.local_name() == "fldChar" {
             match element.attribute(Some("w"), "fldCharType") {
-                Some("begin") => modes.push(FieldMode::Code),
+                Some("begin") => {
+                    modes.push((next_field, FieldMode::Code));
+                    next_field += 1;
+                }
                 Some("separate") => match modes.last_mut() {
-                    Some(mode) => *mode = FieldMode::Result,
+                    Some((_, mode)) => *mode = FieldMode::Result,
                     None => events.external_separates += 1,
                 },
                 Some("end") => {
@@ -502,39 +502,73 @@ fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
         let children: Vec<_> = element.child_elements().collect();
         stack.extend(children.into_iter().rev());
     }
-    events.unmatched_modes = modes;
+    events.unmatched_fields = modes;
     events
 }
 
-fn inline_children(node: &InlineNode) -> &[InlineNode] {
-    match node {
-        InlineNode::Hyperlink(link) => link.written_children(),
-        InlineNode::InlineSdt(sdt) => &sdt.content,
-        InlineNode::Tracked(change) => &change.content,
-        InlineNode::SimpleField(field) => field
-            .structured_result
-            .as_ref()
-            .and_then(|result| result.inline.as_deref())
-            .unwrap_or_default(),
-        _ => &[],
-    }
+fn inline_children(node: &InlineNode) -> impl Iterator<Item = &InlineNode> {
+    let (first, second): (&[InlineNode], &[InlineNode]) = match node {
+        InlineNode::Hyperlink(link) => (link.written_children(), &[]),
+        InlineNode::InlineSdt(sdt) => (&sdt.content, &[]),
+        InlineNode::Tracked(change) => (&change.content, &[]),
+        InlineNode::SimpleField(field) => (
+            field
+                .structured_result
+                .as_ref()
+                .and_then(|result| result.inline.as_deref())
+                .unwrap_or_default(),
+            &[],
+        ),
+        InlineNode::ComplexField(field) => (
+            field
+                .structured_code
+                .as_ref()
+                .and_then(|code| code.inline.as_deref())
+                .unwrap_or_default(),
+            field
+                .structured_result
+                .as_ref()
+                .and_then(|result| result.inline.as_deref())
+                .unwrap_or_default(),
+        ),
+        _ => (&[], &[]),
+    };
+    first.iter().chain(second)
 }
 
-fn inline_children_mut(node: &mut InlineNode) -> &mut [InlineNode] {
-    match node {
-        InlineNode::Hyperlink(link) => link
-            .structured_children
-            .as_deref_mut()
-            .unwrap_or(&mut link.children),
-        InlineNode::InlineSdt(sdt) => &mut sdt.content,
-        InlineNode::Tracked(change) => &mut change.content,
-        InlineNode::SimpleField(field) => field
-            .structured_result
-            .as_mut()
-            .and_then(|result| result.inline.as_deref_mut())
-            .unwrap_or_default(),
-        _ => &mut [],
-    }
+fn inline_children_mut(node: &mut InlineNode) -> impl Iterator<Item = &mut InlineNode> {
+    let (first, second): (&mut [InlineNode], &mut [InlineNode]) = match node {
+        InlineNode::Hyperlink(link) => (
+            link.structured_children
+                .as_deref_mut()
+                .unwrap_or(&mut link.children),
+            &mut [],
+        ),
+        InlineNode::InlineSdt(sdt) => (&mut sdt.content, &mut []),
+        InlineNode::Tracked(change) => (&mut change.content, &mut []),
+        InlineNode::SimpleField(field) => (
+            field
+                .structured_result
+                .as_mut()
+                .and_then(|result| result.inline.as_deref_mut())
+                .unwrap_or_default(),
+            &mut [],
+        ),
+        InlineNode::ComplexField(field) => (
+            field
+                .structured_code
+                .as_mut()
+                .and_then(|code| code.inline.as_deref_mut())
+                .unwrap_or_default(),
+            field
+                .structured_result
+                .as_mut()
+                .and_then(|result| result.inline.as_deref_mut())
+                .unwrap_or_default(),
+        ),
+        _ => (&mut [], &mut []),
+    };
+    first.iter_mut().chain(second)
 }
 
 fn complex_field_paths(block: &BlockContent) -> Vec<Vec<usize>> {
@@ -545,7 +579,7 @@ fn complex_field_paths(block: &BlockContent) -> Vec<Vec<usize>> {
         if matches!(node, InlineNode::ComplexField(_)) {
             found.push(path.clone());
         }
-        for (index, child) in inline_children(node).iter().enumerate() {
+        for (index, child) in inline_children(node).enumerate() {
             path.push(index);
             visit(child, path, found);
             path.pop();
@@ -636,7 +670,7 @@ fn complex_field_mut<'a>(
 ) -> Option<&'a mut ComplexField> {
     fn descend<'a>(node: &'a mut InlineNode, path: &[usize]) -> Option<&'a mut ComplexField> {
         if let Some((index, rest)) = path.split_first() {
-            return descend(inline_children_mut(node).get_mut(*index)?, rest);
+            return descend(inline_children_mut(node).nth(*index)?, rest);
         }
         match node {
             InlineNode::ComplexField(field) => Some(field),
