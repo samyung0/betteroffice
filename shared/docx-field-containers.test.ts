@@ -171,6 +171,7 @@ type Build = (wrap: (xml: string) => string) => string;
 const cases: Array<[string, Build, string, string]> = [
   ["a bookmark inside w:fldSimple", (wrap) => fs(bm(wrap(run("2026")))), "a F<{bm2026bm}> b", "a 2026 b"],
   ["w:fldSimple inside a hyperlink", (wrap) => link(fs(wrap(run("2026")))), "a H(F<2026>) b", "a 2026 b"],
+  ["a complex field inside a hyperlink", (wrap) => link(field(wrap(run("2026")), " PAGEREF target \\h ")), "a H([«PAGEREF target \\h»|2026]) b", "a 2026 b"],
   ["w:fldSimple inside w:ins", (wrap) => ins(fs(wrap(run("2026")))), "a +{F<2026>} b", "a 2026 b"],
   ["w:ins inside w:fldSimple", (wrap) => fs(ins(wrap(run("2026")))), "a F<+{2026}> b", "a 2026 b"],
   ["w:sdt inside w:fldSimple", (wrap) => fs(sdt(wrap(run("2026")))), "a F<S{2026}> b", "a 2026 b"],
@@ -230,6 +231,364 @@ const cases: Array<[string, Build, string, string]> = [
   ],
 ];
 const plain = (xml: string) => xml;
+
+test.each([
+  ["a whole inserted field", ins(field(run("kept"))), ["<w:ins ", "<w:fldChar "]],
+  ["a whole deleted field", del(field(deleted("kept"))), ["<w:del ", "<w:fldChar "]],
+  ["a content control in a link", link(sdt(run("kept"))), ["<w:hyperlink ", "<w:sdt>"]],
+  ["a revision in a link", link(ins(run("kept"))), ["<w:hyperlink ", "<w:ins "]],
+  ["a link in a revision", ins(link(run("kept"))), ["<w:hyperlink ", "<w:ins "]],
+  ["a revision in a content control", sdt(ins(run("kept"))), ["<w:sdt>", "<w:ins "]],
+  ["nested insertions and deletions", ins(del(deleted("kept"))), ["<w:ins ", "<w:del "]],
+] as const)("%s keeps its content and wrappers through publications", async (_, content, tags) => {
+  let bytes = paragraph(content);
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const saved = documentXml(bytes);
+    expect(saved).toContain("kept");
+    for (const tag of tags) expect(saved).toContain(tag);
+    if (tags.some((tag) => tag === "<w:fldChar ")) expect([...saved.matchAll(/<w:fldChar /g)]).toHaveLength(3);
+  }
+});
+
+test.each([
+  ["a content control", (xml: string) => sdt(xml)],
+  ["a link in a field", (xml: string) => field(link(xml))],
+  ["a control in a field", (xml: string) => field(sdt(xml))],
+  ["a field in a control", (xml: string) => sdt(field(xml))],
+])("Accept and Reject All resolve revisions inside %s", async (_, wrap) => {
+  for (const mode of ["accept", "reject"] as const) {
+    let bytes = paragraph(wrap(ins(run("new")) + del(deleted("old")) + ins(del(deleted("both")))));
+    const session = await open(bytes);
+    expect(session.hasFieldChanges()).toBe(true);
+    resolveAll(mode)(session);
+    expect(session.hasFieldChanges()).toBe(false);
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    for (let publication = 0; publication < 3; publication += 1) {
+      const xml = documentXml(bytes);
+      expect(xml).not.toMatch(/<w:(?:ins|del|moveFrom|moveTo)\b/);
+      expect(xml).toContain(mode === "accept" ? "new" : "old");
+      expect(xml).not.toContain(mode === "accept" ? "old" : "new");
+      expect(xml).not.toContain("both");
+      const reopened = await open(bytes);
+      bytes = await publish(bytes, reopened.encodeState());
+      reopened.destroy();
+    }
+  }
+});
+
+test.each([
+  ["typing before the range", (session: YrsSession) => session.insertText({ story: "body", paraId: "11111111", offset: 0 }, "z")],
+  ["Enter inside the range", (session: YrsSession) => session.splitParagraph({ story: "body", paraId: "11111111", offset: 3 })],
+  ["joining the next paragraph", (session: YrsSession) => session.mergeParagraphs("body", "11111111", "forward")],
+])("bookmarks keep one range after %s and publications", async (_, edit) => {
+  let bytes = docx(p("11111111", run("A") + bm(run("BCD")) + run("E")) + p("22222222", bm(run("FG")).replaceAll('w:id="5"', 'w:id="6"').replace('w:name="mark"', 'w:name="other"')));
+  const session = await open(bytes);
+  edit(session);
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  for (let publication = 0; publication < 3; publication += 1) {
+    const xml = documentXml(bytes);
+    for (const [id, text] of [[5, "BCD"], [6, "FG"]] as const) {
+      expect([...xml.matchAll(new RegExp(`<w:bookmarkStart w:id="${id}"`, "g"))]).toHaveLength(1);
+      expect([...xml.matchAll(new RegExp(`<w:bookmarkEnd w:id="${id}"`, "g"))]).toHaveLength(1);
+      const range = xml.match(new RegExp(`<w:bookmarkStart w:id="${id}"[^>]*>([\\s\\S]*?)<w:bookmarkEnd w:id="${id}"`))![1]!;
+      expect([...range.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((match) => match[1]).join("")).toBe(text);
+    }
+    const reopened = await open(bytes);
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
+
+test.each([["a link", link], ["a content control", sdt], ["a field link", (xml: string) => field(link(xml))]])("bookmarks inside %s stay in that container", async (_, wrap) => {
+  let bytes = paragraph(wrap(run("A") + bm(run("BCD")) + run("E")));
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "z");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const xml = documentXml(bytes);
+    expect(xml).toMatch(/<(?:w:hyperlink|w:sdtContent)[^>]*>[\s\S]*?<w:bookmarkStart w:id="5"[\s\S]*?<w:t[^>]*>BCD<\/w:t>[\s\S]*?<w:bookmarkEnd w:id="5"/);
+  }
+});
+
+test("accepting a paragraph-mark deletion preserves bookmarks from both paragraphs", async () => {
+  let bytes = docx(p("11111111", '<w:pPr><w:rPr><w:del w:id="2" w:author="A"/></w:rPr></w:pPr>' + bm(run("AB"))) + p("22222222", bm(run("CD")).replaceAll('w:id="5"', 'w:id="6"')));
+  const session = await open(bytes);
+  session.acceptChange({ all: true });
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  const xml = documentXml(bytes);
+  expect([...xml.matchAll(/<w:bookmarkStart\b/g)]).toHaveLength(2);
+  expect([...xml.matchAll(/<w:bookmarkEnd\b/g)]).toHaveLength(2);
+  expect(view(bytes, "22222222")).toBe("{bmABbm}{bmCDbm}");
+});
+
+test("Accept All exposes a field link's bookmarks as anchored boundaries", async () => {
+  let bytes = paragraph(field(ins(link(run("A") + bm(run("BCD")) + run("E")))));
+  const session = await open(bytes);
+  session.acceptChange({ all: true });
+  expect(session.storySegments("body").some((part) => part.kind === "embed" && part.embedKind === "bookmark")).toBe(false);
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  for (let publication = 0; publication < 3; publication += 1) {
+    expect(view(bytes, "11111111")).toContain("H(A{bmBCDbm}E)");
+    const reopened = await open(bytes);
+    edit(reopened, "22222222", "z");
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
+
+test("a field spanning paragraphs closes at its authored position through edits and publications", async () => {
+  let bytes = docx(p("11111111", char("begin") + instr(" TOC ") + char("separate") + link(run("first"))) + p("22222222", link(run("second")) + char("end") + run("after")) + p("33333333", run("tail")));
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    session.insertText({ story: "body", paraId: "22222222", offset: 0 }, "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(view(bytes, "11111111")).toBe("[«TOC»|H(first)");
+    expect(view(bytes, "22222222")).toBe(`${"x".repeat(publication + 1)}H(second)]after`);
+    expect([...documentXml(bytes).matchAll(/w:fldCharType="end"/g)]).toHaveLength(1);
+  }
+});
+
+test("a continued field keeps its closing anchor when the captured export renumbers its owner", async () => {
+  const bytes = docx(p("11111111", run("prefix") + char("begin") + instr(" TOC ") + char("separate") + link(run("first"))) + p("33333333", run("second") + char("end") + run("after")) + tail);
+  const { next, direct } = await landed(bytes, (session) => session.deleteRange({
+    story: "body", start: { paraId: "11111111", offset: 0 }, end: { paraId: "11111111", offset: 6 },
+  }), (session) => session.insertText({ story: "body", paraId: "33333333", offset: 0 }, "Z"),
+  (saved) => `${view(saved, "11111111")}|${view(saved, "33333333")}`);
+  expect(next).toBe(direct);
+  expect(next).toBe("[«TOC»|H(first)|Zsecond]after");
+});
+
+test("a field's separate and end characters stay in their later paragraphs", async () => {
+  let bytes = docx(p("11111111", char("begin") + instr(" TOC ")) + p("33333333", char("separate") + run("entry")) + p("44444444", char("end") + run("after")) + tail);
+  for (let publication = 0; publication < 3; publication++) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(view(bytes, "11111111")).toBe("[«TOC»");
+    expect(view(bytes, "33333333")).toBe("|entry");
+    expect(view(bytes, "44444444")).toBe("]after");
+  }
+});
+
+for (const [name, wrap] of [["link", link], ["insertion", ins], ["control", sdt]] as const) {
+  test(`a continued field inside a ${name} keeps its markers when its captured owner is renumbered`, async () => {
+    const bytes = docx(p("11111111", run("prefix") + wrap(char("begin") + instr(" TOC "))) + p("33333333", ins(char("separate") + run("result") + char("end"))) + tail);
+    const { next, direct } = await landed(bytes, (session) => session.deleteRange({
+      story: "body", start: { paraId: "11111111", offset: 0 }, end: { paraId: "11111111", offset: 6 },
+    }), (session) => {
+      resolveAll("accept")(session);
+      session.insertText({ story: "body", paraId: "33333333", offset: 1 }, "Z");
+    },
+    (saved) => `${view(saved, "11111111")}|${view(saved, "33333333")}`);
+    expect(next).toBe(direct);
+    expect(next).toContain("|rZesult]");
+  });
+  test.each([false, true])(`a continued field with nested ${name} characters stays open across paragraphs, nested opener: %s`, async (nestedOpener) => {
+    const opening = char("begin") + instr(" TOC ");
+    const closing = run("prefix") + char("separate") + run("result") + char("end") + run("suffix");
+    let bytes = docx(p("11111111", nestedOpener ? wrap(opening) : opening) + p("33333333", nestedOpener ? closing : wrap(closing)) + tail);
+    for (let publication = 0; publication < 3; publication++) {
+      const session = await open(bytes);
+      edit(session, "22222222", "x");
+      bytes = await publish(bytes, session.encodeState());
+      session.destroy();
+      const paragraphs = [...documentXml(bytes).matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)];
+      expect([...paragraphs[0][1].matchAll(/w:fldCharType="([^"]+)"/g)].map((match) => match[1])).toEqual(["begin"]);
+      expect([...paragraphs[1][1].matchAll(/w:fldCharType="([^"]+)"/g)].map((match) => match[1])).toEqual(["separate", "end"]);
+      expect(paragraphs[1][1]).toContain("result");
+      const shown = view(bytes, "33333333");
+      expect(shown.replace(/H\(|\)|S\{|\+\{|\}/g, "")).toBe("prefix|result]suffix");
+      if (!nestedOpener) {
+        const tag = { link: "hyperlink", insertion: "ins", control: "sdtContent" }[name];
+        const containers = [...paragraphs[1][1].matchAll(new RegExp(`<w:${tag}\\b[^>]*>([\\s\\S]*?)</w:${tag}>`, "g"))];
+        for (const type of ["separate", "end"]) {
+          expect(containers.some((container) => container[1].includes(`w:fldCharType="${type}"`))).toBe(true);
+        }
+      }
+    }
+    const resolved = await open(bytes);
+    resolveAll("accept")(resolved);
+    bytes = await publish(bytes, resolved.encodeState());
+    resolved.destroy();
+    expect(documentXml(bytes)).not.toMatch(/<w:ins\b/);
+    expect(view(bytes, "33333333").replace(/H\(|\)|S\{|\}/g, "")).toBe("prefix|result]suffix");
+  });
+}
+
+test("continued fields without paragraph ids have distinct anchors across stories", async () => {
+  const content = (text: string) => `<w:p>${char("begin")}${instr(" TOC ")}${char("separate")}${run(text)}</w:p><w:p>${run("last")}${char("end")}</w:p>`;
+  let bytes = withStories(content("body") + tail, content("header"), p("55555555", run("note")));
+  for (let publication = 0; publication < 3; publication++) {
+    const session = await open(bytes);
+    const ids = ["body", "hf:rId10"].flatMap((story) => session.storySegments(story).flatMap((segment) =>
+      segment.kind === "embed" && typeof segment.payload.continuationId === "string" ? [segment.payload.continuationId] : []
+    ));
+    expect(new Set(ids).size).toBe(2);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    for (const part of ["word/document.xml", "word/header1.xml"]) {
+      const paragraphs = [...documentXml(bytes, part).matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)];
+      expect(paragraphs[0][1]).not.toContain('w:fldCharType="end"');
+      expect(paragraphs[1][1]).toContain('w:fldCharType="end"');
+    }
+  }
+});
+
+test.each(["accept", "reject"] as const)("%s all resolves a formatting-only revision", async (mode) => {
+  const properties = '<w:rPr><w:b/><w:rPrChange w:id="4" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>';
+  let bytes = paragraph(`<w:r>${properties}<w:t>changed</w:t></w:r>`);
+  const session = await open(bytes);
+  resolveAll(mode)(session);
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  for (let publication = 0; publication < 3; publication += 1) {
+    const xml = documentXml(bytes);
+    expect(xml).not.toContain("w:rPrChange");
+    expect(xml).toContain(mode === "accept" ? "<w:b/>" : "<w:i/>");
+    expect(xml).not.toContain(mode === "accept" ? "<w:i/>" : "<w:b/>");
+    const reopened = await open(bytes);
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
+
+test.each(["accept", "reject"] as const)("%s all resolves an empty run's formatting revision", async (mode) => {
+  const bytes = paragraph('<w:r><w:rPr><w:b/><w:rPrChange w:id="4" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t/></w:r>');
+  const session = await open(bytes);
+  expect(session.listRevisions().some((change) => change.kind === "rPrChange")).toBe(true);
+  resolveAll(mode)(session);
+  expect(session.listRevisions()).toHaveLength(0);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(documentXml(saved)).not.toContain("w:rPrChange");
+});
+
+test.each(["accept", "reject"] as const)("%s all resolves formatting revisions inside nested containers", async (mode) => {
+  const changed = '<w:r><w:rPr><w:b/><w:rPrChange w:id="4" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t>changed</w:t></w:r>';
+  for (const wrap of [link, sdt, fs, field, (xml: string) => field(link(sdt(xml)))]) {
+    const bytes = paragraph(wrap(changed));
+    const session = await open(bytes);
+    resolveAll(mode)(session);
+    const saved = await publish(bytes, session.encodeState());
+    session.destroy();
+    const xml = documentXml(saved);
+    expect(xml).not.toContain("w:rPrChange");
+    expect(xml).toContain(mode === "accept" ? "<w:b/>" : "<w:i/>");
+    expect(xml).not.toContain(mode === "accept" ? "<w:i/>" : "<w:b/>");
+  }
+});
+
+test.each(["accept", "reject"] as const)("%s all resolves move wrappers and their range markers", async (mode) => {
+  const moved = '<w:moveFromRangeStart w:id="80" w:name="m"/>' + moveFrom(deleted("old")) + '<w:moveFromRangeEnd w:id="80"/><w:moveToRangeStart w:id="81" w:name="m"/>' + moveTo(run("new")) + '<w:moveToRangeEnd w:id="81"/>';
+  for (const wrap of [(xml: string) => xml, field, (xml: string) => field(sdt(xml))]) {
+    const bytes = paragraph(wrap(moved));
+    const session = await open(bytes);
+    resolveAll(mode)(session);
+    const saved = await publish(bytes, session.encodeState());
+    session.destroy();
+    const xml = documentXml(saved);
+    expect(xml).not.toMatch(/<w:(?:moveFrom|moveTo|ins|del)\b|<w:move(?:From|To)Range(?:Start|End)\b/);
+    expect(xml).toContain(mode === "accept" ? "new" : "old");
+    expect(xml).not.toContain(mode === "accept" ? "old" : "new");
+  }
+});
+
+test("text beside field markers stays on its own side across publications", async () => {
+  let bytes = paragraph('<w:r><w:t>before</w:t><w:fldChar w:fldCharType="begin"/><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/><w:t>2026</w:t></w:r><w:r><w:t> result</w:t><w:fldChar w:fldCharType="end"/><w:t>after</w:t></w:r>');
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(view(bytes)).toBe("a before[«DATE»|2026 result]after b");
+  }
+});
+
+test("a block content control in a table cell keeps its content through edits and publication", async () => {
+  const control = sdt(p("33333333", run("kept")));
+  let bytes = docx(`<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${control}</w:tc></w:tr></w:tbl>${tail}`);
+  const story = "body:t0:r0c0:sdt0";
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    expect(session.paragraphs(story)[0].text).toBe(`${"x".repeat(publication)}kept`);
+    edit(session, "22222222", "z");
+    const captured = session.encodeState();
+    const exported = await publish(bytes, captured);
+    session.insertText({ story, paraId: "33333333", offset: 0 }, "x");
+    const latest = session.encodeState();
+    const result = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+    bytes = await publish(exported, result.state);
+    session.destroy();
+    const xml = documentXml(bytes);
+    expect(xml).toMatch(/<w:tc>(?:<w:tcPr>[\s\S]*?<\/w:tcPr>)?<w:sdt>/);
+    expect(xml).toContain(`${"x".repeat(publication + 1)}kept`);
+  }
+});
+
+test("a dirty complex field keeps Word's update flag through publications", async () => {
+  let bytes = paragraph(field(run("1"), " PAGE ").replace('w:fldCharType="begin"', 'w:fldCharType="begin" w:dirty="true"'));
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(documentXml(bytes)).toContain('w:fldCharType="begin" w:dirty="true"');
+  }
+});
+
+test.each([" DATE ", " REF target \\h "])("typing at a %s field link's end keeps its Word link properties", async (instruction) => {
+  const original = '<w:hyperlink w:anchor="target" w:history="1" w:tgtFrame="_blank" w:docLocation="section" w:tooltip="tip">' + run("BB") + '</w:hyperlink>';
+  let bytes = paragraph(field(original, instruction));
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    if (publication === 0) session.insertText({ story: "body", paraId: "11111111", offset: 4 }, "Z");
+    else edit(session, "22222222", "x");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const saved = documentXml(bytes).match(/<w:hyperlink[^>]*>/)![0];
+    expect(saved).toContain('w:history="1"');
+    expect(saved).toContain('w:tgtFrame="_blank"');
+    expect(saved).toContain('w:docLocation="section"');
+    expect(saved).toContain('w:anchor="target"');
+    expect(saved).toContain('w:tooltip="tip"');
+  }
+});
+
+test("unbolding a field's first child after capture saves the same field formatting directly and after a rebase", async () => {
+  const bold = '<w:hyperlink w:anchor="target"><w:r><w:rPr><w:b/></w:rPr><w:t>AA</w:t></w:r></w:hyperlink>';
+  const bytes = paragraph(field(bold + link(run("BB")), " REF target \\h "));
+  const session = await open(bytes);
+  edit(session, "22222222", "x");
+  const captured = session.encodeState();
+  const exported = await publish(bytes, captured);
+  session.formatRange({ story: "body", start: { paraId: "11111111", offset: 2 }, end: { paraId: "11111111", offset: 4 } }, { bold: false });
+  const latest = session.encodeState();
+  const direct = await publish(bytes, latest);
+  const result = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+  let saved = await publish(exported, result.state);
+  session.destroy();
+  expect(documentXml(saved)).toBe(documentXml(direct));
+  for (let publication = 0; publication < 2; publication += 1) {
+    const reopened = await open(saved);
+    const previous = documentXml(saved);
+    saved = await publish(saved, reopened.encodeState());
+    reopened.destroy();
+    expect(documentXml(saved)).toBe(previous);
+  }
+});
+
 /** The first paragraph as the editor shows it: its text and its fields' texts. */
 function shownText(session: YrsSession): string {
   let text = "";
@@ -474,7 +833,7 @@ test.each([
   "a field result spanning paragraphs keeps %s in its first paragraph, and Accept or Reject All resolves it",
   async (_, first, kept, accepted, rejected) => {
     const bytes = toc(first);
-    const result = (saved: Uint8Array) => view(saved).match(/\|(.*)\]/)?.[1];
+    const result = (saved: Uint8Array) => view(saved).match(/\|(.*)$/)?.[1];
     for (const [resolve, expected] of [
       [() => {}, kept],
       [resolveAll("accept"), accepted],
@@ -488,6 +847,7 @@ test.each([
         saved = await publish(saved, session.encodeState());
         session.destroy();
         expect(result(saved)).toBe(expected);
+        expect(view(saved, "33333333")).toBe("Entry2 2]");
       }
     }
   }
@@ -690,6 +1050,17 @@ async function landed(bytes: Uint8Array, before: Edit, after: Edit, show: (bytes
 const typeIn = (text: string): Edit => (session) =>
   session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 }, "Z");
 
+test("typing at a field child's end after a captured sibling deletion lands exactly", async () => {
+  const bytes = paragraph(field(link(run("AA")).replace('w:anchor="target"', 'w:anchor="a"') + link(run("BB")).replace('w:anchor="target"', 'w:anchor="b"')));
+  const { next, direct } = await landed(bytes, (session) => {
+    const offset = childAt(session, "AA");
+    session.deleteRange({ story: "body", start: { paraId: "11111111", offset }, end: { paraId: "11111111", offset: offset + 2 } });
+  }, (session) => session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, "BB") + 2 }, "Z"));
+  expect(next).toBe(direct);
+  expect(next).toContain("Z");
+  expect(next).not.toContain("AA");
+});
+
 const ref5 = `<w:commentRangeStart w:id="5"/>${run("c ")}<w:commentRangeEnd w:id="5"/>${ref(5)}`;
 const pageBreak = `<w:r><w:br w:type="page"/></w:r>`;
 const splitRuns = ["00A1", "00B2", "00C3"]
@@ -703,9 +1074,13 @@ const uncovered = field(`${run("20")}${ins(link(run("26")))}`);
 test.each([
   ["nothing before the capture", refField("20", "a"), () => {}, "20"],
   ["Accept All after a Word comment", `${ref5}${uncovered}`, resolveAll("accept"), "26"],
+  ["Accept All after a bookmark", `<w:bookmarkStart w:id="7" w:name="m"/>${run("x")}<w:bookmarkEnd w:id="7"/>${uncovered}`, resolveAll("accept"), "26"],
+  ["Accept All beside a mid-paragraph break", `${pageBreak}${uncovered}${refField("30", "b")}`, resolveAll("accept"), "30"],
 ] as const)("text typed in a projected child after the capture lands in its field: %s", async (_, xml, before, text) => {
   const { next, direct } = await landed(paragraph(xml), before, typeIn(text));
   expect(next).toBe(direct);
+  expect(next).toContain("Z");
+  expect(next).toContain(`H(${text[0]}Z${text.slice(1)})`);
 });
 test.each([
   ["Word's split runs before it", `${splitRuns}${refField("20", "a")}${run(" ")}${refField("xy", "b")}`, () => {}, "20"],
@@ -729,8 +1104,6 @@ test.each([
     "20",
   ],
   ["Accept All after a tab", `<w:r><w:t>x</w:t><w:tab/></w:r>${uncovered}`, resolveAll("accept"), "26"],
-  ["Accept All after a bookmark", `<w:bookmarkStart w:id="7" w:name="m"/>${run("x")}<w:bookmarkEnd w:id="7"/>${uncovered}`, resolveAll("accept"), "26"],
-  ["Accept All beside a mid-paragraph break", `${pageBreak}${uncovered}${refField("30", "b")}`, resolveAll("accept"), "30"],
   ["Reject All of a tracked leading break", `${ins(pageBreak)}${uncovered}${refField("30", "b")}`, resolveAll("reject"), "30"],
 ] as const)("text typed in a projected child after the capture refuses the rebase: %s", async (_, xml, before, text) => {
   await expect(landed(paragraph(xml), before, typeIn(text))).rejects.toBeInstanceOf(RebaseError);
@@ -769,7 +1142,8 @@ test("typing in a TOC's first-paragraph entry is kept by Accept All, which keeps
   resolveAll("accept")(session);
   const out = await publish(bytes, session.encodeState());
   session.destroy();
-  expect(view(out)).toBe("[«TOC \\o \\h»|H(InZtro 1)X]");
+  expect(view(out)).toBe("[«TOC \\o \\h»|H(InZtro 1)X");
+  expect(view(out, "33333333")).toBe("Entry2 2]");
 });
 
 const deletedRun = del(deleted("xy"));
@@ -954,7 +1328,7 @@ test.each([
     docx(p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Intro 1"))}${del(deleted("Old"))}`) + p("33333333", `${run("Entry2 2")}${char("end")}`) + tail),
     "Intro",
     resolveAll("reject"),
-    "[«TOC \\o \\h»|H(IZntro 1)Old]",
+    "[«TOC \\o \\h»|H(IZntro 1)Old",
   ],
 ] as const)("%s after a capture lands exactly when a projected child was edited before it", async (_, bytes, text, after, expected) => {
   const { next, direct } = await landed(bytes, typeIn(text), after);
@@ -1087,7 +1461,7 @@ test.each([
     docx(p("11111111", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${link(run("Introduction 1"))}`) + p("33333333", `${link(run("Entry2 2"))}${char("end")}`) + tail),
     "Introduction",
     2,
-    "[«TOC \\o \\h»|H(Introduction 1)]",
+    "[«TOC \\o \\h»|H(Introduction 1)",
   ],
 ] as const)("Clear formatting on part of %s keeps it in its field", async (_, bytes, text, from, expected) => {
   const clear: Edit = (session) => {
@@ -1175,14 +1549,14 @@ const tocEnd = (session: YrsSession) => {
 const atTocEnd: Record<string, [Edit, string]> = {
   "Backspace at the end of the first entry (its page number field)": [
     (session) => void session.deleteAt({ story: "body", ...tocEnd(session) }, "backward"),
-    "[«TOC \\o \\h»|H(Introduction)]",
+    "[«TOC \\o \\h»|H(Introduction)",
   ],
   "retyping the first entry's page number": [
     (session) => {
       const { paraId, offset } = tocEnd(session);
       session.replaceRange({ story: "body", start: { paraId, offset: offset - 1 }, end: { paraId, offset } }, "7");
     },
-    "[«TOC \\o \\h»|H(Introduction7)]",
+    "[«TOC \\o \\h»|H(Introduction7)",
   ],
   "typing at the end of the first entry and deleting it": [
     (session) => {
@@ -1190,7 +1564,7 @@ const atTocEnd: Record<string, [Edit, string]> = {
       session.insertText({ story: "body", paraId, offset }, "Z");
       session.deleteAt({ story: "body", paraId, offset: offset + 1 }, "backward");
     },
-    "[«TOC \\o \\h»|H(Introduction[«PAGEREF _Toc1 \\h»|1])]",
+    "[«TOC \\o \\h»|H(Introduction[«PAGEREF _Toc1 \\h»|1])",
   ],
 };
 test.each(Object.keys(atTocEnd))("%s keeps the TOC field across three publications", async (name) => {

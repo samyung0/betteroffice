@@ -2031,7 +2031,8 @@ fn paragraph_projection_risks(paragraph: &Paragraph) -> Vec<&'static str> {
             | ParagraphContent::Inline(InlineNode::ComplexField(_)) => risks.push("fields"),
             ParagraphContent::Inline(InlineNode::Math(_)) => risks.push("math"),
             ParagraphContent::Inline(InlineNode::RawXml(_)) => risks.push("foreign markup"),
-            ParagraphContent::Tracked(_)
+            ParagraphContent::Inline(InlineNode::Tracked(_))
+            | ParagraphContent::Tracked(_)
             | ParagraphContent::RangeStart(_)
             | ParagraphContent::RangeEnd(_) => risks.push("revision marks"),
             ParagraphContent::CommentRange(_) => risks.push("comment anchors"),

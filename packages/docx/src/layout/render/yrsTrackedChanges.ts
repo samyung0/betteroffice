@@ -37,6 +37,8 @@ export function extractTrackedChangesFromYrs(
           ? 'paragraphMarkDeletion'
           : revision.kind === 'pPrChange'
             ? 'paragraphPropertiesChanged'
+            : revision.kind === 'rPrChange'
+              ? 'runPropertiesChanged'
             : revision.kind === 'trIns'
               ? 'rowInserted'
               : revision.kind === 'trDel'

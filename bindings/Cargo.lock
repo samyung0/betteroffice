@@ -122,7 +122,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -192,6 +191,7 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-pptx-parse",
  "serde",
  "serde_json",
@@ -1383,8 +1383,6 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 [[package]]
 name = "yrs"
 version = "0.27.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d3a728b1abffeca5b9e5319c5b81e04b73790cbdc1e342da8d91b440b3026cb"
 dependencies = [
  "arc-swap",
  "async-lock",

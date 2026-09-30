@@ -202,8 +202,6 @@ pub fn write_docx_s13_parts(
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
-    serialize_comment_parts(&request.document, &mut package, &mut context)?;
-
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
@@ -222,6 +220,8 @@ pub fn write_docx_s13_parts(
             );
         }
     }
+
+    serialize_comment_parts(&request.document, &mut package, &mut context)?;
 
     if request.options.update_modified_date || request.options.modified_by.is_some() {
         if let Some(core_xml) = package.text("docProps/core.xml") {
@@ -535,6 +535,18 @@ fn serialize_comment_parts(
         // An explicit empty projection owns comment deletion: drop the source's
         // comment parts, whose thread metadata would otherwise resurrect them on open.
         return remove_comment_parts(package);
+    }
+    // Reserve the paragraphs actually saved, including opaque drawings and
+    // unchanged parts of a selective save, before minting comment identities.
+    for (path, bytes) in package.refs() {
+        if path.ends_with(".xml")
+            && let Ok(xml) = std::str::from_utf8(bytes)
+            && let Some(paragraphs) = index_paragraphs(xml.trim_end())
+        {
+            for id in paragraphs.by_id.keys() {
+                context.reserve_hex_id(id);
+            }
+        }
     }
     let (comments_xml, infos) = serialize_comments_with_info(comments, context);
     package.set_text("word/comments.xml", comments_xml);
@@ -1793,27 +1805,8 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn cell(&mut self, cell: &TableCell) -> Option<()> {
-        // Mirrors `serialize_table_cell`: block SDTs emit nothing and an
-        // otherwise empty cell still emits a `<w:p/>` fallback.
-        let mut emitted = false;
-        for block in &cell.content {
-            match block {
-                BlockContent::Paragraph(paragraph) => {
-                    self.paragraph(paragraph)?;
-                    emitted = true;
-                }
-                BlockContent::Table(table) => {
-                    self.table(table)?;
-                    emitted = true;
-                }
-                BlockContent::BlockSdt(_) => {}
-                BlockContent::RawXml(raw) => {
-                    self.fragment(&raw.xml)?;
-                    emitted = true;
-                }
-            }
-        }
-        if !emitted {
+        self.story(&cell.content)?;
+        if cell.content.is_empty() {
             self.count += 1;
         }
         Some(())
@@ -1837,14 +1830,8 @@ impl<'a> SelectiveParagraphIndex<'a> {
                         change.node_type.as_str(),
                         "insertion" | "deletion" | "moveFrom" | "moveTo"
                     ) {
-                        let deletion = matches!(change.node_type.as_str(), "deletion" | "moveFrom");
                         for item in &change.content {
-                            match item {
-                                InlineNode::Run(run) => self.run(run)?,
-                                InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink)?,
-                                InlineNode::SimpleField(_) if !deletion => self.inline(item)?,
-                                _ => {}
-                            }
+                            self.inline(item)?;
                         }
                     }
                 }
@@ -1917,18 +1904,18 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 Some(())
             }
             InlineNode::RawXml(raw) => self.fragment(&raw.xml),
+            InlineNode::Tracked(change) => {
+                for child in &change.content {
+                    self.inline(child)?;
+                }
+                Some(())
+            }
         }
     }
 
-    /// Hyperlink serialization only emits Run, SimpleField and bookmark
-    /// children; only runs and fields can carry nested paragraphs or generated ids.
     fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
         for child in hyperlink.written_children() {
-            match child {
-                InlineNode::Run(run) => self.run(run)?,
-                InlineNode::SimpleField(_) => self.inline(child)?,
-                _ => {}
-            }
+            self.inline(child)?;
         }
         Some(())
     }

@@ -9,6 +9,7 @@ import type { InlineSdt } from './sdt';
 import type { MathEquation } from './math';
 import type { BlockContent } from './section';
 import type { RawXml } from './rawXml';
+import type { TrackedRunChange } from './trackedChange';
 
 /** Stable document position used by bookmark and field range contracts. */
 export interface ContentPosition {
@@ -68,7 +69,9 @@ export type HyperlinkContent =
   | SimpleField
   | ComplexField
   | InlineSdt
-  | MathEquation;
+  | MathEquation
+  | RawXml
+  | TrackedRunChange;
 
 /**
  * Bookmark start marker (w:bookmarkStart)
@@ -181,7 +184,8 @@ export type FieldInlineContent =
   | ComplexField
   | BookmarkStart
   | BookmarkEnd
-  | RawXml;
+  | RawXml
+  | TrackedRunChange;
 
 /** Versioned structured field node; missing version means legacy v0 fields. */
 export interface StructuredFieldTree {
@@ -223,6 +227,7 @@ export interface SimpleField {
  */
 export interface ComplexField {
   type: 'complexField';
+  continuation?: { id: string; separate: boolean; end: boolean };
   /** Field instruction */
   instruction: string;
   /** Parsed field type */

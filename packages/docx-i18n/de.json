@@ -860,6 +860,7 @@
     "paragraphMarkDeleted": null,
     "paragraphMarkInserted": null,
     "paragraphPropertiesChanged": null,
+    "runPropertiesChanged": null,
     "rowDeleted": null,
     "rowInserted": null,
     "rowPropertiesChanged": null,

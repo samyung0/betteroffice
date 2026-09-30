@@ -774,6 +774,6 @@ pub fn uuid_v4_from(value: u128) -> Uuid {
     dst[33] = HEX[(src[14] & 0x0f) as usize];
     dst[34] = HEX[(src[15] >> 4) as usize];
     dst[35] = HEX[(src[15] & 0x0f) as usize];
-    let str: &str = unsafe { std::str::from_utf8_unchecked(&dst) };
+    let str = std::str::from_utf8(&dst).expect("UUID bytes are ASCII");
     str.into()
 }

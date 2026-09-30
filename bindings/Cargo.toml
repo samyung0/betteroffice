@@ -2,6 +2,9 @@
 members = ["python-*"]
 resolver = "3"
 
+[patch.crates-io]
+yrs = { path = "../third_party/yrs" }
+
 [profile.release]
 opt-level = 3
 lto = true

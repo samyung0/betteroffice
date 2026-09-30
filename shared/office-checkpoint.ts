@@ -37,7 +37,7 @@ export type OfficeFormat = "docx" | "xlsx" | "pptx";
 export const OFFICE_DOCUMENT_ROOTS: Readonly<
   Record<OfficeFormat, readonly string[]>
 > = {
-  docx: ["stories", "comments", "__capy_pending_contributors"],
+  docx: ["stories", "comments", "bookmarks", "__capy_pending_contributors"],
   xlsx: [
     "xlsx",
     "xlsx:cell-formats",

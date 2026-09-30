@@ -135,6 +135,10 @@ impl DocUndoManager {
         };
         inner.expand_scope(doc.yrs_doc(), &root);
         inner.expand_scope(doc.yrs_doc(), &comments);
+        inner.expand_scope(
+            doc.yrs_doc(),
+            &doc.yrs_doc().get_or_insert_map(crate::bookmarks::ROOT),
+        );
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
         let popped = {
             let changed_stories = Arc::clone(&changed_stories);

@@ -41,10 +41,11 @@ vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-va
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.2.0" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 
-# yrs 0.27.3 from crates.io (upstream y-crdt ac476a47) with one fix in
+# yrs 0.27.3 from crates.io (upstream y-crdt ac476a47) with a fix in
 # `clean_format_gap` (src/types/text.rs): a delete no longer spreads the
 # deleted text's attributes onto a shared type embedded right after it, such
-# as a field or a paragraph mark. Drop this once upstream fixes it.
+# as a field or a paragraph mark. It also retains the native viewer's UTF-8
+# validation. Drop the patch once upstream includes both fixes.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
 

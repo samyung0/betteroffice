@@ -134,11 +134,10 @@ describe('page break save projection', () => {
       engine.seedFromDocx(bytes);
       expect(engine.storySegments('body')).toEqual(projected.storySegments('body'));
       expect(engine.encodeState()).toEqual(projected.encodeState());
-      expect(engine.paragraphs('body')[0]?.properties._originalRunBoundaries).toEqual([
-        { text: 'HEAD', marksKey: '' },
-        { text: '', breaks: [{ offset: 0, type: 'page' }] },
-        { text: 'TARGET', marksKey: '' },
-      ]);
+      expect(engine.paragraphs('body')[0]?.properties._originalRunBoundaries).toBeUndefined();
+      expect(engine.storySegments('body').map((segment) =>
+        segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? 'pilcrow' : segment.embedKind
+      )).toEqual(['HEAD', 'pageBreak', 'TARGET', 'pilcrow']);
     } finally {
       projected.destroy();
       engine.destroy();

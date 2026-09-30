@@ -214,6 +214,7 @@ pub enum ChangeKind {
     ParagraphMarkInsertion,
     ParagraphMarkDeletion,
     ParagraphPropertiesChanged,
+    RunPropertiesChanged,
     TableRowInsertion,
     TableRowDeletion,
     TableInsertion,
@@ -626,7 +627,59 @@ impl EditingDoc {
                         }
                     }
                 }
+                if let Some(Out::Any(Any::Array(boundaries))) =
+                    map.get(&txn, "_originalRunBoundaries")
+                {
+                    for boundary in boundaries.iter() {
+                        let Any::Map(boundary) = boundary else {
+                            continue;
+                        };
+                        if !matches!(boundary.get("text"), Some(Any::String(text)) if text.is_empty())
+                        {
+                            continue;
+                        }
+                        let Some(Any::Array(changes)) = boundary.get("propertyChanges") else {
+                            continue;
+                        };
+                        for change in changes.iter() {
+                            if let Some((id, author, date)) = revision_parts(change) {
+                                raw.push(RawChange {
+                                    id,
+                                    kind: ChangeKind::RunPropertiesChanged,
+                                    author,
+                                    date,
+                                    start: chunk.start,
+                                    end: chunk.start + 1,
+                                });
+                            }
+                        }
+                    }
+                }
                 continue;
+            }
+            if let Some(Any::Map(record)) = chunk.attrs.get("rPrChange")
+                && let Some(Any::Array(changes)) = record.get("changes")
+            {
+                for change in changes.iter() {
+                    if let Some((id, author, date)) = revision_parts(change) {
+                        if let Some(last) = raw.iter_mut().rev().find(|value| {
+                            value.kind == ChangeKind::RunPropertiesChanged
+                                && value.id == id
+                                && value.end == chunk.start
+                        }) {
+                            last.end = chunk.end();
+                        } else {
+                            raw.push(RawChange {
+                                id,
+                                kind: ChangeKind::RunPropertiesChanged,
+                                author,
+                                date,
+                                start: chunk.start,
+                                end: chunk.end(),
+                            });
+                        }
+                    }
+                }
             }
             for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
                 let Some(value) = chunk.attrs.get(key) else {

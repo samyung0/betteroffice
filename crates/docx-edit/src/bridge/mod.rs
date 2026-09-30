@@ -259,9 +259,9 @@ fn lower_story<T: ReadTxn>(
                     // after the breaks when it ends before one), is content
                     // for the slot's breaks to lead as well.
                     let from = slot.start.unwrap_or(paragraph_start);
-                    let text = !paragraph_runs.is_empty()
-                        || !paragraph_drawings.is_empty()
-                        || (!slot.breaks.is_empty()
+                    let content = !paragraph_runs.is_empty() || !paragraph_drawings.is_empty();
+                    let reference = !content
+                        && (!slot.breaks.is_empty()
                             && crate::comment_boundaries(txn).get(story_id).is_some_and(
                                 |boundaries| {
                                     boundaries.iter().any(|&(at, writes)| {
@@ -269,7 +269,17 @@ fn lower_story<T: ReadTxn>(
                                     })
                                 },
                             ));
-                    slot.close(&mut blocks, text);
+                    // A break-only paragraph ending in a column break owns
+                    // its breaks. The new reference follows them on save.
+                    if reference && slot.ends_in_column {
+                        slot.leading = true;
+                        for &index in &slot.breaks {
+                            if let Some(LayoutBlock::PageBreak(block)) = blocks.get_mut(index) {
+                                block.keeps_leading_spacing = Some(true);
+                            }
+                        }
+                    }
+                    slot.close(&mut blocks, content || reference);
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
@@ -358,16 +368,37 @@ fn lower_story<T: ReadTxn>(
                         Some("pageBreak" | "columnBreak")
                     ) =>
                 {
-                    if !at_block_boundary
-                        || !paragraph_runs.is_empty()
-                        || !paragraph_drawings.is_empty()
-                    {
-                        return Err(BridgeError::UnsupportedEmbed {
-                            story: story_id.to_owned(),
-                            index: story_index,
-                        });
-                    }
                     let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    if !at_block_boundary {
+                        let start = paragraph_pm_start + 1 + u64::from(paragraph_pm_units);
+                        let id = BlockId::Str(format!("{story_id}:{kind}:{story_index}"));
+                        let block = if kind == "columnBreak" {
+                            LayoutBlock::ColumnBreak(ColumnBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start: Some(start as f64),
+                                pm_end: Some((start + 1) as f64),
+                            })
+                        } else {
+                            LayoutBlock::PageBreak(PageBreakBlock {
+                                sdt_groups: None,
+                                id,
+                                pm_start: Some(start as f64),
+                                pm_end: Some((start + 1) as f64),
+                                keeps_leading_spacing: None,
+                            })
+                        };
+                        paragraph_drawings.push(DrawingMarker {
+                            pm_offset: paragraph_pm_units,
+                            block,
+                            hidden: mark_bool(attributes, "hidden") == Some(true),
+                            anchored: false,
+                        });
+                        paragraph_pm_units += 1;
+                        story_index += 1;
+                        continue;
+                    }
+                    slot.ends_in_column = kind == "columnBreak";
                     slot.leading |= matches!(
                         page_break.get(txn, "leading"),
                         Some(Out::Any(Any::Bool(true)))
@@ -395,9 +426,7 @@ fn lower_story<T: ReadTxn>(
                         }));
                     } else {
                         let leading = slot.leading || !after_paragraph;
-                        if leading {
-                            slot.breaks.push(blocks.len());
-                        }
+                        slot.breaks.push(blocks.len());
                         blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
                             sdt_groups: None,
                             id,
@@ -819,6 +848,7 @@ fn lower_story<T: ReadTxn>(
 struct Slot {
     /// A break flagged `leading` opened the slot's leading breaks.
     leading: bool,
+    ends_in_column: bool,
     /// The story offset of the slot's first break.
     start: Option<u32>,
     /// Breaks that keep the next paragraph's space-before if text follows.
@@ -2189,8 +2219,49 @@ fn flush_paragraph_parts<T: ReadTxn>(
         return blocks;
     }
 
+    let flow = drawings.iter().any(|drawing| {
+        matches!(
+            drawing.block,
+            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
+        )
+    });
+    let mut first = true;
+    let mut emit = |runs, start: u32, width: u32| {
+        let mut continuation = ListState::default();
+        let mut paragraph = flush_paragraph(
+            runs,
+            pilcrow,
+            pilcrow_attributes,
+            txn,
+            story_id,
+            env,
+            paragraph_pm_start + u64::from(start),
+            width,
+            if first || !flow {
+                &mut *list_state
+            } else {
+                &mut continuation
+            },
+        );
+        if flow
+            && !first
+            && let Some(attrs) = &mut paragraph.attrs
+        {
+            attrs.list_marker = None;
+            let spacing = attrs.spacing.get_or_insert_with(ParagraphSpacing::default);
+            spacing.before = Some(0.0);
+            spacing.before_lines = None;
+        }
+        first = false;
+        LayoutBlock::Paragraph(paragraph)
+    };
     let mut segment_start = 0_u32;
+    let mut ends_in_break = false;
     for drawing in drawings {
+        ends_in_break = matches!(
+            drawing.block,
+            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
+        );
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
         let remaining = raw_runs.split_off(split_at);
         let mut segment = std::mem::replace(&mut raw_runs, remaining);
@@ -2199,38 +2270,26 @@ fn flush_paragraph_parts<T: ReadTxn>(
                 run.pm_start -= segment_start;
                 run.pm_end -= segment_start;
             }
-            blocks.push(LayoutBlock::Paragraph(flush_paragraph(
+            blocks.push(emit(
                 segment,
-                pilcrow,
-                pilcrow_attributes,
-                txn,
-                story_id,
-                env,
-                paragraph_pm_start + u64::from(segment_start),
+                segment_start,
                 drawing.pm_offset - segment_start,
-                list_state,
-            )));
+            ));
         }
         blocks.push(drawing.block);
         segment_start = drawing.pm_offset + 1;
     }
 
-    if !raw_runs.is_empty() {
+    if !raw_runs.is_empty() || ends_in_break {
         for run in &mut raw_runs {
             run.pm_start -= segment_start;
             run.pm_end -= segment_start;
         }
-        blocks.push(LayoutBlock::Paragraph(flush_paragraph(
+        blocks.push(emit(
             raw_runs,
-            pilcrow,
-            pilcrow_attributes,
-            txn,
-            story_id,
-            env,
-            paragraph_pm_start + u64::from(segment_start),
+            segment_start,
             paragraph_pm_units - segment_start,
-            list_state,
-        )));
+        ));
     }
     blocks
 }

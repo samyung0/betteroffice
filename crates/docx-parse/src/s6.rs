@@ -208,6 +208,11 @@ fn project_s6_inline(node: &mut InlineNode, depth: usize) {
                 project_s6_field_tree(tree, depth + 1);
             }
         }
+        InlineNode::Tracked(change) => {
+            for child in &mut change.content {
+                project_s6_inline(child, depth + 1);
+            }
+        }
         InlineNode::InlineSdt(sdt) => {
             for child in &mut sdt.content {
                 project_s6_inline(child, depth + 1);

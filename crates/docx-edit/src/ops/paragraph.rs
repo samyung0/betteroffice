@@ -448,7 +448,7 @@ impl EditingDoc {
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         next_style: Option<&ResolvedStyleProjection>,
     ) -> OpResult<SplitReceipt> {
         if let Some(projection) = next_style
@@ -457,13 +457,29 @@ impl EditingDoc {
             return Err(OpError::UnknownStyle(projection.style_id.clone()));
         }
         let second_para_id = self.next_id();
-        let before_block = self
+        let slot = self
             .segment_index(&at.story)?
             .para_at(at.index)
-            .is_some_and(|para| para.start == at.index && para.node_start > at.index);
+            .filter(|para| para.start == at.index && para.node_start > at.index)
+            .map(|para| (para.node_start, para.pilcrow));
+        let mut before_block = slot.is_some();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
+        if let Some((text_start, end)) = slot
+            && at.index > 0
+            && text_start < end
+        {
+            let prefix = snapshot_range(&story, &txn, at.index, text_start);
+            if prefix.iter().all(|chunk| {
+                matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+                if map_string(map, &txn, KIND_KEY).as_deref() == Some("columnBreak")
+                    && matches!(map.get(&txn, "trailing"), Some(Out::Any(Any::Bool(true)))))
+            }) {
+                at.index = text_start;
+                before_block = false;
+            }
+        }
         let chunks = snapshot_range(
             &story,
             &txn,
@@ -697,6 +713,14 @@ impl EditingDoc {
                         .is_some_and(|kind| kind.as_deref() == Some("columnBreak"));
                 let ahead = if start == 0 && only_breaks { 0 } else { breaks };
                 move_bookmarks(&mut txn, &boundary.map, &survivor.map, ahead);
+                crate::bookmarks::move_range(
+                    &mut txn,
+                    &story,
+                    &boundary.story_id,
+                    from,
+                    to,
+                    survivor.bounds.start + (breaks - ahead) as u32,
+                )?;
             }
             let mut revision_id = None;
             // Units removed ahead of the paragraph mark: the caret shifts by them.

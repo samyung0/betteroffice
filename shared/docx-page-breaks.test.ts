@@ -185,6 +185,79 @@ const paraOf = (session: YrsSession, story: string, text: string) =>
   session.paragraphs(story).find((paragraph) => paragraph.text === text)!
     .paraId;
 
+test.each(["simple", "complex"])("deleting a page break from a %s field result survives publications", async (kind) => {
+  const result = run("20") + BR + run("21");
+  const field = kind === "simple"
+    ? `<w:fldSimple w:instr=" DATE ">${result}</w:fldSimple>`
+    : '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' + result + '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  let bytes = docx("body", p("33333333", run("prev")) + p("11111111", run("a ") + field));
+  const session = await open(bytes);
+  session.deleteAt({ story: "body", paraId: "11111111", offset: 3 }, "forward");
+  expect(units(session, "body")).not.toContain("pageBreak");
+  bytes = await publish(bytes, session);
+  session.destroy();
+  for (let publication = 0; publication < 3; publication++) {
+    expect(breaks(bytes, "word/document.xml")).toBe(0);
+    expect(view(bytes, "word/document.xml")).toContain("a 2021");
+    const reopened = await open(bytes);
+    bytes = await publish(bytes, reopened);
+    reopened.destroy();
+  }
+});
+
+for (const where of ["body", "cell", "header"] as const) {
+  test(`a break beside a field stays put after Enter and Accept All in ${where}`, async () => {
+    const link = `<w:hyperlink w:anchor="target">${run("26")}</w:hyperlink>`;
+    const field = `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("20")}${tracked("ins", link)}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    let bytes = docx(where, p("11111111", run("a") + BR + field));
+    const session = await open(bytes);
+    session.splitParagraph({ story: STORY[where][0], paraId: "11111111", offset: 0 });
+    session.acceptChange({ all: true });
+    bytes = await publish(bytes, session);
+    session.destroy();
+    for (let publication = 0; publication < 3; publication++) {
+      expect(view(bytes, STORY[where][1])).toContain("¶a[PB]2026¶");
+      const reopened = await open(bytes);
+      bytes = await publish(bytes, reopened);
+      reopened.destroy();
+    }
+  });
+
+  test.each([false, true])(`Enter at a heading after a column-break paragraph adds its empty line after the break in ${where}, edited previous: %s`, async (editPrevious) => {
+    let bytes = docx(where, p("33333333", run("prev") + COL) + p("11111111", `<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>${run("Heading")}`));
+    const session = await open(bytes);
+    if (editPrevious) session.insertText({ story: STORY[where][0], paraId: "33333333", offset: 4 }, "X");
+    session.splitParagraph({ story: STORY[where][0], paraId: "11111111", offset: 0 });
+    bytes = await publish(bytes, session);
+    session.destroy();
+    for (let publication = 0; publication < 3; publication++) {
+      expect(view(bytes, STORY[where][1])).toContain(`${editPrevious ? "prevX" : "prev"}[CB]¶¶Heading¶`);
+      const reopened = await open(bytes);
+      bytes = await publish(bytes, reopened);
+      reopened.destroy();
+    }
+  });
+
+  for (const [name, wrap] of [
+    ["link", (xml: string) => `<w:hyperlink w:anchor="target">${xml}</w:hyperlink>`],
+    ["control", (xml: string) => `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${xml}</w:sdtContent></w:sdt>`],
+    ["insertion", (xml: string) => tracked("ins", xml)],
+  ] as const) {
+    test(`a mid-paragraph break inside a ${name} stays before its following text in ${where}`, async () => {
+      let bytes = docx(where, p("11111111", wrap(run("before") + BR + run("after"))));
+      for (let publication = 0; publication < 3; publication++) {
+        const session = await open(bytes);
+        session.insertText({ story: STORY[where][0], paraId: "11111111", offset: 0 }, "Q");
+        if (name === "insertion") session.acceptChange({ all: true });
+        bytes = await publish(bytes, session);
+        session.destroy();
+        expect(view(bytes, STORY[where][1])).toContain(`${"Q".repeat(publication + 1)}before[PB]after¶`);
+        expect(breaks(bytes, STORY[where][1])).toBe(1);
+      }
+    });
+  }
+}
+
 /**
  * Publishes after `edit`, then twice more: the story's units (without the
  * body's tail paragraph) before and after each publication, and each export.
@@ -377,8 +450,8 @@ describe.each(EVERY)("breaks from the file in %s", (where) => {
     [
       "a page break mid-paragraph",
       p("44444444", `${run("ab")}${BR}${run("cd")}`),
-      "abcd¶[pageBreak]",
-      "abcdX[PB]¶",
+      "ab[pageBreak]cd¶",
+      "ab[PB]cdX¶",
     ],
     [
       "two leading page breaks",
@@ -1058,7 +1131,7 @@ describe.each(EVERY)("a page break between a paragraph's %s", (where) => {
       [name, "opening the paragraph", before],
     ])
   )(
-    "%s, %s, stays in place until the paragraph's text changes",
+    "%s, %s, stays in place when the paragraph's text changes",
     async (_, __, before) => {
       const [story, part] = STORY[where];
       const bytes = docx(where, p("44444444", `${before}${BR}${run("x")}`));
@@ -1072,7 +1145,7 @@ describe.each(EVERY)("a page break between a paragraph's %s", (where) => {
       const edited = await publish(bytes, session);
       session.destroy();
       expect(plain(untouched, part)).toContain("2026[PB]x¶");
-      expect(plain(edited, part)).toContain("2026xX[PB]¶");
+      expect(plain(edited, part)).toContain("2026[PB]xX¶");
       const reopened = await open(untouched);
       expect(plain(await publish(untouched, reopened), part)).toContain(
         "2026[PB]x¶"
@@ -1306,7 +1379,7 @@ describe.each(EVERY)(
         "BSE",
       ],
       ["an empty field after a break with no text", `${BR}${seq}`, "BF", "BFT"],
-      ["an empty field before a break", `${seq}${BR}${run("x")}`, "FBT", "FTB"],
+      ["an empty field before a break", `${seq}${BR}${run("x")}`, "FBT", "FBT"],
       [
         "a bookmark opening before a leading break",
         `${bookmark(5, "Start")}${BR}${run("Chapter")}${bookmark(5, "End")}`,

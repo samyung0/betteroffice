@@ -115,6 +115,7 @@ pub mod wasm;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";
+mod bookmarks;
 /// Largest yrs update a replica accepts, as in PPTX.
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const PILCROW_KIND: &str = "pilcrow";
@@ -323,6 +324,7 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(bookmarks::ROOT);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
         // after_transaction: bumps on any store-changing commit without encoding an update.
@@ -709,12 +711,19 @@ impl EditingDoc {
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
+        let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
         Ok(story
             .diff(&txn, YChange::identity)
             .into_iter()
-            .map(|diff| StorySegment {
-                content: segment_content(diff.insert, &txn),
-                attributes: ordered_attrs(diff.attributes.as_deref()),
+            .map(|diff| {
+                let mut content = segment_content(diff.insert, &txn);
+                if let SegmentContent::Pilcrow(properties) = &mut content {
+                    bookmarks::project(&mut properties.values, &properties.para_id, &bookmarks);
+                }
+                StorySegment {
+                    content,
+                    attributes: ordered_attrs(diff.attributes.as_deref()),
+                }
             })
             .collect())
     }

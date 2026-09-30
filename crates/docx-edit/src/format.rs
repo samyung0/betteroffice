@@ -18,7 +18,7 @@ pub const HYPERLINK: &str = "hyperlink";
 pub(crate) const FIELD_RESULT: &str = "fieldResult";
 
 /// Attributes protected from formatting sweeps.
-pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, FIELD_RESULT];
+pub(crate) const PROTECTED_ATTRS: [&str; 5] = [INS, DEL, HYPERLINK, FIELD_RESULT, "rPrChange"];
 
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [

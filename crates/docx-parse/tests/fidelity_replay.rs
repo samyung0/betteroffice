@@ -104,6 +104,134 @@ fn python_check(bytes: &[u8], assertions: &str) {
 }
 
 #[test]
+fn block_content_controls_in_table_cells_roundtrip() {
+    let body = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtPr><w:alias w:val="outer"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>kept</w:t></w:r></w:p><w:sdt><w:sdtPr><w:alias w:val="inner"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>"#;
+    let mut bytes = package(body, "", Some(body));
+    for _ in 0..3 {
+        bytes = roundtrip(&bytes);
+        python_check(
+            &bytes,
+            &format!(
+                "w='{{{W}}}'\nfor part in ['document.xml','header1.xml','footer1.xml']:\n root=E.fromstring(z.read('word/'+part))\n cell=next(root.iter(w+'tc'))\n outer=cell.find(w+'sdt')\n assert outer is not None,part\n assert outer.find(w+'sdtPr/'+w+'alias').attrib[w+'val']=='outer'\n inner=outer.find(w+'sdtContent/'+w+'sdt')\n assert inner.find(w+'sdtPr/'+w+'alias').attrib[w+'val']=='inner'\n assert [t.text for t in cell.iter(w+'t')]==['kept','nested']"
+            ),
+        );
+    }
+}
+
+#[test]
+fn dirty_complex_field_roundtrips() {
+    let mut bytes = package(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin" w:dirty="true" w:fldLock="true"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        "",
+        None,
+    );
+    for _ in 0..3 {
+        bytes = roundtrip(&bytes);
+        python_check(
+            &bytes,
+            &format!(
+                "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nbegin=next(root.iter(w+'fldChar'))\nassert begin.attrib[w+'fldCharType']=='begin'\nassert begin.attrib.get(w+'dirty')=='true',begin.attrib\nassert begin.attrib[w+'fldLock']=='true'"
+            ),
+        );
+    }
+}
+
+#[test]
+fn complex_fields_inside_hyperlinks_roundtrip() {
+    let mut bytes = package(
+        r##"<w:p><w:hyperlink w:anchor="target"><w:r><w:t>Chapter </w:t></w:r><w:r><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r><w:r><w:instrText> PAGEREF target \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>12</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t> end</w:t></w:r></w:hyperlink></w:p>"##,
+        "",
+        None,
+    );
+    for _ in 0..3 {
+        let parsed = parse_docx_s9_wire(&bytes, S9ParseOptions::default()).unwrap();
+        let content = serde_json::to_value(parsed.document.package.document.content).unwrap();
+        assert!(
+            content[0]["content"][0]["structuredChildren"]
+                .as_array()
+                .is_some_and(|children| children
+                    .iter()
+                    .any(|child| child["type"] == "complexField"))
+        );
+        bytes = roundtrip(&bytes);
+        python_check(
+            &bytes,
+            &format!(
+                "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nlink=next(root.iter(w+'hyperlink'))\nassert [f.attrib[w+'fldCharType'] for f in link.iter(w+'fldChar')]==['begin','separate','end']\nassert next(link.iter(w+'instrText')).text.strip()=='PAGEREF target \\\\h'\nassert ''.join(t.text for t in link.iter(w+'t'))=='Chapter 12 end'"
+            ),
+        );
+    }
+}
+
+#[test]
+fn field_marker_runs_keep_text_on_each_side() {
+    let mut bytes = package(
+        r#"<w:p><w:r><w:t>before</w:t><w:fldChar w:fldCharType="begin"/><w:instrText> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/><w:t>2026</w:t></w:r><w:r><w:t> result</w:t><w:fldChar w:fldCharType="end"/><w:t>after</w:t></w:r></w:p>"#,
+        "",
+        None,
+    );
+    for _ in 0..3 {
+        bytes = roundtrip(&bytes);
+        python_check(
+            &bytes,
+            &format!(
+                "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nparts=[e.text if e.tag in [w+'t',w+'instrText'] else e.attrib[w+'fldCharType'] for e in root.iter() if e.tag in [w+'t',w+'instrText',w+'fldChar']]\nassert parts==['before','begin',' DATE ','separate','2026',' result','end','after'],parts"
+            ),
+        );
+    }
+}
+
+#[test]
+fn nested_fields_controls_links_and_revisions_keep_their_wrappers() {
+    let field = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>kept</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let control =
+        r#"<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>kept</w:t></w:r></w:sdtContent></w:sdt>"#;
+    for (content, path) in [
+        (format!(r#"<w:ins w:id="1">{field}</w:ins>"#), "ins"),
+        (format!(r#"<w:del w:id="1">{field}</w:del>"#), "del"),
+        (format!(r#"<w:hyperlink w:anchor="a">{control}</w:hyperlink>"#), "hyperlink/sdt/sdtContent"),
+        (r#"<w:hyperlink w:anchor="a"><w:ins w:id="1"><w:r><w:t>kept</w:t></w:r></w:ins></w:hyperlink>"#.to_owned(), "hyperlink/ins"),
+        (r#"<w:sdt><w:sdtPr/><w:sdtContent><w:ins w:id="1"><w:r><w:t>kept</w:t></w:r></w:ins></w:sdtContent></w:sdt>"#.to_owned(), "sdt/sdtContent/ins"),
+        (r#"<w:ins w:id="1"><w:del w:id="2"><w:r><w:delText>kept</w:delText></w:r></w:del></w:ins>"#.to_owned(), "ins/del"),
+    ] {
+        let mut bytes = package(&format!("<w:p>{content}</w:p>"), "", None);
+        for _ in 0..3 {
+            bytes = roundtrip(&bytes);
+            python_check(&bytes, &format!("w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nnode=root.find('.//'+w+'p/'+'/'.join(w+p for p in '{path}'.split('/')))\nassert node is not None,'{path}'\nassert ''.join(t.text for t in node.iter() if t.tag in [w+'t',w+'delText'])=='kept',E.tostring(node)\nif '{path}' in ['ins','del']:\n assert [f.attrib[w+'fldCharType'] for f in node.iter(w+'fldChar')]==['begin','separate','end']"));
+        }
+    }
+}
+
+#[test]
+fn nested_field_continuations_keep_their_paragraphs() {
+    let opening = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r>"#;
+    let closing = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    for (prefix, suffix) in [
+        (r#"<w:hyperlink w:anchor="target">"#, "</w:hyperlink>"),
+        (r#"<w:ins w:id="7" w:author="A">"#, "</w:ins>"),
+        ("<w:sdt><w:sdtPr/><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+    ] {
+        for nested_opener in [false, true] {
+            let body = if nested_opener {
+                format!("<w:p>{prefix}{opening}{suffix}</w:p><w:p>{closing}</w:p>")
+            } else {
+                format!("<w:p>{opening}</w:p><w:p>{prefix}{closing}{suffix}</w:p>")
+            };
+            let mut bytes = package(&body, "", None);
+            for _ in 0..3 {
+                bytes = roundtrip(&bytes);
+                python_check(
+                    &bytes,
+                    &format!(
+                        "w='{{{W}}}'\nroot=E.fromstring(z.read('word/document.xml'))\nparagraphs=list(root.iter(w+'p'))\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[0].iter(w+'fldChar')]==['begin'],E.tostring(paragraphs[0])\nassert [f.attrib[w+'fldCharType'] for f in paragraphs[1].iter(w+'fldChar')]==['separate','end'],E.tostring(paragraphs[1])\nassert ''.join(t.text for t in paragraphs[1].iter(w+'t'))=='result'"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn foreign_fragment_values_roundtrip_in_inline_block_and_cell_xml() {
     let fragment = r#"<bofx:marker bofx:q="a&amp;&lt;&gt;&quot;b">a&amp;&lt;&gt;"b</bofx:marker>"#;
     for body in [

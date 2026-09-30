@@ -31,6 +31,7 @@ import type {
   TextFormatting,
   Hyperlink,
   TrackedChangeInfo,
+  TrackedRunChange,
   Table,
   TableRow,
   TableCell,
@@ -205,11 +206,21 @@ interface CommentBoundary {
 }
 
 interface BookmarkBoundary extends CommentBoundary {
+  inHyperlink?: boolean;
   name?: string;
   colFirst?: number;
   colLast?: number;
   /** How many of the paragraph's leading breaks follow it. */
   breaksAfter?: number;
+}
+
+interface FieldBoundary {
+  id: string;
+  kind: 'fieldseparate' | 'fieldend';
+  offset: number;
+  order: number;
+  run: Run;
+  attributes: Attrs;
 }
 
 interface OriginalRunBoundary {
@@ -469,11 +480,19 @@ function runContentForText(text: string, formatting: TextFormatting): RunContent
   return content;
 }
 
+function runPropertyChanges(attributes: Attrs): Run['propertyChanges'] {
+  const changes = asObject(attributes.rPrChange)?.changes;
+  if (!Array.isArray(changes)) return undefined;
+  type Stored = NonNullable<Run['propertyChanges']>[number] & { previousAttributes: Attrs; currentAttributes: Attrs };
+  return (changes as Stored[]).map(({ previousAttributes: _before, currentAttributes: _current, ...change }) => change);
+}
+
 function createTextRun(text: string, attributes: Attrs): Run {
   const formatting = attrsToTextFormatting(formattingAttrs(attributes));
   return {
     type: 'run',
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
+    propertyChanges: runPropertyChanges(attributes),
     content: runContentForText(text, formatting),
   };
 }
@@ -907,12 +926,9 @@ function inlineSdtFromPayload(payload: Attrs): InlineSdt {
 function inlineSdtContent(content: ParagraphContent[]): InlineSdt['content'] {
   return content.filter(
     (child): child is InlineSdt['content'][number] =>
-      child.type === 'run' ||
-      child.type === 'hyperlink' ||
-      child.type === 'simpleField' ||
-      child.type === 'complexField' ||
-      child.type === 'inlineSdt' ||
-      child.type === 'mathEquation'
+      child.type !== 'commentRangeStart' && child.type !== 'commentRangeEnd' &&
+      child.type !== 'moveFromRangeStart' && child.type !== 'moveFromRangeEnd' &&
+      child.type !== 'moveToRangeStart' && child.type !== 'moveToRangeEnd'
   );
 }
 
@@ -939,13 +955,22 @@ function commentReferenceFromPayload(payload: Attrs): Run | null {
   };
 }
 
-function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
+function rawContentForItem(item: InlineItem): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes);
   switch (item.embedKind) {
+    case 'bookmark':
+      if (item.payload.kind === 'fieldseparate' || item.payload.kind === 'fieldend') {
+        const run = asObject(item.payload.run);
+        return run?.type === 'run' && Array.isArray(run.content) ? run as unknown as Run : null;
+      }
+      return bookmarkNode({ ...item.payload, offset: 0 } as BookmarkBoundary);
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'flowBreak':
       return unitBreakRun(item.payload.breakType as FlowBreak);
+    case 'pageBreak':
+    case 'columnBreak':
+      return breakRun(item.embedKind === 'pageBreak' ? 'page' : 'column');
     case 'tab':
       return { type: 'run', content: [{ type: 'tab' }] };
     case 'image':
@@ -983,65 +1008,35 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   }
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
-  let run: Run;
-  if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
-    run = horizontalRuleRun(item.payload, item.attributes);
-  else if (item.kind === 'embed' && item.embedKind === 'shape')
-    run = shapeRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'chart')
-    run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
-  else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
-    run = opaqueDrawingRun(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'flowBreak')
-    run = unitBreakRun(item.payload.breakType as FlowBreak);
-  else if (item.kind === 'text') {
-    const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
-    run = {
-      type: 'run',
-      content: [{ type: 'text', text: item.text }],
-      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
-    };
-  } else run = { type: 'run', content: [] };
+function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
+  const content = rawContentForItem(item);
+  const changes = runPropertyChanges(item.attributes);
+  return content?.type === 'run' && changes ? { ...content, propertyChanges: changes } : content;
+}
 
-  const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
-  const isMovePair = raw?.isMovePair === true;
-  if (item.attributes.ins) {
-    const field =
-      item.kind === 'embed' && item.embedKind === 'field' && item.payload.modelKind !== 'commentReference'
-        ? fieldFromPayload(item.payload, item.attributes)
-        : undefined;
-    const content = field?.type === 'simpleField' ? [field] : [run];
-    return isMovePair ? { type: 'moveTo', info, content } : { type: 'insertion', info, content };
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): TrackedRunChange {
+  const link = createHyperlink(item.attributes);
+  if (link) addToHyperlink(link, item);
+  const child = link ?? ordinaryContentForItem(item) ?? { type: 'run' as const, content: [] };
+  let content = inlineSdtContent([child]);
+  let result: TrackedRunChange | undefined;
+  for (const [key, normal, moved] of [['del', 'deletion', 'moveFrom'], ['ins', 'insertion', 'moveTo']] as const) {
+    const raw = asObject(item.attributes[key]);
+    if (!raw) continue;
+    result = { type: raw.isMovePair === true ? moved : normal, info: trackedInfo(raw) ?? info, content };
+    content = [result!];
   }
-  return isMovePair
-    ? { type: 'moveFrom', info, content: [run] }
-    : { type: 'deletion', info, content: [run] };
+  return result!;
 }
 
 function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
-  // Once a field or equation joins the link, its full child list is structuredChildren.
-  const add = (child: Run | SimpleField | ComplexField | MathEquation): void => {
-    if (child.type === 'run') hyperlink.children.push(child);
-    else hyperlink.structuredChildren ??= [...hyperlink.children];
-    hyperlink.structuredChildren?.push(child);
-  };
-  if (item.kind === 'text') {
-    add(createTextRun(item.text, item.attributes));
-    return;
-  }
-  if (item.embedKind === 'break') {
-    add({ type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] });
-  } else if (item.embedKind === 'tab') {
-    add({ type: 'run', content: [{ type: 'tab' }] });
-  } else if (item.embedKind === 'horizontalRule') {
-    add(horizontalRuleRun(item.payload, item.attributes));
-  } else if (item.embedKind === 'field') {
-    add(commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes));
-  } else if (item.embedKind === 'math') {
-    add(mathFromPayload(item.payload));
-  }
+  const child = ordinaryContentForItem(item);
+  if (!child || child.type === 'hyperlink') return;
+  const inline = inlineSdtContent([child])[0];
+  if (!inline || inline.type === 'rawXml' || inline.type === 'hyperlink') return;
+  if (inline.type !== 'run') hyperlink.structuredChildren ??= [...hyperlink.children];
+  hyperlink.children.push(...shownRuns([inline]));
+  hyperlink.structuredChildren?.push(inline);
 }
 
 function projectionSignature(items: InlineItem[]): string {
@@ -1121,8 +1116,10 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
       const rebuilt = inlineSdtContent(buildParagraphContent(current));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
-      if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
-        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+      const links = rebuilt.filter((node) => node.type === 'hyperlink');
+      if (original?.type === 'hyperlink' && links.length === 1) {
+        const link = links[0]!;
+        rebuilt[rebuilt.indexOf(link)] = { ...original, ...link, structuredChildren: link.structuredChildren };
       }
       replacements.set(index, rebuilt);
     }
@@ -1149,6 +1146,7 @@ function shownRuns(nodes: readonly { type: string }[]): Run[] {
     if (node.type === 'simpleField') return shownRuns((node as SimpleField).content);
     if (node.type === 'complexField') return (node as ComplexField).fieldResult;
     if (node.type === 'inlineSdt') return shownRuns((node as InlineSdt).content);
+    if (node.type === 'insertion' || node.type === 'moveTo') return shownRuns((node as TrackedRunChange).content);
     return isRawXml(node) ? (node.shown ?? []) : [];
   });
 }
@@ -1466,10 +1464,6 @@ function storyUnits(content: ParagraphContent): number {
   }
 }
 
-/** Bookmark offsets count story units, but an inline content control as 2 (seed.rs `paragraph_attrs`). */
-const bookmarkUnits = (content: ParagraphContent): number =>
-  content.type === 'inlineSdt' ? 2 : storyUnits(content);
-
 /**
  * `content` split `offset` story units in, or null where it cannot split: a
  * run splits between its entries or inside text, a tracked change around its
@@ -1500,8 +1494,8 @@ function splitContent(
   let units = 0;
   for (const entry of content.content) {
     const width = runContentUnits(entry);
-    if (units + width <= offset) left.push(entry);
-    else if (units >= offset) right.push(entry);
+    if (units >= offset) right.push(entry);
+    else if (units + width <= offset) left.push(entry);
     else if (entry.type === 'text') {
       left.push({ type: 'text', text: entry.text.slice(0, offset - units) });
       right.push({ type: 'text', text: entry.text.slice(offset - units) });
@@ -1545,7 +1539,8 @@ function insertBoundaries(
   makeMarker: (boundary: CommentBoundary) => ParagraphContent = (boundary) =>
     boundary.kind === 'start'
       ? { type: 'commentRangeStart', id: boundary.id }
-      : { type: 'commentRangeEnd', id: boundary.id }
+      : { type: 'commentRangeEnd', id: boundary.id },
+  afterMarkers = false
 ): ParagraphContent[] {
   if (boundaries.length === 0) return content;
   const sorted = [...boundaries].sort(boundaryOrder);
@@ -1559,13 +1554,17 @@ function insertBoundaries(
     }
   };
 
-  emit(0);
+  if (!afterMarkers) emit(0);
   for (const item of content) {
+    if (afterMarkers && measure(item) > 0) emit(cursor);
     const end = cursor + measure(item);
     let rest = item;
     let restStart = cursor;
     const widened: ParagraphContent[] = [];
-    while (boundaryIndex < sorted.length && sorted[boundaryIndex].offset < end) {
+    while (boundaryIndex < sorted.length && (
+      sorted[boundaryIndex].offset < end ||
+      (sorted[boundaryIndex].offset === end && flowTokens([rest]).slice(-1).some(isBreak))
+    )) {
       const boundary = sorted[boundaryIndex];
       const halves = splitContent(rest, boundary.offset - restStart);
       if (halves) {
@@ -1580,7 +1579,7 @@ function insertBoundaries(
     }
     result.push(rest, ...widened);
     cursor = end;
-    emit(cursor);
+    if (!afterMarkers) emit(cursor);
   }
   emit(cursor);
   return result;
@@ -1630,6 +1629,7 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
       colFirst: asFiniteNumber(bookmark.colFirst),
       colLast: asFiniteNumber(bookmark.colLast),
       breaksAfter: asFiniteNumber(bookmark.breaksAfter),
+      inHyperlink: bookmark.inHyperlink === true,
     };
     if (bookmark.kind === 'start') result.push({ id, kind: 'start', offset, ...metadata });
     else if (bookmark.kind === 'end') result.push({ id, kind: 'end', offset, ...metadata });
@@ -1638,6 +1638,58 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
       result.push({ id, kind: 'end', offset: Number.MAX_SAFE_INTEGER, ...metadata });
     }
   }
+  return result;
+}
+
+/** Insert zero-width markers before folding projected children back into fields. */
+function insertBookmarkItems(items: InlineItem[], bookmarks: Array<BookmarkBoundary | FieldBoundary>): InlineItem[] {
+  if (!bookmarks.length) return items;
+  const width = (item: InlineItem) => item.kind === 'text' ? item.text.length
+    : item.embedKind === 'sdt' && !item.attributes.hyperlink ? 2 : 1;
+  const length = items.reduce((sum, item) => sum + width(item), 0);
+  const sorted = bookmarks.map((marker) => ({
+    ...marker,
+    offset: marker.offset === Number.MAX_SAFE_INTEGER ? length : marker.offset,
+  })).sort((a, b) => a.offset - b.offset || (typeof a.id === 'number' && typeof b.id === 'number'
+    ? boundaryOrder(a as BookmarkBoundary, b as BookmarkBoundary)
+    : ('order' in a ? a.order : 0) - ('order' in b ? b.order : 0)));
+  const result: InlineItem[] = [];
+  let cursor = 0;
+  let next = 0;
+  const emit = (at: number, before: InlineItem | undefined, after: InlineItem | undefined) => {
+    while (next < sorted.length && sorted[next]!.offset === at) {
+      const { offset: _offset, ...marker } = sorted[next++]!;
+      if ('run' in marker) {
+        const { attributes, ...payload } = marker;
+        result.push({ kind: 'embed', embedKind: 'bookmark', payload, attributes });
+        continue;
+      }
+      delete marker.breaksAfter;
+      const candidates = marker.kind === 'end' ? [before, after] : [after, before];
+      const container = marker.inHyperlink ? candidates.find((item) => item?.attributes.hyperlink) : undefined;
+      const attributes: Attrs = {};
+      if (container) for (const key of ['hyperlink', 'fieldResult']) {
+        if (container.attributes[key]) attributes[key] = container.attributes[key];
+      }
+      result.push({ kind: 'embed', embedKind: 'bookmark', payload: marker, attributes });
+    }
+  };
+  items.forEach((item, index) => {
+    emit(cursor, items[index - 1], item);
+    const end = cursor + width(item);
+    if (item.kind === 'text') {
+      let start = cursor;
+      while (next < sorted.length && sorted[next]!.offset < end) {
+        const at = sorted[next]!.offset;
+        result.push({ ...item, text: item.text.slice(start - cursor, at - cursor) });
+        emit(at, item, item);
+        start = at;
+      }
+      if (start < end) result.push({ ...item, text: item.text.slice(start - cursor) });
+    } else result.push(item);
+    cursor = end;
+  });
+  emit(cursor, items.at(-1), undefined);
   return result;
 }
 
@@ -1675,7 +1727,16 @@ function paragraphFromStory(
   baseParagraph: Paragraph | undefined
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  let content = buildParagraphContent(items);
+  const continued: FieldBoundary[] = (Array.isArray(properties.bookmarks) ? properties.bookmarks : []).flatMap((raw) => {
+    const marker = asObject(raw);
+    const run = asObject(marker?.run);
+    const offset = asFiniteNumber(marker?.offset);
+    return (marker?.kind === 'fieldend' || marker?.kind === 'fieldseparate') && typeof marker.id === 'string'
+      && offset !== undefined && run?.type === 'run' && Array.isArray(run.content)
+      ? [{ id: marker.id, kind: marker.kind, offset, order: asFiniteNumber(marker.order) ?? 0,
+        run: run as unknown as Run, attributes: asObject(marker.attributes) ?? {} }] : [];
+  });
+  let content = buildParagraphContent(insertBookmarkItems(items, [...bookmarkBoundaries(properties), ...continued]));
   content = restoreOriginalRuns(
     content,
     items,
@@ -1685,19 +1746,6 @@ function paragraphFromStory(
   );
   content = restoreRawInlines(content, baseParagraph);
   content = insertBoundaries(content, commentBoundaries, storyUnits);
-
-  const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
-    ...boundary,
-    offset:
-      boundary.offset === Number.MAX_SAFE_INTEGER
-        ? content.reduce((sum, child) => sum + bookmarkUnits(child), 0)
-        : boundary.offset,
-  }));
-  if (bookmarks.length > 0) {
-    content = insertBoundaries(content, bookmarks, bookmarkUnits, (boundary) =>
-      bookmarkNode(boundary as BookmarkBoundary)
-    );
-  }
 
   const paragraph: Paragraph = {
     type: 'paragraph',
@@ -1968,7 +2016,7 @@ interface FlowToken {
    * a comment's end (the save writes a reference mark after the end of a
    * comment no story holds one for).
    */
-  kind: FlowBreak | 'visible' | 'mark' | 'end';
+  kind: FlowBreak | 'visible' | 'mark' | 'start' | 'end' | 'reference';
   run?: Run;
   index?: number;
   /** The tracked change around a break. */
@@ -1984,6 +2032,7 @@ interface SlotBreak {
   at: number;
   /** Seeded from a page break opening its paragraph's text: it stays that text's first run. */
   leading: boolean;
+  trailing: boolean;
   attributes: Attrs;
 }
 
@@ -2009,8 +2058,8 @@ function slotBreakContent({ kind, attributes }: SlotBreak): ParagraphContent {
   if (!info) return breakRun(kind);
   const item: InlineItem = {
     kind: 'embed',
-    embedKind: 'flowBreak',
-    payload: { breakType: kind },
+    embedKind: kind === 'page' ? 'pageBreak' : 'columnBreak',
+    payload: {},
     attributes,
   };
   return trackedContentForItem(item, info);
@@ -2024,38 +2073,28 @@ function flowTokens(content: readonly ParagraphContent[]): FlowToken[] {
   const tokens: FlowToken[] = [];
   const run = (item: Run, tracked?: Tracked): void =>
     item.content.forEach((entry, index) => {
-      if (entry.type === 'break' && (entry.breakType === 'page' || entry.breakType === 'column'))
+      if (entry.type === 'break' && !unitBreaks.has(entry) && (entry.breakType === 'page' || entry.breakType === 'column'))
         tokens.push({ kind: entry.breakType, run: item, index, tracked });
+      else if (entry.type === 'commentReference') tokens.push({ kind: 'reference' });
       else if (entry.type !== 'text' || entry.text !== '') tokens.push({ kind: 'visible' });
     });
-  const runs = (items: readonly { type: string }[], tracked?: Tracked): void => {
-    for (const item of items) if (item.type === 'run') run(item as Run, tracked);
-  };
-  // A field or equation inside a link or tracked change is one visible unit.
-  const children = (items: readonly { type: string }[], tracked?: Tracked): void => {
-    for (const item of items as ParagraphContent[]) {
+  const inline = (items: readonly { type: string }[], tracked?: Tracked): void => {
+    for (const item of items as readonly ParagraphContent[]) {
       if (item.type === 'run') run(item, tracked);
-      else if (item.type === 'hyperlink')
-        children(item.structuredChildren ?? item.children, tracked);
-      else if (['simpleField', 'complexField', 'mathEquation'].includes(item.type))
-        tokens.push({ kind: 'visible' });
-    }
-  };
-  const inline = (items: readonly ParagraphContent[]): void => {
-    for (const item of items) {
-      if (item.type === 'run') run(item);
-      else if (item.type === 'hyperlink') children(item.structuredChildren ?? item.children);
+      else if (item.type === 'hyperlink') inline(item.structuredChildren ?? item.children, tracked);
       else if (item.type === 'simpleField') {
-        // A field is a unit, text however empty its result.
         tokens.push({ kind: 'visible' });
-        runs(item.content);
-      } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd')
-        tokens.push({ kind: 'mark' });
+        inline(item.structuredResult?.inline ?? item.content, tracked);
+      } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd') tokens.push({ kind: 'mark' });
       else if (item.type === 'commentRangeEnd') tokens.push({ kind: 'end', id: item.id });
-      else if (item.type === 'complexField') runs([...item.fieldCode, ...item.fieldResult]);
-      else if (item.type === 'inlineSdt') inline(item.content);
-      else if (item.type === 'insertion' || item.type === 'moveTo') children(item.content, 'ins');
-      else if (item.type === 'deletion' || item.type === 'moveFrom') children(item.content, 'del');
+      else if (item.type === 'commentRangeStart') tokens.push({ kind: 'start', id: item.id });
+      else if (item.type === 'complexField') inline([
+        ...(item.structuredCode?.inline ?? item.fieldCode),
+        ...(item.structuredResult?.inline ?? item.fieldResult),
+      ], tracked);
+      else if (item.type === 'inlineSdt') inline(item.content, tracked);
+      else if (item.type === 'insertion' || item.type === 'moveTo') inline(item.content, 'ins');
+      else if (item.type === 'deletion' || item.type === 'moveFrom') inline(item.content, 'del');
       else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
     }
   };
@@ -2077,9 +2116,11 @@ function splitFlow(
   // without text the last bookmark. Without either, those up to the last
   // column break lead.
   if (!tokens.some(isBreak)) return { leading: [], trailing: [] };
+  const lastBreak = tokens.map(isBreak).lastIndexOf(true);
   let split = tokens.findIndex(
     ({ kind, id }, index) =>
       kind === 'visible' ||
+      (kind === 'reference' && index > lastBreak) ||
       (kind === 'end' && !referenced(id!) && !tokens.slice(index + 1).some(isBreak))
   );
   if (split < 0) split = tokens.map(({ kind }) => kind).lastIndexOf('mark');
@@ -2155,7 +2196,7 @@ function placeTrailing(
   }
   if (places.length !== entries.length || textSignature(content) !== textSignature(base.content))
     return appended;
-  return insertBoundaries(content, places, storyUnits, ({ id }) => slotBreakContent(entries[id]!));
+  return insertBoundaries(content, places, storyUnits, ({ id }) => slotBreakContent(entries[id]!), true);
 }
 
 /** `content` without the given break tokens; runs left empty are dropped. */
@@ -2189,13 +2230,24 @@ function withoutBreaks(
         return [
           {
             ...item,
-            children: runs(item.children),
-            ...(item.structuredChildren && { structuredChildren: runs(item.structuredChildren) }),
+            children: item.structuredChildren ? shownRuns(inline(item.structuredChildren)) : runs(item.children),
+            ...(item.structuredChildren && { structuredChildren: inline(item.structuredChildren) }),
           },
         ];
-      if (item.type === 'simpleField') return [{ ...item, content: runs(item.content) }];
-      if (item.type === 'complexField')
-        return [{ ...item, fieldCode: runs(item.fieldCode), fieldResult: runs(item.fieldResult) }];
+      if (item.type === 'simpleField' || item.type === 'complexField') {
+        const result = item.structuredResult && { ...item.structuredResult, inline: inline(item.structuredResult.inline ?? []) };
+        const code = item.type === 'complexField' && item.structuredCode
+          ? { ...item.structuredCode, inline: inline(item.structuredCode.inline ?? []) } : undefined;
+        const kept = {
+          ...item,
+          ...(result && { structuredResult: result }),
+          ...(code && { structuredCode: code }),
+          ...(item.fieldTree && { fieldTree: { ...item.fieldTree, ...(result && { result }), ...(code && { code }) } }),
+        };
+        return [(item.type === 'simpleField'
+          ? { ...kept, content: result ? shownRuns(result.inline) : runs(item.content) }
+          : { ...kept, fieldCode: code ? shownRuns(code.inline) : runs(item.fieldCode), fieldResult: result ? shownRuns(result.inline) : runs(item.fieldResult) }) as T];
+      }
       if (item.type === 'inlineSdt') return [{ ...item, content: inline(item.content) }];
       if (
         item.type === 'insertion' ||
@@ -2203,7 +2255,7 @@ function withoutBreaks(
         item.type === 'moveFrom' ||
         item.type === 'moveTo'
       ) {
-        const kept = runs(item.content);
+        const kept = inline(item.content);
         return kept.length > 0 || item.content.length === 0 ? [{ ...item, content: kept }] : [];
       }
       return [item];
@@ -2625,8 +2677,6 @@ class SaveContext {
     // Paragraphs keep breaks that still match the units and are rewritten
     // from the units otherwise.
     let slotBreaks: SlotBreak[] = [];
-    let slotInlineBreaks: SlotBreak[] = [];
-    let carried: SlotBreak[] = [];
     let previous = -1;
     let previousBase: Paragraph | undefined;
     // `marks` are comment boundaries and `bookmarks` bookmarks at the slot,
@@ -2636,17 +2686,17 @@ class SaveContext {
       marks: CommentBoundary[] = [],
       bookmarks: BookmarkBoundary[] = []
     ): Paragraph | undefined => {
-      const expected = [...carried, ...slotBreaks];
-      carried = [];
+      const expected = slotBreaks;
       slotBreaks = [];
       const before = previous >= 0 ? (blocks[previous] as Paragraph) : undefined;
       const beforeFlow = before && splitFlow(flowTokens(before.content), this.referenced);
       const nextTokens = next ? flowTokens(next.content) : [];
+      const lastHeldBreak = nextTokens.map(isBreak).lastIndexOf(true);
       const nextFlow = next && splitFlow(nextTokens, this.referenced);
       // Content for the breaks to lead: text, or a bookmark after them.
       const content =
         next !== undefined &&
-        (nextTokens.some(({ kind }) => kind === 'visible' || kind === 'mark') ||
+        (nextTokens.some(({ kind }, index) => kind === 'visible' || kind === 'mark' || (kind === 'reference' && index > lastHeldBreak)) ||
           bookmarks.some(({ breaksAfter }) => !breaksAfter));
       // Or a comment's own reference mark, written for a comment no story
       // holds one for: after its end, or after the breaks when it ends
@@ -2672,6 +2722,7 @@ class SaveContext {
         !content &&
         next !== undefined &&
         (bookmarks.length === 0 || !before) &&
+        (!before || !expected.at(-1)?.trailing) &&
         expected.at(-1)?.kind === 'column';
       const trailingMarks = own && bookmarks.length > 0;
       // A comment boundary in a paragraph without text sits after its breaks.
@@ -2696,7 +2747,7 @@ class SaveContext {
           (token, index) =>
             token.kind === expected[index]!.kind &&
             token.tracked === trackedKind(expected[index]!.attributes) &&
-            ((token.kind === 'column' && !expected[index]!.leading) ||
+            ((token.kind === 'column' && !expected[index]!.leading && !expected[index]!.trailing) ||
               // Without text either place seeds back the same units.
               (!text && !commented) ||
               index < trailing === index < split)
@@ -2708,13 +2759,13 @@ class SaveContext {
         bookmarks.length === 0 &&
         !commented &&
         !nextTokens.some(
-          ({ kind }, index) => kind === 'end' && nextTokens.slice(index + 1).some(isBreak)
+          ({ kind }, index) => (kind === 'start' || kind === 'end') && nextTokens.slice(index + 1).some(isBreak)
         )
       )
         return next;
       // Breaks the content holds ahead of its text are the slot's (all of them
       // without text: a closing one is placed again by the next slot).
-      const first = nextTokens.findIndex(({ kind }) => kind === 'visible');
+      const first = nextTokens.findIndex(({ kind }, index) => kind === 'visible' || (kind === 'reference' && index > lastHeldBreak));
       const held =
         bookmarks.length > 0
           ? nextTokens
@@ -2856,8 +2907,6 @@ class SaveContext {
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
         paragraph = settle(paragraph, slot, slotBookmarks) ?? paragraph;
-        carried = slotInlineBreaks;
-        slotInlineBreaks = [];
         blocks.push(paragraph);
         previous = blocks.length - 1;
         previousBase = baseParagraph;
@@ -2963,19 +3012,17 @@ class SaveContext {
           at: storyOffset,
           kind: segment.embedKind === 'pageBreak' ? 'page' : 'column',
           leading: segment.payload.leading === true,
+          trailing: segment.payload.trailing === true,
           attributes: segment.attributes,
         };
         if (items.length === 0) slotBreaks.push(entry);
         else {
-          // Inside paragraph content, which the seed never produces: kept in
-          // place, and seeded back as a break after the paragraph.
           items.push({
             kind: 'embed',
             embedKind: 'flowBreak',
             payload: { breakType: entry.kind },
             attributes: segment.attributes,
           });
-          slotInlineBreaks.push({ ...entry, leading: false });
         }
       } else {
         items.push(segment as EmbedItem);

@@ -3,6 +3,11 @@ import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
+import { addComment as matrixComment, blocks, docx as matrixDocx, none, p as matrixParagraph, PB, prime, run as matrixRun, runRow, sig } from "./matrix/lib";
+import { parseDocx } from "../packages/docx/src/docx";
+import { repackDocx } from "../packages/docx/src/docx/rezip";
+import { injectReplyRangeMarkers } from "../packages/docx/src/docx/injectReplyRangeMarkers";
+import { yrsToDocument } from "../packages/docx/src/yrs/yrsToDocument";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -167,6 +172,24 @@ async function publications(
 }
 
 const tail = p("22222222", run("tail"));
+
+test("an emptied comment has the same publication behavior in every reported story location", async () => {
+  await prime();
+  for (const where of ["body", "cell", "headerCell", "endnote"] as const) {
+    const bytes = matrixDocx(where, matrixParagraph("33333333", matrixRun("prev")) + matrixParagraph("44444444", PB + matrixRun("Heading")));
+    const row = await runRow({
+      id: `empty comment in ${where}`,
+      bytes,
+      where,
+      before: none,
+      after: (session, story) => {
+        matrixComment(session, story, ["44444444", 1], ["44444444", 4]);
+        session.deleteRange({ story, start: { paraId: "44444444", offset: 1 }, end: { paraId: "44444444", offset: 8 } });
+      },
+    });
+    expect(row.cls).toBe("exact+unstable");
+  }
+});
 const body = "body";
 
 // "alpha" and one story unit lead " beta", which the new comment covers.
@@ -736,3 +759,113 @@ test.each([
     }
   }
 );
+
+test("a generated comment paragraph id avoids an existing document paragraph id", async () => {
+  const probeBytes = docx(p("11111111", run("text")) + tail, []);
+  const probe = await open(probeBytes);
+  comment(probe, "probe", [body, "11111111", 0, 4]);
+  const occupied = threadIds(await publish(probeBytes, probe))[0]!.paraId;
+  probe.destroy();
+
+  let bytes = docx(p(occupied, run("text")) + tail, []);
+  const session = await open(bytes);
+  comment(session, "kept", [body, occupied, 0, 4]);
+  bytes = await publish(bytes, session);
+  session.destroy();
+  const ids = threadIds(bytes);
+  expect(ids[0]!.paraId).not.toBe(occupied);
+  for (let publication = 0; publication < 2; publication += 1) {
+    const next = await open(bytes);
+    next.insertText({ story: body, paraId: "22222222", offset: 0 }, "x");
+    bytes = await publish(bytes, next);
+    next.destroy();
+    expect(threadIds(bytes)).toEqual(ids);
+  }
+});
+
+const flowBreak = (kind: "page" | "column") => `<w:r><w:br w:type="${kind}"/></w:r>`;
+const commentStories = ["body", "cell", "header"] as const;
+function commentStory(where: typeof commentStories[number], xml: string) {
+  return {
+    story: where === "cell" ? "body:t0:r0c0" : where === "header" ? "hf:rId20" : body,
+    bytes: docx((where === "body" ? xml : where === "cell" ? table(xml) : "") + tail, [1], where === "header" ? xml : ""),
+  };
+}
+
+for (const where of commentStories) {
+  test(`a draft reply puts its reference beside the parent's after a leading break in ${where}`, async () => {
+    const { bytes, story } = commentStory(where, p("33333333", run("prev")) + p("44444444", flowBreak("page") + run("Heading")));
+    const session = await open(bytes);
+    const parent = comment(session, "a", [story, "33333333", 0, 0], "44444444");
+    session.applyRawOps(body, [{ op: "patchComment", id: `reply-${parent}`, fields: { author: "Reviewer", date: fixed.now, body: [], parentId: parent } }]);
+    const base = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const projected = yrsToDocument(session, base);
+    const paragraphs = where === "header" ? projected.package.headers!.get("rId20")!.content : projected.package.document.content;
+    injectReplyRangeMarkers(paragraphs, projected.package.document.comments ?? []);
+    const saved = new Uint8Array(await repackDocx(projected));
+    session.destroy();
+    const xml = sig(saved, where === "header" ? "word/header1.xml" : "word/document.xml");
+    expect(xml).toContain("[PB]RRHeading");
+    expect(xml.indexOf("R")).toBeGreaterThan(xml.indexOf("[PB]"));
+  });
+
+  test(`a comment on a text-less page-and-column-break paragraph keeps the same spacing before and after save in ${where}`, async () => {
+    const { bytes, story } = commentStory(where, p("33333333", run("prev")) + p("44444444", flowBreak("page") + flowBreak("column")) + p("45454545", run("next")));
+    const session = await open(bytes);
+    comment(session, "a", [story, "33333333", 0, 0], "44444444");
+    const before = blocks(session, story);
+    const saved = await publish(bytes, session);
+    session.destroy();
+    const reopened = await open(saved);
+    expect(before).toContain("PB^");
+    expect(blocks(reopened, story)).toBe(before);
+    reopened.destroy();
+  });
+
+  test(`a Word reference before a leading break keeps the break ahead of text in ${where}`, async () => {
+    const { bytes, story } = commentStory(where, p("33333333", S(1) + run("prev")) + p("44444444", E(1) + ref(1) + flowBreak("page") + run("Heading")));
+    const session = await open(bytes);
+    const parts = session.storySegments(story);
+    const at = parts.findIndex((part) => part.kind === "embed" && part.embedKind === "pageBreak");
+    const text = parts.findIndex((part) => part.kind === "text" && part.text.includes("Heading"));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(at).toBeLessThan(text);
+    session.destroy();
+    const { seen } = await publications(bytes, () => {});
+    expect(seen).toEqual(Array(3).fill({ c1: "prev¶" }));
+  });
+
+  test(`a source range after a leading break stays there when its reference is in the next paragraph in ${where}`, async () => {
+    const { bytes } = commentStory(where, p("33333333", run("prev")) + p("44444444", flowBreak("page") + S(1) + run("Heading") + E(1)) + p("45454545", ref(1) + run("next")));
+    const { seen } = await publications(bytes, () => {});
+    expect(seen).toEqual(Array(3).fill({ c1: "Heading" }));
+  });
+
+  test(`an editor range at the text start after a leading break stays there in ${where}`, async () => {
+    const { bytes, story } = commentStory(where, p("33333333", run("prev")) + p("44444444", flowBreak("page") + run("Heading")));
+    const { seen } = await publications(bytes, (session) => comment(session, "a", [story, "44444444", 1, 4]));
+    expect(seen.map((value) => value.a)).toEqual(Array(3).fill("Hea"));
+  });
+
+  for (const kind of ["page", "column"] as const) {
+    test(`a comment added after capture ends before a trailing ${kind} break in ${where}`, async () => {
+      const { bytes, story } = commentStory(where, p("33333333", run("prev") + flowBreak(kind)) + p("44444444", run("Heading")));
+      const session = await open(bytes);
+      comment(session, "B", [story, "33333333", 0, 2]);
+      const captured = session.encodeState();
+      const exported = await publish(bytes, session);
+      comment(session, "C", [story, "33333333", 2, 4]);
+      const latest = session.encodeState();
+      const direct = await publish(bytes, session);
+      session.destroy();
+      const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+      const rebased = await exportOffice(exported, checkpoint(exported, state), fixed);
+      const part = where === "header" ? "word/header1.xml" : "word/document.xml";
+      expect(sig(rebased, part)).toBe(sig(direct, part));
+      for (const saved of [direct, rebased]) {
+        const { seen } = await publications(saved, () => {});
+        expect(seen.map((value) => value.C)).toEqual(Array(3).fill("ev"));
+      }
+    });
+  }
+}

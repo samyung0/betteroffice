@@ -628,11 +628,9 @@ test("DOCX text that concurrent edits put ahead of a page break in its slot stay
   const current = await docxSession(exported, (await rebase()).state);
   const later = await docxSession(beforeAfter, latest);
   try {
-    // The export keeps the break between the texts; seeded again it closes
-    // the paragraph, where the seed places every break after visible text.
     expect(text(current)).toEqual(text(later));
     expect(units(later)).toBe("Bore[pageBreak]After¶");
-    expect(units(current)).toBe("BoreAfter¶[pageBreak]");
+    expect(units(current)).toBe(units(later));
   } finally {
     current.destroy();
     later.destroy();

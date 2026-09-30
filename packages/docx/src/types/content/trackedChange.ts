@@ -12,8 +12,7 @@ import type {
   TableRowFormatting,
   TableCellFormatting,
 } from '../formatting';
-import type { Run } from './run';
-import type { Hyperlink, SimpleField } from './link';
+import type { FieldInlineContent } from './link';
 
 /**
  * Tracked change metadata (w:ins, w:del attributes)
@@ -70,7 +69,7 @@ export interface Insertion {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Inserted content */
-  content: (Run | Hyperlink | SimpleField)[];
+  content: FieldInlineContent[];
 }
 
 /**
@@ -81,7 +80,7 @@ export interface Deletion {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Deleted content */
-  content: (Run | Hyperlink)[];
+  content: FieldInlineContent[];
 }
 
 /**
@@ -92,7 +91,7 @@ export interface MoveFrom {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Moved content */
-  content: (Run | Hyperlink)[];
+  content: FieldInlineContent[];
 }
 
 /**
@@ -103,7 +102,7 @@ export interface MoveTo {
   /** Tracked change metadata */
   info: TrackedChangeInfo;
   /** Moved content */
-  content: (Run | Hyperlink | SimpleField)[];
+  content: FieldInlineContent[];
 }
 
 /**

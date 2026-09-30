@@ -12,6 +12,7 @@ use super::s10::SerializerDeterminism;
 #[derive(Debug)]
 pub struct SerializerContext {
     ids: HexIdAllocator,
+    reserved_ids: HashSet<String>,
     now: String,
     rendered_page_breaks: Vec<bool>,
     /// Ids of the comments the package keeps; `None` keeps every comment marker.
@@ -25,6 +26,7 @@ impl SerializerContext {
         determinism.validate()?;
         Ok(Self {
             ids: HexIdAllocator::from_sha256(&determinism.seed)?,
+            reserved_ids: HashSet::new(),
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
             comments: None,
@@ -53,7 +55,16 @@ impl SerializerContext {
     }
 
     pub fn allocate_hex_id(&mut self) -> String {
-        self.ids.allocate()
+        loop {
+            let id = self.ids.allocate();
+            if self.reserved_ids.insert(id.clone()) {
+                return id;
+            }
+        }
+    }
+
+    pub(crate) fn reserve_hex_id(&mut self, id: &str) {
+        self.reserved_ids.insert(id.to_ascii_uppercase());
     }
 
     /// Injected clock for timestamp-bearing part writers.

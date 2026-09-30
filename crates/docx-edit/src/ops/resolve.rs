@@ -109,6 +109,51 @@ fn clear_attr(txn: &mut TransactionMut<'_>, story: &TextRef, start: u32, len: u3
     story.format(txn, start, len, Attrs::from([(Arc::from(key), Any::Null)]));
 }
 
+fn resolve_field_boundaries(
+    txn: &mut TransactionMut<'_>,
+    story_id: &str,
+    span: Option<(u32, u32)>,
+    filter: Option<&str>,
+    resolved: &mut Vec<String>,
+) {
+    let Some(root) = txn.get_map(crate::bookmarks::ROOT) else {
+        return;
+    };
+    for (at, data) in crate::bookmarks::positions(txn, story_id) {
+        if span.is_some_and(|(start, end)| at < start || at > end) {
+            continue;
+        }
+        let Any::Map(data) = data else { continue };
+        let (Some(Any::String(id)), Some(Any::String(kind)), Some(Any::Map(attrs))) =
+            (data.get("id"), data.get("kind"), data.get("attributes"))
+        else {
+            continue;
+        };
+        if !matches!(kind.as_ref(), "fieldend" | "fieldseparate") {
+            continue;
+        }
+        let mut attributes = attrs.as_ref().clone();
+        for key in [INS, DEL] {
+            if let Some(stamp) = active_stamp(attributes.get(key).cloned(), filter) {
+                record(resolved, Some(&stamp));
+                attributes.remove(key);
+            }
+        }
+        if attributes == **attrs {
+            continue;
+        }
+        if let Some(Out::YMap(entry)) = root.get(txn, &format!("{story_id}:{id}:{kind}")) {
+            let mut data = data.as_ref().clone();
+            if attributes.is_empty() {
+                data.remove("attributes");
+            } else {
+                data.insert("attributes".into(), Any::Map(Arc::new(attributes)));
+            }
+            entry.insert(txn, "data", Any::Map(Arc::new(data)));
+        }
+    }
+}
+
 fn property_map<'a>(
     change: &'a Any,
     key: &str,
@@ -199,6 +244,124 @@ fn resolve_paragraph_property_changes(
     }
 }
 
+/// Empty runs have no text unit; their formatting revision lives in the
+/// paragraph's original-run cache until a resolve consumes it.
+fn resolve_empty_run_changes(
+    txn: &mut TransactionMut<'_>,
+    map: &MapRef,
+    mode: ResolveMode,
+    filter: Option<&str>,
+    resolved: &mut Vec<String>,
+) {
+    let Some(Out::Any(Any::Array(boundaries))) = map.get(txn, "_originalRunBoundaries") else {
+        return;
+    };
+    let mut touched = false;
+    let boundaries: Vec<Any> = boundaries
+        .iter()
+        .map(|boundary| {
+            let Any::Map(values) = boundary else {
+                return boundary.clone();
+            };
+            if !matches!(values.get("text"), Some(Any::String(text)) if text.is_empty()) {
+                return boundary.clone();
+            }
+            let Some(Any::Array(changes)) = values.get("propertyChanges") else {
+                return boundary.clone();
+            };
+            let mut values = values.as_ref().clone();
+            let mut remaining = Vec::new();
+            for change in changes.iter() {
+                if active_stamp(Some(change.clone()), filter).is_some() {
+                    touched = true;
+                    record(resolved, Some(change));
+                    if mode == ResolveMode::Reject {
+                        let formatting = property_map(change, "previousFormatting");
+                        if let Some(formatting) = formatting {
+                            values.insert(
+                                "formatting".into(),
+                                Any::Map(Arc::new(formatting.clone())),
+                            );
+                        } else {
+                            values.remove("formatting");
+                        }
+                    }
+                } else {
+                    remaining.push(change.clone());
+                }
+            }
+            if remaining.is_empty() {
+                values.remove("propertyChanges");
+            } else {
+                values.insert("propertyChanges".into(), Any::Array(Arc::from(remaining)));
+            }
+            Any::Map(Arc::new(values))
+        })
+        .collect();
+    if touched {
+        map.insert(
+            txn,
+            "_originalRunBoundaries",
+            Any::Array(Arc::from(boundaries)),
+        );
+    }
+}
+
+/// Resolves live run-property records. Stored OOXML formatting remains in each
+/// record; effective attributes include inherited paragraph/run styles.
+pub(super) fn run_property_delta(
+    value: Option<&Any>,
+    accept: bool,
+    filter: Option<&str>,
+) -> Option<(std::collections::BTreeMap<String, Any>, Vec<Any>)> {
+    let Any::Map(record) = value? else {
+        return None;
+    };
+    let Some(Any::Array(changes)) = record.get("changes") else {
+        return None;
+    };
+    let mut delta = std::collections::BTreeMap::new();
+    let mut remaining = Vec::new();
+    let mut resolved = Vec::new();
+    for change in changes.iter() {
+        if active_stamp(Some(change.clone()), filter).is_none() {
+            remaining.push(change.clone());
+            continue;
+        }
+        resolved.push(change.clone());
+        if !accept {
+            let before = property_map(change, "previousAttributes");
+            if let Some(current) = property_map(change, "currentAttributes") {
+                for key in current.keys() {
+                    delta.insert(key.clone(), Any::Null);
+                }
+            }
+            if let Some(before) = before {
+                delta.extend(
+                    before
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return None;
+    }
+    delta.insert(
+        "rPrChange".into(),
+        if remaining.is_empty() {
+            Any::Null
+        } else {
+            Any::Map(Arc::new(std::collections::HashMap::from([(
+                "changes".into(),
+                Any::Array(Arc::from(remaining)),
+            )])))
+        },
+    );
+    Some((delta, resolved))
+}
+
 /// Whether the unit at `index` is a block embed that opens a paragraph slot.
 fn opens_with_block<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
     snapshot_range(story, txn, index, index + 1)
@@ -249,11 +412,13 @@ fn holds_content<T: ReadTxn>(
 fn resolve_story(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
+    story_id: &str,
     mode: ResolveMode,
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
 ) -> u32 {
+    resolve_field_boundaries(txn, story_id, span, filter, resolved);
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
     let (chunks, final_pilcrow) = if span.is_some() {
         (
@@ -279,6 +444,7 @@ fn resolve_story(
         match &chunk.kind {
             ChunkKind::Pilcrow(map) => {
                 resolve_paragraph_property_changes(txn, map, mode, filter, resolved);
+                resolve_empty_run_changes(txn, map, mode, filter, resolved);
                 // A suggested split/merge stamps BOTH the pilcrow unit's text attr and the
                 // pPr marker; either signal (matching the filter) selects the mark.
                 let ppr_ins = active_stamp(map_stamp(map, txn, PPR_INS), filter);
@@ -369,6 +535,24 @@ fn resolve_story(
                     story.remove_range(txn, overlap_start, overlap_end - overlap_start);
                     removed += overlap_end - overlap_start;
                 } else {
+                    if let Some((delta, changes)) = run_property_delta(
+                        chunk.attrs.get("rPrChange"),
+                        mode == ResolveMode::Accept,
+                        filter,
+                    ) {
+                        for change in &changes {
+                            record(resolved, Some(change));
+                        }
+                        story.format(
+                            txn,
+                            overlap_start,
+                            overlap_end - overlap_start,
+                            delta
+                                .into_iter()
+                                .map(|(key, value)| (Arc::from(key), value))
+                                .collect(),
+                        );
+                    }
                     match mode {
                         ResolveMode::Accept if ins.is_some() => {
                             record(resolved, ins.as_ref());
@@ -472,6 +656,7 @@ impl EditingDoc {
                 let removed = resolve_story(
                     &mut txn,
                     &story,
+                    &range.story,
                     mode,
                     Some((range.start, range.end)),
                     None,
@@ -496,7 +681,7 @@ impl EditingDoc {
                         None,
                         &mut resolved,
                     )?;
-                    resolve_story(&mut txn, story, mode, None, None, &mut resolved);
+                    resolve_story(&mut txn, story, story_id, mode, None, None, &mut resolved);
                 }
                 // Fields number themselves by the comment boundaries of the
                 // resolved stories, as the seed of their export reads them.
@@ -532,6 +717,7 @@ impl EditingDoc {
                     resolve_story(
                         &mut txn,
                         story,
+                        story_id,
                         mode,
                         None,
                         Some(revision_id.as_str()),

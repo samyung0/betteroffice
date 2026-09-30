@@ -797,6 +797,14 @@ fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
                 body: json_to_any(value.get("body").unwrap_or(&Value::Null))?,
             })
         }
+        "setBookmark" => Ok(RawOp::SetBookmark {
+            index: index?,
+            data: json_to_any(
+                value
+                    .get("data")
+                    .ok_or_else(|| js_err("setBookmark requires data"))?,
+            )?,
+        }),
         "patchComment" => Ok(RawOp::PatchComment {
             id: value
                 .get("id")
@@ -3347,6 +3355,7 @@ impl EditSession {
                     ChangeKind::ParagraphMarkInsertion => "pPrIns",
                     ChangeKind::ParagraphMarkDeletion => "pPrDel",
                     ChangeKind::ParagraphPropertiesChanged => "pPrChange",
+                    ChangeKind::RunPropertiesChanged => "rPrChange",
                     ChangeKind::TableRowInsertion => "trIns",
                     ChangeKind::TableRowDeletion => "trDel",
                     ChangeKind::TableInsertion => "tableIns",

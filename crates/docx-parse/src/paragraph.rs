@@ -588,21 +588,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     is_deletion,
                 )?;
-                let content: Vec<InlineNode> = content
-                    .into_iter()
-                    .filter_map(|content| match content {
-                        ParagraphContent::Inline(
-                            node @ (InlineNode::Run(_) | InlineNode::Hyperlink(_)),
-                        ) => Some(node),
-                        // A deletion's field would need its deleted form on save.
-                        ParagraphContent::Inline(node @ InlineNode::SimpleField(_))
-                            if !is_deletion =>
-                        {
-                            Some(node)
-                        }
-                        _ => None,
-                    })
-                    .collect();
+                let content = filter_field_inline(content);
                 let node_type = match child.local_name() {
                     "ins" => "insertion",
                     "del" => "deletion",
@@ -699,66 +685,64 @@ fn process_field_run(
     output: &mut Vec<ParagraphContent>,
     part: &str,
 ) -> Result<(), ParseError> {
-    let mut has_begin = false;
-    let mut has_separate = false;
-    let mut has_end = false;
-    let mut instruction = String::new();
+    // Word can put text and several field boundaries in the same run.
+    // Split at each boundary so every piece stays on its original side.
+    let mut piece = Run {
+        content: Vec::new(),
+        ..run.clone()
+    };
     for content in &run.content {
-        match content {
-            RunContent::FieldChar { char_type, .. } if char_type == "begin" => has_begin = true,
-            RunContent::FieldChar { char_type, .. } if char_type == "separate" => {
-                has_separate = true
+        let RunContent::FieldChar { char_type, .. } = content else {
+            piece.content.push(content.clone());
+            continue;
+        };
+        if !piece.content.is_empty() {
+            emit_field_run(piece.clone(), fields, output);
+            piece.content.clear();
+        }
+        match char_type.as_str() {
+            "begin" => {
+                if fields.len() >= MAX_FIELD_NESTING {
+                    return Err(ParseError::ResourceLimit {
+                        kind: "fieldDepth",
+                        part: part.to_owned(),
+                    });
+                }
+                fields.push(OpenComplexField::opening(&Run {
+                    content: vec![content.clone()],
+                    ..run.clone()
+                }));
             }
-            RunContent::FieldChar { char_type, .. } if char_type == "end" => has_end = true,
-            RunContent::InstrText { text } => instruction.push_str(text),
-            _ => {}
+            "separate" if !fields.is_empty() => {
+                fields.last_mut().unwrap().switch_to_result();
+            }
+            "end" if !fields.is_empty() => {
+                let completed = fields.pop().unwrap().finish();
+                if let Some(parent) = fields.last_mut() {
+                    parent.absorb_nested(completed);
+                } else {
+                    output.push(ParagraphContent::Inline(InlineNode::ComplexField(
+                        Box::new(completed),
+                    )));
+                }
+            }
+            _ => piece.content.push(content.clone()),
         }
     }
-    if has_begin {
-        if fields.len() >= MAX_FIELD_NESTING {
-            return Err(ParseError::ResourceLimit {
-                kind: "fieldDepth",
-                part: part.to_owned(),
-            });
-        }
-        fields.push(OpenComplexField::opening(&run));
+    if !piece.content.is_empty() || run.content.is_empty() {
+        emit_field_run(piece, fields, output);
     }
+    Ok(())
+}
+
+fn emit_field_run(run: Run, fields: &mut [OpenComplexField], output: &mut Vec<ParagraphContent>) {
     if let Some(active) = fields.last_mut() {
-        active.append_instruction(&instruction);
+        active.append_instruction(&instruction_text(std::slice::from_ref(&run)));
         active.adopt_formatting(&run);
-        // Instruction text a begin or separate run carries is code, as its own run.
-        if (has_begin || has_separate) && !instruction.is_empty() && !active.in_result() {
-            let code = Run {
-                content: run
-                    .content
-                    .iter()
-                    .filter(|content| matches!(content, RunContent::InstrText { .. }))
-                    .cloned()
-                    .collect(),
-                ..run.clone()
-            };
-            active.absorb(InlineNode::Run(code.clone()), vec![code]);
-        }
-        if has_separate {
-            active.switch_to_result();
-        }
-        if !has_begin && !has_separate && !has_end {
-            active.absorb(InlineNode::Run(run.clone()), vec![run]);
-        }
-        if has_end {
-            let completed = fields.pop().unwrap().finish();
-            if let Some(parent) = fields.last_mut() {
-                parent.absorb_nested(completed);
-            } else {
-                output.push(ParagraphContent::Inline(InlineNode::ComplexField(
-                    Box::new(completed),
-                )));
-            }
-        }
+        active.absorb(InlineNode::Run(run.clone()), vec![run]);
     } else {
         output.push(ParagraphContent::Inline(InlineNode::Run(run)));
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -835,7 +819,7 @@ fn parse_hyperlink_composed(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &mut ParseBudget<'_>,
-    mut drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
@@ -848,86 +832,8 @@ fn parse_hyperlink_composed(
         part,
         budget,
     )?;
-    let mut children = Vec::new();
-    let mut structured = Vec::new();
-    for child in element.child_elements().take(10_000) {
-        let node = match child.local_name() {
-            "r" => Some(InlineNode::Run(parse_run_composed(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                budget,
-                drawing.as_deref_mut(),
-            )?)),
-            "bookmarkStart" => Some(InlineNode::BookmarkStart(parse_bookmark_start(child))),
-            "bookmarkEnd" => Some(InlineNode::BookmarkEnd(parse_bookmark_end(child))),
-            "fldSimple" => Some(InlineNode::SimpleField(Box::new(
-                parse_simple_field_composed(
-                    child,
-                    relationships,
-                    theme,
-                    styles,
-                    doc_defaults,
-                    part,
-                    budget,
-                    drawing.as_deref_mut(),
-                    depth + 1,
-                )?,
-            ))),
-            "sdt" => parse_inline_sdt_composed(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                part,
-                budget,
-                drawing.as_deref_mut(),
-                depth + 1,
-                false,
-            )?
-            .map(|sdt| InlineNode::InlineSdt(Box::new(sdt))),
-            "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
-            _ => None,
-        };
-        if let Some(node) = node {
-            if matches!(
-                node,
-                InlineNode::Run(_) | InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
-            ) {
-                children.push(node.clone());
-            }
-            structured.push(node);
-        }
-    }
-    hyperlink.children = children;
-    hyperlink.structured_children = structured
-        .iter()
-        .any(|node| !matches!(node, InlineNode::Run(_)))
-        .then_some(structured);
-    Ok(hyperlink)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn parse_inline_sdt_composed(
-    element: &XmlElement,
-    relationships: Option<&RelationshipMap>,
-    theme: Option<&Theme>,
-    styles: Option<&StyleMap>,
-    doc_defaults: Option<&DocDefaults>,
-    part: &str,
-    budget: &mut ParseBudget<'_>,
-    drawing: Option<&mut DrawingContext<'_>>,
-    depth: usize,
-    property_theme: bool,
-) -> Result<Option<InlineSdt>, ParseError> {
-    let Some(container) = element.child("w", "sdtContent") else {
-        return Ok(None);
-    };
-    let content = filter_field_inline(parse_paragraph_contents(
-        container,
+    let structured = filter_field_inline(parse_paragraph_contents(
+        element,
         relationships,
         theme,
         styles,
@@ -938,16 +844,21 @@ fn parse_inline_sdt_composed(
         depth,
         false,
     )?);
-    Ok(Some(InlineSdt {
-        node_type: InlineSdtType::InlineSdt,
-        // Pinned hyperlink quirk: the SDT's own run properties omit theme.
-        properties: parse_sdt_properties(
-            element.child("w", "sdtPr"),
-            None,
-            property_theme.then_some(theme).flatten(),
-        ),
-        content,
-    }))
+    hyperlink.children = structured
+        .iter()
+        .flat_map(|node| match node {
+            InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => vec![node.clone()],
+            _ => shown_runs(std::slice::from_ref(node))
+                .into_iter()
+                .map(InlineNode::Run)
+                .collect(),
+        })
+        .collect();
+    hyperlink.structured_children = structured
+        .iter()
+        .any(|node| !matches!(node, InlineNode::Run(_)))
+        .then_some(structured);
+    Ok(hyperlink)
 }
 
 /// The runs `nodes` show, in order: what a field result containing them reads as.
@@ -961,6 +872,7 @@ fn shown_runs(nodes: &[InlineNode]) -> Vec<Run> {
             InlineNode::ComplexField(field) => runs.extend(field.field_result.iter().cloned()),
             InlineNode::InlineSdt(sdt) => runs.extend(shown_runs(&sdt.content)),
             InlineNode::RawXml(raw) => runs.extend(raw.shown.iter().cloned()),
+            InlineNode::Tracked(change) => runs.extend(shown_change_runs(change)),
             _ => {}
         }
     }
@@ -1169,14 +1081,8 @@ fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
     content
         .into_iter()
         .filter_map(|content| match content {
-            ParagraphContent::Inline(
-                node @ (InlineNode::Run(_)
-                | InlineNode::Hyperlink(_)
-                | InlineNode::SimpleField(_)
-                | InlineNode::ComplexField(_)
-                | InlineNode::InlineSdt(_)
-                | InlineNode::Math(_)),
-            ) => Some(node),
+            ParagraphContent::Inline(node) => Some(node),
+            ParagraphContent::Tracked(change) => Some(InlineNode::Tracked(Box::new(change))),
             _ => None,
         })
         .collect()
@@ -1622,6 +1528,7 @@ fn inline_node_length(node: &InlineNode) -> usize {
             .map(|node| inline_node_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_node_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_node_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()

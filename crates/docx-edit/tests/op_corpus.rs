@@ -69,6 +69,273 @@ fn raw_text(doc: &EditingDoc) -> String {
         .collect()
 }
 
+#[test]
+fn mid_paragraph_breaks_keep_their_units_and_render_between_text_fragments() {
+    for (open, close) in [
+        ("", ""),
+        ("<w:hyperlink w:anchor=\"target\">", "</w:hyperlink>"),
+        ("<w:ins w:id=\"9\" w:author=\"Ada\">", "</w:ins>"),
+    ] {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111">{open}<w:r><w:t>before</w:t><w:br w:type="page"/><w:t>after</w:t></w:r>{close}</w:p><w:p w14:paraId="22222222"><w:r><w:t>next</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.into_bytes())]).unwrap();
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        assert_eq!(slot_units(&doc), "before[pageBreak]after¶next¶");
+        doc.insert_text(&ctx(), Position::new("body", 0), "Q", FormatPolicy::Inherit)
+            .unwrap();
+        for para in ["11111111", "22222222"] {
+            doc.set_paragraph_attr(
+                para,
+                "numPr",
+                Any::Map(Arc::new(
+                    [(String::from("numId"), Any::Number(1.0))]
+                        .into_iter()
+                        .collect(),
+                )),
+            )
+            .unwrap();
+            doc.set_paragraph_attr(para, "listMarker", Any::String("%1.".into()))
+                .unwrap();
+            doc.set_paragraph_attr(para, "listNumFmt", Any::String("decimal".into()))
+                .unwrap();
+        }
+        let blocks =
+            bridge::yrs_doc_to_layout_blocks(&doc, "body", &bridge::RenderEnv::default()).unwrap();
+        let value = serde_json::to_value(&blocks).unwrap();
+        assert_eq!(
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["paragraph", "pageBreak", "paragraph", "paragraph"]
+        );
+        assert_eq!(value[0]["attrs"]["listMarker"], "1.");
+        assert!(value[2]["attrs"].get("listMarker").is_none());
+        assert_eq!(value[3]["attrs"]["listMarker"], "2.");
+        doc.delete_range(&ctx(), StoryRange::new("body", 7, 8))
+            .unwrap();
+        assert_eq!(slot_units(&doc), "Qbeforeafter¶next¶");
+    }
+}
+
+#[test]
+fn enter_after_a_source_trailing_column_break_keeps_the_new_line_after_it() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t>prev</w:t><w:br w:type="column"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>Heading</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", 5), None)
+        .unwrap();
+    assert_eq!(slot_units(&doc), "prev¶[columnBreak]¶Heading¶");
+}
+
+#[test]
+fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>first</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>second</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let ends = |doc: &EditingDoc| {
+        marks(doc)
+            .into_iter()
+            .flat_map(|properties| {
+                let Some(Any::Array(markers)) = properties.get("bookmarks") else {
+                    return Vec::new();
+                };
+                markers
+                    .iter()
+                    .filter_map(|marker| {
+                        let Any::Map(marker) = marker else {
+                            return None;
+                        };
+                        (marker.get("kind") == Some(&Any::String("fieldend".into())))
+                            .then(|| marker["offset"].clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ends(&doc), vec![Any::Number(6.0)]);
+    doc.insert_text(&ctx(), Position::new("body", 2), "x", FormatPolicy::Inherit)
+        .unwrap();
+    assert_eq!(ends(&doc), vec![Any::Number(7.0)]);
+    doc.split_paragraph(&ctx(), Position::new("body", 5), None)
+        .unwrap();
+    assert_eq!(ends(&doc), vec![Any::Number(4.0)]);
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    assert!(ends(&doc).is_empty());
+}
+
+#[test]
+fn continued_field_boundaries_keep_and_resolve_their_revision() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:sdt><w:sdtContent><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r></w:sdtContent></w:sdt></w:p><w:p w14:paraId="22222222"><w:ins w:id="9" w:author="Ada"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let markers = |doc: &EditingDoc| {
+        let paragraphs = doc.paragraphs("body").unwrap();
+        let Any::Array(markers) = paragraphs[1].properties["bookmarks"].clone() else {
+            panic!("continued field boundaries are missing");
+        };
+        markers
+    };
+    assert_eq!(markers(&doc).len(), 2);
+    assert!(markers(&doc).iter().all(|marker| {
+        map_get(marker, "attributes")
+            .and_then(|attrs| map_get(attrs, "ins"))
+            .is_some()
+    }));
+    doc.accept_change(&ctx(), &ChangeTarget::All).unwrap();
+    assert_eq!(markers(&doc).len(), 2);
+    assert!(markers(&doc).iter().all(|marker| {
+        map_get(marker, "attributes")
+            .and_then(|attrs| map_get(attrs, "ins"))
+            .is_none()
+    }));
+}
+
+#[test]
+fn seeded_bookmarks_follow_typing_splits_joins_and_remote_typing() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t>A</w:t></w:r><w:bookmarkStart w:id="5" w:name="mark"/><w:r><w:t>BC</w:t></w:r><w:bookmarkEnd w:id="5"/><w:r><w:t>D</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let peer = EditingDoc::new(8);
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    let boundaries = |doc: &EditingDoc| {
+        doc.paragraphs("body")
+            .unwrap()
+            .into_iter()
+            .map(|paragraph| {
+                let Some(Any::Array(bookmarks)) = paragraph.properties.get("bookmarks") else {
+                    return Vec::new();
+                };
+                bookmarks
+                    .iter()
+                    .map(|marker| {
+                        (
+                            map_get(marker, "kind").cloned().unwrap(),
+                            map_get(marker, "offset").cloned().unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    doc.insert_text(&ctx(), Position::new("body", 0), "Z", FormatPolicy::Inherit)
+        .unwrap();
+    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+        .unwrap();
+    assert_eq!(
+        boundaries(&doc),
+        vec![
+            vec![(Any::from("start"), Any::Number(2.0))],
+            vec![(Any::from("end"), Any::Number(1.0))]
+        ]
+    );
+    doc.merge_paragraphs(&ctx(), "11111111", MergeDirection::Forward)
+        .unwrap();
+    assert_eq!(
+        boundaries(&doc),
+        vec![vec![
+            (Any::from("start"), Any::Number(2.0)),
+            (Any::from("end"), Any::Number(4.0))
+        ]]
+    );
+    peer.insert_text(&ctx(), Position::new("body", 0), "Y", FormatPolicy::Inherit)
+        .unwrap();
+    doc.apply_update_v1(&peer.encode_state_as_update_v1())
+        .unwrap();
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(boundaries(&doc), boundaries(&peer));
+    assert_eq!(
+        boundaries(&doc),
+        vec![vec![
+            (Any::from("start"), Any::Number(3.0)),
+            (Any::from("end"), Any::Number(5.0))
+        ]]
+    );
+}
+
+#[test]
+fn empty_and_deleted_bookmarks_stay_before_new_text() {
+    for text in ["", "AB"] {
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:bookmarkStart w:id="5" w:name="mark"/><w:r><w:t>{text}</w:t></w:r><w:bookmarkEnd w:id="5"/></w:p></w:body></w:document>"#
+        );
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.into_bytes())]).unwrap();
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        if !text.is_empty() {
+            doc.delete_range(&ctx(), StoryRange::new("body", 0, 2))
+                .unwrap();
+        }
+        doc.insert_text(&ctx(), Position::new("body", 0), "Z", FormatPolicy::Inherit)
+            .unwrap();
+        let paras = doc.paragraphs("body").unwrap();
+        let Any::Array(markers) = &paras[0].properties["bookmarks"] else {
+            panic!("missing bookmarks");
+        };
+        assert_eq!(markers.len(), 2);
+        for marker in markers.iter() {
+            assert_eq!(map_get(marker, "offset"), Some(&Any::Number(0.0)));
+        }
+    }
+}
+
+#[test]
+fn imported_run_property_changes_are_listed_and_resolve_after_typing() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/><w:rPrChange w:id="4" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t>changed</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    for accept in [false, true] {
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let changes = doc.list_changes("body").unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::RunPropertiesChanged);
+        doc.insert_text(&ctx(), Position::new("body", 2), "Z", FormatPolicy::Inherit)
+            .unwrap();
+        let target = ChangeTarget::Revision("4".into());
+        if accept {
+            doc.accept_change(&ctx(), &target).unwrap();
+        } else {
+            doc.reject_change(&ctx(), &target).unwrap();
+        }
+        assert!(doc.list_changes("body").unwrap().is_empty());
+        let attrs = seg_attrs(&doc, "ch");
+        assert_eq!(active(&attrs, "bold"), accept);
+        assert_eq!(active(&attrs, "italic"), !accept);
+        assert!(!active(&attrs, "rPrChange"));
+        assert_eq!(raw_text(&doc), "chZanged");
+    }
+}
+
+#[test]
+fn accepting_a_field_link_uncovered_with_bookmarks_anchors_them_after_inserting_its_text() {
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF mark </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:ins w:id="4" w:author="A"><w:hyperlink w:anchor="mark"><w:r><w:t>A</w:t></w:r><w:bookmarkStart w:id="5" w:name="mark"/><w:r><w:t>BC</w:t></w:r><w:bookmarkEnd w:id="5"/><w:r><w:t>D</w:t></w:r></w:hyperlink></w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc.accept_change(&ctx(), &ChangeTarget::All).unwrap();
+    assert_eq!(slot_units(&doc), "ABCD[field]¶");
+    let paras = doc.paragraphs("body").unwrap();
+    let Any::Array(markers) = &paras[0].properties["bookmarks"] else {
+        panic!("missing bookmarks")
+    };
+    assert_eq!(markers.len(), 2);
+    assert_eq!(map_get(&markers[0], "offset"), Some(&Any::Number(1.0)));
+    assert_eq!(map_get(&markers[1], "offset"), Some(&Any::Number(3.0)));
+}
+
 fn map_get<'a>(value: &'a Any, key: &str) -> Option<&'a Any> {
     match value {
         Any::Map(map) => map.get(key),

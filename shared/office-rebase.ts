@@ -17,7 +17,7 @@ export interface Lineage {
   keyed: ReadonlySet<string>;
   /** A map value that names positions in texts, rewritten once every text has landed. */
   positions?: {
-    root: string;
+    roots: readonly string[];
     key: string;
     rewrite(
       value: unknown,
@@ -42,11 +42,11 @@ const fail = (message: string): never => {
 };
 
 export const DOCX_LINEAGE: Lineage = {
-  maps: ["stories", "comments"],
+  maps: ["stories", "comments", "bookmarks"],
   arrays: [],
-  keyed: new Set(["stories", "comments"]),
+  keyed: new Set(["stories", "comments", "bookmarks"]),
   positions: {
-    root: "comments",
+    roots: ["comments", "bookmarks"],
     key: "anchors",
     rewrite(value, from, to, id) {
       if (!Array.isArray(value)) fail("comment anchors are not a list");
@@ -292,6 +292,55 @@ function assertChildrenLanded(source: Y.Text, target: Y.Text): void {
   }
 }
 
+/** A lone surviving child can change index when an earlier sibling was deleted. */
+function fieldAttributes(source: Y.Text, target: Y.Text, f: Alignment) {
+  const from = projectedChildren(source);
+  const to = projectedChildren(target);
+  const slots = new Map<string, Marker>();
+  const taken = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  const siblings = new Map<number, Set<number>>();
+  const key = (owner: number, marker: Marker) => `${owner}:${marker.index}`;
+  for (const [unit, owner] of from.owners.entries()) {
+    if (owner >= 0) {
+      const children = siblings.get(owner) ?? new Set<number>();
+      children.add(from.markers[unit]!.index);
+      siblings.set(owner, children);
+    }
+    if (owner < 0 || f.map[unit] < 0) continue;
+    const at = f.map[unit];
+    const marker = to.markers[at];
+    const slot = key(owner, from.markers[unit]!);
+    if (!marker || to.owners[at] !== f.map[owner]) {
+      ambiguous.add(slot);
+      continue;
+    }
+    const place = key(to.owners[at], marker);
+    const prior = slots.get(slot);
+    if (prior && (prior.id !== marker.id || prior.index !== marker.index)) ambiguous.add(slot);
+    const other = taken.get(place);
+    if (other && other !== slot) {
+      ambiguous.add(slot);
+      ambiguous.add(other);
+    }
+    slots.set(slot, marker);
+    taken.set(place, slot);
+  }
+  return (attributes: Record<string, unknown>, at: number): Record<string, unknown> => {
+    const marker = attributes.fieldResult as Marker | undefined;
+    if (!marker) return attributes;
+    const neighbour = [at - 1, at].find((unit) =>
+      from.owners[unit] >= 0 && from.markers[unit]?.id === marker.id && from.markers[unit]?.index === marker.index
+    );
+    if (neighbour === undefined) return attributes;
+    if (siblings.get(from.owners[neighbour])?.size !== 1) return attributes;
+    const slot = key(from.owners[neighbour], marker);
+    const saved = slots.get(slot);
+    if (!saved || saved.index === marker.index || ambiguous.has(slot)) return attributes;
+    return { ...attributes, fieldResult: saved };
+  };
+}
+
 export const PPTX_LINEAGE: Lineage = {
   maps: [
     "pptx:meta",
@@ -518,7 +567,8 @@ function landDelta(
   delta: Delta[],
   had: ReadonlyArray<Record<string, unknown>>,
   copy: (value: unknown) => unknown,
-  where: string
+  where: string,
+  attributes: (value: Record<string, unknown>, at: number) => Record<string, unknown> = (value) => value
 ): Delta[] {
   const out: Delta[] = [];
   let c = 0;
@@ -564,6 +614,7 @@ function landDelta(
       out.push({
         ...op,
         insert: typeof op.insert === "string" ? op.insert : copy(op.insert),
+        ...(op.attributes ? { attributes: attributes(op.attributes, c) } : {}),
       });
     } else if (op.delete !== undefined)
       range(op.delete, (length) => ({ delete: length }), true);
@@ -825,7 +876,10 @@ function landLater(
               step.delta,
               unitAttributes(captured as Y.Text),
               (value) => copy(value),
-              [step.root, ...step.path].join("/")
+              [step.root, ...step.path].join("/"),
+              lineage === DOCX_LINEAGE && step.root === "stories"
+                ? fieldAttributes(captured as Y.Text, target as Y.Text, f!)
+                : undefined
             ),
             { sanitize: false }
           );
@@ -839,7 +893,7 @@ function landLater(
         } else {
           const map = target as Y.Map<unknown>;
           const entities = !step.path.length && lineage.keyed.has(step.root);
-          const positioned = step.root === lineage.positions?.root;
+          const positioned = lineage.positions?.roots.includes(step.root) ?? false;
           for (const [key, action] of step.keys) {
             const name = entities ? id(key) : key;
             if (action === "delete") map.delete(name);
@@ -925,6 +979,15 @@ export function docxIds(
   try {
     const ids = new Map<string, string>();
     const stories = [from.getMap("stories"), to.getMap("stories")] as const;
+    const continuedFields = (value: unknown): Array<readonly [string, string]> => {
+      if (Array.isArray(value)) return value.flatMap(continuedFields);
+      if (!value || typeof value !== "object") return [];
+      const payload = value as Record<string, unknown>;
+      if (payload.modelKind === "field" && typeof payload.continuationId === "string" && typeof payload.instruction === "string") {
+        return [[payload.continuationId, payload.instruction]];
+      }
+      return Object.values(payload).flatMap(continuedFields);
+    };
     const pair = (a: unknown, b: unknown) => {
       if (typeof a !== "string" || typeof b !== "string" || ids.has(a)) return;
       ids.set(a, b);
@@ -942,6 +1005,18 @@ export function docxIds(
         const other = theirs.get(f.map[index]);
         const kind = embed.get("_kind");
         if (!other || other.get("_kind") !== kind) continue;
+        if (kind === "field") {
+          const original = embed.get("continuationId");
+          const saved = other.get("continuationId");
+          if (typeof original === "string" && typeof saved === "string") ids.set(original, saved);
+        }
+        if (kind === "sdt") {
+          const original = continuedFields(embed.get("content"));
+          const saved = continuedFields(other.get("content"));
+          if (original.length === saved.length && original.every(([, instruction], index) => instruction === saved[index]![1])) {
+            original.forEach(([id], index) => ids.set(id, saved[index]![0]));
+          }
+        }
         if (kind === "pilcrow") pair(embed.get("paraId"), other.get("paraId"));
         if (kind === "blockSdt") pair(embed.get("story"), other.get("story"));
         if (kind !== "table") continue;
@@ -964,6 +1039,17 @@ export function docxIds(
       .map(([key]) => key);
     for (const [key, saved] of commentOoxmlIds(comments))
       if (to.getMap("comments").has(String(saved))) ids.set(key, String(saved));
+    const bookmarks = to.getMap("bookmarks");
+    for (const [key, value] of from.getMap("bookmarks").entries()) {
+      if (!(value instanceof Y.Map)) continue;
+      const data = value.get("data") as { id?: number | string; kind?: string } | undefined;
+      const anchors = value.get("anchors") as Array<{ story: string }> | undefined;
+      const story = anchors?.[0]?.story;
+      if (!data || !story || !ids.has(story)) continue;
+      const markerId = typeof data.id === "string" ? ids.get(data.id) ?? data.id : data.id;
+      const saved = `${ids.get(story)}:${markerId}:${data.kind}`;
+      if (bookmarks.has(saved)) ids.set(key, saved);
+    }
     return ids;
   } finally {
     from.destroy();

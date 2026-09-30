@@ -106,11 +106,12 @@ export async function sourcesFingerprint(): Promise<string> {
   for (const name of [...CODEGEN_ENV, ...overrides]) {
     hash.update(`${name}=${process.env[name] ?? ''}\0`);
   }
-  for (const file of ['Cargo.toml', 'Cargo.lock', '.cargo/config.toml']) {
+  for (const file of ['Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'third_party/yrs/Cargo.toml']) {
     hash.update(`${file}\0`);
     hash.update(await readFile(resolve(root, file)).catch(() => Buffer.alloc(0)));
   }
   await hashTree(hash, resolve(root, 'crates'), 'crates/');
+  await hashTree(hash, resolve(root, 'third_party/yrs/src'), 'third_party/yrs/src/');
   const scripts = resolve(root, 'scripts');
   const names = (await readdir(scripts)).filter((name) => name.includes('wasm')).sort();
   for (const name of names) {

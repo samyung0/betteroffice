@@ -35,6 +35,24 @@ pub(crate) fn field_data_keeps_changes(data: &str) -> bool {
             })
     }
     fn nested_keeps(value: &Value) -> bool {
+        if value["type"] == "run"
+            && value["propertyChanges"]
+                .as_array()
+                .is_some_and(|changes| !changes.is_empty())
+        {
+            return true;
+        }
+        if matches!(
+            value["type"].as_str(),
+            Some("insertion" | "deletion" | "moveFrom" | "moveTo")
+        ) {
+            return true;
+        }
+        if value["type"] == "rawXml" {
+            return value["xml"]
+                .as_str()
+                .is_some_and(docx_parse::paragraph::raw_holds_changes);
+        }
         match value {
             Value::Object(entries)
                 if matches!(
@@ -49,8 +67,7 @@ pub(crate) fn field_data_keeps_changes(data: &str) -> bool {
             _ => false,
         }
     }
-    data.contains("rawXml")
-        && serde_json::from_str(data).is_ok_and(|field: Value| field_keeps(&field))
+    serde_json::from_str(data).is_ok_and(|field: Value| field_keeps(&field))
 }
 
 /// Whether a field inside an inline content control's content keeps a tracked change.
@@ -62,6 +79,13 @@ pub(crate) fn sdt_keeps_changes(content: &Any) -> bool {
         let Any::Map(entry) = item else {
             return false;
         };
+        if let Some(Any::Map(attrs)) = entry.get("attrs")
+            && ["ins", "del", "rPrChange"]
+                .iter()
+                .any(|key| attrs.get(*key).is_some_and(|value| *value != Any::Null))
+        {
+            return true;
+        }
         let Some(Any::Map(payload)) = entry.get("payload") else {
             return false;
         };
@@ -121,6 +145,18 @@ fn resolve_nodes(nodes: &mut Vec<Value>, how: Resolve<'_>) -> (Places, bool) {
     let mut resolved = Vec::with_capacity(nodes.len());
     let mut changed = false;
     for mut node in nodes.drain(..) {
+        if let Some(kind @ ("insertion" | "deletion" | "moveFrom" | "moveTo")) =
+            node["type"].as_str()
+        {
+            changed = true;
+            places.push(None);
+            if matches!(kind, "deletion" | "moveFrom") != how.accept {
+                let mut content = node["content"].as_array().cloned().unwrap_or_default();
+                resolve_nodes(&mut content, how);
+                resolved.extend(content);
+            }
+            continue;
+        }
         let parsed = (node["type"] == "rawXml")
             .then(|| node["xml"].as_str())
             .flatten()
@@ -156,6 +192,23 @@ fn resolve_nodes(nodes: &mut Vec<Value>, how: Resolve<'_>) -> (Places, bool) {
 
 /// Resolves the changes kept by the fields `value` holds.
 fn resolve_nested(value: &mut Value, how: Resolve<'_>) -> bool {
+    if value["type"] == "run" {
+        let Some(changes) = value
+            .as_object_mut()
+            .and_then(|run| run.remove("propertyChanges"))
+        else {
+            return false;
+        };
+        if !how.accept {
+            for change in changes.as_array().into_iter().flatten() {
+                value["formatting"] = change
+                    .get("previousFormatting")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            }
+        }
+        return true;
+    }
     let items: Vec<&mut Value> = match value {
         Value::Object(entries)
             if matches!(
@@ -165,13 +218,29 @@ fn resolve_nested(value: &mut Value, how: Resolve<'_>) -> bool {
         {
             return resolve_field(value, how).is_some();
         }
-        Value::Array(items) => items.iter_mut().collect(),
+        Value::Array(items) => return resolve_nodes(items, how).1,
         Value::Object(entries) => entries.values_mut().collect(),
         _ => return false,
     };
     let mut changed = false;
     for item in items {
         changed |= resolve_nested(item, how);
+    }
+    if changed
+        && value["type"] == "hyperlink"
+        && let Some(nodes) = value["structuredChildren"].as_array()
+    {
+        let children = nodes
+            .iter()
+            .flat_map(|node| {
+                if matches!(node["type"].as_str(), Some("bookmarkStart" | "bookmarkEnd")) {
+                    vec![node.clone()]
+                } else {
+                    shown_runs(std::slice::from_ref(node))
+                }
+            })
+            .collect();
+        value["children"] = Value::Array(children);
     }
     changed
 }
@@ -396,6 +465,13 @@ fn unit_op(
             let len = text.encode_utf16().count() as u32;
             (len, RawOp::Insert { index, text, attrs })
         }
+        Err((kind, values)) if kind == "bookmark" => (
+            0,
+            RawOp::SetBookmark {
+                index,
+                data: any_from_value(serde_json::json!(values)).map_err(error)?,
+            },
+        ),
         Err((kind, values)) => (
             1,
             RawOp::InsertEmbed {
@@ -550,6 +626,10 @@ pub(crate) fn resolve_field_changes(
         package,
         relationships: package.map(|package| package.relationships(story_id)),
     };
+    let mut boundaries = comments.to_vec();
+    boundaries.extend(crate::bookmarks::positions(txn, story_id).into_iter().filter_map(|(at, data)| {
+        (!matches!(data, Any::Map(data) if data.get("inHyperlink") == Some(&Any::Bool(true)) || matches!(data.get("id"), Some(Any::String(_))))).then_some((at, false))
+    }));
     let chunks = snapshot(story, txn);
     for position in (0..chunks.len()).rev() {
         let ChunkKind::Embed(Some(map)) = &chunks[position].kind else {
@@ -557,7 +637,7 @@ pub(crate) fn resolve_field_changes(
         };
         match map_string(map, txn, KIND_KEY).as_deref() {
             Some("field") if field_result_attr(&chunks[position]).is_none() => {
-                resolve_owner(txn, story, &chunks, position, how, comments)?
+                resolve_owner(txn, story, story_id, &chunks, position, how, &boundaries)?
             }
             Some("sdt") => {
                 let style = paragraph_style(txn, &chunks, position);
@@ -594,7 +674,12 @@ fn resolved_embed(
 
 /// Applies `edits` (offset, order, op) last first; at one offset the lower
 /// order goes first.
-fn apply(txn: &mut TransactionMut<'_>, story: &TextRef, mut edits: Vec<(u32, usize, RawOp)>) {
+fn apply(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    story_id: &str,
+    mut edits: Vec<(u32, usize, RawOp)>,
+) -> OpResult<()> {
     edits.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
     for (_, _, op) in edits {
         match op {
@@ -620,9 +705,13 @@ fn apply(txn: &mut TransactionMut<'_>, story: &TextRef, mut edits: Vec<(u32, usi
             }
             RawOp::Format { index, len, attrs } => story.format(txn, index, len, attrs),
             RawOp::Delete { index, len } => story.remove_range(txn, index, len),
+            RawOp::SetBookmark { index, data } => {
+                crate::bookmarks::set(txn, story, story_id, index, data)?
+            }
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// The embed's payload entries replaced by `payload`, keeping its kind.
@@ -652,6 +741,7 @@ fn set_payload(
 fn resolve_owner(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
+    story_id: &str,
     chunks: &[Chunk],
     position: usize,
     how: Resolve<'_>,
@@ -886,17 +976,26 @@ fn resolve_owner(
             continue;
         }
         let mut at = anchors[order];
+        let mut bookmarks = Vec::new();
         for unit in group {
             let (len, op) = unit_op(at, unit)?;
-            edits.push((anchors[order], 1 + count - order, op));
+            let edit = (anchors[order], 1 + count - order, op);
+            if matches!(edit.2, RawOp::SetBookmark { .. }) {
+                bookmarks.push(edit);
+            } else {
+                edits.push(edit);
+            }
             at += len;
         }
+        // Anchor only after the group's text exists. Later groups inserted
+        // before this one then move these boundaries with that text.
+        edits.extend(bookmarks);
     }
-    apply(txn, story, edits);
+    apply(txn, story, story_id, edits)?;
     set_payload(txn, map, owner_payload)
 }
 
-/// An inline content control's content with its fields' kept changes resolved.
+/// An inline content control's content with its revisions and fields resolved.
 fn resolved_sdt_content(content: &Any, how: Resolve<'_>, style: Option<&str>) -> Option<Any> {
     let Any::Array(items) = content else {
         return None;
@@ -904,57 +1003,118 @@ fn resolved_sdt_content(content: &Any, how: Resolve<'_>, style: Option<&str>) ->
     let mut changed = false;
     let items: Vec<Any> = items
         .iter()
-        .map(|item| {
+        .filter_map(|item| {
             let Any::Map(entry) = item else {
-                return item.clone();
-            };
-            let Some(Any::Map(payload)) = entry.get("payload") else {
-                return item.clone();
+                return Some(item.clone());
             };
             let mut entry = entry.as_ref().clone();
-            match entry.get("kind") {
-                Some(Any::String(kind)) if kind.as_ref() == "sdt" => {
-                    let Some(inner) = payload
-                        .get("content")
-                        .and_then(|inner| resolved_sdt_content(inner, how, style))
-                    else {
-                        return item.clone();
-                    };
-                    let mut payload = payload.as_ref().clone();
-                    payload.insert("content".to_owned(), inner);
-                    entry.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
-                }
-                Some(Any::String(kind)) if kind.as_ref() == "field" => {
-                    let Some((values, old_marks, marks)) = (match payload.get("fieldData") {
-                        Some(Any::String(data)) => resolved_embed(data, how, style),
-                        _ => None,
-                    }) else {
-                        return item.clone();
-                    };
-                    let mut attrs = match entry.get("attrs") {
-                        Some(Any::Map(attrs)) => attrs.as_ref().clone(),
-                        _ => HashMap::new(),
-                    };
-                    for key in old_marks.keys() {
-                        attrs.remove(key);
+            let mut attrs = match entry.get("attrs") {
+                Some(Any::Map(attrs)) => attrs.as_ref().clone(),
+                _ => HashMap::new(),
+            };
+            let active = |key: &str| attrs.get(key).is_some_and(|value| *value != Any::Null);
+            if active(if how.accept { "del" } else { "ins" }) {
+                changed = true;
+                return None;
+            }
+            if active("ins") || active("del") {
+                changed = true;
+                attrs.remove("ins");
+                attrs.remove("del");
+                entry.insert("attrs".to_owned(), Any::Map(Arc::new(attrs.clone())));
+            }
+            if let Some((delta, _)) =
+                super::resolve::run_property_delta(attrs.get("rPrChange"), how.accept, None)
+            {
+                for (key, value) in delta {
+                    if value == Any::Null {
+                        attrs.remove(&key);
+                    } else {
+                        attrs.insert(key, value);
                     }
-                    for (key, value) in marks {
-                        if let Ok(value) = any_from_value(value) {
-                            attrs.insert(key, value);
+                }
+                entry.insert("attrs".into(), Any::Map(Arc::new(attrs.clone())));
+                changed = true;
+            }
+            if let Some(Any::Map(payload)) = entry.get("payload") {
+                match entry.get("kind") {
+                    Some(Any::String(kind)) if kind.as_ref() == "sdt" => {
+                        if let Some(inner) = payload
+                            .get("content")
+                            .and_then(|inner| resolved_sdt_content(inner, how, style))
+                        {
+                            let mut payload = payload.as_ref().clone();
+                            payload.insert("content".to_owned(), inner);
+                            entry.insert("payload".to_owned(), Any::Map(Arc::new(payload)));
+                            changed = true;
                         }
                     }
-                    let Ok(values) = any_from_value(Value::Object(values.into_iter().collect()))
-                    else {
-                        return item.clone();
-                    };
-                    entry.insert("payload".to_owned(), values);
-                    entry.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
+                    Some(Any::String(kind)) if kind.as_ref() == "field" => {
+                        if let Some(Any::String(data)) = payload.get("fieldData")
+                            && let Some((values, old_marks, marks)) =
+                                resolved_embed(data, how, style)
+                            && let Ok(values) =
+                                any_from_value(Value::Object(values.into_iter().collect()))
+                        {
+                            for key in old_marks.keys() {
+                                attrs.remove(key);
+                            }
+                            for (key, value) in marks {
+                                if let Ok(value) = any_from_value(value) {
+                                    attrs.insert(key, value);
+                                }
+                            }
+                            entry.insert("payload".to_owned(), values);
+                            entry.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
+                            changed = true;
+                        }
+                    }
+                    _ => {}
                 }
-                _ => return item.clone(),
             }
-            changed = true;
-            Any::Map(Arc::new(entry))
+            Some(Any::Map(Arc::new(entry)))
         })
         .collect();
     changed.then(|| Any::Array(Arc::from(items)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn nested_revision_nodes_and_control_units_resolve() {
+        for accept in [false, true] {
+            let how = Resolve {
+                accept,
+                package: None,
+                relationships: None,
+            };
+            let mut field = json!({"type":"complexField", "structuredResult":{"inline":[
+                {"type":"hyperlink","structuredChildren":[{"type":"insertion","content":[{"type":"run","content":[{"type":"text","text":"new"}]}]}]},
+                {"type":"inlineSdt","content":[{"type":"deletion","content":[{"type":"run","content":[{"type":"text","text":"old"}]}]}]}
+            ]}});
+            assert!(field_data_keeps_changes(&field.to_string()));
+            assert!(resolve_field(&mut field, how).is_some());
+            let saved = field.to_string();
+            assert!(!saved.contains("insertion") && !saved.contains("deletion"));
+            assert_eq!(saved.contains("new"), accept);
+            assert_eq!(saved.contains("old"), !accept);
+
+            let content = any_from_value(json!([
+                {"text":"new","attrs":{"ins":{"revisionId":1}}},
+                {"text":"old","attrs":{"del":{"revisionId":2}}},
+                {"text":"both","attrs":{"ins":{"revisionId":1},"del":{"revisionId":2}}}
+            ]))
+            .unwrap();
+            assert!(sdt_keeps_changes(&content));
+            let resolved = resolved_sdt_content(&content, how, None).unwrap();
+            assert_eq!(
+                any_value(&resolved),
+                json!([{ "text": if accept { "new" } else { "old" }, "attrs": {} }])
+            );
+            assert!(!sdt_keeps_changes(&resolved));
+        }
+    }
 }

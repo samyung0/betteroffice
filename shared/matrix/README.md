@@ -2,6 +2,7 @@
 
 A pre-landing regression suite for DOCX breaks, comments and fields. Run it before landing a change to the DOCX
 editor, seed, export or rebase, and from the manual `DOCX matrices` workflow. It is not part of `bun run test`.
+Capy's `office_matrix` job runs it and `shared/docx-*.test.ts` whenever the BetterOffice pin moves.
 
 ```sh
 bun run build:wasm            # the docx, xlsx and pptx cores the checkpoint bundle imports
@@ -71,17 +72,15 @@ shows as an improvement, and a refusal that stops firing (R11-S1's misses) as a 
 
 ## Known non-exact rows in the baseline
 
-Decided follow-ups stay in the baseline as they are, so their fix shows as an improvement:
+Accepted differences and unresolved cases stay in the baseline, so fixes show as improvements:
 
-- `silent` rows in `docx-comments-breaks`: a comment added after a capture ending at a paragraph that closes with a
-  trailing break grows over the break in the rebased save (R11-N2, follow-up 2026-09-30).
-- `timing+unstable` rows with a comment starting at the text start after a leading break (R9-N3(b), follow-up): the
-  direct save starts it after the break, the rebased and publish-then-edit saves before it, and the emptied range is
-  gone after two publications.
+- `timing+unstable` rows with two comments ending beside a break-only paragraph retain the accepted marker order
+  and empty-range differences. An empty range becomes a reference-only comment after publication in every story.
 - `unstable` rows with two editor comments ending at one point: their markers reorder on the second publication.
-- `lost` rows in `docx-fields` with a bookmark that opens inside `w:fldSimple`: Enter copies it to both halves and the
-  save drops its end (bookmarks follow-up, 2026-09-29 round 3).
 - `moved` rows in `docx-fields`: text typed next to a projected link or field saves outside it (N18 follow-up), and
   Enter between a projected child and its field.
 - `refused` rows follow decisions: the break-flag refusal (R10-N1, 2026-09-30), field children the rebase cannot
   match one-to-one (round 5, N20), a table of contents entry typed in after a capture (the UAT journey).
+
+The follow-up fixes leave no `silent` or `lost` rows. Field end/separate markers compare by kind and offset, since
+their internal owner id can change on export; bookmark identities still compare exactly.

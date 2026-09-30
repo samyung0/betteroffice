@@ -1022,7 +1022,11 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
     }
 }
 
-fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
+fn run_format_marks(
+    run: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
@@ -1044,6 +1048,39 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
                     .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
             }
         }
+    }
+    marks
+}
+
+fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
+    let mut marks = run_format_marks(run, style_formatting, styles);
+    let changes = array(field(Some(run), "propertyChanges"));
+    if !changes.is_empty() {
+        let records = changes
+            .iter()
+            .map(|change| {
+                let mut record = map_from_value(change.clone());
+                for (source, target) in [
+                    ("previousFormatting", "previousAttributes"),
+                    ("currentFormatting", "currentAttributes"),
+                ] {
+                    let before = json!({"formatting": change[source]});
+                    record.insert(
+                        target.into(),
+                        value_from_map(&marks_to_attrs(&run_format_marks(
+                            &before,
+                            style_formatting,
+                            styles,
+                        ))),
+                    );
+                }
+                value_from_map(&record)
+            })
+            .collect();
+        marks.push(mark(
+            "rPrChange",
+            vec![("changes".into(), Value::Array(records))],
+        ));
     }
     marks
 }
@@ -1233,21 +1270,22 @@ fn field_payload(
             .flatten()
     });
     let merged = merge_text_formatting(style_formatting, formatting);
-    (
-        map_from_value(json!({
-            "fieldType": nullish(field(Some(field_value), "fieldType")),
-            "instruction": nullish(field(Some(field_value), "instruction")),
-            "displayText": display_text,
-            "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
-            "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
-            "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
-            "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
-            "hasCachedResult": !display_text.is_empty(),
-            "fieldData": source_json(field_value, source),
-            "modelKind": "field"
-        })),
-        formatting_to_marks(merged.as_ref()),
-    )
+    let mut payload = map_from_value(json!({
+        "fieldType": nullish(field(Some(field_value), "fieldType")),
+        "instruction": nullish(field(Some(field_value), "instruction")),
+        "displayText": display_text,
+        "fieldKind": if kind == "simpleField" { "simple" } else { "complex" },
+        "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
+        "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
+        "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
+        "hasCachedResult": !display_text.is_empty(),
+        "fieldData": source_json(field_value, source),
+        "modelKind": "field"
+    }));
+    if let Some(id) = field(field(Some(field_value), "continuation"), "id") {
+        payload.insert("continuationId".into(), id.clone());
+    }
+    (payload, formatting_to_marks(merged.as_ref()))
 }
 
 fn math_payload(math: &Value) -> JsonObject {
@@ -1321,6 +1359,16 @@ fn run_content_to_units(
             .map(|text| vec![text_unit(text.to_owned(), marks)])
             .unwrap_or_default(),
         "tab" => vec![text_unit("\t".to_owned(), marks)],
+        "break" if flow_break_type(content).is_some() => vec![embed_unit(
+            if flow_break_type(content) == Some("column") {
+                "columnBreak"
+            } else {
+                "pageBreak"
+            },
+            JsonObject::new(),
+            marks,
+            1,
+        )],
         "break"
             if string(field(Some(content), "breakType"))
                 .is_none_or(|kind| kind == "textWrapping") =>
@@ -1448,7 +1496,17 @@ fn run_to_units(
         .collect();
     array(field(Some(run), "content"))
         .iter()
-        .flat_map(|content| run_content_to_units(content, &marks, source))
+        .flat_map(|content| {
+            if string(field(Some(content), "type")) == Some("fieldChar")
+                && let Some(id) = field(Some(content), "continuationId")
+            {
+                return vec![embed_unit("bookmark", map_from_value(json!({
+                    "id": id, "kind": format!("field{}", string(field(Some(content), "charType")).unwrap_or_default()),
+                    "run": {"type": "run", "content": [content], "formatting": field(Some(run), "formatting")}
+                })), &[], 0)];
+            }
+            run_content_to_units(content, &marks, source)
+        })
         .collect()
 }
 
@@ -1459,40 +1517,70 @@ fn hyperlink_to_units(
     extra_marks: &[Mark],
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
-    let mut units = Vec::new();
-    let link = hyperlink_mark(hyperlink);
+    let marks: Vec<_> = extra_marks
+        .iter()
+        .cloned()
+        .chain([hyperlink_mark(hyperlink)])
+        .collect();
     let children =
         field(Some(hyperlink), "structuredChildren").or_else(|| field(Some(hyperlink), "children"));
-    for child in array(children) {
-        match string(field(Some(child), "type")).unwrap_or_default() {
-            "run" => {
-                let marks: Vec<Mark> = run_marks(child, style_formatting, styles)
-                    .into_iter()
-                    .chain(extra_marks.iter().cloned())
-                    .chain(std::iter::once(link.clone()))
-                    .collect();
-                for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, source));
-                }
-            }
-            "simpleField" | "complexField" => {
-                let (payload, marks) = field_payload(child, style_formatting, source);
-                let marks: Vec<Mark> = marks
-                    .into_iter()
-                    .chain(extra_marks.iter().cloned())
-                    .chain(std::iter::once(link.clone()))
-                    .collect();
-                units.push(embed_unit("field", payload, &marks, 1));
-            }
-            "mathEquation" => {
-                let marks: Vec<Mark> = extra_marks
-                    .iter()
-                    .cloned()
-                    .chain(std::iter::once(link.clone()))
-                    .collect();
-                units.push(embed_unit("math", math_payload(child), &marks, 1));
-            }
-            _ => {}
+    array(children)
+        .iter()
+        .flat_map(|child| inline_to_units(child, style_formatting, styles, &marks, source))
+        .collect()
+}
+
+/// The same recursive inline grammar inside links, controls and revisions.
+fn inline_to_units(
+    child: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    extra_marks: &[Mark],
+    source: &BTreeMap<String, String>,
+) -> Vec<InlineUnit> {
+    let mut units = match string(field(Some(child), "type")) {
+        Some("run") => run_to_units(child, style_formatting, styles, &[], source),
+        Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+        Some("simpleField" | "complexField") => {
+            let (payload, marks) = field_payload(child, style_formatting, source);
+            vec![embed_unit("field", payload, &marks, 1)]
+        }
+        Some("inlineSdt") => vec![embed_unit(
+            "sdt",
+            sdt_payload(child, style_formatting, styles, source),
+            &[],
+            1,
+        )],
+        Some("mathEquation") => vec![embed_unit("math", math_payload(child), &[], 1)],
+        Some(kind @ ("bookmarkStart" | "bookmarkEnd")) => {
+            let mut data = map_from_value(child.clone());
+            data.remove("type");
+            data.remove("position");
+            data.insert(
+                "kind".into(),
+                json!(if kind == "bookmarkStart" {
+                    "start"
+                } else {
+                    "end"
+                }),
+            );
+            vec![embed_unit("bookmark", data, &[], 0)]
+        }
+        Some("insertion" | "deletion" | "moveFrom" | "moveTo") => {
+            tracked_to_units(child, style_formatting, styles, source)
+        }
+        _ => Vec::new(),
+    };
+    for unit in &mut units {
+        for mark in extra_marks {
+            unit.marks = with_mark(&unit.marks, mark.clone());
+        }
+        unit.attrs = marks_to_attrs(&unit.marks);
+        if let UnitContent::Embed { kind, payload } = &mut unit.content
+            && kind == "bookmark"
+            && unit.attrs.contains_key("hyperlink")
+        {
+            payload.insert("inHyperlink".into(), Value::Bool(true));
         }
     }
     units
@@ -1632,7 +1720,9 @@ pub(crate) fn shown_runs(nodes: &[Value]) -> Vec<Value> {
             Some("hyperlink") => shown_runs(array(field(Some(node), "children"))),
             Some("simpleField") => array(field(Some(node), "content")).to_vec(),
             Some("complexField") => array(field(Some(node), "fieldResult")).to_vec(),
-            Some("inlineSdt") => shown_runs(array(field(Some(node), "content"))),
+            Some("inlineSdt" | "insertion" | "moveTo") => {
+                shown_runs(array(field(Some(node), "content")))
+            }
             Some("rawXml") => array(field(Some(node), "shown")).to_vec(),
             _ => Vec::new(),
         })
@@ -1668,32 +1758,18 @@ fn tracked_to_units(
         kind,
         matches!(content_type, "moveFrom" | "moveTo"),
     );
-    let mut units = Vec::new();
-    for child in array(field(Some(content), "content")) {
-        let child_type = string(field(Some(child), "type"));
-        if child_type == Some("run") {
-            units.extend(run_to_units(
+    array(field(Some(content), "content"))
+        .iter()
+        .flat_map(|child| {
+            inline_to_units(
                 child,
                 style_formatting,
                 styles,
                 std::slice::from_ref(&marker),
                 source,
-            ));
-        } else if child_type == Some("simpleField") {
-            let (payload, mut marks) = field_payload(child, style_formatting, source);
-            marks.push(marker.clone());
-            units.push(embed_unit("field", payload, &marks, 1));
-        } else {
-            units.extend(hyperlink_to_units(
-                child,
-                style_formatting,
-                styles,
-                std::slice::from_ref(&marker),
-                source,
-            ));
-        }
-    }
-    units
+            )
+        })
+        .collect()
 }
 
 fn sdt_properties_attrs(properties: &Value, source: &BTreeMap<String, String>) -> JsonObject {
@@ -1757,35 +1833,8 @@ fn sdt_payload(
         }
     };
     for child in array(field(Some(sdt), "content")) {
-        match string(field(Some(child), "type")).unwrap_or_default() {
-            "run" => {
-                for unit in run_to_units(child, style_formatting, styles, &[], source) {
-                    append(&mut content, unit);
-                }
-            }
-            "hyperlink" => {
-                for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
-                    append(&mut content, unit);
-                }
-            }
-            "simpleField" | "complexField" => {
-                let (payload, marks) = field_payload(child, style_formatting, source);
-                append(&mut content, embed_unit("field", payload, &marks, 1));
-            }
-            "inlineSdt" => append(
-                &mut content,
-                embed_unit(
-                    "sdt",
-                    sdt_payload(child, style_formatting, styles, source),
-                    &[],
-                    1,
-                ),
-            ),
-            "mathEquation" => append(
-                &mut content,
-                embed_unit("math", math_payload(child), &[], 1),
-            ),
-            _ => {}
+        for unit in inline_to_units(child, style_formatting, styles, &[], source) {
+            append(&mut content, unit);
         }
     }
     let properties = field(Some(sdt), "properties").unwrap_or(&Value::Null);
@@ -2301,14 +2350,32 @@ fn paragraph_units(
     let mut units = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
+    let (_, _, inline_breaks) = paragraph_flow_plan(paragraph);
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
-    for content in array(field(Some(paragraph), "content")) {
+    for (content_index, content) in array(field(Some(paragraph), "content")).iter().enumerate() {
         let start = units.len();
+        let mut break_index = 0;
+        let mut keep_inline = |unit: &InlineUnit| {
+            if matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pageBreak" || kind == "columnBreak")
+            {
+                let keep = inline_breaks[content_index]
+                    .get(break_index)
+                    .copied()
+                    .unwrap_or(false);
+                break_index += 1;
+                keep
+            } else {
+                true
+            }
+        };
         match string(field(Some(content), "type")).unwrap_or_default() {
             "commentRangeStart" | "commentRangeEnd" => comments.mark(content, story),
             "run" => {
-                let run_units =
-                    run_to_units(content, style_formatting.as_ref(), styles, &[], source);
+                let run_units: Vec<_> =
+                    run_to_units(content, style_formatting.as_ref(), styles, &[], source)
+                        .into_iter()
+                        .filter(&mut keep_inline)
+                        .collect();
                 if let Some(run_boundaries) = &mut boundaries {
                     if let Some(boundary) = run_boundary(content, &run_units, source) {
                         run_boundaries.push(boundary);
@@ -2363,6 +2430,11 @@ fn paragraph_units(
             "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
+        if string(field(Some(content), "type")) != Some("run") {
+            let mut content_units = units.split_off(start);
+            content_units.retain(keep_inline);
+            units.extend(content_units);
+        }
         for unit in &mut units[start..] {
             unit.comments = comments.covering(story);
         }
@@ -2396,6 +2468,8 @@ fn run_tokens(run: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
                 },
                 marker.cloned(),
             ));
+        } else if string(field(Some(content), "type")) == Some("commentReference") {
+            tokens.push(("reference", None));
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -2407,31 +2481,51 @@ fn run_tokens(run: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
 }
 
 fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
+    nested_tokens(content, None, tokens);
+}
+
+fn nested_tokens(content: &[Value], marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
     for item in content {
         match string(field(Some(item), "type")).unwrap_or_default() {
-            "run" => run_tokens(item, None, tokens),
-            "hyperlink" => link_tokens(item, None, tokens),
+            "run" => run_tokens(item, marker, tokens),
+            "hyperlink" => nested_tokens(
+                array(
+                    field(Some(item), "structuredChildren")
+                        .or_else(|| field(Some(item), "children")),
+                ),
+                marker,
+                tokens,
+            ),
             "simpleField" => {
-                // A field is a unit, text however empty its result.
                 tokens.push(("visible", None));
-                for child in array(field(Some(item), "content")) {
-                    if string(field(Some(child), "type")) == Some("run") {
-                        run_tokens(child, None, tokens);
-                    }
-                }
+                nested_tokens(
+                    array(
+                        field(field(Some(item), "structuredResult"), "inline")
+                            .or_else(|| field(Some(item), "content")),
+                    ),
+                    marker,
+                    tokens,
+                );
             }
-            // A bookmark is no text, but a break before one leads it.
             "bookmarkStart" | "bookmarkEnd" => tokens.push(("mark", None)),
             "complexField" => {
-                for key in ["fieldCode", "fieldResult"] {
-                    for child in array(field(Some(item), key)) {
-                        run_tokens(child, None, tokens);
-                    }
+                for (structured, legacy) in [
+                    ("structuredCode", "fieldCode"),
+                    ("structuredResult", "fieldResult"),
+                ] {
+                    nested_tokens(
+                        array(
+                            field(field(Some(item), structured), "inline")
+                                .or_else(|| field(Some(item), legacy)),
+                        ),
+                        marker,
+                        tokens,
+                    );
                 }
             }
-            "inlineSdt" => inline_tokens(array(field(Some(item), "content")), tokens),
+            "inlineSdt" => nested_tokens(array(field(Some(item), "content")), marker, tokens),
             kind @ ("insertion" | "deletion" | "moveFrom" | "moveTo") => {
-                let marker = tracked_mark(
+                let own = tracked_mark(
                     field(Some(item), "info").unwrap_or(&Value::Null),
                     if matches!(kind, "insertion" | "moveTo") {
                         "insertion"
@@ -2440,14 +2534,7 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
                     },
                     matches!(kind, "moveFrom" | "moveTo"),
                 );
-                for child in array(field(Some(item), "content")) {
-                    match string(field(Some(child), "type")) {
-                        Some("run") => run_tokens(child, Some(&marker), tokens),
-                        Some("hyperlink") => link_tokens(child, Some(&marker), tokens),
-                        Some("simpleField") => tokens.push(("visible", None)),
-                        _ => {}
-                    }
-                }
+                nested_tokens(array(field(Some(item), "content")), Some(&own), tokens);
             }
             "mathEquation" => tokens.push(("visible", None)),
             _ => {}
@@ -2455,16 +2542,38 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<FlowToken>) {
     }
 }
 
-/// A hyperlink's tokens: its runs', and a field or equation it holds as visible.
-fn link_tokens(link: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>) {
-    let children =
-        field(Some(link), "structuredChildren").or_else(|| field(Some(link), "children"));
-    for child in array(children) {
-        match string(field(Some(child), "type")) {
-            Some("run") => run_tokens(child, marker, tokens),
-            Some("simpleField" | "complexField" | "mathEquation") => tokens.push(("visible", None)),
-            _ => {}
+fn exposed_flow_breaks(item: &Value, project_field: bool) -> usize {
+    match string(field(Some(item), "type")) {
+        Some("run") => array(field(Some(item), "content"))
+            .iter()
+            .filter(|content| flow_break_type(content).is_some())
+            .count(),
+        Some("hyperlink") => {
+            array(field(Some(item), "structuredChildren").or_else(|| field(Some(item), "children")))
+                .iter()
+                .map(|child| exposed_flow_breaks(child, false))
+                .sum()
         }
+        Some("insertion" | "deletion" | "moveFrom" | "moveTo") => {
+            array(field(Some(item), "content"))
+                .iter()
+                .map(|child| exposed_flow_breaks(child, false))
+                .sum()
+        }
+        Some("complexField")
+            if project_field
+                && !numeric_field_instruction(
+                    string(field(Some(item), "instruction")).unwrap_or_default(),
+                ) =>
+        {
+            ["structuredCode", "structuredResult"]
+                .iter()
+                .flat_map(|key| array(field(field(Some(item), key), "inline")))
+                .filter(|child| string(field(Some(child), "type")) == Some("hyperlink"))
+                .map(|child| exposed_flow_breaks(child, false))
+                .sum()
+        }
+        _ => 0,
     }
 }
 
@@ -2474,6 +2583,7 @@ fn link_tokens(link: &Value, marker: Option<&Mark>, tokens: &mut Vec<FlowToken>)
 struct FlowBreak {
     kind: &'static str,
     leading: bool,
+    trailing: bool,
     marker: Option<Mark>,
     item: usize,
 }
@@ -2484,6 +2594,9 @@ impl FlowBreak {
         if self.leading {
             payload.insert("leading".to_owned(), Value::Bool(true));
         }
+        if self.trailing {
+            payload.insert("trailing".to_owned(), Value::Bool(true));
+        }
         embed_unit(self.kind, payload, self.marker.as_slice(), 1)
     }
 }
@@ -2492,6 +2605,11 @@ impl FlowBreak {
 /// follow its pilcrow (after its text). A paragraph without text keeps its
 /// breaks after its pilcrow, except those up to its last column break.
 fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) {
+    let (leading, trailing, _) = paragraph_flow_plan(paragraph);
+    (leading, trailing)
+}
+
+fn paragraph_flow_plan(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>, Vec<Vec<bool>>) {
     let mut tokens = Vec::new();
     let mut items = Vec::new();
     for (index, item) in array(field(Some(paragraph), "content")).iter().enumerate() {
@@ -2501,7 +2619,10 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) 
     let is_break = |index: &usize| matches!(tokens[*index].0, "pageBreak" | "columnBreak");
     // Breaks lead the content that follows them: the text, or without text
     // the last bookmark. Without either, those up to the last column break lead.
-    let text = tokens.iter().position(|(kind, _)| *kind == "visible");
+    let last_break = (0..tokens.len()).rfind(is_break);
+    let text = tokens.iter().enumerate().position(|(index, (kind, _))| {
+        *kind == "visible" || (*kind == "reference" && last_break.is_none_or(|last| index > last))
+    });
     let content = text.or_else(|| tokens.iter().rposition(|(kind, _)| *kind == "mark"));
     let split = content.unwrap_or_else(|| {
         tokens
@@ -2509,18 +2630,40 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<FlowBreak>, Vec<FlowBreak>) 
             .rposition(|(kind, _)| *kind == "columnBreak")
             .map_or(0, |index| index + 1)
     });
+    let last_text = tokens.iter().rposition(|(kind, _)| *kind == "visible");
+    let mut inline_breaks = vec![Vec::new(); array(field(Some(paragraph), "content")).len()];
+    let exposed: Vec<_> = array(field(Some(paragraph), "content"))
+        .iter()
+        .map(|item| exposed_flow_breaks(item, true))
+        .collect();
+    let mut counts = vec![0; exposed.len()];
+    for index in (0..tokens.len()).filter(is_break) {
+        counts[items[index]] += 1;
+    }
+    let inline: Vec<_> = (0..tokens.len())
+        .map(|index| {
+            is_break(&index)
+                && counts[items[index]] == exposed[items[index]]
+                && text.is_some_and(|first| first < index)
+                && last_text.is_some_and(|last| index < last)
+        })
+        .collect();
+    for index in (0..tokens.len()).filter(is_break) {
+        inline_breaks[items[index]].push(inline[index]);
+    }
     let breaks = |range: std::ops::Range<usize>| {
         range
-            .filter(is_break)
+            .filter(|index| is_break(index) && !inline[*index])
             .map(|index| FlowBreak {
                 kind: tokens[index].0,
                 leading: content.is_some_and(|content| index < content),
+                trailing: index >= split,
                 marker: tokens[index].1.clone(),
                 item: items[index],
             })
             .collect()
     };
-    (breaks(0..split), breaks(split..tokens.len()))
+    (breaks(0..split), breaks(split..tokens.len()), inline_breaks)
 }
 
 fn modifier(value: &str) -> f64 {
@@ -3252,7 +3395,14 @@ fn cached_result_block_count(data: &Value) -> Option<usize> {
         .last()
         .is_some_and(|block| {
             string(field(Some(block), "type")) == Some("paragraph")
-                && array(field(Some(block), "content")).is_empty()
+                && array(field(Some(block), "content")).iter().all(|node| {
+                    string(field(Some(node), "type")) == Some("run")
+                        && array(field(Some(node), "content")).iter().all(|entry| {
+                            string(field(Some(entry), "type")) == Some("fieldChar")
+                                && string(field(Some(entry), "charType")) == Some("end")
+                                && field(Some(entry), "continuationId").is_some()
+                        })
+                })
         })
         .then(|| blocks.len())
 }
@@ -3320,6 +3470,9 @@ fn is_comment_reference(unit: &InlineUnit) -> bool {
 fn add_comment_coverage(plan: &mut StoryPlan) {
     let mut offset = 0u32;
     for (index, unit) in plan.units.iter().enumerate() {
+        if matches!(&unit.content, UnitContent::Embed {kind, ..} if kind == "bookmark") {
+            continue;
+        }
         let width = match &unit.content {
             UnitContent::Text(text) => utf16_len(text),
             UnitContent::Embed { .. } => 1,
@@ -3327,9 +3480,10 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
         // A reference mark follows its own range's end, so another range holds
         // it only when that range goes on past it: coincident ends stay equal.
         let next = is_comment_reference(unit).then(|| {
-            plan.units[index + 1..]
-                .iter()
-                .find(|next| !is_comment_reference(next))
+            plan.units[index + 1..].iter().find(|next| {
+                !is_comment_reference(next)
+                    && !matches!(&next.content, UnitContent::Embed {kind, ..} if kind == "bookmark")
+            })
         });
         for comment_id in &unit.comments {
             if let Some(next) = next
@@ -3693,8 +3847,10 @@ fn seed_plan(
         comment_coverage,
     } = plan;
     reference_media(&mut units, media);
+    let bookmarks = take_bookmarks(&mut units)?;
     let mut referenced_fonts = BTreeSet::new();
     let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
+    ops.extend(bookmarks);
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -3709,6 +3865,101 @@ fn seed_plan(
         );
     }
     Ok((story_id, ops, referenced_fonts))
+}
+
+/// Convert the parser's paragraph offsets to CRDT anchors only after all
+/// text is inserted. Bookmarks inside an opaque control stay in its payload.
+fn take_bookmarks(units: &mut Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
+    let mut found = Vec::<(u32, JsonObject)>::new();
+    let mut at = 0;
+    let mut pm = 0;
+    let mut spans = Vec::<(u32, u32, u32, u32)>::new();
+    let mut leading = Vec::new();
+    let mut head = true;
+    for unit in units.iter_mut() {
+        let width = match &unit.content {
+            UnitContent::Text(text) => utf16_len(text),
+            _ => 1,
+        };
+        if let UnitContent::Embed { kind, payload } = &mut unit.content {
+            if kind == "bookmark" {
+                let mut data = payload.clone();
+                if matches!(string(data.get("kind")), Some("fieldseparate" | "fieldend")) {
+                    data.insert("order".into(), json!(found.len()));
+                    if !unit.attrs.is_empty() {
+                        data.insert("attributes".into(), value_from_map(&unit.attrs));
+                    }
+                }
+                found.push((at, data));
+                continue;
+            }
+            if kind == "pilcrow" {
+                if let Some(Value::Array(bookmarks)) = payload.remove("bookmarks") {
+                    for bookmark in bookmarks {
+                        let mut data = map_from_value(bookmark);
+                        let offset = data
+                            .remove("offset")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0) as u32;
+                        let after = data
+                            .remove("breaksAfter")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or(0) as usize;
+                        let position = if offset == 0 && after > 0 {
+                            *leading
+                                .get(
+                                    leading
+                                        .len()
+                                        .checked_sub(after)
+                                        .ok_or("bookmark break position does not resolve")?,
+                                )
+                                .ok_or("bookmark break position does not resolve")?
+                        } else {
+                            spans
+                                .iter()
+                                .find(|(_, _, start, len)| offset < start + len)
+                                .map_or(at, |(raw, width, start, _)| {
+                                    raw + offset.saturating_sub(*start).min(*width)
+                                })
+                        };
+                        found.push((position, data));
+                    }
+                }
+                at += 1;
+                pm = 0;
+                spans.clear();
+                leading.clear();
+                head = true;
+                continue;
+            }
+            if head && crate::segments::is_block_embed(kind) {
+                if kind.ends_with("Break") {
+                    leading.push(at);
+                }
+                at += 1;
+                continue;
+            }
+        }
+        if width > 0 {
+            head = false;
+            spans.push((at, width, pm, unit.pm_size));
+            at += width;
+            pm += unit.pm_size;
+        }
+    }
+    units.retain(
+        |unit| !matches!(&unit.content, UnitContent::Embed {kind, ..} if kind == "bookmark"),
+    );
+    found.sort_by_key(|(at, data)| (*at, data["id"].as_i64().unwrap_or(0), data["kind"] == "end"));
+    found
+        .into_iter()
+        .map(|(index, data)| {
+            Ok(RawOp::SetBookmark {
+                index,
+                data: any_from_value(value_from_map(&data))?,
+            })
+        })
+        .collect()
 }
 
 fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
@@ -4751,7 +5002,12 @@ mod tests {
             ],
         });
         let units = run_to_units(&run, None, &styles, &[], &BTreeMap::new());
-        let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+        assert!(run_boundary(&run, &units, &BTreeMap::new()).is_none());
+        let text_units: Vec<_> = units
+            .into_iter()
+            .filter(|unit| matches!(unit.content, UnitContent::Text(_)))
+            .collect();
+        let boundary = run_boundary(&run, &text_units, &BTreeMap::new()).unwrap();
         assert_eq!(boundary.get("text"), Some(&json!("ABC")));
         assert_eq!(
             boundary.get("breaks"),
@@ -4806,6 +5062,64 @@ mod tests {
         );
         assert!(leading.is_empty());
         assert_eq!(describe(trailing), ["pageBreak"]);
+    }
+
+    #[test]
+    fn a_comment_reference_before_a_break_does_not_make_it_trailing() {
+        let reference = json!({"type": "commentReference", "id": 1});
+        let page = json!({"type": "break", "breakType": "page"});
+        for content in [
+            vec![
+                reference.clone(),
+                page.clone(),
+                json!({"type": "text", "text": "Heading"}),
+            ],
+            vec![page, reference],
+        ] {
+            let (leading, trailing) = paragraph_flow_breaks(&json!({
+                "type": "paragraph", "content": [{"type": "run", "content": content}]
+            }));
+            assert!(trailing.is_empty());
+            assert_eq!(leading.len(), 1);
+            assert!(leading[0].leading);
+        }
+    }
+
+    #[test]
+    fn a_generated_comment_reference_leads_a_break_only_page_and_column_paragraph() {
+        let doc = seed_body(&[
+            json!({"type": "paragraph", "content": [run("prev")]}),
+            json!({"type": "paragraph", "content": [{"type": "run", "content": [
+                {"type": "break", "breakType": "page"}, {"type": "break", "breakType": "column"}
+            ]}]}),
+            json!({"type": "paragraph", "content": [run("next")]}),
+        ]);
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetComment {
+                id: "2".into(),
+                ranges: vec![(0, 5)],
+                author: "A".into(),
+                date: String::new(),
+                body: Any::Null,
+            }],
+            &crate::EditCtx::system("2026-09-30"),
+        )
+        .unwrap();
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            &doc,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        let page = blocks
+            .iter()
+            .find_map(|block| match block {
+                docx_layout::types::LayoutBlock::PageBreak(page) => Some(page),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(page.keeps_leading_spacing, Some(true));
     }
 
     #[test]
@@ -4866,7 +5180,10 @@ mod tests {
         let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
         assert_eq!(boundaries.len(), 2);
         assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
-        assert_eq!(boundaries[0]["marksKey"], "bold:{}");
+        assert_eq!(
+            boundaries[0]["marksKey"],
+            "bold:{}|rPrChange:{\"changes\":[{\"currentAttributes\":{},\"id\":3,\"previousAttributes\":{}}]}"
+        );
         assert_eq!(boundaries[1]["text"], "12");
     }
 

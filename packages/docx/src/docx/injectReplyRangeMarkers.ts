@@ -57,9 +57,10 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
   function walkBlocks(blocks: BlockContent[]): void {
     for (const block of blocks) {
       if (block.type === 'paragraph') {
-        // Skip paragraphs without any comment range markers
+        // A parent's reference can be in a different paragraph from its end.
         if (
-          !block.content.some((i) => i.type === 'commentRangeStart' || i.type === 'commentRangeEnd')
+          !block.content.some((i) => i.type === 'commentRangeStart' || i.type === 'commentRangeEnd' ||
+            (i.type === 'run' && i.content.some((entry) => entry.type === 'commentReference' && entry.id !== undefined && replyIdsByParent.has(entry.id))))
         )
           continue;
         const newItems: ParagraphContent[] = [];
@@ -80,12 +81,19 @@ export function injectReplyRangeMarkers(content: BlockContent[], comments: Comme
                 newItems.push({ type: 'commentRangeEnd', id: rid });
               }
             }
+          } else if (item.type === 'run') {
+            newItems.push({ ...item, content: item.content.flatMap((entry) => [
+              entry,
+              ...(entry.type === 'commentReference' && entry.id !== undefined ? replyIdsByParent.get(entry.id) ?? [] : [])
+                .map((id) => ({ type: 'commentReference' as const, id })),
+            ]) });
           } else {
             newItems.push(item);
           }
         }
         block.content = newItems;
-      } else if (block.type === 'table') {
+      } else if (block.type === 'blockSdt') walkBlocks(block.content);
+      else if (block.type === 'table') {
         for (const row of block.rows) {
           for (const cell of row.cells) {
             walkBlocks(cell.content);

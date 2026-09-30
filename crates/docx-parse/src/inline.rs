@@ -96,6 +96,8 @@ pub enum RunContent {
         dirty: Option<bool>,
         #[serde(rename = "formData", skip_serializing_if = "Option::is_none")]
         form_data: Option<FieldFormData>,
+        #[serde(rename = "continuationId", skip_serializing_if = "Option::is_none")]
+        continuation_id: Option<String>,
     },
     #[serde(rename = "instrText")]
     InstrText { text: String },
@@ -397,6 +399,7 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
             .then_some(true),
         dirty: matches!(element.attribute(Some("w"), "dirty"), Some("true" | "1")).then_some(true),
         form_data: parse_field_form_data(element),
+        continuation_id: None,
     }
 }
 
@@ -914,6 +917,7 @@ pub enum InlineNode {
     InlineSdt(Box<InlineSdt>),
     Math(MathEquation),
     RawXml(Box<RawInlineXml>),
+    Tracked(Box<crate::paragraph::TrackedInline>),
 }
 
 impl InlineNode {
@@ -928,6 +932,12 @@ impl InlineNode {
             Self::InlineSdt(_) => "inlineSdt",
             Self::Math(_) => "mathEquation",
             Self::RawXml(_) => "rawXml",
+            Self::Tracked(change) => match change.node_type.as_str() {
+                "insertion" => "insertion",
+                "deletion" => "deletion",
+                "moveFrom" => "moveFrom",
+                _ => "moveTo",
+            },
         }
     }
 }
@@ -1002,6 +1012,16 @@ pub struct ComplexField {
     pub structured_result: Option<StructuredFieldContent>,
     #[serde(rename = "fieldTree", skip_serializing_if = "Option::is_none")]
     pub field_tree: Option<StructuredFieldTree>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<FieldContinuation>,
+}
+
+/// Field characters authored in a later paragraph of the same story.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FieldContinuation {
+    pub id: String,
+    pub separate: bool,
+    pub end: bool,
 }
 
 impl StructuredFieldContent {
@@ -2006,6 +2026,7 @@ impl OpenComplexField {
             structured_code,
             structured_result,
             field_tree: Some(field_tree),
+            continuation: None,
         }
     }
 }
@@ -2345,6 +2366,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .map(|node| inline_content_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_content_length).sum(),
+        InlineNode::Tracked(change) => change.content.iter().map(inline_content_length).sum(),
         InlineNode::Math(math) => math
             .plain_text
             .as_deref()

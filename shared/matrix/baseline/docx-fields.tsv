@@ -2,12 +2,6 @@
 body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | cap<edit	exact+moved
 body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | edit<cap<tail	exact+moved
 body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end, then delete REF a | setup<cap<edit	refused
-body | fs>bm-partial | Enter after field | cap<edit	exact+lost
-body | fs>bm-partial | Enter after field | edit<cap<tail	exact+lost
-body | fs>bm-partial | Enter before field | cap<edit	exact+lost
-body | fs>bm-partial | Enter before field | edit<cap<tail	exact+lost
-body | fs>bm-partial | delete across field | cap<edit	exact+lost
-body | fs>bm-partial | delete across field | edit<cap<tail	exact+lost
 body | pj:cf>fs | type after field | cap<edit	exact+moved
 body | pj:cf>fs | type after field | edit<cap<tail	exact+moved
 body | pj:cf>link | Enter before field | cap<edit	exact+moved
@@ -27,12 +21,6 @@ body | x [REF a|L(AA)]¶[REF b|L(BB)] y | type at AA end, then delete REF a | se
 header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | cap<edit	exact+moved
 header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | edit<cap<tail	exact+moved
 header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end, then delete REF a | setup<cap<edit	refused
-header | fs>bm-partial | Enter after field | cap<edit	exact+lost
-header | fs>bm-partial | Enter after field | edit<cap<tail	exact+lost
-header | fs>bm-partial | Enter before field | cap<edit	exact+lost
-header | fs>bm-partial | Enter before field | edit<cap<tail	exact+lost
-header | fs>bm-partial | delete across field | cap<edit	exact+lost
-header | fs>bm-partial | delete across field | edit<cap<tail	exact+lost
 header | pj:cf>fs | type after field | cap<edit	exact+moved
 header | pj:cf>fs | type after field | edit<cap<tail	exact+moved
 header | pj:cf>link | Enter before field | cap<edit	exact+moved

@@ -217,7 +217,7 @@ export function markerOrder(s: string): string {
 
 // ---------------------------------------------------------------- reading an editing state
 
-type Props = { pPrIns?: unknown; pPrDel?: unknown; sectPr?: unknown; bookmarks?: Array<{ kind: string; id: unknown }> };
+type Props = { pPrIns?: unknown; pPrDel?: unknown; sectPr?: unknown; bookmarks?: Array<{ kind: string; id: unknown; offset?: number }> };
 
 /**
  * A story's units: text (+(…)/-(…) tracked, a trailing < when it sits in a field result), ¶ (¶+/¶- tracked mark,
@@ -229,7 +229,11 @@ export function units(s: YrsSession, story: string): string {
     s.paragraphs(story).map(({ paraId, properties }) => {
       const props = properties as Props;
       const mark = props.pPrIns ? "+" : props.pPrDel ? "-" : "";
-      const marks = (props.bookmarks ?? []).map((b) => `${b.kind === "start" ? "B" : "E"}${b.id}`).join(",");
+      const marks = (props.bookmarks ?? []).map((b) =>
+        b.kind === "fieldend" || b.kind === "fieldseparate"
+          ? `${b.kind === "fieldend" ? "]" : "|"}@${b.offset}`
+          : `${b.kind === "start" ? "B" : "E"}${b.id}`
+      ).join(",");
       return [paraId, `${mark}${props.sectPr ? "§" : ""}${marks ? `{${marks}}` : ""}`];
     })
   );

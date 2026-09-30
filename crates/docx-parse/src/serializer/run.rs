@@ -193,7 +193,11 @@ pub(crate) fn serialize_deleted_run(
     {
         return Ok(xml);
     }
-    Ok(xml
+    Ok(deleted_inline_xml(xml))
+}
+
+pub(crate) fn deleted_inline_xml(xml: String) -> String {
+    xml
         // Only `w:t` elements become `w:delText`.
         .replace("<w:t>", "<w:delText>")
         .replace("<w:t ", "<w:delText ")
@@ -202,7 +206,7 @@ pub(crate) fn serialize_deleted_run(
         .replace("<w:instrText>", "<w:delInstrText>")
         .replace("<w:instrText ", "<w:delInstrText ")
         .replace("<w:instrText/", "<w:delInstrText/")
-        .replace("</w:instrText>", "</w:delInstrText>"))
+        .replace("</w:instrText>", "</w:delInstrText>")
 }
 
 fn serialize_run_properties(

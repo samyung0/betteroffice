@@ -300,7 +300,7 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
 function marksKey(marks: readonly MarkDescriptor[]): string {
   return marks
     .filter((mark) => mark.name !== 'hyperlink' && mark.name !== 'comment')
-    .map((mark) => `${mark.name}:${JSON.stringify(mark.attrs)}`)
+    .map((mark) => `${mark.name}:${mark.name === 'rPrChange' ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
     .sort()
     .join('|');
 }
@@ -335,7 +335,7 @@ function embedUnit(
   };
 }
 
-function runMarks(
+function runFormatMarks(
   run: Run,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null
@@ -356,6 +356,22 @@ function runMarks(
       }
     }
   }
+  return marks;
+}
+
+function runMarks(
+  run: Run,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null
+): MarkDescriptor[] {
+  const marks = runFormatMarks(run, styleFormatting, styleResolver);
+  if (run.propertyChanges?.length) marks.push({ name: 'rPrChange', attrs: {
+    changes: run.propertyChanges.map((change) => ({
+      ...change,
+      previousAttributes: marksToYrsAttrs(runFormatMarks({ type: 'run', content: [], formatting: change.previousFormatting }, styleFormatting, styleResolver)),
+      currentAttributes: marksToYrsAttrs(runFormatMarks({ type: 'run', content: [], formatting: change.currentFormatting }, styleFormatting, styleResolver)),
+    })),
+  } });
   return marks;
 }
 
@@ -516,6 +532,7 @@ function fieldPayload(
       hasCachedResult: displayText.length > 0,
       fieldData: JSON.stringify(field),
       modelKind: 'field',
+      ...(field.type === 'complexField' && field.continuation ? { continuationId: field.continuation.id } : {}),
     },
     marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting)),
   };
@@ -552,7 +569,7 @@ function fieldToUnits(
     ...code.map((child, index) => ({ child, index: -index - 1 })),
     ...result.map((child, index) => ({ child, index })),
   ];
-  if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+  if (numericFieldInstruction(value.instruction) || value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
     const field = fieldPayload(value, styleFormatting);
     return [embedUnit('field', field.payload, field.marks)];
   }
@@ -598,6 +615,8 @@ function shownRuns(nodes: readonly FieldInlineContent[]): Run[] {
       case 'complexField':
         return node.fieldResult;
       case 'inlineSdt':
+      case 'insertion':
+      case 'moveTo':
         return shownRuns(node.content);
       case 'rawXml':
         return node.shown ?? [];
@@ -633,7 +652,7 @@ function runContentToUnits(content: RunContent, marks: readonly MarkDescriptor[]
     case 'break':
       return content.breakType === undefined || content.breakType === 'textWrapping'
         ? [embedUnit('break', {}, marks)]
-        : [];
+        : [embedUnit(content.breakType === 'page' ? 'pageBreak' : 'columnBreak', {}, marks)];
     case 'softHyphen':
       return [textUnit('\u00ad', marks)];
     case 'noBreakHyphen':
@@ -697,7 +716,13 @@ function runToUnits(
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
   const marks = [...runMarks(run, styleFormatting, styleResolver), ...extraMarks];
-  return run.content.flatMap((content) => runContentToUnits(content, marks));
+  return run.content.flatMap((content) => content.type === 'fieldChar' && content.continuationId
+    ? [embedUnit('bookmark', {
+      id: content.continuationId,
+      kind: `field${content.charType}`,
+      run: { type: 'run', content: [content], ...(run.formatting && { formatting: run.formatting }) },
+    }, [], 0)]
+    : runContentToUnits(content, marks));
 }
 
 function hyperlinkToUnits(
@@ -706,18 +731,45 @@ function hyperlinkToUnits(
   styleResolver: StyleResolver | null,
   extraMarks: readonly MarkDescriptor[] = []
 ): InlineUnit[] {
-  const units: InlineUnit[] = [];
-  const link = hyperlinkMark(hyperlink);
-  for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
-    if (child.type === 'run') {
-      const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks));
-    } else if (child.type === 'simpleField' || child.type === 'complexField') {
+  const marks = [...extraMarks, hyperlinkMark(hyperlink)];
+  return (hyperlink.structuredChildren ?? hyperlink.children).flatMap((child) =>
+    inlineToUnits(child, styleFormatting, styleResolver, marks)
+  );
+}
+
+function inlineToUnits(
+  child: FieldInlineContent,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  extraMarks: readonly MarkDescriptor[] = []
+): InlineUnit[] {
+  let units: InlineUnit[];
+  switch (child.type) {
+    case 'run': units = runToUnits(child, styleFormatting, styleResolver); break;
+    case 'hyperlink': units = hyperlinkToUnits(child, styleFormatting, styleResolver); break;
+    case 'simpleField': case 'complexField': {
       const field = fieldPayload(child, styleFormatting);
-      units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
-    } else if (child.type === 'mathEquation') {
-      units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
+      units = [embedUnit('field', field.payload, field.marks)];
+      break;
     }
+    case 'inlineSdt': units = [embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver))]; break;
+    case 'mathEquation': units = [embedUnit('math', mathPayload(child))]; break;
+    case 'bookmarkStart': case 'bookmarkEnd': {
+      const data: Record<string, unknown> = { ...child, kind: child.type === 'bookmarkStart' ? 'start' : 'end' };
+      delete data.type;
+      delete data.position;
+      units = [embedUnit('bookmark', data, [], 0)];
+      break;
+    }
+    case 'insertion': case 'deletion': case 'moveFrom': case 'moveTo':
+      units = trackedToUnits(child, styleFormatting, styleResolver); break;
+    default: return [];
+  }
+  for (const unit of units) {
+    for (const mark of extraMarks) unit.marks = withMark(unit.marks, mark);
+    unit.attrs = marksToYrsAttrs(unit.marks);
+    if (unit.kind === 'embed' && unit.embedKind === 'bookmark' && unit.attrs.hyperlink)
+      unit.payload.inHyperlink = true;
   }
   return units;
 }
@@ -749,18 +801,7 @@ function trackedToUnits(
     kind,
     content.type === 'moveFrom' || content.type === 'moveTo'
   );
-  const units: InlineUnit[] = [];
-  for (const child of content.content) {
-    if (child.type === 'run') {
-      units.push(...runToUnits(child, styleFormatting, styleResolver, [mark]));
-    } else if (child.type === 'simpleField') {
-      const field = fieldPayload(child, styleFormatting);
-      units.push(embedUnit('field', field.payload, [...field.marks, mark]));
-    } else {
-      units.push(...hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]));
-    }
-  }
-  return units;
+  return content.content.flatMap((child) => inlineToUnits(child, styleFormatting, styleResolver, [mark]));
 }
 
 function sdtPayload(
@@ -796,18 +837,7 @@ function sdtPayload(
   };
 
   for (const child of sdt.content) {
-    if (child.type === 'run') {
-      runToUnits(child, styleFormatting, styleResolver).forEach(append);
-    } else if (child.type === 'hyperlink') {
-      hyperlinkToUnits(child, styleFormatting, styleResolver).forEach(append);
-    } else if (child.type === 'simpleField' || child.type === 'complexField') {
-      const field = fieldPayload(child, styleFormatting);
-      append(embedUnit('field', field.payload, field.marks));
-    } else if (child.type === 'inlineSdt') {
-      append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver)));
-    } else if (child.type === 'mathEquation') {
-      append(embedUnit('math', mathPayload(child)));
-    }
+    inlineToUnits(child, styleFormatting, styleResolver).forEach(append);
   }
   return dropNulls({
     ...sdtPropsToAttrs(sdt.properties),
@@ -881,9 +911,9 @@ function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'col
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null
+  styleResolver: StyleResolver | null,
+  units = runToUnits(run, styleFormatting, styleResolver)
 ): Attrs | null {
-  const units = runToUnits(run, styleFormatting, styleResolver);
   if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
@@ -1123,18 +1153,23 @@ function paragraphUnits(
 ): { units: InlineUnit[]; ppr: Attrs } {
   const { styleResolver, openComments } = context;
   const units: InlineUnit[] = [];
+  const [, , inlineBreaks] = paragraphFlowBreaks(paragraph);
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
+    let breakIndex = 0;
+    const keepInline = (unit: InlineUnit) => unit.kind !== 'embed' || !['pageBreak', 'columnBreak'].includes(unit.embedKind)
+      || (inlineBreaks[contentIndex][breakIndex++] ?? false);
     if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
       markComment(openComments, content, plan);
     } else if (content.type === 'run') {
-      const boundary = runBoundary(content, styleFormatting, styleResolver);
+      const runUnits = runToUnits(content, styleFormatting, styleResolver).filter(keepInline);
+      const boundary = runBoundary(content, styleFormatting, styleResolver, runUnits);
       if (boundary && boundaries) boundaries.push(boundary);
       else boundaries = undefined;
-      units.push(...runToUnits(content, styleFormatting, styleResolver));
+      units.push(...runUnits);
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
       units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
@@ -1158,6 +1193,7 @@ function paragraphUnits(
     } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
       boundaries = undefined;
     }
+    if (content.type !== 'run') units.push(...units.splice(start).filter(keepInline));
     for (const unit of units.slice(start)) unit.comments = covering(context, plan);
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
@@ -1178,7 +1214,7 @@ function paragraphUnits(
 
 /** A page or column break (with the tracked change around it), or visible content. */
 type FlowToken = {
-  kind: 'pageBreak' | 'columnBreak' | 'visible' | 'mark';
+  kind: 'pageBreak' | 'columnBreak' | 'visible' | 'mark' | 'reference';
   marker?: MarkDescriptor;
   /** The paragraph content item holding it. */
   item?: number;
@@ -1190,51 +1226,42 @@ function runTokens(run: Run, tokens: FlowToken[], marker?: MarkDescriptor): void
       content.type === 'break' && (content.breakType === 'page' || content.breakType === 'column');
     if (flow)
       tokens.push({ kind: content.breakType === 'page' ? 'pageBreak' : 'columnBreak', marker });
+    else if (content.type === 'commentReference') tokens.push({ kind: 'reference' });
     else if (content.type !== 'text' || content.text.length > 0) tokens.push({ kind: 'visible' });
   }
 }
 
-function inlineTokens(content: readonly ParagraphContent[], tokens: FlowToken[]): void {
-  for (const item of content) {
-    if (item.type === 'run') runTokens(item, tokens);
-    else if (item.type === 'hyperlink') linkTokens(item, tokens);
+function inlineTokens(content: readonly { type: string }[], tokens: FlowToken[], marker?: MarkDescriptor): void {
+  for (const item of content as readonly ParagraphContent[]) {
+    if (item.type === 'run') runTokens(item, tokens, marker);
+    else if (item.type === 'hyperlink') inlineTokens(item.structuredChildren ?? item.children, tokens, marker);
     else if (item.type === 'simpleField') {
-      // A field is a unit, text however empty its result.
       tokens.push({ kind: 'visible' });
-      for (const child of item.content) if (child.type === 'run') runTokens(child, tokens);
-    } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd') {
-      // A bookmark is no text, but a break before one leads it.
-      tokens.push({ kind: 'mark' });
-    } else if (item.type === 'complexField') {
-      for (const child of [...item.fieldCode, ...item.fieldResult]) runTokens(child, tokens);
-    } else if (item.type === 'inlineSdt') inlineTokens(item.content as ParagraphContent[], tokens);
-    else if (
-      item.type === 'insertion' ||
-      item.type === 'deletion' ||
-      item.type === 'moveFrom' ||
-      item.type === 'moveTo'
-    ) {
-      const marker = trackedMark(
-        item.info,
+      inlineTokens(item.structuredResult?.inline ?? item.content, tokens, marker);
+    } else if (item.type === 'bookmarkStart' || item.type === 'bookmarkEnd') tokens.push({ kind: 'mark' });
+    else if (item.type === 'complexField') inlineTokens([
+      ...(item.structuredCode?.inline ?? item.fieldCode),
+      ...(item.structuredResult?.inline ?? item.fieldResult),
+    ], tokens, marker);
+    else if (item.type === 'inlineSdt') inlineTokens(item.content, tokens, marker);
+    else if (item.type === 'insertion' || item.type === 'deletion' || item.type === 'moveFrom' || item.type === 'moveTo') {
+      inlineTokens(item.content, tokens, trackedMark(item.info,
         item.type === 'insertion' || item.type === 'moveTo' ? 'insertion' : 'deletion',
-        item.type === 'moveFrom' || item.type === 'moveTo'
-      );
-      for (const child of item.content) {
-        if (child.type === 'run') runTokens(child, tokens, marker);
-        else if (child.type === 'hyperlink') linkTokens(child, tokens, marker);
-        else if (child.type === 'simpleField') tokens.push({ kind: 'visible' });
-      }
+        item.type === 'moveFrom' || item.type === 'moveTo'));
     } else if (item.type === 'mathEquation') tokens.push({ kind: 'visible' });
   }
 }
 
-/** A hyperlink's tokens: its runs', and a field or equation it holds as visible. */
-function linkTokens(link: Hyperlink, tokens: FlowToken[], marker?: MarkDescriptor): void {
-  for (const child of link.structuredChildren ?? link.children) {
-    if (child.type === 'run') runTokens(child, tokens, marker);
-    else if (['simpleField', 'complexField', 'mathEquation'].includes(child.type))
-      tokens.push({ kind: 'visible' });
-  }
+function exposedFlowBreaks(node: { type: string }, projectField = false): number {
+  const item = node as ParagraphContent;
+  const sum = (items: readonly { type: string }[]) => items.reduce((count, child) => count + exposedFlowBreaks(child), 0);
+  if (item.type === 'run') return item.content.filter((entry) => flowBreakType(entry) !== null).length;
+  if (item.type === 'hyperlink') return sum(item.structuredChildren ?? item.children);
+  if (item.type === 'insertion' || item.type === 'deletion' || item.type === 'moveFrom' || item.type === 'moveTo') return sum(item.content);
+  if (item.type === 'complexField' && projectField && !numericFieldInstruction(item.instruction)) return sum([
+    ...(item.structuredCode?.inline ?? []), ...(item.structuredResult?.inline ?? []),
+  ].filter((child) => child.type === 'hyperlink'));
+  return 0;
 }
 
 /**
@@ -1243,7 +1270,7 @@ function linkTokens(link: Hyperlink, tokens: FlowToken[], marker?: MarkDescripto
  */
 function paragraphFlowBreaks(
   paragraph: Paragraph
-): [Array<{ unit: EmbedUnit; item: number }>, EmbedUnit[]] {
+): [Array<{ unit: EmbedUnit; item: number }>, EmbedUnit[], boolean[][]] {
   const tokens: FlowToken[] = [];
   paragraph.content.forEach((content, item) => {
     const start = tokens.length;
@@ -1252,7 +1279,8 @@ function paragraphFlowBreaks(
   });
   // Breaks lead the content that follows them: the text, or without text
   // the last bookmark. Without either, those up to the last column break lead.
-  const text = tokens.findIndex((token) => token.kind === 'visible');
+  const lastBreak = tokens.map(({ kind }) => kind === 'pageBreak' || kind === 'columnBreak').lastIndexOf(true);
+  const text = tokens.findIndex(({ kind }, index) => kind === 'visible' || (kind === 'reference' && index > lastBreak));
   const lastMark = tokens.map(({ kind }) => kind).lastIndexOf('mark');
   const content = text >= 0 ? text : lastMark;
   let split = content;
@@ -1262,22 +1290,32 @@ function paragraphFlowBreaks(
       if (token.kind === 'columnBreak') split = index + 1;
     });
   }
+  const lastText = tokens.map(({ kind }) => kind).lastIndexOf('visible');
+  const exposed = paragraph.content.map((item) => exposedFlowBreaks(item, true));
+  const counts = paragraph.content.map(() => 0);
+  const inlineBreaks: boolean[][] = paragraph.content.map(() => []);
+  for (const token of tokens) if (token.kind === 'pageBreak' || token.kind === 'columnBreak') counts[token.item!]++;
+  const inline = tokens.map((token, index) => counts[token.item!] === exposed[token.item!]
+    && text >= 0 && text < index && index < lastText);
+  tokens.forEach((token, index) => {
+    if (token.kind === 'pageBreak' || token.kind === 'columnBreak') inlineBreaks[token.item!].push(inline[index]);
+  });
   const units = (from: number, to: number) =>
     tokens.slice(from, to).flatMap(({ kind, marker, item }, offset) =>
-      kind === 'visible' || kind === 'mark'
+      inline[from + offset] || (kind !== 'pageBreak' && kind !== 'columnBreak')
         ? []
         : [
             {
               unit: embedUnit(
                 kind,
-                from + offset < content ? { leading: true } : {},
+                { ...(from + offset < content && { leading: true }), ...(from + offset >= split && { trailing: true }) },
                 marker ? [marker] : []
               ),
               item: item!,
             },
           ]
     );
-  return [units(0, split), units(split, tokens.length).map(({ unit }) => unit)];
+  return [units(0, split), units(split, tokens.length).map(({ unit }) => unit), inlineBreaks];
 }
 
 type RowSpanInfo = { rowSpan: number; skip: boolean };
@@ -1635,11 +1673,13 @@ const isCommentReference = (unit: InlineUnit): boolean =>
 function addCommentCoverage(plan: StoryPlan): void {
   let offset = 0;
   for (const [index, unit] of plan.units.entries()) {
+    if (unit.kind === 'embed' && unit.embedKind === 'bookmark') continue;
     const width = unit.kind === 'text' ? unit.text.length : 1;
     // A reference mark follows its own range's end, so another range holds
     // it only when that range goes on past it: coincident ends stay equal.
     const next = isCommentReference(unit)
-      ? plan.units.slice(index + 1).find((candidate) => !isCommentReference(candidate))
+      ? plan.units.slice(index + 1).find((candidate) => !isCommentReference(candidate)
+        && !(candidate.kind === 'embed' && candidate.embedKind === 'bookmark'))
       : unit;
     for (const id of unit.comments ?? []) {
       if (!next?.comments?.includes(id)) continue;
@@ -1678,7 +1718,8 @@ function numericFieldInstruction(instruction: string): boolean {
 function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
   const blocks = field.structuredResult?.blocks ?? [];
   const last = blocks[blocks.length - 1];
-  if (!last || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  if (!last || last.type !== 'paragraph' || !last.content.every((node) => node.type === 'run' && node.content.every((entry) =>
+    entry.type === 'fieldChar' && entry.charType === 'end' && entry.continuationId))) return null;
   return blocks.length;
 }
 
@@ -1878,7 +1919,9 @@ function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
 }
 
 function seedPlan(session: YrsSession, plan: StoryPlan): void {
+  const bookmarks = takeBookmarks(plan.units);
   const ops = unitsToRawOps(plan.units);
+  ops.push(...bookmarks);
   for (const [id, ranges] of plan.commentCoverage) {
     ops.push({
       op: 'setComment',
@@ -1890,6 +1933,69 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
     });
   }
   session.applySeedRawOps(plan.storyId, ops);
+}
+
+/** Same offset-to-anchor lowering as seed.rs `take_bookmarks`. */
+function takeBookmarks(units: InlineUnit[]): YrsRawOp[] {
+  const found: Array<{ index: number; data: Record<string, unknown> }> = [];
+  let at = 0;
+  let pm = 0;
+  let head = true;
+  let spans: Array<{ raw: number; width: number; start: number; length: number }> = [];
+  let leading: number[] = [];
+  for (const unit of units) {
+    const width = unit.kind === 'text' ? unit.text.length : 1;
+    if (unit.kind === 'embed') {
+      if (unit.embedKind === 'bookmark') {
+        const data = { ...unit.payload };
+        if (data.kind === 'fieldseparate' || data.kind === 'fieldend') {
+          data.order = found.length;
+          if (Object.keys(unit.attrs).length) data.attributes = unit.attrs;
+        }
+        found.push({ index: at, data });
+        continue;
+      }
+      if (unit.embedKind === 'pilcrow') {
+        const bookmarks = unit.payload.bookmarks;
+        delete unit.payload.bookmarks;
+        if (Array.isArray(bookmarks)) for (const bookmark of bookmarks) {
+          const data = { ...bookmark } as Record<string, unknown>;
+          const offset = typeof data.offset === 'number' ? data.offset : 0;
+          const after = typeof data.breaksAfter === 'number' ? data.breaksAfter : 0;
+          delete data.offset;
+          delete data.breaksAfter;
+          const span = spans.find(({ start, length }) => offset < start + length);
+          if (offset === 0 && after > leading.length) throw new Error('Bookmark break position does not resolve');
+          const index = offset === 0 && after > 0
+            ? leading[leading.length - after]!
+            : span ? span.raw + Math.min(Math.max(0, offset - span.start), span.width) : at;
+          found.push({ index, data });
+        }
+        at++;
+        pm = 0;
+        spans = [];
+        leading = [];
+        head = true;
+        continue;
+      }
+      if (head && ['table', 'blockSdt', 'pageBreak', 'columnBreak'].includes(unit.embedKind)) {
+        if (unit.embedKind.endsWith('Break')) leading.push(at);
+        at++;
+        continue;
+      }
+    }
+    if (width > 0) {
+      head = false;
+      spans.push({ raw: at, width, start: pm, length: unit.pmSize });
+      at += width;
+      pm += unit.pmSize;
+    }
+  }
+  let kept = 0;
+  for (const unit of units) if (unit.kind !== 'embed' || unit.embedKind !== 'bookmark') units[kept++] = unit;
+  units.length = kept;
+  found.sort((a, b) => a.index - b.index || Number(a.data.id) - Number(b.data.id) || Number(a.data.kind === 'end') - Number(b.data.kind === 'end'));
+  return found.map(({ index, data }) => ({ op: 'setBookmark', index, data }));
 }
 
 /**

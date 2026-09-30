@@ -483,7 +483,7 @@ impl<'a> StringDecoder<'a> {
         let buf = cursor.buf;
         let mut next = cursor.next;
         let str_bin = DecoderV2::read_buf(buf, &mut next)?;
-        let str = unsafe { std::str::from_utf8_unchecked(str_bin) };
+        let str = std::str::from_utf8(str_bin).map_err(|error| Error::Custom(error.to_string()))?;
         let len_decoder = UIntOptRleDecoder::new(Cursor { buf, next });
         Ok(StringDecoder {
             pos: 0,
@@ -506,5 +506,18 @@ impl<'a> StringDecoder<'a> {
         let result = &start[..i];
         self.pos += i;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_update_decoders_validate_utf8() {
+        assert!(Cursor::new(&[1, 0xff]).read_string().is_err());
+        assert!(StringDecoder::new(Cursor::new(&[1, 0xff])).is_err());
+        assert_eq!(Cursor::new(&[1, b'x']).read_string().unwrap(), "x");
+        assert!(StringDecoder::new(Cursor::new(&[1, b'x'])).is_ok());
     }
 }

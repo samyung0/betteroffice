@@ -4,9 +4,7 @@
  * checkbox state) for the supported SDT types.
  */
 
-import type { Run } from './run';
-import type { Hyperlink, SimpleField, ComplexField } from './link';
-import type { MathEquation } from './math';
+import type { FieldInlineContent } from './link';
 import type { BlockContent } from './section';
 import type { TextFormatting } from '../formatting';
 import type { ColorValue } from '../colors';
@@ -186,7 +184,7 @@ export interface InlineSdt {
    * level; the renderer must descend into all of them so docProps-bound
    * fields and similar template content survive paged rendering.
    */
-  content: (Run | Hyperlink | SimpleField | ComplexField | InlineSdt | MathEquation)[];
+  content: FieldInlineContent[];
 }
 
 /**

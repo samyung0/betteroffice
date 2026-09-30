@@ -87,6 +87,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, story_id)?;
     let comment_groups = story_comment_groups(&txn, story_id);
+    let bookmarks = crate::bookmarks::paragraph_properties(&txn, story_id, &story);
     let mut items = Vec::new();
     // The running UTF-16 story-unit index (every embed, pilcrows included, = 1),
     // used to test each scalar against the resolved comment intervals.
@@ -107,9 +108,14 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                 }
             }
             Out::YMap(map) if is_pilcrow(&map, &txn) => {
-                items.push(CanonicalItem::ParaMark {
-                    ppr: canonical_shared_map(&map, &txn, &[KIND_KEY, PARA_ID]),
-                });
+                let mut ppr = canonical_shared_map(&map, &txn, &[KIND_KEY, PARA_ID]);
+                if let Some(value) =
+                    map_string(&map, &txn, PARA_ID).and_then(|id| bookmarks.get(&id))
+                    && let Some(value) = canonical_any(value)
+                {
+                    ppr.insert("bookmarks".into(), value);
+                }
+                items.push(CanonicalItem::ParaMark { ppr });
                 unit += 1;
             }
             Out::YMap(map) if map_string(&map, &txn, KIND_KEY).as_deref() == Some("table") => {

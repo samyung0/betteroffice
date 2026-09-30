@@ -37,6 +37,8 @@ pub enum RawOp {
     },
     /// Sets one key on the map-backed embed at the index.
     SetEmbedAttr { index: u32, key: String, value: Any },
+    /// A zero-width bookmark boundary anchored to the story's content.
+    SetBookmark { index: u32, data: Any },
     /// Upserts a side-map comment with sticky UTF-16 ranges.
     SetComment {
         id: String,
@@ -415,6 +417,10 @@ fn apply_raw_op_absolute(
             let embed = embed_at(story, txn, index)?;
             crate::set_embed_entry(&embed, txn, key, value);
         }
+        RawOp::SetBookmark { index, data } => {
+            guard_index(story, txn, index)?;
+            crate::bookmarks::set(txn, story, story_id, index, data)?;
+        }
         RawOp::SetComment {
             id,
             ranges,
@@ -636,6 +642,10 @@ mod tests {
                 RawOp::SetEmbedAttr { index, key, value } => {
                     let embed = embed_at(&story, txn, index)?;
                     crate::set_embed_entry(&embed, txn, key, value);
+                }
+                RawOp::SetBookmark { index, data } => {
+                    guard_index(txn, index)?;
+                    crate::bookmarks::set(txn, &story, story_id, index, data)?;
                 }
                 RawOp::SetComment {
                     id,

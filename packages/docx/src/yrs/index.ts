@@ -380,6 +380,7 @@ export type YrsRawOp =
       attrs?: Record<string, unknown>;
     }
   | { op: 'setEmbedAttr'; index: number; key: string; value: unknown }
+  | { op: 'setBookmark'; index: number; data: Record<string, unknown> }
   | {
       /** Upserts a side-map comment with sticky story-unit ranges. */
       op: 'setComment';
@@ -618,6 +619,7 @@ export interface YrsRevisionInfo {
     | 'pPrIns'
     | 'pPrDel'
     | 'pPrChange'
+    | 'rPrChange'
     | 'trIns'
     | 'trDel'
     | 'tableIns'

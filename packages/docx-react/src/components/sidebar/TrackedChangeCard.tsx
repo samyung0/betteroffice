@@ -152,9 +152,9 @@ export function TrackedChangeCard({
               </>
             ) : null}
           </>
-        ) : change.type === 'paragraphPropertiesChanged' ? (
+        ) : change.type === 'paragraphPropertiesChanged' || change.type === 'runPropertiesChanged' ? (
           <>
-            {t('revisions.paragraphPropertiesChanged')}
+            {t(change.type === 'runPropertiesChanged' ? 'revisions.runPropertiesChanged' : 'revisions.paragraphPropertiesChanged')}
             {change.text ? (
               <>
                 {': '}

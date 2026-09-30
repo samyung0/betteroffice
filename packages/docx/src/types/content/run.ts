@@ -134,6 +134,8 @@ export interface FieldCharContent {
   dirty?: boolean;
   /** Legacy form data. Undefined = no form control. Macros remain inert. */
   formData?: FieldFormData;
+  /** Connects a character in a later paragraph to the field that opened it. */
+  continuationId?: string;
 }
 
 /** Zero-width `w:commentReference` anchor for point/malformed comments. */

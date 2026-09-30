@@ -30,3 +30,6 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[patch.crates-io]
+yrs = { path = "../third_party/yrs" }

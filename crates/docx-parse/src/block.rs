@@ -76,7 +76,7 @@ struct FieldEvents {
 #[derive(Clone, Debug)]
 struct FieldRecord {
     owner_block: usize,
-    owner_content: usize,
+    owner_content: Vec<usize>,
     code_blocks: Vec<usize>,
     result_blocks: Vec<usize>,
 }
@@ -175,7 +175,13 @@ impl StoryParser<'_, '_> {
                 _ => unreachable!(),
             };
 
-            remove_external_field_end_runs(&mut parsed, events.external_ends);
+            anchor_external_field_chars(
+                &mut parsed,
+                &mut content,
+                &records,
+                &open_fields,
+                self.ids,
+            );
             let parsed_index = content.len();
             for open in &open_fields {
                 let target = &mut records[open.record];
@@ -192,13 +198,13 @@ impl StoryParser<'_, '_> {
             content.push(parsed);
 
             if !events.unmatched_modes.is_empty() {
-                let candidates = top_level_complex_field_indices(&content[parsed_index]);
+                let candidates = complex_field_paths(&content[parsed_index]);
                 let start = candidates
                     .len()
                     .saturating_sub(events.unmatched_modes.len());
                 for (content_index, mode) in candidates[start..]
                     .iter()
-                    .copied()
+                    .cloned()
                     .zip(events.unmatched_modes.iter().copied())
                 {
                     let record = records.len();
@@ -500,22 +506,67 @@ fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
     events
 }
 
-fn top_level_complex_field_indices(block: &BlockContent) -> Vec<usize> {
+fn inline_children(node: &InlineNode) -> &[InlineNode] {
+    match node {
+        InlineNode::Hyperlink(link) => link.written_children(),
+        InlineNode::InlineSdt(sdt) => &sdt.content,
+        InlineNode::Tracked(change) => &change.content,
+        InlineNode::SimpleField(field) => field
+            .structured_result
+            .as_ref()
+            .and_then(|result| result.inline.as_deref())
+            .unwrap_or_default(),
+        _ => &[],
+    }
+}
+
+fn inline_children_mut(node: &mut InlineNode) -> &mut [InlineNode] {
+    match node {
+        InlineNode::Hyperlink(link) => link
+            .structured_children
+            .as_deref_mut()
+            .unwrap_or(&mut link.children),
+        InlineNode::InlineSdt(sdt) => &mut sdt.content,
+        InlineNode::Tracked(change) => &mut change.content,
+        InlineNode::SimpleField(field) => field
+            .structured_result
+            .as_mut()
+            .and_then(|result| result.inline.as_deref_mut())
+            .unwrap_or_default(),
+        _ => &mut [],
+    }
+}
+
+fn complex_field_paths(block: &BlockContent) -> Vec<Vec<usize>> {
     let BlockContent::Paragraph(paragraph) = block else {
         return Vec::new();
     };
-    paragraph
-        .content
-        .iter()
-        .enumerate()
-        .filter_map(|(index, content)| {
-            matches!(
-                content,
-                ParagraphContent::Inline(InlineNode::ComplexField(_))
-            )
-            .then_some(index)
-        })
-        .collect()
+    fn visit(node: &InlineNode, path: &mut Vec<usize>, found: &mut Vec<Vec<usize>>) {
+        if matches!(node, InlineNode::ComplexField(_)) {
+            found.push(path.clone());
+        }
+        for (index, child) in inline_children(node).iter().enumerate() {
+            path.push(index);
+            visit(child, path, found);
+            path.pop();
+        }
+    }
+    let mut found = Vec::new();
+    for (index, content) in paragraph.content.iter().enumerate() {
+        let mut path = vec![index];
+        match content {
+            ParagraphContent::Inline(node) => visit(node, &mut path, &mut found),
+            ParagraphContent::Tracked(change) => {
+                for (index, child) in change.content.iter().enumerate() {
+                    path.push(index);
+                    visit(child, &mut path, &mut found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<FieldRecord>) {
@@ -530,7 +581,7 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
             .iter()
             .filter_map(|index| content.get(*index).cloned())
             .collect();
-        let Some(field) = complex_field_mut(content, record.owner_block, record.owner_content)
+        let Some(field) = complex_field_mut(content, record.owner_block, &record.owner_content)
         else {
             continue;
         };
@@ -578,20 +629,32 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
     }
 }
 
-fn complex_field_mut(
-    content: &mut [BlockContent],
+fn complex_field_mut<'a>(
+    content: &'a mut [BlockContent],
     block_index: usize,
-    content_index: usize,
-) -> Option<&mut ComplexField> {
+    path: &[usize],
+) -> Option<&'a mut ComplexField> {
+    fn descend<'a>(node: &'a mut InlineNode, path: &[usize]) -> Option<&'a mut ComplexField> {
+        if let Some((index, rest)) = path.split_first() {
+            return descend(inline_children_mut(node).get_mut(*index)?, rest);
+        }
+        match node {
+            InlineNode::ComplexField(field) => Some(field),
+            _ => None,
+        }
+    }
     let BlockContent::Paragraph(paragraph) = content.get_mut(block_index)? else {
         return None;
     };
-    let ParagraphContent::Inline(InlineNode::ComplexField(field)) =
-        Arc::make_mut(paragraph).content.get_mut(content_index)?
-    else {
-        return None;
-    };
-    Some(field)
+    let (index, rest) = path.split_first()?;
+    match Arc::make_mut(paragraph).content.get_mut(*index)? {
+        ParagraphContent::Inline(node) => descend(node, rest),
+        ParagraphContent::Tracked(change) => {
+            let (index, rest) = rest.split_first()?;
+            descend(change.content.get_mut(*index)?, rest)
+        }
+        _ => None,
+    }
 }
 
 fn default_field_tree() -> StructuredFieldTree {
@@ -604,37 +667,86 @@ fn default_field_tree() -> StructuredFieldTree {
     }
 }
 
-fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
+fn anchor_external_field_chars(
+    block: &mut BlockContent,
+    previous: &mut [BlockContent],
+    records: &[FieldRecord],
+    open: &[OpenField],
+    ids: &mut HexIdAllocator,
+) {
     let BlockContent::Paragraph(paragraph) = block else {
         return;
     };
-    let mut remaining = count;
-    Arc::make_mut(paragraph).content.retain(|content| {
-        if remaining == 0 {
-            return true;
-        }
-        let ParagraphContent::Inline(InlineNode::Run(run)) = content else {
-            return true;
-        };
-        let non_instruction: Vec<_> = run
-            .content
-            .iter()
-            .filter(|content| !matches!(content, RunContent::InstrText { .. }))
-            .collect();
-        let end_only = !non_instruction.is_empty()
-            && non_instruction.iter().all(|content| {
-                matches!(
-                    content,
-                    RunContent::FieldChar { char_type, .. } if char_type == "end"
-                )
-            });
-        if end_only {
-            remaining -= 1;
-            false
+    fn visit(node: &mut InlineNode, anchor: &mut impl FnMut(&mut RunContent)) {
+        if let InlineNode::Run(run) = node {
+            for entry in &mut run.content {
+                anchor(entry);
+            }
         } else {
-            true
+            for child in inline_children_mut(node) {
+                visit(child, anchor);
+            }
         }
-    });
+    }
+    let mut stack = open.to_vec();
+    let mut anchor = |entry: &mut RunContent| {
+        let RunContent::FieldChar {
+            char_type,
+            continuation_id,
+            ..
+        } = entry
+        else {
+            return;
+        };
+        let owner = match char_type.as_str() {
+            "separate" => stack.last().copied(),
+            "end" => stack.pop(),
+            _ => None,
+        };
+        let Some(owner) = owner else { return };
+        let record = &records[owner.record];
+        let BlockContent::Paragraph(owner_paragraph) = &previous[record.owner_block] else {
+            return;
+        };
+        let owner_id = owner_paragraph.para_id.clone();
+        let Some(field) = complex_field_mut(previous, record.owner_block, &record.owner_content)
+        else {
+            return;
+        };
+        let continuation =
+            field
+                .continuation
+                .get_or_insert_with(|| crate::inline::FieldContinuation {
+                    id: format!(
+                        "field:{}:{}",
+                        owner_id.unwrap_or_else(|| ids.allocate()),
+                        record
+                            .owner_content
+                            .iter()
+                            .map(usize::to_string)
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    ),
+                    ..Default::default()
+                });
+        if char_type == "separate" {
+            continuation.separate = true;
+        } else {
+            continuation.end = true;
+        }
+        *continuation_id = Some(continuation.id.clone());
+    };
+    for content in &mut Arc::make_mut(paragraph).content {
+        match content {
+            ParagraphContent::Inline(node) => visit(node, &mut anchor),
+            ParagraphContent::Tracked(change) => {
+                for node in &mut change.content {
+                    visit(node, &mut anchor);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn math_paragraph(element: &XmlElement) -> Paragraph {
@@ -803,11 +915,20 @@ mod tests {
         let BlockContent::Paragraph(closing) = &blocks[3] else {
             panic!("closing")
         };
-        assert_eq!(closing.content.len(), 1);
+        assert_eq!(closing.content.len(), 2);
         assert!(matches!(
-            closing.content[0],
+            closing.content[1],
             ParagraphContent::Inline(InlineNode::BookmarkEnd(_))
         ));
+        let continuation = field.continuation.as_ref().unwrap();
+        assert!(continuation.separate && continuation.end);
+        let ParagraphContent::Inline(InlineNode::Run(end)) = &closing.content[0] else {
+            panic!("field end")
+        };
+        assert!(
+            matches!(&end.content[0], RunContent::FieldChar { char_type, continuation_id: Some(id), .. }
+            if char_type == "end" && id == &continuation.id)
+        );
     }
 
     #[test]
