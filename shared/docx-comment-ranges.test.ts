@@ -2,7 +2,7 @@ import { beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
-import { exportOffice, seedOffice } from "./office-checkpoint";
+import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -590,3 +590,149 @@ test("a bookmark after a line break keeps its text across publications", async (
     [...marked.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(([, t]) => t).join("")
   ).toBe("beta");
 });
+
+/**
+ * Gives the source comment's paragraph Word's `w14:paraId`, and with
+ * `companions` the commentsExtended and commentsIds parts Word writes too.
+ */
+function withCommentIds(bytes: Uint8Array, companions: boolean): Uint8Array {
+  const parts = unzipContainer(bytes);
+  const text = (path: string) => new TextDecoder().decode(parts[path]);
+  const set = (path: string, xml: string) =>
+    (parts[path] = new TextEncoder().encode(xml));
+  set(
+    "word/comments.xml",
+    text("word/comments.xml").replace(
+      '<w:comment w:id="1" w:author="Reviewer" w:date="2026-09-01T00:00:00Z"><w:p>',
+      '<w:comment w:id="1" w:author="Reviewer" w:date="2026-09-01T00:00:00Z"><w:p w14:paraId="0ABC1234">'
+    )
+  );
+  if (companions) {
+    set(
+      "word/commentsExtended.xml",
+      `<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="0ABC1234" w15:done="0"/></w15:commentsEx>`
+    );
+    set(
+      "word/commentsIds.xml",
+      `<w16cid:commentsIds xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"><w16cid:commentId w16cid:paraId="0ABC1234" w16cid:durableId="7D1A2B3C"/></w16cid:commentsIds>`
+    );
+    set(
+      "[Content_Types].xml",
+      text("[Content_Types].xml").replace(
+        "</Types>",
+        `<Override PartName="/word/commentsExtended.xml" ContentType="${OFFICE}.commentsExtended+xml"/><Override PartName="/word/commentsIds.xml" ContentType="${OFFICE}.commentsIds+xml"/></Types>`
+      )
+    );
+    set(
+      "word/_rels/document.xml.rels",
+      text("word/_rels/document.xml.rels").replace(
+        "</Relationships>",
+        `<Relationship Id="rId10" Type="http://schemas.microsoft.com/office/2011/relationships/commentsExtended" Target="commentsExtended.xml"/><Relationship Id="rId11" Type="http://schemas.microsoft.com/office/2016/09/relationships/commentsIds" Target="commentsIds.xml"/></Relationships>`
+      )
+    );
+  }
+  return rezipContainer(parts);
+}
+
+/**
+ * Each comment's paragraph id and durable id, and the paragraph id each
+ * reply names as its parent, by the comment's w:id.
+ */
+function threadIds(bytes: Uint8Array) {
+  const parts = unzipContainer(bytes);
+  const text = (path: string) =>
+    parts[path] ? new TextDecoder().decode(parts[path]) : "";
+  const paraIds = new Map(
+    [
+      ...text("word/comments.xml").matchAll(
+        /<w:comment w:id="(-?\d+)"[^>]*><w:p w14:paraId="([0-9A-F]+)"/g
+      ),
+    ].map(([, id, paraId]) => [id!, paraId!])
+  );
+  const durable = new Map(
+    [
+      ...text("word/commentsIds.xml").matchAll(
+        /w16cid:paraId="([0-9A-F]+)" w16cid:durableId="([0-9A-F]+)"/g
+      ),
+    ].map(([, paraId, id]) => [paraId!, id!])
+  );
+  const parents = new Map(
+    [
+      ...text("word/commentsExtended.xml").matchAll(
+        /w15:paraId="([0-9A-F]+)"[^>]*w15:paraIdParent="([0-9A-F]+)"/g
+      ),
+    ].map(([, paraId, parent]) => [paraId!, parent!])
+  );
+  return [...paraIds].map(([id, paraId]) => ({
+    id,
+    paraId,
+    durable: durable.get(paraId),
+    parent: parents.get(paraId),
+  }));
+}
+
+test.each([
+  ["without w14:paraId", (bytes: Uint8Array) => bytes],
+  ["with w14:paraId", (bytes: Uint8Array) => withCommentIds(bytes, false)],
+  [
+    "with w14:paraId, commentsExtended and commentsIds",
+    (bytes: Uint8Array) => withCommentIds(bytes, true),
+  ],
+] as const)(
+  "a comment and reply added after a capture get their own ids, the source comment's paragraph %s",
+  async (_, shape) => {
+    let bytes = shape(
+      docx(
+        p("11111111", `${range(1, run("prev"))}`) +
+          p("33333333", run("next")) +
+          tail
+      )
+    );
+    const session = await open(bytes);
+    const captured = session.encodeState();
+    const exported = await exportOffice(
+      bytes,
+      checkpoint(bytes, captured),
+      fixed
+    );
+    const parent = comment(session, "added", [body, "33333333", 0, 4]);
+    session.applyRawOps(body, [
+      {
+        op: "patchComment",
+        id: `reply-${parent}`,
+        fields: {
+          author: "Reviewer",
+          date: "2026-09-29T00:00:00Z",
+          body: [],
+          parentId: parent,
+        },
+      },
+    ]);
+    const latest = session.encodeState();
+    const direct = await exportOffice(bytes, checkpoint(bytes, latest), fixed);
+    session.destroy();
+    const { state } = await rebaseOffice(
+      bytes,
+      checkpoint(bytes, captured),
+      checkpoint(bytes, latest),
+      exported
+    );
+    bytes = await exportOffice(exported, checkpoint(exported, state), fixed);
+    const ids = threadIds(bytes);
+    expect(ids).toEqual(threadIds(direct));
+    expect(ids).toHaveLength(3);
+    for (const key of ["paraId", "durable"] as const)
+      expect(new Set(ids.map((entry) => entry[key])).size).toBe(ids.length);
+    const [reply] = ids.filter((entry) => entry.parent);
+    expect(reply!.parent).toBe(
+      ids.find((entry) => entry.id !== "1" && !entry.parent)!.paraId
+    );
+    for (let publication = 0; publication < 2; publication += 1) {
+      const next = await open(bytes);
+      next.insertText({ story: body, paraId: "22222222", offset: 0 }, "x");
+      bytes = await publish(bytes, next);
+      next.destroy();
+      expect(threadIds(bytes)).toEqual(ids);
+    }
+  }
+);

@@ -1,5 +1,7 @@
 //! WordprocessingML story-part serializers with stable byte ordering.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::comments::Comment;
@@ -311,10 +313,24 @@ pub fn serialize_comments_with_info(
         }
     }
 
+    // The paragraph and durable ids the comments already hold, which a
+    // generated one must not repeat: the seed stream gives a comment added
+    // after a publication the ids it gave there to a comment that lacked them.
+    let mut taken: HashSet<String> = comments
+        .iter()
+        .flat_map(|comment| [&comment.para_id, &comment.durable_id])
+        .flatten()
+        .map(|id| id.to_ascii_uppercase())
+        .collect();
     let mut para_infos = Vec::with_capacity(comments.len());
     let mut content = String::new();
     for comment in top_level.into_iter().chain(replies) {
-        content.push_str(&serialize_comment(comment, &mut para_infos, context));
+        content.push_str(&serialize_comment(
+            comment,
+            &mut para_infos,
+            context,
+            &mut taken,
+        ));
     }
 
     (
@@ -405,16 +421,27 @@ pub fn serialize_comments_extensible_part(
     )
 }
 
+/// The next id of the seed stream that no comment holds yet.
+fn untaken_hex_id(context: &mut SerializerContext, taken: &mut HashSet<String>) -> String {
+    loop {
+        let id = context.allocate_hex_id();
+        if taken.insert(id.clone()) {
+            return id;
+        }
+    }
+}
+
 fn serialize_comment(
     comment: &Comment,
     para_infos: &mut Vec<CommentParaInfo>,
     context: &mut SerializerContext,
+    taken: &mut HashSet<String>,
 ) -> String {
     // Minting fresh ids every save would never reach a fixed point.
     let comment_para_id = comment
         .para_id
         .clone()
-        .unwrap_or_else(|| context.allocate_hex_id());
+        .unwrap_or_else(|| untaken_hex_id(context, taken));
     let mut output = String::new();
     output.push_str("<w:comment w:id=\"");
     output.push_str(&js_number(comment.id));
@@ -474,7 +501,7 @@ fn serialize_comment(
         durable_id: comment
             .durable_id
             .clone()
-            .unwrap_or_else(|| context.allocate_hex_id()),
+            .unwrap_or_else(|| untaken_hex_id(context, taken)),
         parent_id: comment.parent_id,
         done: comment.done,
     });
@@ -652,6 +679,29 @@ mod tests {
         assert!(xml.contains(r#"w14:paraId="1CB626C9""#));
         assert_eq!(infos[0].last_para_id, "1CB626C9");
         assert_eq!(infos[0].durable_id, "2ECC71AA");
+    }
+
+    #[test]
+    fn a_minted_comment_id_skips_the_ids_the_comments_hold() {
+        // The ids the seed stream mints first, as an earlier save gave them to a comment.
+        let mut stream = context();
+        let (first, second) = (stream.allocate_hex_id(), stream.allocate_hex_id());
+        let held = Comment {
+            para_id: Some(first.clone()),
+            durable_id: Some(second.clone()),
+            ..comment(1.0, None, "held")
+        };
+        let added = comment(2.0, None, "added");
+        let (_, infos) = serialize_comments_with_info(&[held, added], &mut context());
+        assert_eq!(
+            (infos[0].last_para_id.as_str(), infos[0].durable_id.as_str()),
+            (first.as_str(), second.as_str())
+        );
+        let (third, fourth) = (stream.allocate_hex_id(), stream.allocate_hex_id());
+        assert_eq!(
+            (&infos[1].last_para_id, &infos[1].durable_id),
+            (&third, &fourth)
+        );
     }
 
     fn paragraph(text: &str) -> BlockContent {
