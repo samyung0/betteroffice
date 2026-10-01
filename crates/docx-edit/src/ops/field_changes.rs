@@ -416,6 +416,96 @@ pub(crate) fn renumber_fields(
     }
 }
 
+/// Enter at `at` inside a field result's projected children: the field's
+/// begin stays after the children before `at`, those after it become plain
+/// content, and the field ends where its embed stood, across the paragraphs.
+/// A field showing result text of its own (a kept change) stays as it is.
+pub(crate) fn split_field(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    story_id: &str,
+    at: u32,
+    continuation: &str,
+) -> OpResult<()> {
+    let chunks = snapshot(story, txn);
+    let Some(before) = chunks.iter().position(|chunk| chunk.end() == at) else {
+        return Ok(());
+    };
+    let Some((id, _)) = field_result_attr(&chunks[before]).filter(|(_, index)| *index >= 0) else {
+        return Ok(());
+    };
+    let owner = chunks
+        .get(before + 2..)
+        .unwrap_or_default()
+        .iter()
+        .find(|chunk| field_result_attr(chunk).is_none_or(|(child, _)| child != id));
+    let Some(owner) = owner.filter(|chunk| projection(txn, chunk).is_some_and(|(of, _)| of == id))
+    else {
+        return Ok(());
+    };
+    let ChunkKind::Embed(Some(map)) = &owner.kind else {
+        return Ok(());
+    };
+    if map_string(map, txn, "displayText").is_some_and(|text| !text.is_empty()) {
+        return Ok(());
+    }
+    let Some(Ok(mut data)) =
+        map_string(map, txn, "fieldData").map(|data| serde_json::from_str::<Value>(&data))
+    else {
+        return Ok(());
+    };
+    let end = data["continuation"]["end"] != Value::Bool(true);
+    if end {
+        data["continuation"] =
+            serde_json::json!({"id": continuation, "separate": false, "end": true});
+    }
+    let entries: Vec<(String, Any)> = map
+        .iter(txn)
+        .filter_map(|(key, value)| match value {
+            Out::Any(value) => Some((key.to_owned(), value)),
+            _ => None,
+        })
+        .collect();
+    let attrs: Attrs = owner
+        .attrs
+        .iter()
+        .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+        .collect();
+    let (from, to) = (at + 1, owner.start);
+    if from < to {
+        story.format(
+            txn,
+            from,
+            to - from,
+            Attrs::from([(Arc::from(FIELD_RESULT), Any::Null)]),
+        );
+    }
+    story.remove_range(txn, to, 1);
+    let embed = story.insert_embed_with_attributes(txn, at, yrs::MapPrelim::default(), attrs);
+    for (key, value) in entries {
+        embed.insert(txn, key, value);
+    }
+    embed.insert(txn, "fieldData", data.to_string());
+    if end {
+        embed.insert(txn, "continuationId", continuation);
+        let marker = serde_json::json!({
+            "id": continuation,
+            "kind": "fieldend",
+            "run": {"type": "run", "content": [
+                {"type": "fieldChar", "charType": "end", "continuationId": continuation}
+            ]},
+        });
+        crate::bookmarks::set(
+            txn,
+            story,
+            story_id,
+            to + 1,
+            any_from_value(marker).map_err(OpError::InvalidUpdate)?,
+        )?;
+    }
+    Ok(())
+}
+
 /// Clears the `fieldResult` markers of the children of the projecting field
 /// embeds in `start..end` of `story`, which a delete is about to remove: the
 /// children right before each that carry its number. A child whose field is

@@ -581,6 +581,15 @@ impl EditingDoc {
             // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
             remove_borders(&mut txn, &orig_map);
         }
+        if !ctx.is_suggesting() {
+            crate::ops::field_changes::split_field(
+                &mut txn,
+                &story,
+                &at.story,
+                at.index,
+                &format!("field:{second_para_id}"),
+            )?;
+        }
         Ok(SplitReceipt {
             first_para_id,
             second_para_id,

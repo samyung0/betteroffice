@@ -4,6 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
+import { units as matrixUnits } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -1563,12 +1564,14 @@ const deleteText = (text: string): Edit => (session) => {
   const { story, paraId, offset } = textAt(session, text);
   session.deleteRange({ story, start: { paraId, offset }, end: { paraId, offset: offset + text.length } });
 };
+// Enter between a field's links splits the field across the paragraphs (round 2 D), so the join lands as saved directly.
+test("a split between two of a field's links before the capture and a join after land exactly", async () => {
+  const split = (session: YrsSession) => session.splitParagraph({ story: "body", paraId: "11111111", offset: textAt(session, "BB").offset });
+  const { next, direct } = await landed(threeLinks, split, joinNext("11111111"));
+  expect(direct).toBe("a [«DATE»|H(AA)H(BB)H(CC)] b");
+  expect(next).toBe(direct);
+});
 test.each([
-  [
-    "a split between two links before the capture and a join after",
-    (session: YrsSession) => session.splitParagraph({ story: "body", paraId: "11111111", offset: textAt(session, "BB").offset }),
-    joinNext("11111111"),
-  ],
   ["a link deleted before the capture and typing at the end of the next after", deleteText("AA"), typeInText("BB", 2)],
   [
     "a link deleted before the capture and the next retyped after",
@@ -1582,11 +1585,22 @@ test.each([
   await expect(landed(threeLinks, before, after)).rejects.toBeInstanceOf(RebaseError);
 });
 
+// A field showing a kept insertion of its own keeps Enter as it was: its links stop projecting, which refuses.
 test("a rebase fails as a RebaseError when a child's field stops projecting in the export", async () => {
-  const bytes = paragraph(field(`${link(run("AA"))}${link(run("BB"))}`));
+  const bytes = paragraph(field(`${link(run("AA"))}${link(run("BB"))}${ins(run("26"))}`));
   const split: Edit = (session) =>
     void session.splitParagraph({ story: "body", paraId: "11111111", offset: fieldAt(session, "DATE").offset });
   await expect(landed(bytes, split, joinNext("11111111"))).rejects.toBeInstanceOf(RebaseError);
+});
+
+// Enter before a field's embed now splits the field across the paragraphs (round 2 D): its links keep projecting.
+test("a split before a field's embed before the capture and a join after land exactly", async () => {
+  const bytes = paragraph(field(`${link(run("AA"))}${link(run("BB"))}`));
+  const split: Edit = (session) =>
+    void session.splitParagraph({ story: "body", paraId: "11111111", offset: fieldAt(session, "DATE").offset });
+  const { next, direct } = await landed(bytes, split, joinNext("11111111"));
+  expect(direct).toBe("a [«DATE»|H(AA)H(BB)] b");
+  expect(next).toBe(direct);
 });
 
 // The refusal a UAT journey reproduces: the export writes a run holding
@@ -1867,3 +1881,29 @@ test("text typed after a projected simple field stays in its field across public
     reopened.destroy();
   }
 });
+
+// Round 2 D: Enter inside a projected link splits its field across the two paragraphs (the field ends in the second).
+const tocParagraphs =
+  p("11111111", `${run("C")}${char("begin")}${instr(" TOC ")}${char("separate")}${link(run("Introduction"))}`) +
+  p("33333333", `${link(run("Details"))}${char("end")}`);
+test.each([
+  ["a field's only link", paragraph(field(link(run("2026")))), "2026", 4, ["a [«DATE»|H(2026)", "]"]],
+  ["a table of contents' first entry", docx(tocParagraphs + tail), "Introduction", 5, ["C[«TOC»|H(Intro)", "H(duction)", "H(Details)]"]],
+])("Enter inside %s splits its field across the paragraphs", async (_, source, text, at, saved) => {
+  let bytes = source;
+  const session = await open(bytes);
+  session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, text) + at });
+  const editor = matrixUnits(session, "body").replace(/¶[^¶]*tail¶$/, "");
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  const paragraphs = [...documentXml(bytes).matchAll(/<w:p [^>]*w14:paraId="([0-9A-F]+)"/g)].map(([, id]) => id!);
+  expect(paragraphs.slice(0, saved.length).map((id) => view(bytes, id).replace(/ b$/, ""))).toEqual(saved);
+  for (let publication = 0; publication < 2; publication += 1) {
+    const reopened = await open(bytes);
+    expect(matrixUnits(reopened, "body").replace(/¶[^¶]*tail¶$/, "")).toBe(editor);
+    edit(reopened, "22222222", "z");
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
+
