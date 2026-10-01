@@ -869,3 +869,43 @@ for (const where of commentStories) {
     });
   }
 }
+
+/** Every comment range in `bytes` opens before it closes. */
+const ordered = (bytes: Uint8Array) => {
+  const xml = new TextDecoder().decode(unzipContainer(bytes)["word/document.xml"]);
+  return [...xml.matchAll(/<w:commentRange(End) w:id="(\d+)"/g)].every(
+    ({ index, 2: id }) => xml.slice(0, index).includes(`<w:commentRangeStart w:id="${id}"`)
+  );
+};
+// 8a: a comment ending where an emptied one sits saves both in order, so direct and rebased saves agree.
+test.each([
+  ["Word's shape", `${E(1)}${ref(1)}${pageBreak}`],
+  ["no reference", `${E(1)}${pageBreak}`],
+])("an emptied comment beside another's end saves alike directly and rebased, %s", async (_, lead) => {
+  const bytes = docx(p("33333333", `${S(1)}${run("prev")}`) + p("44444444", `${lead}${run("Heading")}`) + tail);
+  const later = (session: YrsSession) => {
+    comment(session, "before", [body, "33333333", 0, 0], "44444444");
+    comment(session, "over", [body, "44444444", 0, 1]);
+    session.deleteAt({ story: body, paraId: "44444444", offset: 1 }, "backward");
+  };
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const session = await open(bytes);
+    const captured = session.encodeState();
+    const exported = await exportOffice(bytes, checkpoint(bytes, captured), fixed);
+    later(session);
+    const latest = session.encodeState();
+    session.destroy();
+    const direct = await exportOffice(bytes, checkpoint(bytes, latest), fixed);
+    const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+    const next = await exportOffice(exported, checkpoint(exported, state), fixed);
+    const saves = [];
+    for (const saved of [direct, next]) {
+      expect(ordered(saved)).toBe(true);
+      const reopened = await open(saved);
+      saves.push(covered(reopened));
+      reopened.destroy();
+    }
+    expect(saves[1]).toEqual(saves[0]!);
+    expect(saves[0]!.over).toBe("");
+  }
+});

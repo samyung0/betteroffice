@@ -1512,26 +1512,27 @@ function splitContent(
 }
 
 /**
+ * Boundaries by offset; at one offset, ranges closing there first, then empty
+ * ranges (each opening before it closes), then ranges opening there.
+ */
+function sortBoundaries(boundaries: CommentBoundary[]): CommentBoundary[] {
+  const at = new Set(boundaries.map(({ id, kind, offset }) => `${id}:${kind}:${offset}`));
+  const place = ({ id, kind, offset }: CommentBoundary) =>
+    at.has(`${id}:${kind === 'start' ? 'end' : 'start'}:${offset}`) ? 1 : kind === 'end' ? 0 : 2;
+  return [...boundaries].sort(
+    (left, right) =>
+      left.offset - right.offset ||
+      place(left) - place(right) ||
+      left.id - right.id ||
+      Number(left.kind === 'end') - Number(right.kind === 'end')
+  );
+}
+
+/**
  * Places each boundary `offset` units (by `measure`) into `content`. A
  * boundary inside content that cannot split moves to that content's edge, so
  * its range widens to hold the content whole.
  */
-/** Boundaries by offset: an empty range opens before it closes, ranges meeting close first. */
-function boundaryOrder(left: CommentBoundary, right: CommentBoundary): number {
-  return (
-    left.offset - right.offset ||
-    (left.kind === right.kind
-      ? left.id - right.id
-      : left.id === right.id
-        ? left.kind === 'start'
-          ? -1
-          : 1
-        : left.kind === 'end'
-          ? -1
-          : 1)
-  );
-}
-
 function insertBoundaries(
   content: ParagraphContent[],
   boundaries: CommentBoundary[],
@@ -1543,7 +1544,7 @@ function insertBoundaries(
   afterMarkers = false
 ): ParagraphContent[] {
   if (boundaries.length === 0) return content;
-  const sorted = [...boundaries].sort(boundaryOrder);
+  const sorted = sortBoundaries(boundaries);
   const result: ParagraphContent[] = [];
   let cursor = 0;
   let boundaryIndex = 0;
@@ -2668,7 +2669,7 @@ class SaveContext {
         add(range.id, 'start', range.start);
         add(range.id, 'end', Math.min(range.end, lastPilcrow));
       }
-      return { boundaries, slot: slot.sort(boundaryOrder) };
+      return { boundaries, slot: sortBoundaries(slot) };
     };
 
     // Break units opening a slot are where the seed put the trailing breaks of
