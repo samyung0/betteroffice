@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
-import { addComment as matrixComment, blocks, docx as matrixDocx, none, p as matrixParagraph, PB, prime, run as matrixRun, runRow, sig } from "./matrix/lib";
+import { addComment as matrixComment, blocks, CB as matrixCB, docx as matrixDocx, len as matrixLen, none, orders, p as matrixParagraph, PB, prime, run as matrixRun, runRow, sig, textStart as matrixTextStart, type Edit as MatrixEdit, type Where as MatrixWhere } from "./matrix/lib";
 import { parseDocx } from "../packages/docx/src/docx";
 import { repackDocx } from "../packages/docx/src/docx/rezip";
 import { injectReplyRangeMarkers } from "../packages/docx/src/docx/injectReplyRangeMarkers";
@@ -959,6 +959,62 @@ test("an emptied editor comment over a source reference survives the rebase or r
       after: (session, story) =>
         session.deleteRange({ story, start: { paraId: "44444444", offset: 0 }, end: { paraId: "44444444", offset: 2 } }),
     });
+    expect(row.cls).not.toStartWith("silent");
+  }
+});
+
+// Round 2 review B: breaks a comment boundary or bookmark sits at, with edits after a capture. J: unrelated
+// edits land; N: a rebase that would move the breaks, bookmarks or comment differently refuses.
+const bmMark = `<w:bookmarkStart w:id="5" w:name="m5"/><w:bookmarkEnd w:id="5"/>`;
+const reviewB: Record<string, string> = {
+  "prev[CB]¶[CB]¶next": matrixParagraph("33333333", matrixRun("prev") + matrixCB) + matrixParagraph("44444444", matrixCB) + matrixParagraph("45454545", matrixRun("next")),
+  "prev¶<bm/>[PB][CB]¶next": matrixParagraph("33333333", matrixRun("prev")) + matrixParagraph("44444444", bmMark + PB + matrixCB) + matrixParagraph("45454545", matrixRun("next")),
+  "prev¶<bm>[CB]</bm>¶next": matrixParagraph("33333333", matrixRun("prev")) + matrixParagraph("44444444", `<w:bookmarkStart w:id="5" w:name="m5"/>${matrixCB}<w:bookmarkEnd w:id="5"/>`) + matrixParagraph("45454545", matrixRun("next")),
+};
+const endOf44: (s: Parameters<MatrixEdit>[0], st: string) => { story: string; paraId: string; offset: number } = (s, st) =>
+  ({ story: st, paraId: "44444444", offset: matrixLen(s, st, "44444444") });
+const reviewBEdits: Record<string, MatrixEdit> = {
+  "type Q": (s, st) => void s.insertText(endOf44(s, st), "Q"),
+  "join next": (s, st) => void s.deleteAt(endOf44(s, st), "forward"),
+  "type Q, Backspace before Q": (s, st) => {
+    s.insertText(endOf44(s, st), "Q");
+    s.deleteAt({ story: st, paraId: "44444444", offset: matrixTextStart(s, st, "44444444") }, "backward");
+  },
+};
+test.each(["body", "cell", "header"] as MatrixWhere[])(
+  "edits after a capture next to breaks a comment ends at or a bookmark sits at land exactly or refuse, in %s",
+  async (where) => {
+    await prime();
+    for (const [name, xml] of Object.entries(reviewB))
+      for (const [edit, after] of Object.entries(reviewBEdits))
+        for (const order of orders(`${where} | ${name} | ${edit}`, (s, st) => void matrixComment(s, st, ["33333333", 0], ["44444444", 0]), after)) {
+          const row = await runRow({ id: order.id, bytes: matrixDocx(where, xml), where, before: order.before, after: order.after });
+          expect(`${order.id}: ${row.cls}`).not.toMatch(/: silent|: error/);
+          // Edits made before the capture, then typing elsewhere: the breaks read alike, so the rebase lands.
+          if (order.id.endsWith("edit<cap<tail")) expect(`${order.id}: ${row.cls}`).toMatch(/: exact/);
+        }
+  }
+);
+
+// Round 2 review B, L: the coverage refusal fires only when an edit after the capture touches the comment's range or
+// what it covers; typing elsewhere lands with the accepted timing difference.
+test("an edit after a capture away from a comment the export settled lands", async () => {
+  await prime();
+  for (const where of ["body", "cell", "header"] as MatrixWhere[]) {
+    const bytes = matrixDocx(
+      where,
+      matrixParagraph("33333333", matrixRun("prev")) +
+        matrixParagraph("44444444", `<w:commentRangeStart w:id="1"/>${PB}${matrixRun("Heading")}<w:commentRangeEnd w:id="1"/>${ref(1)}`)
+    );
+    const row = await runRow({
+      id: `src comment over [PB]Heading in ${where}`,
+      bytes,
+      where,
+      before: (session, story) =>
+        void matrixComment(session, story, ["44444444", matrixTextStart(session, story, "44444444")], ["44444444", matrixLen(session, story, "44444444")]),
+      after: none,
+    });
+    expect(row.cls).not.toStartWith("refused");
     expect(row.cls).not.toStartWith("silent");
   }
 });

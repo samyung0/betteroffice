@@ -158,6 +158,27 @@ const H_FILE = { "src <prev¶ ER Heading (no break)": `${p33(`${S()}${run("prev"
 const H_COVER = { "ed prev..44@0 + ed over 44@0..1": both(ed([PREV, 0], at(0)), ed([H, 0], at(1))) };
 const H_EDIT = [["delete 44 units 0..2", ((s, st) => s.deleteRange({ story: st, start: { paraId: H, offset: 0 }, end: { paraId: H, offset: 2 } })) as Edit]] as const;
 
+// ---- Round 2 review B (rv2): breaks a comment ends at or a bookmark sits at, with joins and typing.
+const bmAt = `<w:bookmarkStart w:id="5" w:name="m5"/><w:bookmarkEnd w:id="5"/>`;
+const RB_FILES: Record<string, string> = {
+  "prev[CB]¶[CB]¶next": `${p33(`${run("prev")}${CB}`)}${p44(CB)}${p45(run("next"))}`,
+  "prev¶<bm/>[PB][CB]¶next": `${p33(run("prev"))}${p44(`${bmAt}${PB}${CB}`)}${p45(run("next"))}`,
+  "prev¶<bm>[CB]</bm>¶next": `${p33(run("prev"))}${p44(`<w:bookmarkStart w:id="5" w:name="m5"/>${CB}<w:bookmarkEnd w:id="5"/>`)}${p45(run("next"))}`,
+  "prev¶[CB]<bm/>¶next": `${p33(run("prev"))}${p44(`${CB}${bmAt}`)}${p45(run("next"))}`,
+};
+const RB_COVERS: Record<string, Edit> = { "ed prev..44@0": A_COVERS["ed prev..44@0"], "ed over 44": ed([H, 0], (s, st) => [H, len(s, st, H)]) };
+const RB_EDITS = [
+  ["type Q at 44 end", EDITS["type Q at 44 end"]],
+  ["join next into 44", ((s, st) => void s.deleteAt({ story: st, paraId: H, offset: len(s, st, H) }, "forward")) as Edit],
+  [
+    "type Q, Backspace before Q",
+    ((s, st) => {
+      EDITS["type Q at 44 end"](s, st);
+      s.deleteAt({ story: st, paraId: H, offset: ts(s, st) }, "backward");
+    }) as Edit,
+  ],
+] as const;
+
 function rows(): Row[] {
   const out: Row[] = [];
   const untouched = new Set<string>();
@@ -193,6 +214,7 @@ function rows(): Row[] {
       for (const [aname, after] of Object.entries(afters))
         out.push({ id: `${where} | ${fname} | ${aname} | setup<cap<edit`, bytes: docx(where, xml), where, before, after });
     grid(where, H_FILE, H_COVER, H_EDIT);
+    grid(where, RB_FILES, RB_COVERS, RB_EDITS);
     for (const [fname, xml] of Object.entries(ENDPARA))
       for (const [aname, after] of Object.entries(ENDPARA_ADDS))
         for (const [bname, before] of Object.entries({ "no earlier comment": none, "B on pr before": cB }))

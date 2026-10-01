@@ -32,7 +32,7 @@ export interface Lineage {
    * Refuses a settled rebased state whose export would write what the latest
    * state `later` holds otherwise; `id` maps its entity ids.
    */
-  check?(doc: Y.Doc, later: Y.Doc, id: (value: string) => string): void;
+  check?(doc: Y.Doc, later: Y.Doc, id: (value: string) => string, captured: Y.Doc): void;
 }
 
 export class RebaseError extends Error {}
@@ -120,14 +120,15 @@ export const DOCX_LINEAGE: Lineage = {
           )
             text.delete(offset, 1);
   },
-  check(doc, later, id) {
+  check(doc, later, id, captured) {
     const stories = doc.getMap("stories");
     for (const [key, source] of later.getMap("stories").entries()) {
       const target = stories.get(id(key));
       if (source instanceof Y.Text && target instanceof Y.Text) {
         assertChildrenLanded(source, target);
-        assertBreaksLead(source, target);
-        assertCommentsCover(later, key, source, doc, id(key), target, id);
+        assertBreaksLead(source, target, later, key);
+        assertReferencesBeforeBookmarks(source, target, doc, id(key));
+        assertCommentsCover(later, key, source, doc, id(key), target, id, captured);
         assertContinuationsKept(doc, id(key), target);
       }
     }
@@ -190,10 +191,26 @@ function assertCommentsCover(
   doc: Y.Doc,
   targetStory: string,
   target: Y.Text,
-  id: (value: string) => string
+  id: (value: string) => string,
+  captured: Y.Doc
 ): void {
   const from = commentRanges(later, story);
   if (!from.size) return;
+  // Only a comment the later edits touched: its range, or the content it covers.
+  const was = commentRanges(captured, story);
+  const capturedText = captured.getMap("stories").get(story);
+  const covers = (text: unknown, ranges: Array<[number, number]> | undefined) =>
+    text instanceof Y.Text && ranges
+      ? ranges.map(([start, end]) => units(text).ids.slice(start, end).join(",")).join("|")
+      : undefined;
+  const touched = (key: string) => {
+    const before = covers(capturedText, was.get(key));
+    return (
+      before === undefined ||
+      before !== covers(source, from.get(key)) ||
+      (from.get(key) ?? []).some(([start, end]) => start > end)
+    );
+  };
   const to = commentRanges(doc, targetStory);
   const attributes = unitAttributes(source);
   const same = (a: number, b: number, key: string) =>
@@ -217,6 +234,7 @@ function assertCommentsCover(
     return;
   }
   for (const [key, ranges] of from) {
+    if (!touched(key)) continue;
     const landed = to.get(id(key)) ?? to.get(key);
     if (!landed) {
       // An emptied range the export kept as a reference-only comment settles;
@@ -225,7 +243,10 @@ function assertCommentsCover(
         ([, embed]) =>
           embed.get("modelKind") === "commentReference" && [key, id(key)].includes(String(embed.get("commentId")))
       );
-      if (!referenced) fail("a comment would lose its range and reference");
+      // (Typing in an empty range can leave it ending before it starts, which a
+      // direct save still writes.)
+      if (!referenced || ranges.some(([start, end]) => start !== end))
+        fail("a comment would lose its range and reference");
       continue;
     }
     const edges = ranges.flat();
@@ -279,7 +300,43 @@ function breakSlots(text: Y.Text): Array<Array<[number, Y.Map<unknown>]>> {
  * text followed them only later. Saved directly, such breaks close the
  * paragraph before; the rebased state would keep them opening this one.
  */
-function assertBreaksLead(source: Y.Text, target: Y.Text): void {
+/** Offsets of the bookmark boundaries (not continued field characters) in story `story` of `doc`. */
+function bookmarkOffsets(doc: Y.Doc, story: string): number[] {
+  const found: number[] = [];
+  for (const entry of doc.getMap("bookmarks").values()) {
+    if (!(entry instanceof Y.Map) || typeof (entry.get("data") as { id?: unknown })?.id === "string") continue;
+    for (const anchor of (entry.get("anchors") ?? []) as Array<{ story: string; start: Uint8Array }>) {
+      if (anchor.story !== story) continue;
+      const at = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(anchor.start), doc)?.index;
+      if (at !== undefined) found.push(at);
+    }
+  }
+  return found;
+}
+
+/**
+ * Refuses when a bookmark boundary of the rebased story sits right before the
+ * export's reference for a comment (a seed unit the latest state never held)
+ * that opens a paragraph: a direct save writes a comment's end and reference
+ * at a paragraph's start ahead of the bookmark markers there.
+ */
+function assertReferencesBeforeBookmarks(source: Y.Text, target: Y.Text, doc: Y.Doc, story: string): void {
+  const bookmarks = bookmarkOffsets(doc, story);
+  if (!bookmarks.length) return;
+  let f: Alignment;
+  try {
+    f = align(units(source), units(target));
+  } catch {
+    return;
+  }
+  f.to.keys.forEach((key, unit) => {
+    const opens = unit === 0 || f.to.keys[unit - 1] === "\u0000pilcrow";
+    if (key === COMMENT_REFERENCE && !f.matched[unit] && opens && bookmarks.includes(unit))
+      fail("the export wrote a comment's reference after bookmarks a direct save writes it ahead of");
+  });
+}
+
+function assertBreaksLead(source: Y.Text, target: Y.Text, later: Y.Doc, story: string): void {
   const leads = (unit: unknown) =>
     unit instanceof Y.Map && unit.get("leading") === true;
   const slots = breakSlots(source).filter((slot) =>
@@ -294,14 +351,32 @@ function assertBreaksLead(source: Y.Text, target: Y.Text): void {
   } catch {
     return; // Changes inside it cannot land and fail the rebase.
   }
-  // Breaks a text-less paragraph owned (ending in a column break, none taken
-  // from the paragraph before) lead the text that follows them.
+  // As the save reads the latest state (`settle` in yrsToDocument.ts): breaks
+  // a text-less paragraph owned (ending in a column break, none taken from the
+  // paragraph before, and no bookmark at them after a paragraph) lead the
+  // text that follows them, and so does a column break a comment boundary
+  // precedes, with the breaks after it.
+  const bookmarks = bookmarkOffsets(later, story);
+  const boundaries = [...commentRanges(later, story).values()].flat(2);
+  const at = (slot: Array<[number, Y.Map<unknown>]>) => [slot[0]![0], slot.at(-1)![0] + 1];
   const owned = (slot: Array<[number, Y.Map<unknown>]>) =>
     slot.at(-1)![1].get("_kind") === "columnBreak" &&
-    !slot.some(([, unit]) => unit.get("trailing") === true);
+    !slot.some(([, unit]) => unit.get("trailing") === true) &&
+    !bookmarks.some((offset) => offset >= at(slot)[0]! && offset <= at(slot)[1]!);
+  const marked = (slot: Array<[number, Y.Map<unknown>]>) =>
+    slot.findIndex(
+      ([offset, unit]) =>
+        unit.get("_kind") === "columnBreak" && boundaries.some((boundary) => boundary >= slot[0]![0] && boundary <= offset)
+    );
   for (const slot of slots) {
+    // The capture's save wrote a new comment's reference ahead of breaks it
+    // left without text; with text after them now, the rebased paragraph
+    // would hold that reference before the breaks the latest state opens with.
+    for (let unit = f.map[slot[0]![0]]! - 1; unit >= 0 && f.to.keys[unit] === COMMENT_REFERENCE; unit--)
+      if (!f.matched[unit]) fail("the export wrote a reference ahead of breaks the latest state opens a paragraph with");
     const flagged = slot.findIndex(([, unit]) => leads(unit));
-    const latest = flagged < 0 && owned(slot) ? 0 : flagged;
+    const leading = [flagged, owned(slot) ? 0 : -1, marked(slot)].filter((index) => index >= 0);
+    const latest = leading.length ? Math.min(...leading) : -1;
     const rebased = slot.findIndex(
       ([at]) => f.map[at] >= 0 && leads(childAtOffset(target, f.map[at]))
     );
@@ -1023,7 +1098,7 @@ function landLater(
           lineage.positions!.rewrite(value, edited, result, id)
         );
       lineage.settle?.(result);
-      lineage.check?.(result, later, id);
+      lineage.check?.(result, later, id, before);
     });
 
     // Every touched entity reads as in the latest state, but for what the
