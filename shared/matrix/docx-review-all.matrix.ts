@@ -21,6 +21,7 @@ import {
   none,
   orders,
   p,
+  ref,
   run,
   sdt,
   table,
@@ -137,6 +138,19 @@ const PLAIN: Record<string, string> = {
   "inserted mark before a table": `${p(P, run("one"), `<w:rPr><w:ins w:id="82" w:author="A" w:date="2026-09-01T00:00:00Z"/></w:rPr>`)}${table(p("46464646", run("cell")))}`,
 };
 
+// zz-n4 (round 2 E): Accept all uncovers a link a comment around its field covers only from the next publication;
+// deleting that field's embed afterwards leaves the link plain.
+const COMMENTED_FIELDS = `${ins(run("xy"))}${S()}${field(`${run("20")}${ins(link(run("26")))}`)}${field(link(run("30")))}${E()}${ref()}`;
+const dropFirstOwner: Edit = (s, st) => {
+  let offset = 0;
+  for (const g of s.storySegments(st)) {
+    if (g.kind === "pilcrow") return;
+    if (g.kind === "embed" && (g.payload as Record<string, unknown>).resultProjection)
+      return void s.deleteRange({ story: st, start: { paraId: P, offset }, end: { paraId: P, offset: offset + 1 } });
+    offset += g.kind === "text" ? g.text.length : 1;
+  }
+};
+
 function rows(): Row[] {
   const out: Row[] = [];
   const push = (where: Where, xml: string, id: string, setup: Edit | null, edit: Edit) => {
@@ -164,6 +178,8 @@ function rows(): Row[] {
       push(where, holder(xml), `${name} | reject all`, null, reject);
       push(where, holder(xml), `${name} | accept all, then type in ${child}`, accept, typeIn(child));
     }
+  for (const where of ["body", "cell", "header"] as Where[])
+    push(where, holder(COMMENTED_FIELDS), "comment around fields | accept all, then drop the first field", accept, dropFirstOwner);
   for (const where of ["body", "cell"] as Where[])
     for (const [name, xml] of Object.entries(PLAIN)) {
       push(where, xml, `${name} | accept all`, null, accept);

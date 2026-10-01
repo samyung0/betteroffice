@@ -84,7 +84,8 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
 - `refused` rows follow decisions: field children the rebase cannot match one-to-one (round 5, N20; text typed
   after a projected simple field before a capture shares that field's result slot, which the export's seed splits;
   Enter inside a table of contents' first entry after a capture), a table of contents entry typed in after a
-  capture (the UAT journey). The break-flag refusal (R10-N1, 2026-09-30) no longer
+  capture (the UAT journey), a field deleted after Accept all uncovered a link a comment around it covers only from
+  the next publication (zz-n4, round 2). The break-flag refusal (R10-N1, 2026-09-30) no longer
   fires for a text-less paragraph's own breaks, which lead text typed after them in the editor too (round 2).
 
 The follow-up fixes leave no `silent` or `lost` rows. Field end/separate markers compare by kind and offset, since

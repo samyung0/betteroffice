@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { units as matrixUnits } from "./matrix/lib";
+import { units as matrixUnits, sig } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -1907,3 +1907,25 @@ test.each([
   }
 });
 
+
+// Round 2 E (zz-n4): Accept all uncovers a link a comment around its field does not cover until a publication; a
+// later delete of that field's embed must not leave the rebased save covering the link where the direct save does not.
+test("deleting a field after Accept all uncovered its link under a comment lands exactly or refuses", async () => {
+  const bytes = docx(
+    p("33333333", run("prev")) +
+      p("11111111", `${ins(run("xy"))}<w:commentRangeStart w:id="5"/>${field(run("20") + ins(link(run("26"))))}${field(link(run("30")))}<w:commentRangeEnd w:id="5"/>${ref(5)}`) +
+      tail
+  );
+  const dropFirst: Edit = (session) => {
+    const { story, paraId, offset } = fieldAt(session, "DATE");
+    session.deleteRange({ story, start: { paraId, offset }, end: { paraId, offset: offset + 1 } });
+  };
+  const show = (saved: Uint8Array) => sig(saved, "word/document.xml");
+  const result = await landed(bytes, (session) => void session.acceptChange({ all: true }), dropFirst, show).catch(
+    (error: unknown) => error
+  );
+  if (result instanceof RebaseError) return;
+  const { next, direct } = result as { next: string; direct: string };
+  expect(direct).toContain("L(26)<c1");
+  expect(next).toBe(direct);
+});

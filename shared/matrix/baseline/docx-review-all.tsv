@@ -1,4 +1,5 @@
-# docx-review-all: 752 rows, ids 50b03d3e4b23fd12; rows not listed are exact
+# docx-review-all: 761 rows, ids b40faac0706d7a84; rows not listed are exact
+body | comment around fields | accept all, then drop the first field | setup<cap<edit	refused
 body | fs child+ins +tab | before=accept | after=type	refused
 body | fs child+ins +tab | before=accept | after=type+accept	refused
 body | fs child+ins +tab | before=reject | after=type	refused
@@ -23,3 +24,5 @@ body | two links, ins between +tab | before=accept | after=type	refused
 body | two links, ins between +tab | before=accept | after=type+accept	refused
 body | two links, ins between +tab | before=reject | after=type	refused
 body | two links, ins between +tab | before=reject | after=type+accept	refused
+cell | comment around fields | accept all, then drop the first field | setup<cap<edit	refused
+header | comment around fields | accept all, then drop the first field | setup<cap<edit	refused

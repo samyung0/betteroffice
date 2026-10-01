@@ -127,10 +127,82 @@ export const DOCX_LINEAGE: Lineage = {
       if (source instanceof Y.Text && target instanceof Y.Text) {
         assertChildrenLanded(source, target);
         assertBreaksLead(source, target);
+        assertCommentsCover(later, key, source, doc, id(key), target);
       }
     }
   },
 };
+
+/** Each comment's ranges in story `story` of `doc`, as absolute offsets. */
+function commentRanges(doc: Y.Doc, story: string): Map<string, Array<[number, number]>> {
+  const ranges = new Map<string, Array<[number, number]>>();
+  for (const [key, comment] of doc.getMap("comments").entries()) {
+    const anchors = comment instanceof Y.Map ? comment.get("anchors") : undefined;
+    if (!Array.isArray(anchors)) continue;
+    for (const anchor of anchors as Array<{ story: string; start: Uint8Array; end: Uint8Array }>) {
+      if (anchor.story !== story) continue;
+      const at = (bytes: Uint8Array) =>
+        Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(bytes), doc)?.index;
+      const [start, end] = [at(anchor.start), at(anchor.end)];
+      if (start !== undefined && end !== undefined)
+        ranges.set(key, [...(ranges.get(key) ?? []), [start, end]]);
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Refuses when a comment would cover other content of the latest state in the
+ * rebased one, but where the export settles a range: a boundary inside a
+ * field's projected children or splitting a link moves to its edge. A field
+ * deleted after the capture leaves its children plain, so the range the
+ * export widened over them no longer matches what a direct save writes.
+ */
+function assertCommentsCover(
+  later: Y.Doc,
+  story: string,
+  source: Y.Text,
+  doc: Y.Doc,
+  targetStory: string,
+  target: Y.Text
+): void {
+  const from = commentRanges(later, story);
+  if (!from.size) return;
+  const to = commentRanges(doc, targetStory);
+  const attributes = unitAttributes(source);
+  const same = (a: number, b: number, key: string) =>
+    JSON.stringify(attributes[a]?.[key] ?? null) === JSON.stringify(attributes[b]?.[key] ?? null);
+  // A unit a settled boundary may move over: a projected child, or a link
+  // unit in the same link (and child) as the unit across a boundary.
+  const settles = (unit: number, edges: number[]) =>
+    attributes[unit]?.fieldResult != null ||
+    (attributes[unit]?.hyperlink != null &&
+      edges.some(
+        (edge) =>
+          attributes[edge - 1]?.hyperlink != null &&
+          edge < attributes.length &&
+          same(edge - 1, edge, "hyperlink") &&
+          same(edge - 1, edge, "fieldResult")
+      ));
+  let f: Alignment;
+  try {
+    f = align(units(source), units(target));
+  } catch {
+    return;
+  }
+  for (const [key, ranges] of from) {
+    const landed = to.get(key);
+    if (!landed) continue;
+    const edges = ranges.flat();
+    const inside = (at: number, spans: Array<[number, number]>) => spans.some(([start, end]) => start <= at && at < end);
+    for (let unit = 0; unit < f.map.length; unit++) {
+      const at = f.map[unit]!;
+      if (at < 0) continue;
+      if (inside(unit, ranges) !== inside(at, landed) && !settles(unit, edges))
+        fail("a comment would cover other content than the latest state's");
+    }
+  }
+}
 
 /**
  * The page and column break units opening each paragraph that follows
