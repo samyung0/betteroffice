@@ -268,22 +268,6 @@ impl EditingDoc {
             &at.story,
             self.inline_landing(&at.story, at.index, at.index)?,
         );
-        if !text.is_empty()
-            && !ctx.is_suggesting()
-            && self
-                .segment_index(&at.story)?
-                .result_continues_before(at.index)
-        {
-            let mut txn = self.transact_for(ctx);
-            let story = story_ref(&txn, &at.story)?;
-            let field = crate::raw::embed_at(&story, &txn, at.index - 1)?;
-            crate::ops::field_changes::append_result_text(&mut txn, &field, text)?;
-            let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index)?;
-            return Ok(Receipt {
-                range: Some(range),
-                ..Receipt::default()
-            });
-        }
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;

@@ -36,8 +36,6 @@ pub(crate) enum SegKind {
         /// A field whose code continues into the next paragraph: everything
         /// after it in its paragraph is that code.
         code_continues: bool,
-        /// A field whose result continues into the next paragraph.
-        result_continues: bool,
     },
 }
 
@@ -101,7 +99,6 @@ impl SegmentIndex {
                         })
                     };
                     let code_continues = flag("separate");
-                    let result_continues = !code_continues && flag("end");
                     let block = is_block_embed(&kind);
                     if len == node_start && block {
                         node_start = len + 1;
@@ -109,7 +106,6 @@ impl SegmentIndex {
                     SegKind::Embed {
                         container: matches!(kind.as_str(), "table" | "blockSdt"),
                         code_continues,
-                        result_continues,
                     }
                 }
             };
@@ -125,22 +121,6 @@ impl SegmentIndex {
             paras,
             by_para,
         }
-    }
-
-    /// Whether the unit right before `index` is a field whose result continues
-    /// into the next paragraph.
-    pub(crate) fn result_continues_before(&self, index: u32) -> bool {
-        index > 0
-            && self.segment_at(index - 1).is_some_and(|seg| {
-                seg.start == index - 1
-                    && matches!(
-                        seg.kind,
-                        SegKind::Embed {
-                            result_continues: true,
-                            ..
-                        }
-                    )
-            })
     }
 
     /// The first field in `[from, to)` whose code continues into the next paragraph.

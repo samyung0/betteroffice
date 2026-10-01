@@ -676,44 +676,6 @@ pub(crate) fn split_field(
     Ok(())
 }
 
-/// Text typed right after a field whose result continues into the next
-/// paragraph goes into that result, as the save and Word put it: a run
-/// appended to the field's result and shown with it.
-pub(crate) fn append_result_text(
-    txn: &mut TransactionMut<'_>,
-    field: &yrs::MapRef,
-    text: &str,
-) -> OpResult<()> {
-    let Some(Ok(mut data)) =
-        map_string(field, txn, "fieldData").map(|data| serde_json::from_str::<Value>(&data))
-    else {
-        return Err(OpError::InvalidUpdate(
-            "the field holds no field data".into(),
-        ));
-    };
-    let run = serde_json::json!({
-        "type": "run",
-        "content": [{"type": "text", "text": text, "preserveSpace": true}],
-    });
-    for key in [["structuredResult", "inline"], ["fieldTree", "result"]] {
-        let target = if key[0] == "fieldTree" {
-            &mut data["fieldTree"]["result"]["inline"]
-        } else {
-            &mut data["structuredResult"]["inline"]
-        };
-        if let Some(nodes) = target.as_array_mut() {
-            nodes.push(run.clone());
-        }
-    }
-    if let Some(runs) = data["fieldResult"].as_array_mut() {
-        runs.push(run);
-    }
-    let shown = map_string(field, txn, "displayText").unwrap_or_default();
-    field.insert(txn, "displayText", format!("{shown}{text}"));
-    field.insert(txn, "fieldData", data.to_string());
-    Ok(())
-}
-
 /// The text runs show, tabs as tab characters.
 fn runs_text(runs: &[Value]) -> String {
     runs.iter()

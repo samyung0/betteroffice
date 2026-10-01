@@ -80,7 +80,9 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   after a capture land with that marker order instead of refusing.
 - `unstable` rows with two editor comments ending at one point: their markers reorder on the second publication.
 - `moved` rows in `docx-fields` (accepted, round 2): Enter between a projected link and its field when the field's
-  result holds a kept tracked insertion stays as it was, saving the link outside the field.
+  result holds a kept tracked insertion stays as it was, saving the link outside the field. Text typed at the end of
+  a paragraph whose field result continues into the next saves inside that result, as Word does, while the editor
+  shows it after the field (round 2 review D reverted V; it is on the follow-up list).
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
     simple field before a capture, which shares that field's result slot the export's seed splits (accepted like
@@ -92,7 +94,9 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   - Undo restoring a continued field whose separate and end the export dropped, and a comment the rebase would lose
     with its reference, or whose range typing left ending before it starts (round 2 review);
   - the capture's save writing a new comment's reference ahead of breaks that open the latest paragraph, or ahead
-    of bookmarks at a paragraph's start (round 2 review B, N).
+    of bookmarks at a paragraph's start (round 2 review B, N);
+  - an Enter taken after a capture that splits a field holding a tracked move after the split point (accepted,
+    round 2 review D).
 
   The break-flag refusal (R10-N1, 2026-09-30) no longer fires for a text-less paragraph's own breaks, which lead text
   typed after them in the editor too, nor for a column break a comment boundary precedes (round 2).
