@@ -379,6 +379,43 @@ pub(crate) fn removes_owner<T: ReadTxn>(
         .is_some_and(|owner| (start..end).contains(&owner.start))
 }
 
+/// Adds `by` to the numbers of the projecting fields in `start..end` and of
+/// their children: the seed numbers a field by its place in its saved
+/// paragraph, so markers written ahead of it move it on.
+pub(crate) fn renumber_fields(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    start: u32,
+    end: u32,
+    by: i64,
+) {
+    if by == 0 {
+        return;
+    }
+    for chunk in crate::ops::snapshot_range(story, txn, start, end) {
+        if let Some((id, index)) = field_result_attr(&chunk) {
+            let marker = Any::from(HashMap::from([
+                ("id".to_owned(), Any::from(id + by)),
+                ("index".to_owned(), Any::from(index)),
+            ]));
+            story.format(
+                txn,
+                chunk.start,
+                chunk.len,
+                Attrs::from([(Arc::from(FIELD_RESULT), marker)]),
+            );
+        } else if projection(txn, &chunk).is_some()
+            && let ChunkKind::Embed(Some(map)) = &chunk.kind
+            && let Some(Out::Any(Any::Map(value))) = map.get(txn, "resultProjection")
+            && let Some(Any::Number(id)) = value.get("id")
+        {
+            let mut value = (*value).clone();
+            value.insert("id".to_owned(), Any::from(*id + by as f64));
+            map.insert(txn, "resultProjection", Any::Map(Arc::new(value)));
+        }
+    }
+}
+
 /// Clears the `fieldResult` markers of the children of the projecting field
 /// embeds in `start..end` of `story`, which a delete is about to remove: the
 /// children right before each that carry its number. A child whose field is

@@ -713,7 +713,7 @@ impl EditingDoc {
                         .is_some_and(|kind| kind.as_deref() == Some("columnBreak"));
                 let ahead = if start == 0 && only_breaks { 0 } else { breaks };
                 move_bookmarks(&mut txn, &boundary.map, &survivor.map, ahead);
-                crate::bookmarks::move_range(
+                let moved = crate::bookmarks::move_range(
                     &mut txn,
                     &story,
                     &boundary.story_id,
@@ -721,6 +721,14 @@ impl EditingDoc {
                     to,
                     survivor.bounds.start + (breaks - ahead) as u32,
                 )?;
+                // The save writes them ahead of the survivor's fields.
+                crate::ops::field_changes::renumber_fields(
+                    &mut txn,
+                    &story,
+                    survivor.bounds.start,
+                    survivor.bounds.pilcrow,
+                    moved as i64,
+                );
             }
             let mut revision_id = None;
             // Units removed ahead of the paragraph mark: the caret shifts by them.

@@ -1773,3 +1773,47 @@ test("coincident continued-field markers keep their source order in the editor",
     session.destroy();
   }
 });
+
+/** Types Q inside the projected child holding `text`, in whichever paragraph it is. */
+function typeInChild(session: YrsSession, text: string) {
+  let offset = 0;
+  let found: number | undefined;
+  for (const segment of session.storySegments("body")) {
+    if (segment.kind === "pilcrow") {
+      if (found !== undefined) return void session.insertText({ story: "body", paraId: segment.paraId, offset: found }, "Q");
+      offset = 0;
+      continue;
+    }
+    if (found === undefined && segment.kind === "text" && segment.attributes.fieldResult && segment.text.includes(text))
+      found = offset + segment.text.indexOf(text) + 1;
+    offset += segment.kind === "text" ? segment.text.length : 1;
+  }
+  throw new Error(`no projected child holds ${text}`);
+}
+const holder = p("55555555", bookmarkStart(5) + bookmarkEnd(5));
+const tocFields = field(link(run("26"))) + field(link(run("30")));
+const handOff = (session: YrsSession) => session.deleteAt({ story: "body", paraId: "55555555", offset: 0 }, "forward");
+// R6-N1: the hand-off writes the bookmarks ahead of the survivor's fields, so it renumbers them as the export's seed does.
+test.each([
+  ["a paragraph before", p("33333333", run("prev")) + holder + p("44444444", pageBreak + tocFields)],
+  ["the story start", holder + p("44444444", pageBreak + tocFields)],
+  ["a column break after the page break", p("33333333", run("prev")) + holder + p("44444444", pageBreak + `<w:r><w:br w:type="column"/></w:r>` + tocFields)],
+  ["text before the fields", p("33333333", run("prev")) + holder + p("44444444", pageBreak + run("a") + tocFields)],
+  ["a table instead of the break", p("33333333", run("prev")) + holder + `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>${p("12121212", run("cell"))}</w:tc></w:tr></w:tbl>` + p("44444444", tocFields)],
+])("typing in a field's link after a captured bookmark hand-off with %s lands exactly", async (_, body) => {
+  const bytes = docx(body + tail);
+  const session = await open(bytes);
+  handOff(session);
+  const captured = session.encodeState();
+  const exported = await publish(bytes, captured);
+  typeInChild(session, "30");
+  const latest = session.encodeState();
+  session.destroy();
+  const direct = documentXml(await publish(bytes, latest));
+  const { state } = await rebaseOffice(bytes, checkpoint(bytes, captured), checkpoint(bytes, latest), exported);
+  const rebased = await open(exported, state);
+  const next = await publish(exported, rebased.encodeState());
+  rebased.destroy();
+  expect(documentXml(next)).toBe(direct);
+  expect(view(next, "44444444")).toContain("H(3Q0)");
+});

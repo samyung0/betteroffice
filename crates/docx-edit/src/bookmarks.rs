@@ -208,7 +208,8 @@ fn marker_key(
 }
 
 /// Removing an empty paragraph before a block hands its markers to the
-/// surviving paragraph, on the same side of its breaks as the save.
+/// surviving paragraph, on the same side of its breaks as the save, and
+/// returns how many moved.
 pub(crate) fn move_range(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -216,14 +217,15 @@ pub(crate) fn move_range(
     from: u32,
     to: u32,
     target: u32,
-) -> OpResult<()> {
-    for (_, data) in positions(txn, story_id)
+) -> OpResult<usize> {
+    let moving: Vec<_> = positions(txn, story_id)
         .into_iter()
         .filter(|(at, _)| *at >= from && *at < to)
-    {
-        set(txn, story, story_id, target, data)?;
+        .collect();
+    for (_, data) in &moving {
+        set(txn, story, story_id, target, data.clone())?;
     }
-    Ok(())
+    Ok(moving.len())
 }
 
 /// The save's paragraph-relative offsets, computed from live anchors. A
