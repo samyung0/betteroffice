@@ -152,6 +152,12 @@ const ENDPARA_ADDS: Record<string, Edit> = {
   "add C prev..44@0": by("C", [PREV, 0], [H, 0]),
 };
 
+// ---- H (round 2): a source comment's reference opens a heading; editor comments end before it and cover it, then
+// the heading's first units go after a capture.
+const H_FILE = { "src <prev¶ ER Heading (no break)": `${p33(`${S()}${run("prev")}`)}${p44(`${E()}${ref()}${run("Heading")}`)}` };
+const H_COVER = { "ed prev..44@0 + ed over 44@0..1": both(ed([PREV, 0], at(0)), ed([H, 0], at(1))) };
+const H_EDIT = [["delete 44 units 0..2", ((s, st) => s.deleteRange({ story: st, start: { paraId: H, offset: 0 }, end: { paraId: H, offset: 2 } })) as Edit]] as const;
+
 function rows(): Row[] {
   const out: Row[] = [];
   const untouched = new Set<string>();
@@ -186,6 +192,7 @@ function rows(): Row[] {
     for (const [fname, xml, before, afters] of STALE)
       for (const [aname, after] of Object.entries(afters))
         out.push({ id: `${where} | ${fname} | ${aname} | setup<cap<edit`, bytes: docx(where, xml), where, before, after });
+    grid(where, H_FILE, H_COVER, H_EDIT);
     for (const [fname, xml] of Object.entries(ENDPARA))
       for (const [aname, after] of Object.entries(ENDPARA_ADDS))
         for (const [bname, before] of Object.entries({ "no earlier comment": none, "B on pr before": cB }))

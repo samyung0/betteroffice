@@ -127,11 +127,36 @@ export const DOCX_LINEAGE: Lineage = {
       if (source instanceof Y.Text && target instanceof Y.Text) {
         assertChildrenLanded(source, target);
         assertBreaksLead(source, target);
-        assertCommentsCover(later, key, source, doc, id(key), target);
+        assertCommentsCover(later, key, source, doc, id(key), target, id);
+        assertContinuationsKept(doc, id(key), target);
       }
     }
   },
 };
+
+/**
+ * Refuses when a field the rebased story holds continues in a later paragraph
+ * without its separate or end there: the export would leave it unbalanced
+ * (Undo restoring a field whose continued characters the export dropped).
+ */
+function assertContinuationsKept(doc: Y.Doc, story: string, target: Y.Text): void {
+  const bookmarks = doc.getMap("bookmarks");
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (!value || typeof value !== "object") return;
+    const node = value as Record<string, unknown>;
+    const continuation = node.continuation as { id?: string; separate?: boolean; end?: boolean } | undefined;
+    if (node.type === "complexField" && continuation?.id)
+      for (const kind of ["separate", "end"] as const)
+        if (continuation[kind] && !bookmarks.has(`${story}:${continuation.id}:field${kind}`))
+          fail("a continued field would lose its separate or end");
+    Object.values(node).forEach(visit);
+  };
+  for (const [, embed] of embeds(target)) {
+    const data = embed.get("fieldData");
+    if (typeof data === "string" && data.includes('"continuation"')) visit(JSON.parse(data));
+  }
+}
 
 /** Each comment's ranges in story `story` of `doc`, as absolute offsets. */
 function commentRanges(doc: Y.Doc, story: string): Map<string, Array<[number, number]>> {
@@ -164,7 +189,8 @@ function assertCommentsCover(
   source: Y.Text,
   doc: Y.Doc,
   targetStory: string,
-  target: Y.Text
+  target: Y.Text,
+  id: (value: string) => string
 ): void {
   const from = commentRanges(later, story);
   if (!from.size) return;
@@ -191,8 +217,8 @@ function assertCommentsCover(
     return;
   }
   for (const [key, ranges] of from) {
-    const landed = to.get(key);
-    if (!landed) continue;
+    const landed = to.get(id(key)) ?? to.get(key);
+    if (!landed) fail("a comment would lose its range");
     const edges = ranges.flat();
     const inside = (at: number, spans: Array<[number, number]>) => spans.some(([start, end]) => start <= at && at < end);
     for (let unit = 0; unit < f.map.length; unit++) {

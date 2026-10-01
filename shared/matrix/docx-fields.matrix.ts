@@ -187,6 +187,24 @@ const REF_OPS: Record<string, Edit> = {
   "clear formatting on the first A": (s, st) => s.clearFormatting({ story: st, start: aa(s, st), end: aa(s, st, 1) }),
 };
 
+// Joins collapsing bookmarks and continued fields, then Undo and Redo (round 2 F and G, the review's C rows).
+const fc = (type: string) => `<w:r><w:fldChar w:fldCharType="${type}"/></w:r>`;
+const bs = (id: number) => `<w:bookmarkStart w:id="${id}" w:name="m${id}"/>`;
+const be = (id: number) => `<w:bookmarkEnd w:id="${id}"/>`;
+const JOINS: Record<string, [string, Edit]> = {
+  "nested continued field": [
+    p("11111111", run("a") + fc("begin") + instr(" IF ") + fc("begin") + instr(" PAGE ")) +
+      p(P, fc("separate") + run("one") + fc("end") + bs(5) + fc("separate") + be(5) + run("yes") + fc("end") + run("z")),
+    (s, st) => void s.deleteRange({ story: st, start: { paraId: "11111111", offset: 1 }, end: { paraId: P, offset: 0 } }),
+  ],
+  "bookmarks collapsing": [
+    p("11111111", run("ab") + bs(3) + bs(4) + run("c")) + p(P, run("d") + bs(5) + be(3) + run("e") + be(4) + be(5) + run("f")),
+    (s, st) => void s.deleteRange({ story: st, start: { paraId: "11111111", offset: 2 }, end: { paraId: P, offset: 2 } }),
+  ],
+};
+const undo: Edit = (s) => void s.undo();
+const redo: Edit = (s) => void s.redo();
+
 function rows(): Row[] {
   const out: Row[] = [];
   const push = (where: Where, xml: string, id: string, setup: Edit | null, edit: Edit) => {
@@ -212,6 +230,15 @@ function rows(): Row[] {
       if (name.includes("¶"))
         push(where, xml, `${name} | join the paragraphs`, null, (s, st) =>
           void s.deleteAt({ story: st, paraId: P, offset: s.paragraphSpans(st).find((x) => x.paraId === P)!.length }, "forward"));
+    }
+  for (const where of ["body", "cell", "header"] as Where[])
+    for (const [name, [xml, join]] of Object.entries(JOINS)) {
+      push(where, xml, `join ${name}`, null, join);
+      push(where, xml, `join ${name}, undo`, join, undo);
+      push(where, xml, `join ${name}, undo, redo`, join, (s, st) => {
+        undo(s, st);
+        redo(s, st);
+      });
     }
   return out;
 }

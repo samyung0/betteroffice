@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { units as matrixUnits, sig } from "./matrix/lib";
+import { docx as matrixDocx, prime, runRow, units as matrixUnits, sig } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -1928,4 +1928,43 @@ test("deleting a field after Accept all uncovered its link under a comment lands
   const { next, direct } = result as { next: string; direct: string };
   expect(direct).toContain("L(26)<c1");
   expect(next).toBe(direct);
+});
+
+// Round 2 G: Undo of a join restores bookmarks where the save writes them.
+test("Undo of a join collapsing bookmarks leaves them where the save writes them", async () => {
+  const bytes = docx(
+    p("11111111", run("ab") + bookmarkStart(3) + bookmarkStart(4) + run("c")) +
+      p("33333333", run("d") + bookmarkStart(5) + bookmarkEnd(3) + run("e") + bookmarkEnd(4) + bookmarkEnd(5) + run("f")) +
+      tail
+  );
+  const placed = (session: YrsSession) =>
+    session.paragraphs("body").map(({ properties }) =>
+      ((properties.bookmarks ?? []) as Array<{ kind: string; id: unknown; offset: number }>).map(({ kind, id, offset }) => `${kind}${id}@${offset}`).join(" ")
+    );
+  const session = await open(bytes);
+  session.deleteRange({ story: "body", start: { paraId: "11111111", offset: 2 }, end: { paraId: "33333333", offset: 2 } });
+  expect(session.undo()).toBe(true);
+  const editor = placed(session);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  const reopened = await open(saved);
+  expect(placed(reopened)).toEqual(editor);
+  reopened.destroy();
+});
+
+// Round 2 F: a join removing a nested continued field's paragraph, then Undo after a capture: the rebased state
+// holds the restored fields only with their continued separate and end, or the rebase refuses.
+test("Undo of a join removing a nested continued field lands exactly or refuses, in every story", async () => {
+  await prime();
+  for (const where of ["body", "cell", "header"] as const) {
+    const row = await runRow({
+      id: `nested continued join, undo in ${where}`,
+      bytes: matrixDocx(where, nestedContinued),
+      where,
+      before: (session, story) =>
+        void session.deleteRange({ story, start: { paraId: "11111111", offset: 1 }, end: { paraId: "33333333", offset: 0 } }),
+      after: (session) => void session.undo(),
+    });
+    expect(row.cls).not.toStartWith("silent");
+  }
 });

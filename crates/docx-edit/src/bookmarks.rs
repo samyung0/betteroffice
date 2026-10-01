@@ -4,7 +4,9 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use yrs::{Any, Assoc, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, TransactionMut};
+use yrs::{
+    Any, Assoc, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, Transact, TransactionMut,
+};
 
 use crate::op::{OpError, OpResult};
 use crate::ops::{ChunkKind, snapshot};
@@ -78,6 +80,49 @@ pub(crate) fn set(
     entry.insert(txn, "data", data);
     entry.insert(txn, "anchors", anchors);
     Ok(())
+}
+
+/// Re-anchors every bookmark where it stands now. Undo restores deleted text
+/// as new items; markers anchored to the deleted ones resolve through them
+/// only in this session, so a reopened state would place them elsewhere.
+pub(crate) fn rebind(doc: &yrs::Doc) {
+    let mut txn = doc.transact_mut_with("system");
+    let Some(root) = txn.get_map(ROOT) else {
+        return;
+    };
+    // Continued field characters go with their fields' own items.
+    let entries: Vec<_> = root
+        .iter(&txn)
+        .filter_map(|(_, value)| match value {
+            Out::YMap(entry)
+                if !matches!(entry.get(&txn, "data"), Some(Out::Any(Any::Map(data)))
+                    if matches!(data.get("id"), Some(Any::String(_)))) =>
+            {
+                Some(entry)
+            }
+            _ => None,
+        })
+        .collect();
+    for entry in entries {
+        let Some(Out::Any(Any::Array(anchors))) = entry.get(&txn, "anchors") else {
+            continue;
+        };
+        let mut changed = false;
+        let mut rebound = Vec::with_capacity(anchors.len());
+        for encoded in anchors.iter() {
+            let fresh = decode_anchor(encoded).ok().and_then(|anchor| {
+                let story = crate::story_ref(&txn, &anchor.story).ok()?;
+                let index = anchor.start.get_offset(&txn)?.index;
+                let sticky = story.sticky_index(&mut txn, index, anchor.start.assoc)?;
+                (sticky != anchor.start).then(|| anchor_value(&anchor.story, &sticky, &sticky))
+            });
+            changed |= fresh.is_some();
+            rebound.push(fresh.unwrap_or_else(|| encoded.clone()));
+        }
+        if changed {
+            entry.insert(&mut txn, "anchors", Any::Array(Arc::from(rebound)));
+        }
+    }
 }
 
 pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> {

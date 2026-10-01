@@ -80,6 +80,7 @@ impl Clock for CaptureClock {
 /// The contract-shaped undo surface over yrs [`yrs::undo::UndoManager`].
 pub struct DocUndoManager {
     inner: yrs::undo::UndoManager<()>,
+    doc: yrs::Doc,
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
     clock: Arc<CaptureClock>,
@@ -157,6 +158,7 @@ impl DocUndoManager {
         Self {
             clock,
             inner,
+            doc: doc.yrs_doc().clone(),
             changed_stories,
             _popped: popped,
         }
@@ -176,12 +178,20 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
-        self.inner.undo_blocking()
+        let applied = self.inner.undo_blocking();
+        if applied {
+            crate::bookmarks::rebind(&self.doc);
+        }
+        applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
-        self.inner.redo_blocking()
+        let applied = self.inner.redo_blocking();
+        if applied {
+            crate::bookmarks::rebind(&self.doc);
+        }
+        applied
     }
 
     pub fn can_undo(&self) -> bool {

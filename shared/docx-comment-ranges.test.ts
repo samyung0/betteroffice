@@ -937,3 +937,28 @@ test.each([
   );
   expect(seen.map((ranges) => ranges.c)).toEqual([text, text, text]);
 });
+
+// Round 2 H: a source comment's reference opens a heading; editor comments end before it and cover it. Deleting the
+// heading's first units after a capture empties the covering comment: the rebase keeps it as the direct save does,
+// or refuses.
+test("an emptied editor comment over a source reference survives the rebase or refuses, in every story", async () => {
+  await prime();
+  for (const where of ["body", "control", "cell", "header", "footer", "footnote", "headerCell", "endnote"] as const) {
+    const bytes = matrixDocx(
+      where,
+      matrixParagraph("33333333", `${S(1)}${matrixRun("prev")}`) + matrixParagraph("44444444", `${E(1)}${ref(1)}${matrixRun("Heading")}`)
+    );
+    const row = await runRow({
+      id: `emptied over a source reference in ${where}`,
+      bytes,
+      where,
+      before: (session, story) => {
+        matrixComment(session, story, ["33333333", 0], ["44444444", 0]);
+        matrixComment(session, story, ["44444444", 0], ["44444444", 1]);
+      },
+      after: (session, story) =>
+        session.deleteRange({ story, start: { paraId: "44444444", offset: 0 }, end: { paraId: "44444444", offset: 2 } }),
+    });
+    expect(row.cls).not.toStartWith("silent");
+  }
+});
