@@ -203,12 +203,13 @@ function assertCommentsCover(
     text instanceof Y.Text && ranges
       ? ranges.map(([start, end]) => units(text).ids.slice(start, end).join(",")).join("|")
       : undefined;
+  const reversed = (ranges: Array<[number, number]> | undefined) => (ranges ?? []).some(([start, end]) => start > end);
   const touched = (key: string) => {
     const before = covers(capturedText, was.get(key));
     return (
       before === undefined ||
       before !== covers(source, from.get(key)) ||
-      (from.get(key) ?? []).some(([start, end]) => start > end)
+      (reversed(from.get(key)) && !reversed(was.get(key)))
     );
   };
   const to = commentRanges(doc, targetStory);
@@ -293,13 +294,6 @@ function breakSlots(text: Y.Text): Array<Array<[number, Y.Map<unknown>]>> {
   return slots;
 }
 
-/**
- * Refuses when the seed reads a break opening a paragraph as leading its
- * text where the latest state does not: the capture's save wrote a comment's
- * reference mark after the paragraph's breaks while it held nothing else, and
- * text followed them only later. Saved directly, such breaks close the
- * paragraph before; the rebased state would keep them opening this one.
- */
 /** Offsets of the bookmark boundaries (not continued field characters) in story `story` of `doc`. */
 function bookmarkOffsets(doc: Y.Doc, story: string): number[] {
   const found: number[] = [];
@@ -336,6 +330,13 @@ function assertReferencesBeforeBookmarks(source: Y.Text, target: Y.Text, doc: Y.
   });
 }
 
+/**
+ * Refuses when the seed reads a break opening a paragraph as leading its
+ * text where the latest state does not: the capture's save wrote a comment's
+ * reference mark after the paragraph's breaks while it held nothing else, and
+ * text followed them only later. Saved directly, such breaks close the
+ * paragraph before; the rebased state would keep them opening this one.
+ */
 function assertBreaksLead(source: Y.Text, target: Y.Text, later: Y.Doc, story: string): void {
   const leads = (unit: unknown) =>
     unit instanceof Y.Map && unit.get("leading") === true;

@@ -1018,3 +1018,23 @@ test("an edit after a capture away from a comment the export settled lands", asy
     expect(row.cls).not.toStartWith("silent");
   }
 });
+
+// Round 2 review C, S: a comment range typing left reversed before the capture is no edit after it: typing elsewhere
+// after the capture lands.
+test("a comment range reversed before a capture lets unrelated edits after it land", async () => {
+  await prime();
+  for (const where of ["body", "cell", "header"] as MatrixWhere[]) {
+    const row = await runRow({
+      id: `reversed range in ${where}`,
+      bytes: matrixDocx(where, reviewB["prev¶<bm/>[PB][CB]¶next"]!),
+      where,
+      before: (session, story) => {
+        matrixComment(session, story, ["44444444", 0], ["44444444", matrixLen(session, story, "44444444")]);
+        session.insertText(endOf44(session, story), "Q");
+      },
+      after: (session) => void session.insertText({ story: "body", paraId: "22222222", offset: 0 }, "z"),
+    });
+    expect(row.cls).not.toStartWith("refused");
+    expect(row.cls).not.toStartWith("silent");
+  }
+});

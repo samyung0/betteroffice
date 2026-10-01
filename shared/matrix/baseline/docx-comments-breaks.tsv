@@ -16,10 +16,10 @@ body | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | edit<cap<tai
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | setup<cap<edit	refused+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | none | setup<cap	timing+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | cap<setup+edit	exact+unstable
-body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	refused+unstable
+body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	timing+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | setup<cap<edit	refused+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
-body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	refused+unstable
+body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	timing+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | setup<cap<edit	refused+unstable
 body | prev¶<bm/>[PB][CB]¶next | ed prev..44@0 | join next into 44 | setup<cap<edit	refused
 body | prev¶<bm>[CB]</bm>¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
@@ -207,10 +207,10 @@ cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | edit<cap<tai
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | setup<cap<edit	refused+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | none | setup<cap	timing+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | cap<setup+edit	exact+unstable
-cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	refused+unstable
+cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	timing+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | setup<cap<edit	refused+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
-cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	refused+unstable
+cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	timing+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | setup<cap<edit	refused+unstable
 cell | prev¶<bm/>[PB][CB]¶next | ed prev..44@0 | join next into 44 | setup<cap<edit	refused
 cell | prev¶<bm>[CB]</bm>¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
@@ -398,10 +398,10 @@ header | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | edit<cap<t
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | join next into 44 | setup<cap<edit	refused+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | none | setup<cap	timing+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | cap<setup+edit	exact+unstable
-header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	refused+unstable
+header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | edit<cap<tail	timing+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q at 44 end | setup<cap<edit	refused+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
-header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	refused+unstable
+header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | edit<cap<tail	timing+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed over 44 | type Q, Backspace before Q | setup<cap<edit	refused+unstable
 header | prev¶<bm/>[PB][CB]¶next | ed prev..44@0 | join next into 44 | setup<cap<edit	refused
 header | prev¶<bm>[CB]</bm>¶next | ed over 44 | type Q, Backspace before Q | cap<setup+edit	exact+unstable
