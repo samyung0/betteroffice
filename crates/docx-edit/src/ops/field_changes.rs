@@ -771,56 +771,6 @@ pub(crate) fn rejoin_fields(
             )
         })
         .collect();
-    let mut slot = units
-        .last()
-        .map(|(chunk, index, _)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
-    for chunk in chunks[position + 1..]
-        .iter()
-        .take_while(|chunk| chunk.start < target)
-    {
-        // A projected simple field takes a slot of its own.
-        let field = matches!(&chunk.kind, ChunkKind::Embed(Some(map))
-            if map_string(map, txn, KIND_KEY).as_deref() == Some("field"));
-        let link = chunk
-            .attrs
-            .get(HYPERLINK)
-            .filter(|link| **link != Any::Null)
-            .cloned()
-            .or_else(|| field.then(|| Any::from(format!("field@{}", chunk.start))))
-            // Result text the split moved out takes its own slot too.
-            .or_else(|| {
-                matches!(chunk.kind, ChunkKind::Text(_))
-                    .then(|| Any::from(format!("text@{}", chunk.start)))
-            });
-        if link.is_none() || !matches!(chunk.kind, ChunkKind::Text(_) | ChunkKind::Embed(Some(_))) {
-            return Ok(());
-        }
-        let index = match &slot {
-            Some((index, previous)) if *previous == link => *index,
-            Some((index, _)) => match recorded.iter().find(|next| **next > *index) {
-                Some(next) => *next,
-                None => return Ok(()),
-            },
-            None => match recorded.iter().find(|next| **next >= 0) {
-                Some(next) => *next,
-                None => return Ok(()),
-            },
-        };
-        slot = Some((index, link));
-        units.push((chunk, index, chunk.len.min(target - chunk.start)));
-    }
-    if ends_here.is_some() {
-        if data["continuation"]["separate"] == Value::Bool(true) {
-            data["continuation"]["end"] = Value::Bool(false);
-        } else if let Some(field) = data.as_object_mut() {
-            field.remove("continuation");
-        }
-        if let Some(root) = txn.get_map(crate::bookmarks::ROOT) {
-            root.remove(txn, &format!("{story_id}:{continuation}:fieldend"));
-        }
-    }
-    // Text whose slot the seed shows as the field's own result (any but runs
-    // after a projected simple field) goes back into the field.
     let inline = data["structuredResult"]["inline"]
         .as_array()
         .cloned()
@@ -836,15 +786,96 @@ pub(crate) fn rejoin_fields(
             })
             .unwrap_or(false)
     };
-    let (folded, units): (Vec<_>, Vec<_>) = units.into_iter().partition(|(chunk, index, _)| {
-        chunk.start > owner.start
-            && matches!(chunk.kind, ChunkKind::Text(_))
-            && !chunk.attr_active(HYPERLINK)
-            && !projected_run(*index)
-    });
+    let mut slot = units
+        .last()
+        .map(|(chunk, index, _)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
+    // Result text the split moved out goes back as the runs it came from, in
+    // order; anything else (text typed between the halves) keeps the split.
+    let mut folded: Vec<(&Chunk, u32)> = Vec::new();
+    let mut runs: Vec<(u32, i64, u32)> = Vec::new();
+    let mut dropped: Vec<i64> = Vec::new();
+    for chunk in chunks[position + 1..]
+        .iter()
+        .take_while(|chunk| chunk.start < target)
+    {
+        // A projected simple field takes a slot of its own.
+        let field = matches!(&chunk.kind, ChunkKind::Embed(Some(map))
+            if map_string(map, txn, KIND_KEY).as_deref() == Some("field"));
+        let link = chunk
+            .attrs
+            .get(HYPERLINK)
+            .filter(|link| **link != Any::Null)
+            .cloned()
+            .or_else(|| field.then(|| Any::from(format!("field@{}", chunk.start))));
+        let len = chunk.len.min(target - chunk.start);
+        if let (None, ChunkKind::Text(text)) = (&link, &chunk.kind) {
+            let mut left = String::from_utf16_lossy(
+                &text.encode_utf16().take(len as usize).collect::<Vec<_>>(),
+            );
+            let mut last = slot.as_ref().map_or(-1, |(index, _)| *index);
+            let mut taken = Vec::new();
+            let mut lengths = Vec::new();
+            while !left.is_empty() {
+                let Some(next) = recorded.iter().copied().find(|next| *next > last) else {
+                    return Ok(());
+                };
+                let node = inline.get(next as usize).cloned().unwrap_or(Value::Null);
+                let own = runs_text(std::slice::from_ref(&node));
+                if node["type"] != "run" || own.is_empty() || !left.starts_with(&own) {
+                    return Ok(());
+                }
+                left = left[own.len()..].to_owned();
+                taken.push(next);
+                lengths.push(own.encode_utf16().count() as u32);
+                last = next;
+            }
+            if taken.iter().any(|index| projected_run(*index)) {
+                // Runs the seed projects after a simple field are children,
+                // each in its own slot.
+                if !taken.iter().all(|index| projected_run(*index)) {
+                    return Ok(());
+                }
+                let mut at = chunk.start;
+                for (index, run) in taken.iter().zip(&lengths) {
+                    runs.push((at, *index, *run));
+                    at += run;
+                }
+            } else {
+                folded.push((chunk, len));
+                dropped.extend(&taken);
+            }
+            slot = Some((last, None));
+            continue;
+        }
+        if link.is_none() || !matches!(chunk.kind, ChunkKind::Text(_) | ChunkKind::Embed(Some(_))) {
+            return Ok(());
+        }
+        let index = match &slot {
+            Some((index, previous)) if *previous == link => *index,
+            Some((index, _)) => match recorded.iter().find(|next| **next > *index) {
+                Some(next) => *next,
+                None => return Ok(()),
+            },
+            None => match recorded.iter().find(|next| **next >= 0) {
+                Some(next) => *next,
+                None => return Ok(()),
+            },
+        };
+        slot = Some((index, link));
+        units.push((chunk, index, len));
+    }
+    if ends_here.is_some() {
+        if data["continuation"]["separate"] == Value::Bool(true) {
+            data["continuation"]["end"] = Value::Bool(false);
+        } else if let Some(field) = data.as_object_mut() {
+            field.remove("continuation");
+        }
+        if let Some(root) = txn.get_map(crate::bookmarks::ROOT) {
+            root.remove(txn, &format!("{story_id}:{continuation}:fieldend"));
+        }
+    }
     let mut overrides: Vec<(String, Any)> = Vec::new();
     if !folded.is_empty() {
-        let dropped: Vec<i64> = folded.iter().map(|(_, index, _)| *index).collect();
         recorded.retain(|index| !dropped.contains(index));
         let shown = shown_runs(
             &inline
@@ -874,18 +905,20 @@ pub(crate) fn rejoin_fields(
             ));
         }
     }
-    for (chunk, index, len) in units
+    for (start, index, len) in units
         .iter()
         .filter(|(chunk, _, _)| chunk.start > owner.start)
+        .map(|(chunk, index, len)| (chunk.start, *index, *len))
+        .chain(runs)
     {
         let marker = Any::from(HashMap::from([
             ("id".to_owned(), Any::Number(id as f64)),
-            ("index".to_owned(), Any::Number(*index as f64)),
+            ("index".to_owned(), Any::Number(index as f64)),
         ]));
         story.format(
             txn,
-            chunk.start,
-            *len,
+            start,
+            len,
             Attrs::from([(Arc::from(FIELD_RESULT), marker)]),
         );
     }
@@ -906,7 +939,7 @@ pub(crate) fn rejoin_fields(
         .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
         .collect();
     let mut removed = 0;
-    for (chunk, _, len) in folded.iter().rev() {
+    for (chunk, len) in folded.iter().rev() {
         story.remove_range(txn, chunk.start, *len);
         removed += len;
     }

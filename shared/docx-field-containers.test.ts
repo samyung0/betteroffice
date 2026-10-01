@@ -2107,20 +2107,49 @@ test.each([
     }
 });
 
-// Round 2 review C, V: text typed at the end of a paragraph whose field result continues into the next shows in the
-// field's result in the editor, as the save and Word put it.
-test("text typed after a field whose result continues into the next paragraph shows in its result", async () => {
-  let bytes = docx(
-    p("11111111", run("a") + char("begin") + instr(" DATE ") + char("separate") + run("2")) + p("33333333", run("0") + char("end") + run("z")) + tail
-  );
+
+// Round 2 review D, W: a join after an Enter split keeps every result run and the text typed between the halves.
+const bodyText = (bytes: Uint8Array) =>
+  [...documentXml(bytes).matchAll(/<w:p [^>]*>([\s\S]*?)<\/w:p>/g)]
+    .map(([, paragraph]) => [...paragraph!.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(([, text]) => text).join(""))
+    .filter((text) => text !== "tail")
+    .join("¶");
+const runsField = (xml: string) => paragraph(field(xml, " REF a \\\\h "));
+test.each([
+  ["[REF|L(AA)yz], Backspace", runsField(link(run("AA")) + run("y") + run("z")), "join", "a AAyz b"],
+  ["[REF|L(AA)yzL(BB)w], Backspace", runsField(link(run("AA")) + run("y") + run("z") + linkTo("BB") + run("w")), "join", "a AAyzBBw b"],
+  ["[REF|L(AA)yz], Enter at the 2nd half's start, type X, Backspace", runsField(link(run("AA")) + run("y") + run("z")), "X between", "a AX¶Ayz b"],
+  ["[REF|L(AA)yz], type X at the 1st half's end, Backspace", runsField(link(run("AA")) + run("y") + run("z")), "X first", "a AXAyz b"],
+])("Enter in a projected link of %s keeps every run and typed text", async (_, bytes, flow, text) => {
   const session = await open(bytes);
-  const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
-  session.insertText({ story: "body", paraId: "11111111", offset: length }, "Q");
-  const editor = matrixUnits(session, "body");
-  expect(editor).toStartWith("a[field:DATE|2Q]¶");
-  bytes = await publish(bytes, session.encodeState());
+  const { firstParaId, secondParaId } = splitAA(session);
+  if (flow === "X between") {
+    const inner = session.splitParagraph({ story: "body", paraId: secondParaId, offset: 0 });
+    session.insertText({ story: "body", paraId: inner.firstParaId, offset: 0 }, "X");
+    session.deleteAt({ story: "body", paraId: inner.firstParaId, offset: 0 }, "backward");
+  } else {
+    if (flow === "X first") {
+      const { length } = session.paragraphSpans("body").find((span) => span.paraId === firstParaId)!;
+      session.insertText({ story: "body", paraId: firstParaId, offset: length }, "X");
+    }
+    session.deleteAt({ story: "body", paraId: secondParaId, offset: 0 }, "backward");
+  }
+  const saved = await publish(bytes, session.encodeState());
   session.destroy();
-  const reopened = await open(bytes);
-  expect(matrixUnits(reopened, "body")).toBe(editor);
-  reopened.destroy();
+  expect(bodyText(saved)).toBe(text);
+});
+
+test("Enter after a projected simple field followed by two runs, then Backspace, restores the field", async () => {
+  const bytes = paragraph(field(fs(run("20"), " PAGE ") + run("y") + run("z")));
+  const before = await open(bytes);
+  const original = matrixUnits(before, "body");
+  before.destroy();
+  const session = await open(bytes);
+  const at = fieldAt(session, "PAGE");
+  const { secondParaId } = session.splitParagraph({ story: "body", paraId: at.paraId, offset: at.offset + 1 });
+  session.deleteAt({ story: "body", paraId: secondParaId, offset: 0 }, "backward");
+  expect(matrixUnits(session, "body")).toBe(original);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(bodyText(saved)).toBe("a 20yz b");
 });
