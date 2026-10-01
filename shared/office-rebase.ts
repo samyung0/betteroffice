@@ -201,7 +201,13 @@ function assertCommentsCover(
   const capturedText = captured.getMap("stories").get(story);
   const covers = (text: unknown, ranges: Array<[number, number]> | undefined) =>
     text instanceof Y.Text && ranges
-      ? ranges.map(([start, end]) => units(text).ids.slice(start, end).join(",")).join("|")
+      ? // A reversed range (typing in an empty one) holds what lies between its
+        // ends, and the units on either side of them.
+        ranges
+          .map(([start, end]) =>
+            (start > end ? units(text).ids.slice(Math.max(end - 1, 0), start + 1) : units(text).ids.slice(start, end)).join(",")
+          )
+          .join("|")
       : undefined;
   const reversed = (ranges: Array<[number, number]> | undefined) => (ranges ?? []).some(([start, end]) => start > end);
   const touched = (key: string) => {

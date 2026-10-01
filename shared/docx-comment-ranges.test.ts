@@ -1038,3 +1038,36 @@ test("a comment range reversed before a capture lets unrelated edits after it la
     expect(row.cls).not.toStartWith("silent");
   }
 });
+
+// Round 2 review D, X: a range reversed before a capture is touched when a later edit touches what lies between
+// its ends: those rebases refuse instead of landing silently.
+test("a comment range reversed before a capture refuses edits after it that touch its content", async () => {
+  await prime();
+  const files = {
+    "prev¶<bm/>[PB][CB]¶next": reviewB["prev¶<bm/>[PB][CB]¶next"]!,
+    "prev¶abc¶next": matrixParagraph("33333333", matrixRun("prev")) + matrixParagraph("44444444", matrixRun("abc")) + matrixParagraph("45454545", matrixRun("next")),
+  };
+  const setups: Record<string, MatrixEdit> = {
+    "a comment over 44": (session, story) => {
+      matrixComment(session, story, ["44444444", 0], ["44444444", matrixLen(session, story, "44444444")]);
+      session.insertText(endOf44(session, story), "Q");
+    },
+    "an empty comment at its end": (session, story) => {
+      matrixComment(session, story, ["44444444", matrixLen(session, story, "44444444")], ["44444444", matrixLen(session, story, "44444444")]);
+      session.insertText(endOf44(session, story), "Q");
+    },
+  };
+  const afters: Record<string, MatrixEdit> = {
+    "Backspace before Q": (s, st) => void s.deleteAt({ story: st, paraId: "44444444", offset: matrixTextStart(s, st, "44444444") }, "backward"),
+    "type at 44 start": (s, st) => void s.insertText({ story: st, paraId: "44444444", offset: 0 }, "S"),
+    "delete 44 content": (s, st) => void s.deleteRange({ story: st, start: { paraId: "44444444", offset: 0 }, end: { paraId: "44444444", offset: matrixLen(s, st, "44444444") } }),
+  };
+  for (const where of ["body", "cell", "header"] as MatrixWhere[])
+    for (const [file, xml] of Object.entries(files))
+      for (const [setup, before] of Object.entries(setups))
+        for (const [edit, after] of Object.entries(afters)) {
+          const id = `${where} | ${file} | ${setup} | ${edit}`;
+          const row = await runRow({ id, bytes: matrixDocx(where, xml), where, before, after });
+          expect(`${id}: ${row.cls}`).not.toMatch(/: silent|: error/);
+        }
+});
