@@ -2740,12 +2740,24 @@ class SaveContext {
         next.content.some(
           ({ type }) => type === 'commentRangeStart' || type === 'commentRangeEnd'
         );
+      // A comment boundary before a column break keeps it, and the breaks
+      // after it, in the paragraph: the seed reads a boundary there after the
+      // breaks the paragraph before closes with.
+      const marked = text
+        ? expected.findIndex(
+            (entry) => entry.kind === 'column' && marks.some(({ offset }) => offset <= entry.at)
+          )
+        : -1;
       const split = own
         ? 0
         : !text || (before && leading < 0)
-          ? expected.length
+          ? marked < 0
+            ? expected.length
+            : marked
           : before
-            ? leading
+            ? marked < 0
+              ? leading
+              : Math.min(leading, marked)
             : 0;
       const trailing = beforeFlow?.trailing.length ?? 0;
       const have = [...(beforeFlow?.trailing ?? []), ...(nextFlow?.leading ?? [])];

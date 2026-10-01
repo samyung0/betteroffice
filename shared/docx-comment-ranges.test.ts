@@ -909,3 +909,31 @@ test.each([
     expect(saves[0]!.over).toBe("");
   }
 });
+
+// 8b: text typed after a text-less column-break paragraph keeps the break in its paragraph while a comment
+// boundary sits before it, so the comment neither grows over the break nor loses it.
+const columnBreak = `<w:r><w:br w:type="column"/></w:r>`;
+test.each([
+  ["ending before it", [body, "33333333", 0, 0] as Span, "44444444", "prev¶"],
+  ["over it", [body, "44444444", 0, 1] as Span, undefined, "[columnBreak]"],
+])("a comment %s keeps its range when text is typed after a column-break paragraph", async (_, span, endPara, text) => {
+  const { seen } = await publications(
+    docx(p("33333333", run("prev")) + p("44444444", columnBreak) + p("45454545", run("next")) + tail),
+    (session) => {
+      comment(session, "c", span, endPara);
+      session.insertText({ story: body, paraId: "44444444", offset: 1 }, "Q");
+    }
+  );
+  expect(seen.map((ranges) => ranges.c)).toEqual([text, text, text]);
+});
+
+test.each([
+  ["ending before it", [body, "33333333", 0, 0] as Span, "44444444", "prev¶"],
+  ["over it", [body, "44444444", 0, 1] as Span, undefined, "[columnBreak]"],
+])("a comment %s keeps its range over a column break closing the paragraph before", async (_, span, endPara, text) => {
+  const { seen } = await publications(
+    docx(p("33333333", run("prev") + columnBreak) + p("44444444", run("Heading")) + tail),
+    (session) => comment(session, "c", span, endPara)
+  );
+  expect(seen.map((ranges) => ranges.c)).toEqual([text, text, text]);
+});

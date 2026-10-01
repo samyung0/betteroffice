@@ -145,7 +145,12 @@ const ENDPARA: Record<string, string> = {
   "prev[CB]¶[PB]Heading": `${p33(run("prev") + CB)}${p44(PB + run("Heading"))}${p45(run("next"))}`,
   "prev[PB]¶¶next": `${p33(run("prev") + PB)}${p44("")}${p45(run("next"))}`,
 };
-const ENDPARA_ADDS: Record<string, Edit> = { "add C over ev": by("C", [PREV, 2], [PREV, 4]), "add C over prev": by("C", [PREV, 0], [PREV, 4]) };
+const ENDPARA_ADDS: Record<string, Edit> = {
+  "add C over ev": by("C", [PREV, 2], [PREV, 4]),
+  "add C over prev": by("C", [PREV, 0], [PREV, 4]),
+  // 8b: a comment ending before a break that closed the paragraph before keeps that break in its own paragraph.
+  "add C prev..44@0": by("C", [PREV, 0], [H, 0]),
+};
 
 function rows(): Row[] {
   const out: Row[] = [];

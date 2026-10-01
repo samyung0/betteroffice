@@ -1,4 +1,4 @@
-# docx-comments-breaks: 2721 rows, ids 1e8c2cc50e78cb4f; rows not listed are exact
+# docx-comments-breaks: 2745 rows, ids 2f4fa55a71fe773f; rows not listed are exact
 body | [PB]Heading¶next (story start) | ed over Heading | delete 44 text | cap<setup+edit	exact+unstable
 body | [PB]Heading¶next (story start) | ed over Heading | delete 44 text | edit<cap<tail	timing+unstable
 body | [PB]Heading¶next (story start) | ed over Heading | delete 44 text | setup<cap<edit	exact+unstable
