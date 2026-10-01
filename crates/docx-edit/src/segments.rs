@@ -33,6 +33,11 @@ pub(crate) enum SegKind {
     /// Backspace never remove (the user selects it to delete it).
     Embed {
         container: bool,
+        /// A field whose code continues into the next paragraph: everything
+        /// after it in its paragraph is that code.
+        code_continues: bool,
+        /// A field whose result continues into the next paragraph.
+        result_continues: bool,
     },
 }
 
@@ -78,16 +83,33 @@ impl SegmentIndex {
                     SegKind::Pilcrow
                 }
                 insert => {
-                    let kind = match insert {
-                        Out::YMap(map) => map_string(&map, txn, KIND_KEY).unwrap_or_default(),
-                        _ => String::new(),
+                    let (kind, continuation) = match insert {
+                        Out::YMap(map) => (
+                            map_string(&map, txn, KIND_KEY).unwrap_or_default(),
+                            map_string(&map, txn, "fieldData")
+                                .filter(|data| data.contains("\"continuation\""))
+                                .and_then(|data| {
+                                    serde_json::from_str::<serde_json::Value>(&data).ok()
+                                })
+                                .map(|field| field["continuation"].clone()),
+                        ),
+                        _ => (String::new(), None),
                     };
+                    let flag = |key: &str| {
+                        continuation.as_ref().is_some_and(|continuation| {
+                            continuation[key] == serde_json::Value::Bool(true)
+                        })
+                    };
+                    let code_continues = flag("separate");
+                    let result_continues = !code_continues && flag("end");
                     let block = is_block_embed(&kind);
                     if len == node_start && block {
                         node_start = len + 1;
                     }
                     SegKind::Embed {
                         container: matches!(kind.as_str(), "table" | "blockSdt"),
+                        code_continues,
+                        result_continues,
                     }
                 }
             };
@@ -103,6 +125,39 @@ impl SegmentIndex {
             paras,
             by_para,
         }
+    }
+
+    /// Whether the unit right before `index` is a field whose result continues
+    /// into the next paragraph.
+    pub(crate) fn result_continues_before(&self, index: u32) -> bool {
+        index > 0
+            && self.segment_at(index - 1).is_some_and(|seg| {
+                seg.start == index - 1
+                    && matches!(
+                        seg.kind,
+                        SegKind::Embed {
+                            result_continues: true,
+                            ..
+                        }
+                    )
+            })
+    }
+
+    /// The first field in `[from, to)` whose code continues into the next paragraph.
+    pub(crate) fn code_continues_in(&self, from: u32, to: u32) -> Option<u32> {
+        self.segs[self.segs.partition_point(|seg| seg.start < from)..]
+            .iter()
+            .take_while(|seg| seg.start < to)
+            .find(|seg| {
+                matches!(
+                    seg.kind,
+                    SegKind::Embed {
+                        code_continues: true,
+                        ..
+                    }
+                )
+            })
+            .map(|seg| seg.start)
     }
 
     /// `(start, pilcrow)` span of `para_id`, matching the first paragraph with that id.

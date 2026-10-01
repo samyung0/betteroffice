@@ -395,20 +395,10 @@ impl EditingDoc {
         if end < para.node_start {
             return Ok(start + (para.node_start - end));
         }
-        let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
-        let code_continues = ops::snapshot_range(&story, &txn, para.node_start, start)
-            .into_iter()
-            .find(|chunk| {
-                chunk.end() <= start
-                    && matches!(&chunk.kind, ops::ChunkKind::Embed(Some(map))
-                        if map_string(map, &txn, "fieldData").is_some_and(|data| {
-                            data.contains("\"continuation\"")
-                                && serde_json::from_str::<serde_json::Value>(&data)
-                                .is_ok_and(|field| field["continuation"]["separate"] == serde_json::Value::Bool(true))
-                        }))
-            });
-        Ok(code_continues.map_or(start, |chunk| chunk.start))
+        // Only the edited paragraph, from the cached segment index.
+        Ok(segments
+            .code_continues_in(para.node_start, start)
+            .unwrap_or(start))
     }
 
     /// The paragraph mark a delete of `[start, end)` keeps, as Word does: the

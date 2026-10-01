@@ -57,7 +57,7 @@ pub enum RawOp {
 }
 
 /// Finds the map-backed embed sitting exactly at story `index`.
-fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<MapRef> {
+pub(crate) fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<MapRef> {
     let mut offset = 0u32;
     for diff in story.diff(txn, YChange::identity) {
         if offset == index {

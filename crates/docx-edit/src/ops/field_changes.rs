@@ -541,11 +541,23 @@ pub(crate) fn split_field(
         if recorded.contains(&(index as i64)) {
             continue;
         }
-        if node["type"] != "run" {
-            return Ok(());
+        match node["type"].as_str() {
+            Some("run") => runs.push((index as i64, node.clone())),
+            // Shown nowhere, they stay with the field.
+            Some("deletion" | "moveFrom" | "bookmarkStart" | "bookmarkEnd") => {}
+            Some("rawXml")
+                if node["xml"].as_str().is_some_and(|xml| {
+                    let xml = xml.trim_start();
+                    xml.starts_with("<w:del")
+                        || xml.starts_with("<w:moveFrom")
+                        || xml.starts_with("<w:bookmark")
+                }) => {}
+            // A content control or foreign markup keeps the old Enter.
+            _ => return Ok(()),
         }
-        runs.push((index as i64, node.clone()));
     }
+    // Written only to the new embed, so Undo restores the old one as it was.
+    let mut overrides: Vec<(String, Any)> = Vec::new();
     if !runs.is_empty() {
         // The moved runs read as children the field lost, so its save leaves
         // them out of the result; it shows what stays.
@@ -560,7 +572,7 @@ pub(crate) fn split_field(
                 .map(|(_, node)| node.clone())
                 .collect::<Vec<_>>(),
         );
-        map.insert(txn, "displayText", runs_text(&shown));
+        overrides.push(("displayText".to_owned(), Any::from(runs_text(&shown))));
         if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
             let mut projection = (*projection).clone();
             let mut children = match projection.get("children") {
@@ -584,7 +596,10 @@ pub(crate) fn split_field(
                 ])));
             }
             projection.insert("children".to_owned(), Any::Array(Arc::from(children)));
-            map.insert(txn, "resultProjection", Any::Map(Arc::new(projection)));
+            overrides.push((
+                "resultProjection".to_owned(),
+                Any::Map(Arc::new(projection)),
+            ));
         }
     }
     let end = data["continuation"]["end"] != Value::Bool(true);
@@ -621,7 +636,7 @@ pub(crate) fn split_field(
         .collect();
     story.remove_range(txn, to, 1);
     let embed = story.insert_embed_with_attributes(txn, at, yrs::MapPrelim::default(), attrs);
-    for (key, value) in entries {
+    for (key, value) in entries.into_iter().chain(overrides) {
         embed.insert(txn, key, value);
     }
     embed.insert(txn, "fieldData", data.to_string());
@@ -658,6 +673,44 @@ pub(crate) fn split_field(
             any_from_value(marker).map_err(OpError::InvalidUpdate)?,
         )?;
     }
+    Ok(())
+}
+
+/// Text typed right after a field whose result continues into the next
+/// paragraph goes into that result, as the save and Word put it: a run
+/// appended to the field's result and shown with it.
+pub(crate) fn append_result_text(
+    txn: &mut TransactionMut<'_>,
+    field: &yrs::MapRef,
+    text: &str,
+) -> OpResult<()> {
+    let Some(Ok(mut data)) =
+        map_string(field, txn, "fieldData").map(|data| serde_json::from_str::<Value>(&data))
+    else {
+        return Err(OpError::InvalidUpdate(
+            "the field holds no field data".into(),
+        ));
+    };
+    let run = serde_json::json!({
+        "type": "run",
+        "content": [{"type": "text", "text": text, "preserveSpace": true}],
+    });
+    for key in [["structuredResult", "inline"], ["fieldTree", "result"]] {
+        let target = if key[0] == "fieldTree" {
+            &mut data["fieldTree"]["result"]["inline"]
+        } else {
+            &mut data["structuredResult"]["inline"]
+        };
+        if let Some(nodes) = target.as_array_mut() {
+            nodes.push(run.clone());
+        }
+    }
+    if let Some(runs) = data["fieldResult"].as_array_mut() {
+        runs.push(run);
+    }
+    let shown = map_string(field, txn, "displayText").unwrap_or_default();
+    field.insert(txn, "displayText", format!("{shown}{text}"));
+    field.insert(txn, "fieldData", data.to_string());
     Ok(())
 }
 
@@ -745,13 +798,20 @@ pub(crate) fn rejoin_fields(
         .rev()
         .take_while(|chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == id))
         .count();
-    let mut units: Vec<(&Chunk, i64)> = chunks[position - first..position]
+    // Each unit with its slot and its length up to `target` (text there can run on past it).
+    let mut units: Vec<(&Chunk, i64, u32)> = chunks[position - first..position]
         .iter()
-        .map(|chunk| (chunk, field_result_attr(chunk).expect("a child").1))
+        .map(|chunk| {
+            (
+                chunk,
+                field_result_attr(chunk).expect("a child").1,
+                chunk.len,
+            )
+        })
         .collect();
     let mut slot = units
         .last()
-        .map(|(chunk, index)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
+        .map(|(chunk, index, _)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
     for chunk in chunks[position + 1..]
         .iter()
         .take_while(|chunk| chunk.start < target)
@@ -764,7 +824,12 @@ pub(crate) fn rejoin_fields(
             .get(HYPERLINK)
             .filter(|link| **link != Any::Null)
             .cloned()
-            .or_else(|| field.then(|| Any::from(format!("field@{}", chunk.start))));
+            .or_else(|| field.then(|| Any::from(format!("field@{}", chunk.start))))
+            // Result text the split moved out takes its own slot too.
+            .or_else(|| {
+                matches!(chunk.kind, ChunkKind::Text(_))
+                    .then(|| Any::from(format!("text@{}", chunk.start)))
+            });
         if link.is_none() || !matches!(chunk.kind, ChunkKind::Text(_) | ChunkKind::Embed(Some(_))) {
             return Ok(());
         }
@@ -780,7 +845,7 @@ pub(crate) fn rejoin_fields(
             },
         };
         slot = Some((index, link));
-        units.push((chunk, index));
+        units.push((chunk, index, chunk.len.min(target - chunk.start)));
     }
     if ends_here.is_some() {
         if data["continuation"]["separate"] == Value::Bool(true) {
@@ -792,7 +857,65 @@ pub(crate) fn rejoin_fields(
             root.remove(txn, &format!("{story_id}:{continuation}:fieldend"));
         }
     }
-    for (chunk, index) in units.iter().filter(|(chunk, _)| chunk.start > owner.start) {
+    // Text whose slot the seed shows as the field's own result (any but runs
+    // after a projected simple field) goes back into the field.
+    let inline = data["structuredResult"]["inline"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let projected_run = |index: i64| {
+        inline[..(index.max(0) as usize).min(inline.len())]
+            .iter()
+            .rev()
+            .find_map(|node| match node["type"].as_str() {
+                Some("simpleField") => Some(true),
+                Some("hyperlink") => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false)
+    };
+    let (folded, units): (Vec<_>, Vec<_>) = units.into_iter().partition(|(chunk, index, _)| {
+        chunk.start > owner.start
+            && matches!(chunk.kind, ChunkKind::Text(_))
+            && !chunk.attr_active(HYPERLINK)
+            && !projected_run(*index)
+    });
+    let mut overrides: Vec<(String, Any)> = Vec::new();
+    if !folded.is_empty() {
+        let dropped: Vec<i64> = folded.iter().map(|(_, index, _)| *index).collect();
+        recorded.retain(|index| !dropped.contains(index));
+        let shown = shown_runs(
+            &inline
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !recorded.contains(&(*index as i64)))
+                .map(|(_, node)| node.clone())
+                .collect::<Vec<_>>(),
+        );
+        overrides.push(("displayText".to_owned(), Any::from(runs_text(&shown))));
+        if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
+            let mut projection = (*projection).clone();
+            if let Some(Any::Array(children)) = projection.get("children") {
+                let kept: Vec<Any> = children
+                    .iter()
+                    .filter(|child| match child {
+                        Any::Map(child) => !matches!(child.get("index"), Some(Any::Number(index)) if dropped.contains(&(*index as i64))),
+                        _ => true,
+                    })
+                    .cloned()
+                    .collect();
+                projection.insert("children".to_owned(), Any::Array(Arc::from(kept)));
+            }
+            overrides.push((
+                "resultProjection".to_owned(),
+                Any::Map(Arc::new(projection)),
+            ));
+        }
+    }
+    for (chunk, index, len) in units
+        .iter()
+        .filter(|(chunk, _, _)| chunk.start > owner.start)
+    {
         let marker = Any::from(HashMap::from([
             ("id".to_owned(), Any::Number(id as f64)),
             ("index".to_owned(), Any::Number(*index as f64)),
@@ -800,7 +923,7 @@ pub(crate) fn rejoin_fields(
         story.format(
             txn,
             chunk.start,
-            chunk.len,
+            *len,
             Attrs::from([(Arc::from(FIELD_RESULT), marker)]),
         );
     }
@@ -814,14 +937,24 @@ pub(crate) fn rejoin_fields(
         .filter(|(key, _)| key != "continuationId" || data.get("continuation").is_some())
         .collect();
     entries.push(("fieldData".to_owned(), Any::from(data.to_string())));
+    entries.extend(overrides);
     let attrs: Attrs = owner
         .attrs
         .iter()
         .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
         .collect();
+    let mut removed = 0;
+    for (chunk, _, len) in folded.iter().rev() {
+        story.remove_range(txn, chunk.start, *len);
+        removed += len;
+    }
     story.remove_range(txn, owner.start, 1);
-    let embed =
-        story.insert_embed_with_attributes(txn, target - 1, yrs::MapPrelim::default(), attrs);
+    let embed = story.insert_embed_with_attributes(
+        txn,
+        target - removed - 1,
+        yrs::MapPrelim::default(),
+        attrs,
+    );
     for (key, value) in entries {
         embed.insert(txn, key, value);
     }

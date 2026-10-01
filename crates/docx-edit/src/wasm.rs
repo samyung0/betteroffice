@@ -227,8 +227,12 @@ fn adjacent_story_unit(
             AdjacentStoryUnit::Content(width)
         }
         SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
-        SegKind::Embed { container: true } => AdjacentStoryUnit::Container,
-        SegKind::Embed { container: false } => AdjacentStoryUnit::Content(1),
+        SegKind::Embed {
+            container: true, ..
+        } => AdjacentStoryUnit::Container,
+        SegKind::Embed {
+            container: false, ..
+        } => AdjacentStoryUnit::Content(1),
     }))
 }
 

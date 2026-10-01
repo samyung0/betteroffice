@@ -2040,3 +2040,87 @@ test.each([
       expect(`${order.id}: ${row.cls}`).toEndWith(": exact");
     }
 });
+
+// Round 2 review C: Enter in a projected link of a field showing its own result text, then Undo (P) or a join back
+// (Q), restores the field without duplicating its links; a deletion or bookmark after the split splits (R).
+const ownText: Record<string, string> = {
+  "[REF|L(AA)yL(BB)]": field(link(run("AA")) + run("y") + linkTo("BB"), " REF a \\\\h "),
+  "[REF|L(AA)y]": field(link(run("AA")) + run("y"), " REF a \\\\h "),
+  "[REF|xL(AA)y]": field(run("x") + link(run("AA")) + run("y"), " REF a \\\\h "),
+  "[REF|L(AA)L(BB)y]": field(link(run("AA")) + linkTo("BB") + run("y"), " REF a \\\\h "),
+};
+const splitAA = (session: YrsSession) => session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, "AA") + 1 });
+const restoring: Record<string, (session: YrsSession) => void> = {
+  "Enter, Undo": (session) => {
+    splitAA(session);
+    session.undo();
+  },
+  "Enter, Backspace": (session) => {
+    const { secondParaId } = splitAA(session);
+    session.deleteAt({ story: "body", paraId: secondParaId, offset: 0 }, "backward");
+  },
+  "Enter, Delete": (session) => {
+    const { firstParaId } = splitAA(session);
+    const { length } = session.paragraphSpans("body").find((span) => span.paraId === firstParaId)!;
+    session.deleteAt({ story: "body", paraId: firstParaId, offset: length }, "forward");
+  },
+  "Enter, a range delete across the paragraph mark": (session) => {
+    const { firstParaId, secondParaId } = splitAA(session);
+    const { length } = session.paragraphSpans("body").find((span) => span.paraId === firstParaId)!;
+    session.deleteRange({ story: "body", start: { paraId: firstParaId, offset: length }, end: { paraId: secondParaId, offset: 0 } });
+  },
+  "Enter, Backspace, Undo": (session) => {
+    const { secondParaId } = splitAA(session);
+    session.deleteAt({ story: "body", paraId: secondParaId, offset: 0 }, "backward");
+    session.undo();
+  },
+};
+test.each(Object.keys(ownText).flatMap((file) => Object.keys(restoring).map((how) => [file, how] as const)))(
+  "%s: %s restores the original without duplicating its links",
+  async (file, how) => {
+    const bytes = paragraph(ownText[file]!);
+    const untouched = await open(bytes);
+    const original = documentXml(await publish(bytes, untouched.encodeState()));
+    untouched.destroy();
+    const session = await open(bytes);
+    restoring[how]!(session);
+    const editor = matrixUnits(session, "body");
+    const saved = await publish(bytes, session.encodeState());
+    session.destroy();
+    const xml = view(saved);
+    expect(xml.split("AA").length - 1).toBe(1);
+    expect(documentXml(saved)).toBe(original);
+    const reopened = await open(saved);
+    expect(matrixUnits(reopened, "body")).toBe(editor);
+    reopened.destroy();
+  }
+);
+test.each([
+  ["a tracked deletion", field(fs(run("20"), " PAGE ") + del(deleted("w")) + run("y"))],
+  ["a bookmark", field(fs(run("20"), " PAGE ") + `<w:bookmarkStart w:id="7" w:name="m7"/>` + run("y") + `<w:bookmarkEnd w:id="7"/>`)],
+])("Enter after a projected simple field with %s after it splits the field exactly", async (_, xml) => {
+  await prime();
+  for (const where of ["body", "cell", "header"] as const)
+    for (const order of orders(`${where}`, null, enterAfterPage)) {
+      const row = await runRow({ id: order.id, bytes: matrixDocx(where, holder44(xml)), where, before: order.before, after: order.after });
+      expect(`${order.id}: ${row.cls}`).toEndWith(": exact");
+    }
+});
+
+// Round 2 review C, V: text typed at the end of a paragraph whose field result continues into the next shows in the
+// field's result in the editor, as the save and Word put it.
+test("text typed after a field whose result continues into the next paragraph shows in its result", async () => {
+  let bytes = docx(
+    p("11111111", run("a") + char("begin") + instr(" DATE ") + char("separate") + run("2")) + p("33333333", run("0") + char("end") + run("z")) + tail
+  );
+  const session = await open(bytes);
+  const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
+  session.insertText({ story: "body", paraId: "11111111", offset: length }, "Q");
+  const editor = matrixUnits(session, "body");
+  expect(editor).toStartWith("a[field:DATE|2Q]¶");
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  const reopened = await open(bytes);
+  expect(matrixUnits(reopened, "body")).toBe(editor);
+  reopened.destroy();
+});

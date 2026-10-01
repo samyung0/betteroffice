@@ -1,4 +1,4 @@
-# docx-fields: 973 rows, ids 3c04101d0257af73; rows not listed are exact
+# docx-fields: 1079 rows, ids 0eba4685aba12910; rows not listed are exact
 body | join nested continued field, undo | setup<cap<edit	refused
 body | pj:cf>fs | type after field | edit<cap<tail	refused
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved

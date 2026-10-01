@@ -1088,7 +1088,12 @@ function landLater(
             else if (positioned && !entities && key === lineage.positions?.key)
               positions.push({ map, value: step.target.get(key) });
             else
-              map.set(name, copy(step.target.get(key), positioned && entities));
+              map.set(
+                name,
+                lineage === DOCX_LINEAGE && step.path.length
+                  ? keepContinuation(key, map.get(key), copy(step.target.get(key)))
+                  : copy(step.target.get(key), positioned && entities)
+              );
           }
         }
       }
@@ -1142,6 +1147,22 @@ function landLater(
   } finally {
     for (const doc of [before, edited, later, result]) doc.destroy();
   }
+}
+
+/**
+ * A later edit to a continued field's embed keeps the continuation id the
+ * export's seed gave it: its separate and end markers carry that id, which the
+ * seed derives from the field's place in its saved paragraph.
+ */
+function keepContinuation(key: string, old: unknown, next: unknown): unknown {
+  if (key === "continuationId") return typeof old === "string" && typeof next === "string" ? old : next;
+  if (key !== "fieldData" || typeof old !== "string" || typeof next !== "string") return next;
+  if (!old.includes('"continuation"') || !next.includes('"continuation"')) return next;
+  const before = JSON.parse(old) as { continuation?: { id?: string } };
+  const after = JSON.parse(next) as { continuation?: { id?: string } };
+  if (!before.continuation?.id || !after.continuation?.id || before.continuation.id === after.continuation.id) return next;
+  after.continuation.id = before.continuation.id;
+  return JSON.stringify(after);
 }
 
 /** The embed at `offset` of a text. */

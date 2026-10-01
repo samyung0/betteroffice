@@ -268,6 +268,22 @@ impl EditingDoc {
             &at.story,
             self.inline_landing(&at.story, at.index, at.index)?,
         );
+        if !text.is_empty()
+            && !ctx.is_suggesting()
+            && self
+                .segment_index(&at.story)?
+                .result_continues_before(at.index)
+        {
+            let mut txn = self.transact_for(ctx);
+            let story = story_ref(&txn, &at.story)?;
+            let field = crate::raw::embed_at(&story, &txn, at.index - 1)?;
+            crate::ops::field_changes::append_result_text(&mut txn, &field, text)?;
+            let range = loc_range_in_txn(&at.story, &story, &txn, at.index, at.index)?;
+            return Ok(Receipt {
+                range: Some(range),
+                ..Receipt::default()
+            });
+        }
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
@@ -342,6 +358,16 @@ impl EditingDoc {
         } else {
             range.start
         };
+        // A join restores a field Enter split across the two paragraphs.
+        if revision.is_none()
+            && chunks.iter().any(|chunk| {
+                matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                    && chunk.start >= range.start
+                    && chunk.start < range.end
+            })
+        {
+            crate::ops::field_changes::rejoin_fields(&mut txn, &story, &range.story, range.start)?;
+        }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),

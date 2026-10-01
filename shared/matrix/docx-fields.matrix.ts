@@ -211,6 +211,9 @@ const SPLITS: Record<string, string> = {
   "<c>[REF|L(AA)L(BB)]</c>": holder(`<w:commentRangeStart w:id="1"/>${field(`${link(run("AA"))}${link(run("BB"), "other")}`, " REF a \\h ")}<w:commentRangeEnd w:id="1"/>${ref()}`),
   "[REF|L(AA)F{20}L(BB)]": holder(field(`${link(run("AA"))}${fs(run("20"), " PAGE ")}${link(run("BB"), "other")}`, " REF a \\h ")),
   "[TOC|L(Intro)L(Body)]": p(P, field(`${link(run("Intro"))}${link(run("Body"), "t2")}`, ' TOC \\o "1-3" \\h ')),
+  // Round 2 review C: a field showing its own result text.
+  "[REF|L(AA)yL(BB)]": holder(field(`${link(run("AA"))}${run("y")}${link(run("BB"), "other")}`, " REF a \\h ")),
+  "[REF|xL(AA)y]": holder(field(`${run("x")}${link(run("AA"))}${run("y")}`, " REF a \\h ")),
 };
 const firstLink = (s: YrsSession, st: string) => {
   const at = locate(s, st, s.storySegments(st).some((g) => g.kind === "text" && g.text.includes("AA")) ? "AA" : "Intro");
@@ -225,11 +228,21 @@ const SPLIT_OPS: Record<string, Edit> = {
     const { secondParaId } = s.splitParagraph(firstLink(s, st));
     s.deleteAt({ story: st, paraId: secondParaId, offset: 0 }, "backward");
   },
+  "Enter in 1st, Undo": (s, st) => {
+    s.splitParagraph(firstLink(s, st));
+    s.undo();
+  },
+  "Enter in 1st, range delete back": (s, st) => {
+    const { firstParaId, secondParaId } = s.splitParagraph(firstLink(s, st));
+    s.deleteRange({ story: st, start: { paraId: firstParaId, offset: len(s, st, firstParaId) }, end: { paraId: secondParaId, offset: 0 } });
+  },
 };
 const AFTER_SIMPLE: Record<string, string> = {
   "[DATE|xF{20}y]": holder(field(`${run("x")}${fs(run("20"), " PAGE ")}${run("y")}`)),
   "[DATE|F{20}L(AA)x]": holder(field(`${fs(run("20"), " PAGE ")}${link(run("AA"))}${run("x")}`)),
   "[DATE|F{20}+{y}x]": holder(field(`${fs(run("20"), " PAGE ")}${ins(run("y"))}${run("x")}`)),
+  "[DATE|F{20}-{w}y]": holder(field(`${fs(run("20"), " PAGE ")}${del(deleted("w"))}${run("y")}`)),
+  "[DATE|F{20}<bm>y]": holder(field(`${fs(run("20"), " PAGE ")}<w:bookmarkStart w:id="7" w:name="m7"/>${run("y")}<w:bookmarkEnd w:id="7"/>`)),
 };
 const enterAfterPage: Edit = (s, st) => {
   const at = fieldAt(s, st, "PAGE");
@@ -238,6 +251,9 @@ const enterAfterPage: Edit = (s, st) => {
 const CODE_CONTINUES =
   p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DATE ")}`) +
   p("45454545", `<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("20")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+const RESULT_CONTINUES =
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DATE ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("2")}`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
 
@@ -274,6 +290,8 @@ function rows(): Row[] {
     }
     for (const [name, xml] of Object.entries(AFTER_SIMPLE)) push(where, xml, `${name} | Enter after the simple field`, null, enterAfterPage);
     push(where, CODE_CONTINUES, "field code continued | type at its paragraph's end", null, (s, st) =>
+      void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+    push(where, RESULT_CONTINUES, "field result continued | type at its paragraph's end", null, (s, st) =>
       void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
   }
   for (const where of ["body", "cell", "header"] as Where[])
