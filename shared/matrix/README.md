@@ -86,8 +86,7 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   Enter inside a table of contents' first entry after a capture), a table of contents entry typed in after a
   capture (the UAT journey), a field deleted after Accept all uncovered a link a comment around it covers only from
   the next publication (zz-n4, round 2), Undo restoring a continued field whose separate and end the export dropped,
-  and a comment whose range the export emptied into a reference-only comment (round 2 review; these were
-  `timing+unstable` before). The break-flag refusal (R10-N1, 2026-09-30) no longer
+  and a comment the rebase would lose with its reference (round 2 review; 15 such rows were `timing+unstable`). The break-flag refusal (R10-N1, 2026-09-30) no longer
   fires for a text-less paragraph's own breaks, which lead text typed after them in the editor too (round 2).
 
 The follow-up fixes leave no `silent` or `lost` rows. Field end/separate markers compare by kind and offset, since

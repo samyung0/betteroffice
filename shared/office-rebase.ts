@@ -218,7 +218,16 @@ function assertCommentsCover(
   }
   for (const [key, ranges] of from) {
     const landed = to.get(id(key)) ?? to.get(key);
-    if (!landed) fail("a comment would lose its range");
+    if (!landed) {
+      // An emptied range the export kept as a reference-only comment settles;
+      // a comment with neither range nor reference is lost.
+      const referenced = embeds(target).some(
+        ([, embed]) =>
+          embed.get("modelKind") === "commentReference" && [key, id(key)].includes(String(embed.get("commentId")))
+      );
+      if (!referenced) fail("a comment would lose its range and reference");
+      continue;
+    }
     const edges = ranges.flat();
     const inside = (at: number, spans: Array<[number, number]>) => spans.some(([start, end]) => start <= at && at < end);
     for (let unit = 0; unit < f.map.length; unit++) {
