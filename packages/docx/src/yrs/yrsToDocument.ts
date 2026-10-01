@@ -2717,7 +2717,15 @@ class SaveContext {
       // own, which is how the seed reads such a paragraph back. With bookmarks
       // it does so only with no paragraph before, writing them after the
       // breaks so the seed reads the breaks as leading them.
-      const leading = expected.findIndex((entry) => entry.leading);
+      // Breaks a text-less paragraph owned (ending in a column break, none
+      // taken from the paragraph before) lead the text that follows them.
+      // With a paragraph before, bookmarks at the slot leave them closing it.
+      const owned =
+        expected.at(-1)?.kind === 'column' &&
+        !expected.some((entry) => entry.trailing) &&
+        (bookmarks.length === 0 || !before);
+      const flagged = expected.findIndex((entry) => entry.leading);
+      const leading = flagged < 0 && content && owned ? 0 : flagged;
       const own =
         !content &&
         next !== undefined &&

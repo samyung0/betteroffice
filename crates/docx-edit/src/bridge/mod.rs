@@ -214,6 +214,7 @@ fn lower_story<T: ReadTxn>(
     let result = (|| {
         let story = story_ref(txn, story_id)?;
         let comments = resolve_comment_intervals(txn, story_id, env)?;
+        let bookmarks = std::cell::OnceCell::<Vec<u32>>::new();
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();
         let mut paragraph_drawings = Vec::new();
@@ -270,8 +271,26 @@ fn lower_story<T: ReadTxn>(
                                 },
                             ));
                     // A break-only paragraph ending in a column break owns
-                    // its breaks. The new reference follows them on save.
-                    if reference && slot.ends_in_column {
+                    // its breaks, which lead the text or new reference that
+                    // follows them, as on save. With a paragraph before,
+                    // bookmarks at the slot leave them closing that paragraph.
+                    let marked = || {
+                        let bookmarks = bookmarks.get_or_init(|| {
+                            crate::bookmarks::positions(txn, story_id)
+                                .into_iter()
+                                .map(|(at, _)| at)
+                                .collect()
+                        });
+                        after_paragraph
+                            && slot.start.is_some_and(|start| {
+                                bookmarks
+                                    .iter()
+                                    .any(|&at| (start..=paragraph_start).contains(&at))
+                            })
+                    };
+                    if slot.ends_in_column
+                        && (reference || (content && !slot.trailing && !marked()))
+                    {
                         slot.leading = true;
                         for &index in &slot.breaks {
                             if let Some(LayoutBlock::PageBreak(block)) = blocks.get_mut(index) {
@@ -401,6 +420,10 @@ fn lower_story<T: ReadTxn>(
                     slot.ends_in_column = kind == "columnBreak";
                     slot.leading |= matches!(
                         page_break.get(txn, "leading"),
+                        Some(Out::Any(Any::Bool(true)))
+                    );
+                    slot.trailing |= matches!(
+                        page_break.get(txn, "trailing"),
                         Some(Out::Any(Any::Bool(true)))
                     );
                     slot.start.get_or_insert(story_index);
@@ -848,6 +871,8 @@ fn lower_story<T: ReadTxn>(
 struct Slot {
     /// A break flagged `leading` opened the slot's leading breaks.
     leading: bool,
+    /// A break the seed took from the end of the paragraph before.
+    trailing: bool,
     ends_in_column: bool,
     /// The story offset of the slot's first break.
     start: Option<u32>,

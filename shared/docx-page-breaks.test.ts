@@ -2144,10 +2144,11 @@ async function kept(
   edit(session);
   const state = () => {
     const seen = units(session, story);
+    // Comment ids differ between sessions, so the ranges compare sorted.
     return `${flags ? seen : seen.replaceAll("^", "")} ${covered(
       session,
       story
-    )}`;
+    ).sort()}`;
   };
   const seen = [state()];
   for (let publication = 0; publication < 3; publication += 1) {
@@ -2387,7 +2388,8 @@ describe.each(NINE)(
       editorComment(story, start, ["44444444", end]);
     const type = typeAtEnd(story, "44444444", "Q");
     // The capture's save writes the comment's reference after the breaks,
-    // so the seed reads them as leading it; the latest state does not.
+    // so the seed reads them as leading it; the latest state reads them so
+    // too once text follows them (round 2), and the typing lands.
     test.each([
       [
         "a column break, a comment ending before it",
@@ -2427,10 +2429,8 @@ describe.each(NINE)(
         only(`${E(1)}${COL}`, `${S(1)}${run("prev")}`),
         () => {},
       ],
-    ] as const)("%s: the rebase refuses", async (_, xml, cover) => {
-      await expect(
-        rebase(docx(where, xml), story, cover, type)
-      ).rejects.toThrow("Office rebase:");
+    ] as const)("%s: the typing lands as saved directly", async (_, xml, cover) => {
+      await keepsBreaks(docx(where, xml), story, cover, [type], false);
     });
 
     test.each([
@@ -2501,11 +2501,9 @@ describe.each(NINE)(
         ),
       ],
     ] as const)(
-      "a column break alone in its paragraph, %s, then text typed there: the rebase refuses",
+      "a column break alone in its paragraph, %s, then text typed there: it lands as saved directly",
       async (_, cover) => {
-        await expect(
-          rebase(docx(where, only), story, all(B, cover), all(reviewed, type))
-        ).rejects.toThrow("Office rebase:");
+        await keepsBreaks(docx(where, only), story, all(B, cover), [all(reviewed, type)], false);
       }
     );
 
@@ -2530,3 +2528,23 @@ describe.each(NINE)(
     });
   }
 );
+
+// Round 2 A: a text-less break paragraph's breaks lead once text follows them, in the editor at once as in the save.
+test.each(["body", "cell", "header"] as const)("text typed after a text-less page-and-column-break paragraph shows its space-before at once, in %s", async (where) => {
+  const [story, part] = STORY[where];
+  const flags = (session: YrsSession) =>
+    (session.yrsBlocksForStory(story) as Array<{ kind: string; keepsLeadingSpacing?: boolean }>)
+      .filter(({ kind }) => kind === "pageBreak")
+      .map(({ keepsLeadingSpacing }) => keepsLeadingSpacing === true);
+  const bytes = docx(where, `${p("33333333", run("prev"))}${p("44444444", `${BR}${COL}`)}${p("45454545", run("next"))}`);
+  const session = await open(bytes);
+  expect(flags(session)).toEqual([false]);
+  session.insertText({ story, paraId: "44444444", offset: 2 }, "Q");
+  expect(flags(session)).toEqual([true]);
+  const saved = await publish(bytes, session);
+  session.destroy();
+  expect(view(saved, part)).toContain("prev¶[PB][CB]Q¶next");
+  const reopened = await open(saved);
+  expect(flags(reopened)).toEqual([true]);
+  reopened.destroy();
+});

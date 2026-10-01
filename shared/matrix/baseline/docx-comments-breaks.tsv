@@ -33,30 +33,16 @@ body | prev¶[CB]Heading | two ed ending at 44@0 | Backspace after 1st break | s
 body | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-body | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-body | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-body | prev¶[CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 body | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 body | prev¶[CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 body | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 body | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
+body | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 body | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | setup<cap<edit	timing+unstable
-body | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-body | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-body | prev¶[CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-body | prev¶[CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-body | prev¶[CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-body | prev¶[CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
 body | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
@@ -119,27 +105,13 @@ body | prev¶[PB][CB]Heading | two ed: [PB] and [PB]Heading | retype 44 text as 
 body | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-body | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-body | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-body | prev¶[PB][CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 body | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 body | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 body | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 body | prev¶[PB][CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 body | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 body | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
-body | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-body | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-body | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-body | prev¶[PB][CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-body | prev¶[PB][CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
+body | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 body | prev¶del[PB]Heading | ed over 1st break | accept all | cap<setup+edit	exact+unstable
 body | prev¶del[PB]Heading | ed over 1st break | accept all | edit<cap<tail	timing+unstable
 body | prev¶del[PB]Heading | ed over 1st break | accept all | setup<cap<edit	exact+unstable
@@ -230,30 +202,16 @@ cell | prev¶[CB]Heading | two ed ending at 44@0 | Backspace after 1st break | s
 cell | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-cell | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-cell | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-cell | prev¶[CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 cell | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 cell | prev¶[CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 cell | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 cell | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
+cell | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 cell | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | setup<cap<edit	timing+unstable
-cell | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-cell | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-cell | prev¶[CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-cell | prev¶[CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-cell | prev¶[CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-cell | prev¶[CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
 cell | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
@@ -316,27 +274,13 @@ cell | prev¶[PB][CB]Heading | two ed: [PB] and [PB]Heading | retype 44 text as 
 cell | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-cell | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-cell | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-cell | prev¶[PB][CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 cell | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 cell | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 cell | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 cell | prev¶[PB][CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 cell | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 cell | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
-cell | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-cell | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-cell | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-cell | prev¶[PB][CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-cell | prev¶[PB][CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
+cell | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 cell | prev¶del[PB]Heading | ed over 1st break | accept all | cap<setup+edit	exact+unstable
 cell | prev¶del[PB]Heading | ed over 1st break | accept all | edit<cap<tail	timing+unstable
 cell | prev¶del[PB]Heading | ed over 1st break | accept all | setup<cap<edit	exact+unstable
@@ -427,30 +371,16 @@ header | prev¶[CB]Heading | two ed ending at 44@0 | Backspace after 1st break |
 header | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-header | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-header | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-header | prev¶[CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 header | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 header | prev¶[CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 header | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 header | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
+header | prev¶[CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 header | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[CB]¶next | two ed ending at 44@0 | Backspace after 1st break | setup<cap<edit	timing+unstable
-header | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-header | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-header | prev¶[CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-header | prev¶[CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-header | prev¶[CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-header | prev¶[CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
 header | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[PB]Heading | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
@@ -513,27 +443,13 @@ header | prev¶[PB][CB]Heading | two ed: [PB] and [PB]Heading | retype 44 text a
 header | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[PB][CB]¶next | ed over 1st break | Backspace after 1st break | setup<cap<edit	exact+unstable
-header | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | cap<setup+edit	exact+unstable
-header | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[PB][CB]¶next | ed over 1st break | type Q at 44 end | setup<cap<edit	refused+unstable
-header | prev¶[PB][CB]¶next | ed prev..44@0 + reply | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next | ed prev..44@0 | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next | ed prev..44@1 | type Q at 44 end | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next | ed prev@0..text start | type Q at 44 end | setup<cap<edit	refused
 header | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | cap<setup+edit	exact+unstable
 header | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | edit<cap<tail	timing+unstable
 header | prev¶[PB][CB]¶next | two ed ..text start | Backspace after 1st break | setup<cap<edit	timing+unstable
 header | prev¶[PB][CB]¶next | two ed ..text start | none | setup<cap	timing+unstable
 header | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | cap<setup+edit	exact+unstable
 header | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	refused+unstable
-header | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | cap<setup+edit	exact+unstable
-header | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | edit<cap<tail	timing+unstable
-header | prev¶[PB][CB]¶next | two ed ending at 44@0 | type Q at 44 end | setup<cap<edit	refused+unstable
-header | prev¶[PB][CB]¶next, A ends at 44@0 | add C + type Q | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + add C + type Q | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next, A ends at 44@0 | remove B + type Q | setup<cap<edit	refused
-header | prev¶[PB][CB]¶next, A ends at 44@0 | type Q | setup<cap<edit	refused
+header | prev¶[PB][CB]¶next | two ed ..text start | type Q at 44 end | setup<cap<edit	timing+unstable
 header | prev¶del[PB]Heading | ed over 1st break | accept all | cap<setup+edit	exact+unstable
 header | prev¶del[PB]Heading | ed over 1st break | accept all | edit<cap<tail	timing+unstable
 header | prev¶del[PB]Heading | ed over 1st break | accept all | setup<cap<edit	exact+unstable

@@ -580,6 +580,9 @@ fn content_index<T: ReadTxn>(
     let mut head = first;
     let mut after_paragraph = first > 0;
     let mut leads = false;
+    // Breaks a text-less paragraph owned (ending in a column break, none taken
+    // from the paragraph before) lead the text after them too.
+    let (mut breaks, mut trailing, mut column) = (0, false, false);
     while head < position {
         let ChunkKind::Embed(Some(map)) = &chunks[head].kind else {
             break;
@@ -588,17 +591,24 @@ fn content_index<T: ReadTxn>(
             Some("table" | "blockSdt") => {
                 after_paragraph = false;
                 leads = false;
+                (breaks, trailing, column) = (0, false, false);
             }
-            Some("pageBreak" | "columnBreak") => {
+            Some(kind @ ("pageBreak" | "columnBreak")) => {
                 leads |= !after_paragraph
                     || matches!(map.get(txn, "leading"), Some(Out::Any(Any::Bool(true))));
                 if leads {
                     count += 1;
                 }
+                breaks += 1;
+                trailing |= matches!(map.get(txn, "trailing"), Some(Out::Any(Any::Bool(true))));
+                column = kind == "columnBreak";
             }
             _ => break,
         }
         head += 1;
+    }
+    if !leads && column && !trailing {
+        count += breaks;
     }
     for (chunk, &paired) in chunks[head..position].iter().zip(&paired[head - first..]) {
         offset += match &chunk.kind {

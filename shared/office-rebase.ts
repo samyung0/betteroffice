@@ -187,8 +187,14 @@ function assertBreaksLead(source: Y.Text, target: Y.Text): void {
   } catch {
     return; // Changes inside it cannot land and fail the rebase.
   }
+  // Breaks a text-less paragraph owned (ending in a column break, none taken
+  // from the paragraph before) lead the text that follows them.
+  const owned = (slot: Array<[number, Y.Map<unknown>]>) =>
+    slot.at(-1)![1].get("_kind") === "columnBreak" &&
+    !slot.some(([, unit]) => unit.get("trailing") === true);
   for (const slot of slots) {
-    const latest = slot.findIndex(([, unit]) => leads(unit));
+    const flagged = slot.findIndex(([, unit]) => leads(unit));
+    const latest = flagged < 0 && owned(slot) ? 0 : flagged;
     const rebased = slot.findIndex(
       ([at]) => f.map[at] >= 0 && leads(childAtOffset(target, f.map[at]))
     );

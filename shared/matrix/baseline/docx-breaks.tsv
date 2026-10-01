@@ -17,8 +17,6 @@ body | prev[CB]¶[PB]Heading | Enter at 44@0 | cap<edit	exact+moved+render
 body | prev[CB]¶[PB]Heading | Enter at 44@0 | edit<cap<tail	exact+moved+render
 body | prev¶[PB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
 body | prev¶[PB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
-body | prev¶[PB][CB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
-body | prev¶[PB][CB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
 cell | [PB]Heading (story start) | Enter at 44 text start | cap<edit	exact+break-paragraph
 cell | [PB]Heading (story start) | Enter at 44 text start | edit<cap<tail	exact+break-paragraph
 cell | [PB]Heading (story start) | Enter at 44 text start, then Backspace after 1st break | setup<cap<edit	timing
@@ -37,8 +35,6 @@ cell | prev[CB]¶[PB]Heading | Enter at 44@0 | cap<edit	exact+moved+render
 cell | prev[CB]¶[PB]Heading | Enter at 44@0 | edit<cap<tail	exact+moved+render
 cell | prev¶[PB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
 cell | prev¶[PB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
-cell | prev¶[PB][CB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
-cell | prev¶[PB][CB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
 control | [PB]Heading (story start) | Enter at 44 text start | cap<edit	exact+break-paragraph
 control | [PB]Heading (story start) | Enter at 44 text start | edit<cap<tail	exact+break-paragraph
 control | [PB]Heading (story start) | Enter at 44 text start, then Backspace after 1st break | setup<cap<edit	refused
@@ -57,8 +53,6 @@ control | prev[CB]¶[PB]Heading | Enter at 44@0 | cap<edit	exact+moved+render
 control | prev[CB]¶[PB]Heading | Enter at 44@0 | edit<cap<tail	exact+moved+render
 control | prev¶[PB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
 control | prev¶[PB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
-control | prev¶[PB][CB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
-control | prev¶[PB][CB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
 footnote | [PB]Heading (story start) | Enter at 44 text start | cap<edit	exact+break-paragraph
 footnote | [PB]Heading (story start) | Enter at 44 text start | edit<cap<tail	exact+break-paragraph
 footnote | [PB]Heading (story start) | Enter at 44 text start, then Backspace after 1st break | setup<cap<edit	timing
@@ -77,8 +71,6 @@ footnote | prev[CB]¶[PB]Heading | Enter at 44@0 | cap<edit	exact+moved+render
 footnote | prev[CB]¶[PB]Heading | Enter at 44@0 | edit<cap<tail	exact+moved+render
 footnote | prev¶[PB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
 footnote | prev¶[PB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
-footnote | prev¶[PB][CB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
-footnote | prev¶[PB][CB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
 header | [PB]Heading (story start) | Enter at 44 text start | cap<edit	exact+break-paragraph
 header | [PB]Heading (story start) | Enter at 44 text start | edit<cap<tail	exact+break-paragraph
 header | [PB]Heading (story start) | Enter at 44 text start, then Backspace after 1st break | setup<cap<edit	timing
@@ -97,5 +89,3 @@ header | prev[CB]¶[PB]Heading | Enter at 44@0 | cap<edit	exact+moved+render
 header | prev[CB]¶[PB]Heading | Enter at 44@0 | edit<cap<tail	exact+moved+render
 header | prev¶[PB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
 header | prev¶[PB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
-header | prev¶[PB][CB]Heading | Enter at 44 text start, then type Q at 44 end | setup<cap<edit	timing
-header | prev¶[PB][CB]Heading | delete 44 text, then type Q at 44 end | setup<cap<edit	timing
