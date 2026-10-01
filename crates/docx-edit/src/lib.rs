@@ -385,12 +385,30 @@ impl EditingDoc {
     /// block content controls and page or column breaks that still open its
     /// paragraph slot once the range is gone. Inline content never goes ahead
     /// of them in one slot, as in Word; the render bridge refuses that state.
+    /// Nor does it go after a field whose code continues into the next
+    /// paragraph: everything after it there is that code, so it lands ahead.
     pub(crate) fn inline_landing(&self, story_id: &str, start: u32, end: u32) -> EditResult<u32> {
         let segments = self.segment_index(story_id)?;
-        Ok(match segments.para_at(start) {
-            Some(para) if end < para.node_start => start + (para.node_start - end),
-            _ => start,
-        })
+        let Some(para) = segments.para_at(start) else {
+            return Ok(start);
+        };
+        if end < para.node_start {
+            return Ok(start + (para.node_start - end));
+        }
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let code_continues = ops::snapshot_range(&story, &txn, para.node_start, start)
+            .into_iter()
+            .find(|chunk| {
+                chunk.end() <= start
+                    && matches!(&chunk.kind, ops::ChunkKind::Embed(Some(map))
+                        if map_string(map, &txn, "fieldData").is_some_and(|data| {
+                            data.contains("\"continuation\"")
+                                && serde_json::from_str::<serde_json::Value>(&data)
+                                .is_ok_and(|field| field["continuation"]["separate"] == serde_json::Value::Bool(true))
+                        }))
+            });
+        Ok(code_continues.map_or(start, |chunk| chunk.start))
     }
 
     /// The paragraph mark a delete of `[start, end)` keeps, as Word does: the
@@ -712,20 +730,28 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
-        Ok(story
-            .diff(&txn, YChange::identity)
-            .into_iter()
-            .map(|diff| {
-                let mut content = segment_content(diff.insert, &txn);
-                if let SegmentContent::Pilcrow(properties) = &mut content {
-                    bookmarks::project(&mut properties.values, &properties.para_id, &bookmarks);
-                }
-                StorySegment {
-                    content,
-                    attributes: ordered_attrs(diff.attributes.as_deref()),
-                }
-            })
-            .collect())
+        let mut segments: Vec<StorySegment> = Vec::new();
+        for diff in story.diff(&txn, YChange::identity) {
+            let mut content = segment_content(diff.insert, &txn);
+            if let SegmentContent::Pilcrow(properties) = &mut content {
+                bookmarks::project(&mut properties.values, &properties.para_id, &bookmarks);
+            }
+            let attributes = ordered_attrs(diff.attributes.as_deref());
+            // Formatting a run back to its neighbour's attributes leaves a
+            // boundary yrs keeps; the text reads as one run.
+            if let (SegmentContent::Text(text), Some(previous)) = (&content, segments.last_mut())
+                && let SegmentContent::Text(before) = &mut previous.content
+                && previous.attributes == attributes
+            {
+                before.push_str(text);
+                continue;
+            }
+            segments.push(StorySegment {
+                content,
+                attributes,
+            });
+        }
+        Ok(segments)
     }
 
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {

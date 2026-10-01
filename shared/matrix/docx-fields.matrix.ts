@@ -21,6 +21,7 @@ import {
   none,
   orders,
   p,
+  ref,
   run,
   sdt,
   type Edit,
@@ -202,6 +203,41 @@ const JOINS: Record<string, [string, Edit]> = {
     (s, st) => void s.deleteRange({ story: st, start: { paraId: "11111111", offset: 2 }, end: { paraId: P, offset: 2 } }),
   ],
 };
+// Round 2 review B (rv2): Enter inside projected links and after projected simple fields, joins back, and typing
+// after a field whose code continues into the next paragraph.
+const len = (s: YrsSession, st: string, paraId: string) => s.paragraphSpans(st).find((x) => x.paraId === paraId)!.length;
+const SPLITS: Record<string, string> = {
+  "[REF|L(AA)L(BB)]": holder(field(`${link(run("AA"))}${link(run("BB"), "other")}`, " REF a \\h ")),
+  "<c>[REF|L(AA)L(BB)]</c>": holder(`<w:commentRangeStart w:id="1"/>${field(`${link(run("AA"))}${link(run("BB"), "other")}`, " REF a \\h ")}<w:commentRangeEnd w:id="1"/>${ref()}`),
+  "[REF|L(AA)F{20}L(BB)]": holder(field(`${link(run("AA"))}${fs(run("20"), " PAGE ")}${link(run("BB"), "other")}`, " REF a \\h ")),
+  "[TOC|L(Intro)L(Body)]": p(P, field(`${link(run("Intro"))}${link(run("Body"), "t2")}`, ' TOC \\o "1-3" \\h ')),
+};
+const firstLink = (s: YrsSession, st: string) => {
+  const at = locate(s, st, s.storySegments(st).some((g) => g.kind === "text" && g.text.includes("AA")) ? "AA" : "Intro");
+  return { story: st, paraId: at.paraId, offset: at.offset + 1 };
+};
+const SPLIT_OPS: Record<string, Edit> = {
+  "Enter in 1st, join back": (s, st) => {
+    const { firstParaId } = s.splitParagraph(firstLink(s, st));
+    s.deleteAt({ story: st, paraId: firstParaId, offset: len(s, st, firstParaId) }, "forward");
+  },
+  "Enter in 1st, Backspace at 2nd start": (s, st) => {
+    const { secondParaId } = s.splitParagraph(firstLink(s, st));
+    s.deleteAt({ story: st, paraId: secondParaId, offset: 0 }, "backward");
+  },
+};
+const AFTER_SIMPLE: Record<string, string> = {
+  "[DATE|xF{20}y]": holder(field(`${run("x")}${fs(run("20"), " PAGE ")}${run("y")}`)),
+  "[DATE|F{20}L(AA)x]": holder(field(`${fs(run("20"), " PAGE ")}${link(run("AA"))}${run("x")}`)),
+  "[DATE|F{20}+{y}x]": holder(field(`${fs(run("20"), " PAGE ")}${ins(run("y"))}${run("x")}`)),
+};
+const enterAfterPage: Edit = (s, st) => {
+  const at = fieldAt(s, st, "PAGE");
+  s.splitParagraph({ story: st, paraId: at.paraId, offset: at.offset + 1 });
+};
+const CODE_CONTINUES =
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DATE ")}`) +
+  p("45454545", `<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("20")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
 
@@ -231,6 +267,15 @@ function rows(): Row[] {
         push(where, xml, `${name} | join the paragraphs`, null, (s, st) =>
           void s.deleteAt({ story: st, paraId: P, offset: s.paragraphSpans(st).find((x) => x.paraId === P)!.length }, "forward"));
     }
+  for (const where of ["body", "cell", "header"] as Where[]) {
+    for (const [name, xml] of Object.entries(SPLITS)) {
+      if (name.startsWith("[TOC") && where !== "body") continue;
+      for (const [op, edit] of Object.entries(SPLIT_OPS)) push(where, xml, `${name} | ${op}`, null, edit);
+    }
+    for (const [name, xml] of Object.entries(AFTER_SIMPLE)) push(where, xml, `${name} | Enter after the simple field`, null, enterAfterPage);
+    push(where, CODE_CONTINUES, "field code continued | type at its paragraph's end", null, (s, st) =>
+      void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+  }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {
       push(where, xml, `join ${name}`, null, join);

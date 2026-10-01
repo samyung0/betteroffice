@@ -1732,6 +1732,35 @@ pub(crate) fn field_units(
         .collect()
 }
 
+/// A run's story units as the seed makes them in a paragraph styled
+/// `style_id` in `package` (see [`field_units`]).
+pub(crate) fn run_units(
+    run: &Value,
+    package: Option<&PackageContext>,
+    style_id: Option<&str>,
+) -> Vec<(Result<String, (String, JsonObject)>, JsonObject)> {
+    let none = StyleResolver::new(None);
+    let styles = package.map_or(&none, |package| &package.styles);
+    let paragraph = json!({ "formatting": { "styleId": style_id } });
+    let style_formatting = paragraph_style_formatting(&paragraph, styles, None);
+    run_to_units(
+        run,
+        style_formatting.as_ref(),
+        styles,
+        &[],
+        &BTreeMap::new(),
+    )
+    .into_iter()
+    .map(|unit| {
+        let content = match unit.content {
+            UnitContent::Text(text) => Ok(text),
+            UnitContent::Embed { kind, payload } => Err((kind, payload)),
+        };
+        (content, unit.attrs)
+    })
+    .collect()
+}
+
 /// The runs field result `nodes` show (`shown_runs` in docx-parse's paragraph module).
 pub(crate) fn shown_runs(nodes: &[Value]) -> Vec<Value> {
     nodes

@@ -588,6 +588,7 @@ impl EditingDoc {
                 &at.story,
                 at.index,
                 &format!("field:{second_para_id}"),
+                self.package().as_deref(),
             )?;
         }
         Ok(SplitReceipt {
@@ -805,6 +806,12 @@ impl EditingDoc {
             let (donor_id, donor_props) = capture_pilcrow(&boundary.map, &txn);
             story.remove_range(&mut txn, pilcrow_index, 1);
             adopt_pilcrow(&mut txn, &survivor.map, &donor_id, &donor_props);
+            crate::ops::field_changes::rejoin_fields(
+                &mut txn,
+                &story,
+                &boundary.story_id,
+                pilcrow_index,
+            )?;
         }
         let caret = crate::op::loc_range_in_txn(
             &boundary.story_id,

@@ -1,6 +1,5 @@
-# docx-fields: 909 rows, ids 1a1efe78976d6535; rows not listed are exact
+# docx-fields: 973 rows, ids 3c04101d0257af73; rows not listed are exact
 body | join nested continued field, undo | setup<cap<edit	refused
-body | pj:cf>fs | comment over field | edit<cap<tail	refused
 body | pj:cf>fs | type after field | edit<cap<tail	refused
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 body | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved
@@ -10,7 +9,6 @@ body | toc | type at 1st entry end | cap<edit	refused
 body | toc | type in 1st entry | cap<edit	refused
 cell | join nested continued field, undo | setup<cap<edit	refused
 header | join nested continued field, undo | setup<cap<edit	refused
-header | pj:cf>fs | comment over field | edit<cap<tail	refused
 header | pj:cf>fs | type after field | edit<cap<tail	refused
 header | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 header | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved

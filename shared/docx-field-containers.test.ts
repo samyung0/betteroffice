@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { docx as matrixDocx, prime, runRow, units as matrixUnits, sig } from "./matrix/lib";
+import { docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, prime, runRow, units as matrixUnits, sig, type Edit as MatrixEdit } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -1967,4 +1967,76 @@ test("Undo of a join removing a nested continued field lands exactly or refuses,
     });
     expect(row.cls).not.toStartWith("silent");
   }
+});
+
+// Round 2 review B, I: Enter inside a projected link, then Delete or Backspace back, restores the link and its field.
+const twoLinks = paragraph(field(link(run("AA")) + linkTo("BB"), " REF a \\h "));
+test.each([
+  ["Delete at the first half's end", twoLinks, "AA", (session: YrsSession, first: string) => {
+    const { length } = session.paragraphSpans("body").find((span) => span.paraId === first)!;
+    session.deleteAt({ story: "body", paraId: first, offset: length }, "forward");
+  }],
+  ["Backspace at the second half's start", twoLinks, "AA", (session: YrsSession, _: string, second: string) =>
+    void session.deleteAt({ story: "body", paraId: second, offset: 0 }, "backward")],
+  ["Delete in a table of contents", docx(tocParagraphs + tail), "Introduction", (session: YrsSession, first: string) => {
+    const { length } = session.paragraphSpans("body").find((span) => span.paraId === first)!;
+    session.deleteAt({ story: "body", paraId: first, offset: length }, "forward");
+  }],
+])("Enter inside a projected link, then %s, restores the original", async (_, bytes, text, join) => {
+  const before = await open(bytes);
+  const original = matrixUnits(before, "body");
+  before.destroy();
+  const session = await open(bytes);
+  const { firstParaId, secondParaId } = session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, text) + 1 });
+  join(session, firstParaId, secondParaId);
+  expect(matrixUnits(session, "body")).toBe(original);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(documentXml(saved)).toBe(documentXml(await publish(bytes, (await open(bytes)).encodeState())));
+});
+
+// Round 2 review B, O: text typed at the end of a paragraph whose field code continues into the next stays out of the code.
+test("text typed after a field whose code continues into the next paragraph lands before the field", async () => {
+  let bytes = docx(
+    p("11111111", run("a") + char("begin") + instr(" DATE ")) + p("33333333", char("separate") + run("20") + char("end") + run("z")) + tail
+  );
+  const session = await open(bytes);
+  const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
+  session.insertText({ story: "body", paraId: "11111111", offset: length }, "Q");
+  const editor = matrixUnits(session, "body");
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(bytes)).toBe("aQ[«DATE»");
+  const reopened = await open(bytes);
+  expect(matrixUnits(reopened, "body")).toBe(editor);
+  reopened.destroy();
+});
+
+
+// Round 2 review B: Enter after a projected simple field splits its field (K, M; a kept insertion keeps the old
+// Enter), and Enter inside a projected link then a join back restores it (I), with a comment around it too.
+const holder44 = (xml: string) => p("44444444", `${run("a ")}${xml}${run(" b")}`);
+const enterAfterPage: MatrixEdit = (s, st) => {
+  const at = matrixFieldAt(s, st, "PAGE");
+  s.splitParagraph({ ...at, story: st, offset: at.offset + 1 });
+};
+const enterInAA = (join: "back" | "Backspace"): MatrixEdit => (s, st) => {
+  const at = matrixLocate(s, st, "AA");
+  const { firstParaId, secondParaId } = s.splitParagraph({ story: st, paraId: at.paraId, offset: at.offset + 1 });
+  if (join === "back") s.deleteAt({ story: st, paraId: firstParaId, offset: matrixLen(s, st, firstParaId) }, "forward");
+  else s.deleteAt({ story: st, paraId: secondParaId, offset: 0 }, "backward");
+};
+test.each([
+  ["Enter after a projected simple field with result text before it", field(run("x") + fs(run("20"), " PAGE ") + run("y")), enterAfterPage],
+  ["Enter after a projected simple field with a link and text after it", field(fs(run("20"), " PAGE ") + link(run("AA")) + run("x")), enterAfterPage],
+  ["Enter after a projected simple field before a kept insertion", field(fs(run("20"), " PAGE ") + ins(run("y")) + run("x")), enterAfterPage],
+  ["Enter in a link of a commented field, Delete back", `<w:commentRangeStart w:id="5"/>${field(link(run("AA")) + linkTo("BB"), " REF a \\h ")}<w:commentRangeEnd w:id="5"/>${ref(5)}`, enterInAA("back")],
+  ["Enter in a link before a simple field, Backspace back", field(link(run("AA")) + fs(run("20"), " PAGE ") + linkTo("BB"), " REF a \\h "), enterInAA("Backspace")],
+])("%s lands exactly in every capture order", async (_, xml, edit) => {
+  await prime();
+  for (const where of ["body", "cell", "header"] as const)
+    for (const order of orders(`${where}`, null, edit)) {
+      const row = await runRow({ id: order.id, bytes: matrixDocx(where, holder44(xml)), where, before: order.before, after: order.after });
+      expect(`${order.id}: ${row.cls}`).toEndWith(": exact");
+    }
 });
