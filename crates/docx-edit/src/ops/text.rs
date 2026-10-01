@@ -72,7 +72,10 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
                 (None, None) => return Vec::new(),
             };
             let mut attrs = formatting_of(source);
-            if let Some(index) = attrs.iter().position(|(key, _)| key == HYPERLINK) {
+            // Text typed next to a field result's projected link stays in it,
+            // as the seed reads that field's result back.
+            let projected = attrs.iter().any(|(key, _)| key == FIELD_RESULT);
+            if !projected && let Some(index) = attrs.iter().position(|(key, _)| key == HYPERLINK) {
                 let same_on_other =
                     other.is_some_and(|other| other.attrs.get(HYPERLINK) == Some(&attrs[index].1));
                 if !same_on_other {

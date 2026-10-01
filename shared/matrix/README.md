@@ -77,8 +77,8 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
 - `timing+unstable` rows with two comments ending beside a break-only paragraph retain the accepted marker order
   and empty-range differences. An empty range becomes a reference-only comment after publication in every story.
 - `unstable` rows with two editor comments ending at one point: their markers reorder on the second publication.
-- `moved` rows in `docx-fields`: text typed next to a projected link or field saves outside it (N18 follow-up), and
-  Enter between a projected child and its field.
+- `moved` rows in `docx-fields`: text typed after a projected field saves as its owner's result text, and Enter
+  between a projected child and its field, or inside a table of contents' first entry, saves the child outside it.
 - `refused` rows follow decisions: the break-flag refusal (R10-N1, 2026-09-30), field children the rebase cannot
   match one-to-one (round 5, N20), a table of contents entry typed in after a capture (the UAT journey).
 

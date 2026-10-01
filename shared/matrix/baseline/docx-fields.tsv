@@ -1,34 +1,18 @@
 # docx-fields: 861 rows, ids f77983608e09867a; rows not listed are exact
-body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | cap<edit	exact+moved
-body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | edit<cap<tail	exact+moved
-body | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end, then delete REF a | setup<cap<edit	refused
 body | pj:cf>fs | type after field | cap<edit	exact+moved
 body | pj:cf>fs | type after field | edit<cap<tail	exact+moved
 body | pj:cf>link | Enter before field | cap<edit	exact+moved
 body | pj:cf>link | Enter before field | edit<cap<tail	exact+moved
-body | pj:cf>link | type before field | cap<edit	exact+moved
-body | pj:cf>link | type before field | edit<cap<tail	exact+moved
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 body | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved
-body | pj:cf>link+ins | type before field | cap<edit	exact+moved
-body | pj:cf>link+ins | type before field | edit<cap<tail	exact+moved
 body | toc | Enter inside 1st entry | cap<edit	exact+moved
 body | toc | Enter inside 1st entry | edit<cap<tail	exact+moved
 body | toc | retype 1st entry's last letter | cap<edit	refused
 body | toc | type at 1st entry end | cap<edit	refused
 body | toc | type in 1st entry | cap<edit	refused
-body | x [REF a|L(AA)]¶[REF b|L(BB)] y | type at AA end, then delete REF a | setup<cap<edit	refused
-header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | cap<edit	exact+moved
-header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end | edit<cap<tail	exact+moved
-header | a [REF a|L(AA)][REF b|L(BB)] b | type at AA end, then delete REF a | setup<cap<edit	refused
 header | pj:cf>fs | type after field | cap<edit	exact+moved
 header | pj:cf>fs | type after field | edit<cap<tail	exact+moved
 header | pj:cf>link | Enter before field | cap<edit	exact+moved
 header | pj:cf>link | Enter before field | edit<cap<tail	exact+moved
-header | pj:cf>link | type before field | cap<edit	exact+moved
-header | pj:cf>link | type before field | edit<cap<tail	exact+moved
 header | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 header | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved
-header | pj:cf>link+ins | type before field | cap<edit	exact+moved
-header | pj:cf>link+ins | type before field | edit<cap<tail	exact+moved
-header | x [REF a|L(AA)]¶[REF b|L(BB)] y | type at AA end, then delete REF a | setup<cap<edit	refused

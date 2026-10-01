@@ -1455,18 +1455,20 @@ async function directly(bytes: Uint8Array, ...edits: Edit[]) {
   return view(out);
 }
 
+// Text typed at a link's end stays in that link (item 8), so the export's seed holds it as the capture does.
 test.each([
   ["one link", field(link(run("BB")), " REF b \\h "), "BB"],
   ["two links", field(`${linkTo("AA")}${linkTo("BB")}`, " REF b \\h "), "AA"],
-])("text typed at a link's end before the capture refuses a rebase that deletes its field (%s)", async (_, xml, text) => {
-  const landing = landed(paragraph(xml), typeInText(text, text.length), backspaceField("REF b"));
-  await expect(landing).rejects.toBeInstanceOf(RebaseError);
+])("text typed at a link's end before the capture lands exactly when a rebase deletes its field (%s)", async (_, xml, text) => {
+  const { next, direct } = await landed(paragraph(xml), typeInText(text, text.length), backspaceField("REF b"));
+  expect(direct).toContain(`H(${text}Z)`);
+  expect(next).toBe(direct);
 });
 
 test("text typed at a link's end before the capture lands when the field is left alone", async () => {
   const bytes = paragraph(field(link(run("BB")), " REF b \\h "));
   const { next, direct } = await landed(bytes, typeInText("BB", 2), (session) => edit(session, "22222222", "y"));
-  expect(direct).toBe("a [«REF b \\h»|H(BB)Z] b");
+  expect(direct).toBe("a [«REF b \\h»|H(BBZ)] b");
   expect(next).toBe(direct);
 });
 
@@ -1816,4 +1818,33 @@ test.each([
   rebased.destroy();
   expect(documentXml(next)).toBe(direct);
   expect(view(next, "44444444")).toContain("H(3Q0)");
+});
+
+/** The first paragraph's segments as the editor holds them: text with its field result and link, or an embed. */
+const segments = (session: YrsSession) =>
+  session.storySegments("body").map((segment) =>
+    segment.kind === "text"
+      ? `${segment.text}${segment.attributes.fieldResult ? "<" : ""}${segment.attributes.hyperlink ? "@" : ""}`
+      : segment.kind === "pilcrow" ? "¶" : `[${segment.embedKind}]`
+  ).join("").split("¶")[0];
+// Item 8 (N18 follow-up): text typed at the end of a field result's projected link stays in that link and field.
+test.each([
+  ["a REF field's link", field(link(run("AA")), " REF a \\h ") + field(link(run("BB")), " REF b \\h "), "AA", "[«REF a \\h»|H(AAZ)][«REF b \\h»|H(BB)]"],
+  ["a field's only link", field(link(run("2026"))), "2026", "[«DATE»|H(2026Z)]"],
+  ["a link before a kept insertion", field(link(run("20")) + ins(run("26"))), "20", "[«DATE»|H(20Z)+{26}]"],
+])("text typed at the end of %s stays in it across publications", async (_, xml, text, saved) => {
+  let bytes = paragraph(xml);
+  const session = await open(bytes);
+  session.insertText({ story: "body", paraId: "11111111", offset: childAt(session, text) + text.length }, "Z");
+  const editor = segments(session);
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(bytes)).toContain(saved);
+  for (let publication = 0; publication < 2; publication += 1) {
+    const reopened = await open(bytes);
+    expect(segments(reopened)).toBe(editor);
+    edit(reopened, "22222222", "z");
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
 });
