@@ -1620,12 +1620,30 @@ fn field_to_units(
     }
     let mut units = Vec::new();
     let mut children = Vec::new();
+    // Result runs after a projected simple field are its field's text too.
+    let mut after_simple = false;
+    let mut projected_runs = BTreeSet::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
-            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("hyperlink") => {
+                after_simple = false;
+                hyperlink_to_units(child, style_formatting, styles, &[], source)
+            }
             Some("simpleField") => {
+                after_simple = index >= 0;
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, 1)]
+            }
+            Some("run") if after_simple => {
+                let text = run_to_units(child, style_formatting, styles, &[], source);
+                if !text
+                    .iter()
+                    .all(|unit| matches!(&unit.content, UnitContent::Text(_)))
+                {
+                    continue;
+                }
+                projected_runs.insert(index);
+                text
             }
             _ => continue,
         };
@@ -1648,12 +1666,15 @@ fn field_to_units(
     visible["fieldResult"] = Value::Array(
         result
             .iter()
-            .filter(|child| {
-                matches!(
-                    string(field(Some(child), "type")),
-                    Some("run" | "rawXml" | "inlineSdt")
-                )
+            .enumerate()
+            .filter(|(index, child)| {
+                !projected_runs.contains(&(*index as isize))
+                    && matches!(
+                        string(field(Some(child), "type")),
+                        Some("run" | "rawXml" | "inlineSdt")
+                    )
             })
+            .map(|(_, child)| child)
             .flat_map(|child| shown_runs(std::slice::from_ref(child)))
             .collect(),
     );

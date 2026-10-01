@@ -575,12 +575,23 @@ function fieldToUnits(
   }
   const units: InlineUnit[] = [];
   const children: Attrs[] = [];
+  // Result runs after a projected simple field are its field's text too.
+  let afterSimple = false;
+  const projectedRuns = new Set<number>();
   projectedChildren.forEach(({ child, index }) => {
-    if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
-    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
-    const projected = child.type === 'hyperlink'
-      ? hyperlinkToUnits(child, styleFormatting, styleResolver)
-      : [embedUnit('field', nested!.payload, nested!.marks)];
+    let projected: InlineUnit[];
+    if (child.type === 'run') {
+      if (!afterSimple) return;
+      projected = runToUnits(child, styleFormatting, styleResolver);
+      if (!projected.every((unit) => unit.kind === 'text')) return;
+      projectedRuns.add(index);
+    } else if (child.type === 'hyperlink' || child.type === 'simpleField') {
+      afterSimple = child.type === 'simpleField' && index >= 0;
+      const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+      projected = child.type === 'hyperlink'
+        ? hyperlinkToUnits(child, styleFormatting, styleResolver)
+        : [embedUnit('field', nested!.payload, nested!.marks)];
+    } else return;
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
       : { kind: 'embed', embedKind: unit.embedKind, payload: unit.payload, attributes: unit.attrs }) });
@@ -592,7 +603,7 @@ function fieldToUnits(
   const visible = {
     ...value,
     fieldResult: shownRuns(
-      result.filter((child) => child.type === 'run' || child.type === 'rawXml' || child.type === 'inlineSdt')
+      result.filter((child, index) => !projectedRuns.has(index) && (child.type === 'run' || child.type === 'rawXml' || child.type === 'inlineSdt'))
     ),
   };
   const field = fieldPayload(visible, styleFormatting);

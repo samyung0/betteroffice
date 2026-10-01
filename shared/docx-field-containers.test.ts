@@ -1848,3 +1848,22 @@ test.each([
     reopened.destroy();
   }
 });
+
+// Round 2 C: text typed after a field result's projected simple field stays a unit inside that field across publications.
+test("text typed after a projected simple field stays in its field across publications", async () => {
+  let bytes = paragraph(field(fs(run("20"), " PAGE ")));
+  const session = await open(bytes);
+  session.insertText({ story: "body", paraId: "11111111", offset: 3 }, "Y");
+  const editor = segments(session);
+  expect(editor).toBe("a [field]Y<[field] b");
+  bytes = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(bytes)).toContain("[«DATE»|F<20>Y]");
+  for (let publication = 0; publication < 2; publication += 1) {
+    const reopened = await open(bytes);
+    expect(segments(reopened)).toBe(editor);
+    edit(reopened, "22222222", "z");
+    bytes = await publish(bytes, reopened.encodeState());
+    reopened.destroy();
+  }
+});
