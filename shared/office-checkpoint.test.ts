@@ -1328,3 +1328,33 @@ test("semantic baselines roundtrip without embedded media and detect edits and r
       expect(entry.value).toMatch(/^[a-f0-9]{64}$/);
   }
 });
+
+test("DOCX formatting toggled back reports no effect, however the engine splits its runs", async () => {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const bytes = rezipContainer({
+    "[Content_Types].xml": new TextEncoder().encode(
+      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`
+    ),
+    "_rels/.rels": new TextEncoder().encode(
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`
+    ),
+    "word/document.xml": new TextEncoder().encode(
+      `<w:document ${W}><w:body><w:p w14:paraId="11111111"><w:hyperlink w:anchor="t"><w:r><w:t>AABB</w:t></w:r></w:hyperlink></w:p><w:p w14:paraId="22222222"><w:r><w:t>tail</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`
+    ),
+  });
+  const before = await seedOffice("docx", bytes);
+  const doc = await createYrsSession({ clientId: 9993 });
+  try {
+    doc.openDocx(bytes, false);
+    doc.loadState(before.state);
+    const range = { story: "body", start: { paraId: "11111111", offset: 2 }, end: { paraId: "11111111", offset: 4 } };
+    doc.toggleMark(range, { type: "bold" });
+    doc.toggleMark(range, { type: "bold" });
+    const { firstParaId } = doc.splitParagraph({ story: "body", paraId: "11111111", offset: 2 });
+    doc.mergeParagraphs("body", firstParaId, "forward");
+    const after = { ...before, state: doc.encodeState() };
+    expect((await compare(bytes, before, after)).filter((effect) => effect.id.includes("11111111"))).toEqual([]);
+  } finally {
+    doc.destroy();
+  }
+});
