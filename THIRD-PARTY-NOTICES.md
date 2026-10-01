@@ -87,30 +87,22 @@ https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
 
 ---
 
-## yrs (vendored copy for the macOS app)
-
-`apps/native-viewer/vendor/yrs` is the `yrs` 0.27.3 crate from crates.io
-(upstream https://github.com/y-crdt/y-crdt), byte-identical apart from three
-call sites that replace `from_utf8_unchecked` with checked decoding (see issue
-#224). `apps/native-viewer` substitutes it for the registry crate via
-`[patch.crates-io]`, so it is compiled into the macOS app only.
-
-Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
-
-License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).
-
----
-
-## yrs (vendored copy for the workspace)
+## yrs (vendored copy)
 
 `third_party/yrs` is the `yrs` 0.27.3 crate from crates.io (upstream
-https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from
-one match arm in `clean_format_gap` (`src/types/text.rs`) that counts a shared
-type as content, and a `[lints]` block in its `Cargo.toml` that allows its
-upstream warnings. The workspace substitutes it for the registry crate via
-`[patch.crates-io]`, so it is compiled into the workspace crates that use
-`yrs` and their WASM builds; crates published to crates.io depend on the
-registry crate.
+https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
+
+- one match arm in `clean_format_gap` (`src/types/text.rs`) that counts a
+  shared type as content;
+- checked UTF-8 decoding instead of `from_utf8_unchecked` at three call sites
+  (`src/encoding/read.rs`, `src/updates/decoder.rs`, `src/lib.rs`), so both
+  update decoders reject invalid strings (see issue #224), with a unit test;
+- a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
+
+The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for
+the registry crate via `[patch.crates-io]`, so it is compiled into the crates
+that use `yrs`, their WASM builds and the macOS app; crates published to
+crates.io depend on the registry crate.
 
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 
