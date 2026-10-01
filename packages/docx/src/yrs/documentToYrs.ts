@@ -1097,6 +1097,13 @@ function paragraphAttrs(
     const after = leadingItems.filter((item) => item > index).length;
     return after > 0 ? { breaksAfter: after } : {};
   };
+  // Continued field characters share offsets with bookmarks; with any in the
+  // paragraph, a bookmark records how many precede it.
+  const fieldMarker = (unit: InlineUnit | undefined) =>
+    unit?.kind === 'embed' && unit.embedKind === 'bookmark' &&
+    (unit.payload.kind === 'fieldseparate' || unit.payload.kind === 'fieldend');
+  const fieldsBefore = units.some(fieldMarker) ? (count: number) => ({ fieldsBefore: count }) : () => ({});
+  let fields = 0;
   for (const [index, content] of paragraph.content.entries()) {
     if (content.type === 'bookmarkStart') {
       bookmarks.push({
@@ -1107,13 +1114,15 @@ function paragraphAttrs(
         ...(content.colFirst !== undefined ? { colFirst: content.colFirst } : {}),
         ...(content.colLast !== undefined ? { colLast: content.colLast } : {}),
         ...breaksAfter(index),
+        ...fieldsBefore(fields),
       });
     } else if (content.type === 'bookmarkEnd') {
-      bookmarks.push({ id: content.id, kind: 'end', offset: pmOffset, ...breaksAfter(index) });
+      bookmarks.push({ id: content.id, kind: 'end', offset: pmOffset, ...breaksAfter(index), ...fieldsBefore(fields) });
     } else {
       const count = unitsForParagraphContent(content);
       for (let index = 0; index < count; index += 1) {
         pmOffset += units[contentIndex]?.pmSize ?? 0;
+        if (fieldMarker(units[contentIndex])) fields += 1;
         contentIndex += 1;
       }
     }
@@ -1943,12 +1952,14 @@ function takeBookmarks(units: InlineUnit[]): YrsRawOp[] {
   let head = true;
   let spans: Array<{ raw: number; width: number; start: number; length: number }> = [];
   let leading: number[] = [];
+  let fields: number[] = [];
   for (const unit of units) {
     const width = unit.kind === 'text' ? unit.text.length : 1;
     if (unit.kind === 'embed') {
       if (unit.embedKind === 'bookmark') {
         const data = { ...unit.payload };
         if (data.kind === 'fieldseparate' || data.kind === 'fieldend') {
+          fields.push(found.length);
           data.order = found.length;
           if (Object.keys(unit.attrs).length) data.attributes = unit.attrs;
         }
@@ -1964,6 +1975,12 @@ function takeBookmarks(units: InlineUnit[]): YrsRawOp[] {
           const after = typeof data.breaksAfter === 'number' ? data.breaksAfter : 0;
           delete data.offset;
           delete data.breaksAfter;
+          // Between the field characters it follows and the next.
+          if (typeof data.fieldsBefore === 'number' && fields.length) {
+            const before = Math.min(data.fieldsBefore, fields.length);
+            data.order = before === 0 ? fields[0]! - 0.5 : fields[before - 1]! + 0.5;
+          }
+          delete data.fieldsBefore;
           const span = spans.find(({ start, length }) => offset < start + length);
           if (offset === 0 && after > leading.length) throw new Error('Bookmark break position does not resolve');
           const index = offset === 0 && after > 0
@@ -1975,6 +1992,7 @@ function takeBookmarks(units: InlineUnit[]): YrsRawOp[] {
         pm = 0;
         spans = [];
         leading = [];
+        fields = [];
         head = true;
         continue;
       }

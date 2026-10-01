@@ -1,5 +1,6 @@
 //! Bookmark and continued-field boundaries follow text identities.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -128,20 +129,82 @@ pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> 
             *at = (*at).min(*end);
         }
     }
-    result.sort_by_key(|(at, data)| {
-        let (id, end) = match data {
-            Any::Map(data) => (
-                match data.get("id") {
-                    Some(Any::Number(id)) => *id as i64,
-                    _ => 0,
-                },
-                matches!(data.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "end"),
-            ),
-            _ => (0, false),
-        };
-        (*at, id, end)
-    });
-    result
+    let ranges: HashMap<(i64, bool), (u32, f64)> = result
+        .iter()
+        .filter_map(
+            |(at, data)| match (marker_field(data, "id"), marker_field(data, "kind")) {
+                (Some(Any::Number(id)), Some(Any::String(kind)))
+                    if matches!(kind.as_ref(), "start" | "end") =>
+                {
+                    Some((
+                        (id as i64, kind.as_ref() == "start"),
+                        (*at, marker_order(data)),
+                    ))
+                }
+                _ => None,
+            },
+        )
+        .collect();
+    let mut keyed: Vec<_> = result
+        .into_iter()
+        .map(|marker| ((marker.0, marker_key(&marker, &ranges)), marker))
+        .collect();
+    keyed.sort_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    keyed.into_iter().map(|(_, marker)| marker).collect()
+}
+
+fn marker_field(data: &Any, key: &str) -> Option<Any> {
+    match data {
+        Any::Map(data) => data.get(key).cloned(),
+        _ => None,
+    }
+}
+
+fn marker_order(data: &Any) -> f64 {
+    match marker_field(data, "order") {
+        Some(Any::Number(order)) => order,
+        _ => f64::INFINITY,
+    }
+}
+
+/// A total order at one point: seeded markers by source `order` (an end never
+/// before its own start), then the rest with ends of earlier ranges first,
+/// empty ranges, and starts of later ranges last.
+fn marker_key(
+    (at, data): &(u32, Any),
+    ranges: &HashMap<(i64, bool), (u32, f64)>,
+) -> (f64, u8, f64, String, u8) {
+    let kind = match marker_field(data, "kind") {
+        Some(Any::String(kind)) => kind.to_string(),
+        _ => String::new(),
+    };
+    let (number, name) = match marker_field(data, "id") {
+        Some(Any::Number(id)) => (id, String::new()),
+        Some(Any::String(id)) => (0.0, id.to_string()),
+        _ => (0.0, String::new()),
+    };
+    let partner = matches!(kind.as_str(), "start" | "end")
+        .then(|| ranges.get(&(number as i64, kind == "end")))
+        .flatten();
+    let mut order = marker_order(data);
+    if kind == "end"
+        && let Some((_, start)) = partner
+    {
+        order = order.max(*start);
+    }
+    let place = match (kind.as_str(), partner) {
+        ("start" | "end", Some((other, _))) if other == at => 1,
+        ("end", _) => 0,
+        ("start", _) => 2,
+        _ => 1,
+    };
+    let kind = match kind.as_str() {
+        "start" => 0,
+        "fieldseparate" => 1,
+        "end" => 2,
+        _ => 3,
+    };
+    (order, place, number, name, kind)
 }
 
 /// Removing an empty paragraph before a block hands its markers to the

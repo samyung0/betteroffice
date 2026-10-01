@@ -1650,9 +1650,7 @@ function insertBookmarkItems(items: InlineItem[], bookmarks: Array<BookmarkBound
   const sorted = bookmarks.map((marker) => ({
     ...marker,
     offset: marker.offset === Number.MAX_SAFE_INTEGER ? length : marker.offset,
-  })).sort((a, b) => a.offset - b.offset || (typeof a.id === 'number' && typeof b.id === 'number'
-    ? boundaryOrder(a as BookmarkBoundary, b as BookmarkBoundary)
-    : ('order' in a ? a.order : 0) - ('order' in b ? b.order : 0)));
+  })).sort((a, b) => a.offset - b.offset);
   const result: InlineItem[] = [];
   let cursor = 0;
   let next = 0;
@@ -1727,16 +1725,17 @@ function paragraphFromStory(
   baseParagraph: Paragraph | undefined
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  const continued: FieldBoundary[] = (Array.isArray(properties.bookmarks) ? properties.bookmarks : []).flatMap((raw) => {
+  // The engine lists markers in their order at each point.
+  const markers = (Array.isArray(properties.bookmarks) ? properties.bookmarks : []).flatMap((raw): Array<BookmarkBoundary | FieldBoundary> => {
     const marker = asObject(raw);
     const run = asObject(marker?.run);
     const offset = asFiniteNumber(marker?.offset);
-    return (marker?.kind === 'fieldend' || marker?.kind === 'fieldseparate') && typeof marker.id === 'string'
-      && offset !== undefined && run?.type === 'run' && Array.isArray(run.content)
+    if (marker?.kind !== 'fieldend' && marker?.kind !== 'fieldseparate') return bookmarkBoundaries({ bookmarks: [raw] });
+    return typeof marker.id === 'string' && offset !== undefined && run?.type === 'run' && Array.isArray(run.content)
       ? [{ id: marker.id, kind: marker.kind, offset, order: asFiniteNumber(marker.order) ?? 0,
         run: run as unknown as Run, attributes: asObject(marker.attributes) ?? {} }] : [];
   });
-  let content = buildParagraphContent(insertBookmarkItems(items, [...bookmarkBoundaries(properties), ...continued]));
+  let content = buildParagraphContent(insertBookmarkItems(items, markers));
   content = restoreOriginalRuns(
     content,
     items,

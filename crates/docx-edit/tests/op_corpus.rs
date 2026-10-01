@@ -193,6 +193,45 @@ fn nested_continued_fields_keep_both_owners_boundaries() {
 }
 
 #[test]
+fn coincident_markers_keep_source_order_and_starts_before_ends() {
+    let kinds = |doc: &EditingDoc, paragraph: usize| {
+        let Any::Array(markers) =
+            doc.paragraphs("body").unwrap()[paragraph].properties["bookmarks"].clone()
+        else {
+            panic!("markers are missing");
+        };
+        markers
+            .iter()
+            .map(
+                |marker| match (map_get(marker, "kind"), map_get(marker, "id")) {
+                    (Some(Any::String(kind)), Some(Any::Number(id))) => format!("{kind}{id}"),
+                    (Some(Any::String(kind)), _) => kind.to_string(),
+                    _ => panic!("marker without a kind"),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:bookmarkStart w:id="5" w:name="m"/><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:bookmarkEnd w:id="5"/><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    for client in 7..12 {
+        let doc = EditingDoc::new(client);
+        seed_from_docx(&doc, &bytes).unwrap();
+        assert_eq!(
+            kinds(&doc, 1),
+            "fieldseparate fieldend start5 fieldseparate end5 fieldend"
+        );
+    }
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t>ab</w:t></w:r><w:bookmarkStart w:id="3" w:name="a"/><w:bookmarkStart w:id="4" w:name="b"/><w:r><w:t>c</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>d</w:t></w:r><w:bookmarkStart w:id="5" w:name="c"/><w:bookmarkEnd w:id="3"/><w:r><w:t>e</w:t></w:r><w:bookmarkEnd w:id="4"/><w:bookmarkEnd w:id="5"/><w:r><w:t>f</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", 2, 6))
+        .unwrap();
+    assert_eq!(kinds(&doc, 0), "start3 end3 start4 end4 start5 end5");
+}
+
+#[test]
 fn a_continued_fields_cached_blocks_do_not_keep_deleted_owners_alive() {
     let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r></w:p><w:p w14:paraId="33333333"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
     let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();

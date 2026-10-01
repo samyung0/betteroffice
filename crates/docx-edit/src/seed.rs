@@ -2211,6 +2211,14 @@ fn paragraph_attrs(
     let mut bookmarks = Vec::new();
     let mut unit_index = 0usize;
     let mut pm_offset = 0u32;
+    // Continued field characters share offsets with bookmarks; with any in the
+    // paragraph, a bookmark records how many precede it.
+    let field_marker = |unit: &InlineUnit| {
+        matches!(&unit.content, UnitContent::Embed { kind, payload } if kind == "bookmark"
+            && matches!(string(payload.get("kind")), Some("fieldseparate" | "fieldend")))
+    };
+    let continued = units.iter().any(field_marker);
+    let mut fields_before = 0usize;
     // A bookmark ahead of some of the paragraph's leading breaks records how
     // many follow it, so the save writes it back before them.
     let leading_items: Vec<usize> = paragraph_flow_breaks(paragraph)
@@ -2245,6 +2253,9 @@ fn paragraph_attrs(
                     }
                 }
                 breaks_after(&mut bookmark, content_index);
+                if continued {
+                    bookmark["fieldsBefore"] = json!(fields_before);
+                }
                 bookmarks.push(bookmark);
             }
             "bookmarkEnd" => {
@@ -2254,11 +2265,15 @@ fn paragraph_attrs(
                     "offset": pm_offset
                 });
                 breaks_after(&mut bookmark, content_index);
+                if continued {
+                    bookmark["fieldsBefore"] = json!(fields_before);
+                }
                 bookmarks.push(bookmark);
             }
             _ => {
                 for _ in 0..unit_counts.get(content_index).copied().unwrap_or_default() {
                     pm_offset += units.get(unit_index).map(|unit| unit.pm_size).unwrap_or(0);
+                    fields_before += units.get(unit_index).is_some_and(field_marker) as usize;
                     unit_index += 1;
                 }
             }
@@ -3876,6 +3891,7 @@ fn take_bookmarks(units: &mut Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
     let mut spans = Vec::<(u32, u32, u32, u32)>::new();
     let mut leading = Vec::new();
     let mut head = true;
+    let mut fields = Vec::new();
     for unit in units.iter_mut() {
         let width = match &unit.content {
             UnitContent::Text(text) => utf16_len(text),
@@ -3885,6 +3901,7 @@ fn take_bookmarks(units: &mut Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
             if kind == "bookmark" {
                 let mut data = payload.clone();
                 if matches!(string(data.get("kind")), Some("fieldseparate" | "fieldend")) {
+                    fields.push(found.len() as f64);
                     data.insert("order".into(), json!(found.len()));
                     if !unit.attrs.is_empty() {
                         data.insert("attributes".into(), value_from_map(&unit.attrs));
@@ -3905,6 +3922,17 @@ fn take_bookmarks(units: &mut Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
                             .remove("breaksAfter")
                             .and_then(|value| value.as_u64())
                             .unwrap_or(0) as usize;
+                        // Between the field characters it follows and the next.
+                        if let Some(before) =
+                            data.remove("fieldsBefore").and_then(|value| value.as_u64())
+                            && let Some(first) = fields.first()
+                        {
+                            let order = match (before as usize).min(fields.len()) {
+                                0 => first - 0.5,
+                                before => fields[before - 1] + 0.5,
+                            };
+                            data.insert("order".into(), json!(order));
+                        }
                         let position = if offset == 0 && after > 0 {
                             *leading
                                 .get(
@@ -3929,6 +3957,7 @@ fn take_bookmarks(units: &mut Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
                 pm = 0;
                 spans.clear();
                 leading.clear();
+                fields.clear();
                 head = true;
                 continue;
             }

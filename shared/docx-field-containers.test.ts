@@ -1705,3 +1705,71 @@ test("deleting a field with the tracked break after it, after the capture, lands
   const { next, direct } = await landed(bytes, () => {}, removeField);
   expect(next).toBe(direct);
 });
+
+const bookmarkStart = (id: number) => `<w:bookmarkStart w:id="${id}" w:name="m${id}"/>`;
+const bookmarkEnd = (id: number) => `<w:bookmarkEnd w:id="${id}"/>`;
+/** The body's bookmark and field characters in order, one string per paragraph: B5/E5, [ | ]. */
+const markers = (bytes: Uint8Array) =>
+  [...documentXml(bytes).matchAll(/<w:p [\s\S]*?<\/w:p>/g)].map(([paragraph]) =>
+    [...paragraph.matchAll(/<w:(bookmarkStart|bookmarkEnd|fldChar) w:(?:id|fldCharType)="(\w+)"/g)]
+      .map(([, tag, value]) => (tag === "fldChar" ? { begin: "[", separate: "|", end: "]" }[value!] : `${tag === "bookmarkStart" ? "B" : "E"}${value}`))
+      .join(" ")
+  ).filter(Boolean);
+/** Every bookmark opens before it closes. */
+const balanced = (sequence: string) =>
+  sequence.split(" ").every((marker, index, all) => !marker.startsWith("E") || all.slice(0, index).includes(`B${marker.slice(1)}`));
+const nestedContinued =
+  p("11111111", run("a") + char("begin") + instr(" IF ") + char("begin") + instr(" PAGE ")) +
+  p("33333333", char("separate") + run("one") + char("end") + bookmarkStart(5) + char("separate") + bookmarkEnd(5) + run("yes") + char("end") + run("z"));
+
+test.each([
+  [
+    "bookmarks a join collapses to one point",
+    p("11111111", run("ab") + bookmarkStart(3) + bookmarkStart(4) + run("c")) +
+      p("33333333", run("d") + bookmarkStart(5) + bookmarkEnd(3) + run("e") + bookmarkEnd(4) + bookmarkEnd(5) + run("f")),
+    (session: YrsSession) => session.deleteRange({ story: "body", start: { paraId: "11111111", offset: 2 }, end: { paraId: "33333333", offset: 2 } }),
+  ],
+  [
+    "bookmarks around a continued field a join removes",
+    p("11111111", run("a") + char("begin") + instr(" IF ") + char("begin") + instr(" PAGE ")) +
+      p("33333333", char("separate") + run("one") + bookmarkStart(3) + bookmarkStart(4) + char("end") + bookmarkStart(5) + bookmarkEnd(3) + char("separate") + bookmarkEnd(4) + bookmarkEnd(5) + run("yes") + char("end") + run("z")),
+    (session: YrsSession) => session.deleteRange({ story: "body", start: { paraId: "11111111", offset: 1 }, end: { paraId: "33333333", offset: 0 } }),
+  ],
+])("%s save each start before its end", async (_, body, change) => {
+  let bytes = docx(body + tail);
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    if (publication === 0) change(session);
+    else edit(session, "22222222", "z");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    const [first] = markers(bytes);
+    expect(first!.split(" ").filter((marker) => marker.startsWith("B"))).toHaveLength(3);
+    expect(balanced(first!)).toBe(true);
+  }
+});
+
+test("a bookmark between a nested continued field's inner end and outer separate stays there", async () => {
+  let bytes = docx(nestedContinued + tail);
+  const source = markers(bytes);
+  expect(source).toEqual(["[ [", "| ] B5 | E5 ]"]);
+  for (let publication = 0; publication < 3; publication += 1) {
+    const session = await open(bytes);
+    if (publication > 0) edit(session, "22222222", "z");
+    bytes = await publish(bytes, session.encodeState());
+    session.destroy();
+    expect(markers(bytes)).toEqual(source);
+  }
+});
+
+test("coincident continued-field markers keep their source order in the editor", async () => {
+  const bytes = docx(nestedContinued + tail);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const session = await open(bytes);
+    const bookmarks = session.paragraphs("body")[1]!.properties.bookmarks as Array<{ kind: string; offset: number }>;
+    expect(bookmarks.map(({ kind, offset }) => `${kind}@${offset}`)).toEqual([
+      "fieldseparate@0", "fieldend@3", "start@3", "fieldseparate@3", "end@3", "fieldend@6",
+    ]);
+    session.destroy();
+  }
+});
