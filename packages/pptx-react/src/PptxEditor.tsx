@@ -190,8 +190,6 @@ export interface PptxEditorProps {
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
-  /** Receives the current slide's PNG; without it, exporting downloads the file. */
-  onExportPng?: (bytes: Uint8Array, fileName: string) => void;
   /** Called whenever what `runCommand` can do changes, for host menus. */
   onCommandState?: (state: PptxCommandState) => void;
 }
@@ -384,7 +382,6 @@ function PptxEditorContent({
   showFontPicker = true,
   showFontSizePicker = true,
   showZoomControl = true,
-  onExportPng,
   onCommandState,
 }: Omit<PptxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
@@ -2161,9 +2158,7 @@ function PptxEditorContent({
       .then(async (blob) => {
         const bytes = new Uint8Array(await blob.arrayBuffer());
         if (handleRef.current !== handle) return;
-        const name = pngName(fileName, currentSlide);
-        if (onExportPng) onExportPng(bytes, name);
-        else downloadBytes(bytes, name, 'image/png');
+        downloadBytes(bytes, pngName(fileName, currentSlide), 'image/png');
       })
       .catch((value: unknown) => {
         if (handleRef.current === handle) reportError(value);
