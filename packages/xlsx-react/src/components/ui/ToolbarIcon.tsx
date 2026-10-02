@@ -1,31 +1,83 @@
-import type { CSSProperties } from 'react';
+import { createContext, useContext } from 'react';
+import type { ComponentType, CSSProperties, ReactNode } from 'react';
 
-export type ToolbarIconName =
-  | 'search'
-  | 'undo'
-  | 'redo'
-  | 'print'
-  | 'formatPaint'
-  | 'decimalDecrease'
-  | 'decimalIncrease'
-  | 'bold'
-  | 'italic'
-  | 'strikethrough'
-  | 'textColor'
-  | 'fillColor'
-  | 'borders'
-  | 'merge'
-  | 'alignLeft'
-  | 'verticalAlignCenter'
-  | 'wrap'
-  | 'more'
-  | 'chevronDown'
-  | 'remove'
-  | 'add'
-  | 'check'
-  | 'save'
-  | 'image'
-  | 'proposals';
+/** Every name `ToolbarIcon` draws. */
+export const TOOLBAR_ICON_NAMES = [
+  'search',
+  'undo',
+  'redo',
+  'print',
+  'formatPaint',
+  'decimalDecrease',
+  'decimalIncrease',
+  'bold',
+  'italic',
+  'strikethrough',
+  'textColor',
+  'fillColor',
+  'borders',
+  'merge',
+  'alignLeft',
+  'verticalAlignCenter',
+  'wrap',
+  'more',
+  'menu',
+  'chevronDown',
+  'remove',
+  'add',
+  'check',
+  'save',
+  'image',
+  'proposals',
+] as const;
+
+/** The border and alignment glyphs the toolbar otherwise draws itself. */
+export const DRAWN_ICON_NAMES = [
+  'borderAll',
+  'borderInner',
+  'borderHorizontal',
+  'borderVertical',
+  'borderOuter',
+  'borderLeft',
+  'borderTop',
+  'borderRight',
+  'borderBottom',
+  'borderNone',
+  'alignTextLeft',
+  'alignTextCenter',
+  'alignTextRight',
+  'alignCellTop',
+  'alignCellMiddle',
+  'alignCellBottom',
+] as const;
+
+export type ToolbarIconName = (typeof TOOLBAR_ICON_NAMES)[number];
+export type DrawnIconName = (typeof DRAWN_ICON_NAMES)[number];
+
+export interface IconProps {
+  size?: number;
+  style?: CSSProperties;
+}
+
+/** A host's replacement for every toolbar icon and drawn glyph. */
+export type IconSet = Record<ToolbarIconName | DrawnIconName, ComponentType<IconProps>>;
+
+/** Provided by `XlsxEditor`'s `icons` prop; null keeps the built-in drawings. */
+export const IconSetContext = createContext<IconSet | null>(null);
+
+/** A glyph the toolbar draws itself, unless the host set replaces it. */
+export function DrawnIcon({
+  name,
+  size,
+  children,
+}: {
+  name: DrawnIconName;
+  size: number;
+  children: ReactNode;
+}) {
+  const HostIcon = useContext(IconSetContext)?.[name];
+  return HostIcon ? <HostIcon size={size} /> : children;
+}
 
 export interface ToolbarIconProps {
   name: ToolbarIconName;
@@ -34,6 +86,8 @@ export interface ToolbarIconProps {
 }
 
 export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
+  const HostIcon = useContext(IconSetContext)?.[name];
+  if (HostIcon) return <HostIcon size={size} style={style} />;
   return (
     <svg
       width={size}
@@ -133,6 +187,7 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
           <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
         </>
       )}
+      {name === 'menu' && <path d="M4 6h16M4 12h16M4 18h16" />}
       {name === 'chevronDown' && <path d="m7 10 5 5 5-5" />}
       {name === 'remove' && <path d="M5 12h14" />}
       {name === 'add' && <path d="M12 5v14M5 12h14" />}

@@ -1,10 +1,11 @@
-import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useTranslation } from '../i18n';
 import { EditorToolbarContext } from './EditorToolbarContext';
+import { useToolbarRowScroll } from './useToolbarRowScroll';
 import { ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
-import { ToolbarIcon } from './ui/ToolbarIcon';
+import { DrawnIcon, type DrawnIconName, ToolbarIcon } from './ui/ToolbarIcon';
 import {
   ToolbarButton,
   ToolbarDropdown,
@@ -102,11 +103,24 @@ export interface ToolbarProps {
   canUndo?: boolean;
   canRedo?: boolean;
   onPrint?: () => void;
+  /** The single row's menu items; the two-row layout leaves these to the host. */
+  onSave?: () => void;
+  onExportPng?: () => void;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
   fontFamilies?: readonly string[];
   fontSizes?: readonly number[];
   disabled?: boolean;
+  /**
+   * One flat 40px row: a menu (save, PNG export, print) at the left, the groups
+   * scrolling sideways (a vertical wheel scrolls them) and zoom pinned at the
+   * right, with no overflow menu and no font size steps.
+   */
+  singleRow?: boolean;
+  showSearchMenus?: boolean;
+  showFontPicker?: boolean;
+  showFontSizePicker?: boolean;
+  showZoomControl?: boolean;
   className?: string;
   style?: CSSProperties;
   children?: ReactNode;
@@ -170,34 +184,59 @@ function useToolbarProps(props: ToolbarProps): ToolbarProps {
   return context ? { ...context, ...stripUndefined(props) } : props;
 }
 
+const BORDER_ICONS: Record<BorderPreset, DrawnIconName> = {
+  all: 'borderAll',
+  inner: 'borderInner',
+  horizontal: 'borderHorizontal',
+  vertical: 'borderVertical',
+  outer: 'borderOuter',
+  left: 'borderLeft',
+  top: 'borderTop',
+  right: 'borderRight',
+  bottom: 'borderBottom',
+  none: 'borderNone',
+};
+const HORIZONTAL_ICONS: Record<HorizontalAlignment, DrawnIconName> = {
+  left: 'alignTextLeft',
+  center: 'alignTextCenter',
+  right: 'alignTextRight',
+};
+const VERTICAL_ICONS: Record<VerticalAlignment, DrawnIconName> = {
+  top: 'alignCellTop',
+  middle: 'alignCellMiddle',
+  bottom: 'alignCellBottom',
+};
+
 function BorderGlyph({ preset }: { preset: BorderPreset }) {
   const edge = (side: BorderPreset) =>
     preset === side || preset === 'all' || preset === 'outer' ? 2 : 0.6;
   return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      aria-hidden="true"
-    >
-      {preset !== 'none' && (
-        <>
-          <path d="M3 3h14" strokeWidth={edge('top')} />
-          <path d="M17 3v14" strokeWidth={edge('right')} />
-          <path d="M3 17h14" strokeWidth={edge('bottom')} />
-          <path d="M3 3v14" strokeWidth={edge('left')} />
-          {(preset === 'all' || preset === 'inner' || preset === 'horizontal') && (
-            <path d="M3 10h14" strokeWidth="1.5" />
-          )}
-          {(preset === 'all' || preset === 'inner' || preset === 'vertical') && (
-            <path d="M10 3v14" strokeWidth="1.5" />
-          )}
-        </>
-      )}
-      {preset === 'none' && <path d="M4 4h12v12H4zM3 17 17 3" strokeWidth="1.5" />}
-    </svg>
+    <DrawnIcon name={BORDER_ICONS[preset]} size={20}>
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        aria-hidden="true"
+      >
+        {preset !== 'none' && (
+          <>
+            <path d="M3 3h14" strokeWidth={edge('top')} />
+            <path d="M17 3v14" strokeWidth={edge('right')} />
+            <path d="M3 17h14" strokeWidth={edge('bottom')} />
+            <path d="M3 3v14" strokeWidth={edge('left')} />
+            {(preset === 'all' || preset === 'inner' || preset === 'horizontal') && (
+              <path d="M3 10h14" strokeWidth="1.5" />
+            )}
+            {(preset === 'all' || preset === 'inner' || preset === 'vertical') && (
+              <path d="M10 3v14" strokeWidth="1.5" />
+            )}
+          </>
+        )}
+        {preset === 'none' && <path d="M4 4h12v12H4zM3 17 17 3" strokeWidth="1.5" />}
+      </svg>
+    </DrawnIcon>
   );
 }
 
@@ -205,45 +244,49 @@ function HorizontalAlignmentGlyph({ value }: { value: HorizontalAlignment }) {
   const x1 = value === 'left' ? 3 : value === 'center' ? 5 : 7;
   const x2 = value === 'left' ? 15 : value === 'center' ? 17 : 19;
   return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      aria-hidden="true"
-    >
-      <path d="M3 4h14M3 10h14M3 16h14" />
-      <path d={`M${x1} 7h${x2 - x1}M${x1} 13h${x2 - x1}`} />
-    </svg>
+    <DrawnIcon name={HORIZONTAL_ICONS[value]} size={20}>
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        aria-hidden="true"
+      >
+        <path d="M3 4h14M3 10h14M3 16h14" />
+        <path d={`M${x1} 7h${x2 - x1}M${x1} 13h${x2 - x1}`} />
+      </svg>
+    </DrawnIcon>
   );
 }
 
 function VerticalAlignmentGlyph({ value }: { value: VerticalAlignment }) {
   const y = value === 'top' ? 5 : value === 'middle' ? 10 : 15;
   return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      aria-hidden="true"
-    >
-      <path d="M3 3h14M3 17h14" />
-      <path d={`M6 ${y}h8`} />
-      <path
-        d={
-          value === 'top'
-            ? 'm8 8 2-3 2 3'
-            : value === 'bottom'
-            ? 'm8 12 2 3 2-3'
-            : 'm8 7 2 3 2-3m-4 6 2-3 2 3'
-        }
-      />
-    </svg>
+    <DrawnIcon name={VERTICAL_ICONS[value]} size={20}>
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 20 20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        aria-hidden="true"
+      >
+        <path d="M3 3h14M3 17h14" />
+        <path d={`M6 ${y}h8`} />
+        <path
+          d={
+            value === 'top'
+              ? 'm8 8 2-3 2 3'
+              : value === 'bottom'
+              ? 'm8 12 2 3 2-3'
+              : 'm8 7 2 3 2-3m-4 6 2-3 2 3'
+          }
+        />
+      </svg>
+    </DrawnIcon>
   );
 }
 
@@ -272,6 +315,27 @@ function BorderStyleGlyph({ value }: { value: BorderStyle }) {
   );
 }
 
+function EdgeFade({ side, visible }: { side: 'start' | 'end'; visible: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        [side === 'start' ? 'left' : 'right']: 0,
+        width: 28,
+        pointerEvents: 'none',
+        background: `linear-gradient(to ${
+          side === 'start' ? 'right' : 'left'
+        }, var(--xlsx-chrome-bg, #ffffff), transparent)`,
+        opacity: visible ? 1 : 0,
+        transition: 'opacity 0.15s',
+      }}
+    />
+  );
+}
+
 function nextFontSize(value: number, sizes: readonly number[], direction: -1 | 1): number {
   if (direction > 0) return sizes.find((size) => size > value) ?? value + 1;
   return [...sizes].reverse().find((size) => size < value) ?? Math.max(1, value - 1);
@@ -290,16 +354,25 @@ export function Toolbar(explicitProps: ToolbarProps) {
     canUndo = false,
     canRedo = false,
     onPrint,
+    onSave,
+    onExportPng,
     zoom = 1,
     onZoomChange,
     fontFamilies = DEFAULT_FONT_FAMILIES,
     fontSizes = DEFAULT_FONT_SIZES,
     disabled = false,
+    singleRow = false,
+    showSearchMenus = true,
+    showFontPicker = true,
+    showFontSizePicker = true,
+    showZoomControl = true,
     className,
     style,
     children,
   } = useToolbarProps(explicitProps);
   const rootRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const rowEdges = useToolbarRowScroll(rowRef, singleRow);
   const [rootWidth, setRootWidth] = useState(Number.POSITIVE_INFINITY);
   const formattingEnabled = !disabled && Boolean(onFormat);
   const mergeEnabled = !disabled && Boolean(onMerge);
@@ -493,391 +566,562 @@ export function Toolbar(explicitProps: ToolbarProps) {
     </>
   );
 
-  const sections: ToolbarSection[] = [
-    {
-      key: 'search',
-      width: 29,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.search')}>
-          <ToolbarButton
-            title={t('toolbar.searchMenus')}
-            onClick={onSearchMenus}
-            testId="xlsx-search-menus"
+  const searchButton = (
+    <ToolbarButton
+      title={t('toolbar.searchMenus')}
+      onClick={onSearchMenus}
+      testId="xlsx-search-menus"
+    >
+      <ToolbarIcon name="search" />
+    </ToolbarButton>
+  );
+
+  const historyButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.undo')}
+        disabled={disabled || !canUndo || !onUndo}
+        onClick={onUndo}
+        testId="xlsx-undo"
+      >
+        <ToolbarIcon name="undo" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.redo')}
+        disabled={disabled || !canRedo || !onRedo}
+        onClick={onRedo}
+        testId="xlsx-redo"
+      >
+        <ToolbarIcon name="redo" />
+      </ToolbarButton>
+    </>
+  );
+
+  const printButton = (
+    <ToolbarButton title={t('toolbar.print')} disabled={disabled || !onPrint} onClick={onPrint}>
+      <ToolbarIcon name="print" />
+    </ToolbarButton>
+  );
+
+  const paintButton = (
+    <ToolbarButton
+      title={t('toolbar.paintFormat')}
+      active={currentFormatting.paintFormat}
+      disabled={!formattingEnabled}
+      onClick={() => apply('paintFormat')}
+    >
+      <ToolbarIcon name="formatPaint" />
+    </ToolbarButton>
+  );
+
+  const zoomControl = (
+    <EditableCombobox
+      value={`${Math.round(zoom * 100)}%`}
+      options={zoomOptions}
+      label={t('toolbar.zoomValue', {
+        value: `${Math.round(zoom * 100)}%`,
+      })}
+      disabled={disabled || !onZoomChange}
+      onCommit={(value) => {
+        const percent = Number.parseFloat(value.replace('%', ''));
+        if (Number.isFinite(percent) && percent >= 25 && percent <= 400)
+          onZoomChange?.(percent / 100);
+      }}
+      width={singleRow ? 64 : 76}
+      testId="xlsx-zoom"
+      bordered={!singleRow}
+    />
+  );
+
+  const numberButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.currency')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('currency')}
+      >
+        <span style={{ fontSize: 16 }}>{t('toolbar.currencySymbol')}</span>
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.percent')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('percent')}
+      >
+        <span style={{ fontSize: 15 }}>%</span>
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.decreaseDecimal')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('decreaseDecimal')}
+      >
+        <ToolbarIcon name="decimalDecrease" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.increaseDecimal')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('increaseDecimal')}
+      >
+        <ToolbarIcon name="decimalIncrease" />
+      </ToolbarButton>
+      <ToolbarDropdown
+        title={t('toolbar.moreNumberFormats')}
+        disabled={!formattingEnabled}
+        trigger={
+          <>
+            <span>123</span>
+            <ToolbarIcon name="chevronDown" size={13} />
+          </>
+        }
+      >
+        {renderNumberFormats}
+      </ToolbarDropdown>
+    </>
+  );
+
+  const fontFamilyPicker = (
+    <ToolbarDropdown
+      title={t('toolbar.fontFamily')}
+      disabled={!formattingEnabled}
+      menuWidth={210}
+      style={singleRow ? { maxWidth: 160 } : { width: 120, justifyContent: 'space-between' }}
+      trigger={
+        <>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {currentFormatting.fontFamily ?? 'Calibri'}
+          </span>
+          <ToolbarIcon name="chevronDown" size={13} />
+        </>
+      }
+    >
+      {(close) => (
+        <>
+          {fontFamilies.map((font) => (
+            <ToolbarMenuItem
+              key={font}
+              label={font}
+              selected={currentFormatting.fontFamily === font}
+              disabled={!formattingEnabled}
+              onClick={() => apply({ type: 'fontFamily', value: font })}
+              close={close}
+            />
+          ))}
+        </>
+      )}
+    </ToolbarDropdown>
+  );
+
+  const fontSizeBox = (
+    <EditableCombobox
+      value={String(fontSize)}
+      options={fontSizeOptions}
+      label={t('toolbar.fontSize')}
+      disabled={!formattingEnabled}
+      onCommit={(value) => {
+        const size = Number.parseFloat(value);
+        if (Number.isFinite(size) && size >= 1 && size <= 400)
+          apply({ type: 'fontSize', value: size });
+      }}
+      width={50}
+      inputStyle={{ textAlign: 'center' }}
+    />
+  );
+
+  const textButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.bold')}
+        active={currentFormatting.bold}
+        disabled={!formattingEnabled}
+        onClick={() => apply('bold')}
+      >
+        <ToolbarIcon name="bold" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.italic')}
+        active={currentFormatting.italic}
+        disabled={!formattingEnabled}
+        onClick={() => apply('italic')}
+      >
+        <ToolbarIcon name="italic" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.strikethrough')}
+        active={currentFormatting.strikethrough}
+        disabled={!formattingEnabled}
+        onClick={() => apply('strikethrough')}
+      >
+        <ToolbarIcon name="strikethrough" />
+      </ToolbarButton>
+    </>
+  );
+
+  const colorPickers = (
+    <>
+      <ColorPicker
+        mode="text"
+        value={currentFormatting.textColor ?? '#000000'}
+        label={t('toolbar.textColor')}
+        disabled={!formattingEnabled}
+        onChange={(value) => apply({ type: 'textColor', value })}
+      />
+      <ColorPicker
+        mode="fill"
+        value={currentFormatting.fillColor ?? '#ffffff'}
+        label={t('toolbar.fillColor')}
+        disabled={!formattingEnabled}
+        onChange={(value) => apply({ type: 'fillColor', value })}
+      />
+    </>
+  );
+
+  const bordersDropdown = (
+    <ToolbarDropdown
+      title={t('toolbar.borders')}
+      disabled={!formattingEnabled}
+      menuWidth={240}
+      trigger={
+        <>
+          <BorderGlyph preset={currentFormatting.borderPreset ?? 'all'} />
+          <ToolbarIcon name="chevronDown" size={12} />
+        </>
+      }
+    >
+      {renderBorders}
+    </ToolbarDropdown>
+  );
+
+  const mergeButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.merge.all')}
+        disabled={!mergeEnabled || !canMergeAll}
+        onClick={() => onMerge?.('all')}
+        style={{ borderRadius: '4px 0 0 4px' }}
+        testId="xlsx-merge-all"
+      >
+        <ToolbarIcon name="merge" />
+      </ToolbarButton>
+      <ToolbarDropdown
+        title={t('toolbar.mergeCells')}
+        disabled={!mergeEnabled || (!canMergeAll && !selectionShape?.canUnmerge)}
+        menuWidth={220}
+        style={{
+          minWidth: 20,
+          width: 20,
+          padding: 0,
+          borderRadius: '0 4px 4px 0',
+        }}
+        trigger={<ToolbarIcon name="chevronDown" size={13} />}
+      >
+        {renderMerge}
+      </ToolbarDropdown>
+    </>
+  );
+
+  const alignmentDropdowns = (
+    <>
+      <ToolbarDropdown
+        title={t('toolbar.horizontalAlignment')}
+        disabled={!formattingEnabled}
+        menuWidth={180}
+        trigger={
+          <>
+            <HorizontalAlignmentGlyph value={currentFormatting.horizontalAlignment ?? 'left'} />
+            <ToolbarIcon name="chevronDown" size={12} />
+          </>
+        }
+      >
+        {renderHorizontalAlignment}
+      </ToolbarDropdown>
+      <ToolbarDropdown
+        title={t('toolbar.verticalAlignment')}
+        disabled={!formattingEnabled}
+        menuWidth={180}
+        trigger={
+          <>
+            <VerticalAlignmentGlyph value={currentFormatting.verticalAlignment ?? 'middle'} />
+            <ToolbarIcon name="chevronDown" size={12} />
+          </>
+        }
+      >
+        {renderVerticalAlignment}
+      </ToolbarDropdown>
+      <ToolbarDropdown
+        title={t('toolbar.textWrapping')}
+        disabled={!formattingEnabled}
+        menuWidth={180}
+        trigger={
+          <>
+            <ToolbarIcon name="wrap" />
+            <ToolbarIcon name="chevronDown" size={12} />
+          </>
+        }
+      >
+        {renderWrapping}
+      </ToolbarDropdown>
+    </>
+  );
+
+  if (singleRow) {
+    const fileMenu = (
+      <ToolbarDropdown
+        title={t('toolbar.menu')}
+        menuWidth={200}
+        testId="xlsx-menu"
+        trigger={<ToolbarIcon name="menu" />}
+      >
+        {(close) => (
+          <>
+            <ToolbarMenuItem
+              icon={<ToolbarIcon name="save" size={16} />}
+              label={t('toolbar.save')}
+              disabled={disabled || !onSave}
+              onClick={onSave}
+              close={close}
+            />
+            <ToolbarMenuItem
+              icon={<ToolbarIcon name="image" size={16} />}
+              label={t('toolbar.exportPng')}
+              disabled={disabled || !onExportPng}
+              onClick={onExportPng}
+              close={close}
+            />
+            <ToolbarMenuItem
+              icon={<ToolbarIcon name="print" size={16} />}
+              label={t('toolbar.print')}
+              disabled={disabled || !onPrint}
+              onClick={onPrint}
+              close={close}
+            />
+          </>
+        )}
+      </ToolbarDropdown>
+    );
+    const groups: Array<{ key: string; label: string; node: ReactNode }> = [
+      {
+        key: 'file',
+        label: t('toolbar.fileActionsLabel'),
+        node: (
+          <>
+            {fileMenu}
+            {showSearchMenus && searchButton}
+          </>
+        ),
+      },
+      { key: 'history', label: t('toolbar.groups.history'), node: historyButtons },
+      { key: 'paint', label: t('toolbar.groups.paintFormat'), node: paintButton },
+      { key: 'number', label: t('toolbar.groups.number'), node: numberButtons },
+    ];
+    if (showFontPicker || showFontSizePicker)
+      groups.push({
+        key: 'font',
+        label: t('toolbar.groups.font'),
+        node: (
+          <>
+            {showFontPicker && fontFamilyPicker}
+            {showFontSizePicker && fontSizeBox}
+          </>
+        ),
+      });
+    groups.push(
+      { key: 'text', label: t('toolbar.groups.text'), node: textButtons },
+      { key: 'colors', label: t('toolbar.groups.colors'), node: colorPickers },
+      { key: 'borders', label: t('toolbar.groups.borders'), node: bordersDropdown },
+      { key: 'merge', label: t('toolbar.groups.merge'), node: mergeButtons },
+      { key: 'alignment', label: t('toolbar.groups.alignment'), node: alignmentDropdowns }
+    );
+    return (
+      <div
+        ref={rootRef}
+        className={className}
+        role="toolbar"
+        aria-label={t('toolbar.actionsLabel')}
+        data-testid="xlsx-formatting-toolbar"
+        data-layout="single-row"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          minWidth: 0,
+          height: 40,
+          padding: '0 8px',
+          borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
+          background: 'var(--xlsx-chrome-bg, #ffffff)',
+          color: toolbarColors.text,
+          boxSizing: 'border-box',
+          ...style,
+        }}
+      >
+        <div
+          style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0, height: '100%' }}
+        >
+          <div
+            ref={rowRef}
+            data-testid="xlsx-toolbar-row"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flex: 1,
+              minWidth: 0,
+              height: '100%',
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              scrollbarWidth: 'none',
+            }}
           >
-            <ToolbarIcon name="search" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
-    },
+            {groups.map((group, index) => (
+              <Fragment key={group.key}>
+                {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
+                <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
+              </Fragment>
+            ))}
+          </div>
+          <EdgeFade side="start" visible={rowEdges.start} />
+          <EdgeFade side="end" visible={rowEdges.end} />
+        </div>
+        {(showZoomControl || children) && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              flex: '0 0 auto',
+              height: '100%',
+              paddingLeft: 8,
+            }}
+          >
+            {showZoomControl && (
+              <ToolbarGroup label={t('toolbar.groups.zoom')}>{zoomControl}</ToolbarGroup>
+            )}
+            {children}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const sections: ToolbarSection[] = [
+    ...(showSearchMenus
+      ? [
+          {
+            key: 'search',
+            width: 29,
+            node: <ToolbarGroup label={t('toolbar.groups.search')}>{searchButton}</ToolbarGroup>,
+          },
+        ]
+      : []),
     {
       key: 'history',
       width: 58,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.history')}>
-          <ToolbarButton
-            title={t('toolbar.undo')}
-            disabled={disabled || !canUndo || !onUndo}
-            onClick={onUndo}
-            testId="xlsx-undo"
-          >
-            <ToolbarIcon name="undo" />
-          </ToolbarButton>
-          <ToolbarButton
-            title={t('toolbar.redo')}
-            disabled={disabled || !canRedo || !onRedo}
-            onClick={onRedo}
-            testId="xlsx-redo"
-          >
-            <ToolbarIcon name="redo" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.history')}>{historyButtons}</ToolbarGroup>,
     },
     {
       key: 'print',
       width: 29,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.print')}>
-          <ToolbarButton
-            title={t('toolbar.print')}
-            disabled={disabled || !onPrint}
-            onClick={onPrint}
-          >
-            <ToolbarIcon name="print" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.print')}>{printButton}</ToolbarGroup>,
     },
     {
       key: 'paint',
       width: 29,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.paintFormat')}>
-          <ToolbarButton
-            title={t('toolbar.paintFormat')}
-            active={currentFormatting.paintFormat}
-            disabled={!formattingEnabled}
-            onClick={() => apply('paintFormat')}
-          >
-            <ToolbarIcon name="formatPaint" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.paintFormat')}>{paintButton}</ToolbarGroup>,
     },
-    {
-      key: 'zoom',
-      width: 82,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.zoom')}>
-          <EditableCombobox
-            value={`${Math.round(zoom * 100)}%`}
-            options={zoomOptions}
-            label={t('toolbar.zoomValue', {
-              value: `${Math.round(zoom * 100)}%`,
-            })}
-            disabled={disabled || !onZoomChange}
-            onCommit={(value) => {
-              const percent = Number.parseFloat(value.replace('%', ''));
-              if (Number.isFinite(percent) && percent >= 25 && percent <= 400)
-                onZoomChange?.(percent / 100);
-            }}
-            width={76}
-            testId="xlsx-zoom"
-          />
-        </ToolbarGroup>
-      ),
-    },
+    ...(showZoomControl
+      ? [
+          {
+            key: 'zoom',
+            width: 82,
+            node: <ToolbarGroup label={t('toolbar.groups.zoom')}>{zoomControl}</ToolbarGroup>,
+          },
+        ]
+      : []),
     {
       key: 'number',
       width: 202,
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.number')}>
-            <ToolbarButton
-              title={t('toolbar.currency')}
-              disabled={!formattingEnabled}
-              onClick={() => apply('currency')}
-            >
-              <span style={{ fontSize: 16 }}>{t('toolbar.currencySymbol')}</span>
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.percent')}
-              disabled={!formattingEnabled}
-              onClick={() => apply('percent')}
-            >
-              <span style={{ fontSize: 15 }}>%</span>
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.decreaseDecimal')}
-              disabled={!formattingEnabled}
-              onClick={() => apply('decreaseDecimal')}
-            >
-              <ToolbarIcon name="decimalDecrease" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.increaseDecimal')}
-              disabled={!formattingEnabled}
-              onClick={() => apply('increaseDecimal')}
-            >
-              <ToolbarIcon name="decimalIncrease" />
-            </ToolbarButton>
-            <ToolbarDropdown
-              title={t('toolbar.moreNumberFormats')}
-              disabled={!formattingEnabled}
-              trigger={
-                <>
-                  <span>123</span>
-                  <ToolbarIcon name="chevronDown" size={13} />
-                </>
-              }
-            >
-              {renderNumberFormats}
-            </ToolbarDropdown>
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.number')}>{numberButtons}</ToolbarGroup>
         </>
       ),
     },
-    {
-      key: 'font-family',
-      width: 137,
-      node: (
-        <>
-          <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.font')}>
-            <ToolbarDropdown
-              title={t('toolbar.fontFamily')}
-              disabled={!formattingEnabled}
-              menuWidth={210}
-              style={{ width: 120, justifyContent: 'space-between' }}
-              trigger={
-                <>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {currentFormatting.fontFamily ?? 'Calibri'}
-                  </span>
-                  <ToolbarIcon name="chevronDown" size={13} />
-                </>
-              }
-            >
-              {(close) => (
-                <>
-                  {fontFamilies.map((font) => (
-                    <ToolbarMenuItem
-                      key={font}
-                      label={font}
-                      selected={currentFormatting.fontFamily === font}
-                      disabled={!formattingEnabled}
-                      onClick={() => apply({ type: 'fontFamily', value: font })}
-                      close={close}
-                    />
-                  ))}
-                </>
-              )}
-            </ToolbarDropdown>
-          </ToolbarGroup>
-        </>
-      ),
-    },
-    {
-      key: 'font-size',
-      width: 116,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.font')}>
-          <ToolbarButton
-            title={t('toolbar.decreaseFontSize')}
-            disabled={!formattingEnabled}
-            onClick={() =>
-              apply({
-                type: 'fontSize',
-                value: nextFontSize(fontSize, fontSizes, -1),
-              })
-            }
-          >
-            <ToolbarIcon name="remove" />
-          </ToolbarButton>
-          <EditableCombobox
-            value={String(fontSize)}
-            options={fontSizeOptions}
-            label={t('toolbar.fontSize')}
-            disabled={!formattingEnabled}
-            onCommit={(value) => {
-              const size = Number.parseFloat(value);
-              if (Number.isFinite(size) && size >= 1 && size <= 400)
-                apply({ type: 'fontSize', value: size });
-            }}
-            width={50}
-            inputStyle={{ textAlign: 'center' }}
-          />
-          <ToolbarButton
-            title={t('toolbar.increaseFontSize')}
-            disabled={!formattingEnabled}
-            onClick={() =>
-              apply({
-                type: 'fontSize',
-                value: nextFontSize(fontSize, fontSizes, 1),
-              })
-            }
-          >
-            <ToolbarIcon name="add" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
-    },
+    ...(showFontPicker
+      ? [
+          {
+            key: 'font-family',
+            width: 137,
+            node: (
+              <>
+                <ToolbarSeparator />
+                <ToolbarGroup label={t('toolbar.groups.font')}>{fontFamilyPicker}</ToolbarGroup>
+              </>
+            ),
+          },
+        ]
+      : []),
+    ...(showFontSizePicker
+      ? [
+          {
+            key: 'font-size',
+            width: 116,
+            node: (
+              <ToolbarGroup label={t('toolbar.groups.font')}>
+                <ToolbarButton
+                  title={t('toolbar.decreaseFontSize')}
+                  disabled={!formattingEnabled}
+                  onClick={() =>
+                    apply({
+                      type: 'fontSize',
+                      value: nextFontSize(fontSize, fontSizes, -1),
+                    })
+                  }
+                >
+                  <ToolbarIcon name="remove" />
+                </ToolbarButton>
+                {fontSizeBox}
+                <ToolbarButton
+                  title={t('toolbar.increaseFontSize')}
+                  disabled={!formattingEnabled}
+                  onClick={() =>
+                    apply({
+                      type: 'fontSize',
+                      value: nextFontSize(fontSize, fontSizes, 1),
+                    })
+                  }
+                >
+                  <ToolbarIcon name="add" />
+                </ToolbarButton>
+              </ToolbarGroup>
+            ),
+          },
+        ]
+      : []),
     {
       key: 'text',
       width: 98,
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.text')}>
-            <ToolbarButton
-              title={t('toolbar.bold')}
-              active={currentFormatting.bold}
-              disabled={!formattingEnabled}
-              onClick={() => apply('bold')}
-            >
-              <ToolbarIcon name="bold" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.italic')}
-              active={currentFormatting.italic}
-              disabled={!formattingEnabled}
-              onClick={() => apply('italic')}
-            >
-              <ToolbarIcon name="italic" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.strikethrough')}
-              active={currentFormatting.strikethrough}
-              disabled={!formattingEnabled}
-              onClick={() => apply('strikethrough')}
-            >
-              <ToolbarIcon name="strikethrough" />
-            </ToolbarButton>
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.text')}>{textButtons}</ToolbarGroup>
         </>
       ),
     },
     {
       key: 'colors',
       width: 58,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.colors')}>
-          <ColorPicker
-            mode="text"
-            value={currentFormatting.textColor ?? '#000000'}
-            label={t('toolbar.textColor')}
-            disabled={!formattingEnabled}
-            onChange={(value) => apply({ type: 'textColor', value })}
-          />
-          <ColorPicker
-            mode="fill"
-            value={currentFormatting.fillColor ?? '#ffffff'}
-            label={t('toolbar.fillColor')}
-            disabled={!formattingEnabled}
-            onChange={(value) => apply({ type: 'fillColor', value })}
-          />
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.colors')}>{colorPickers}</ToolbarGroup>,
     },
     {
       key: 'borders',
       width: 36,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.borders')}>
-          <ToolbarDropdown
-            title={t('toolbar.borders')}
-            disabled={!formattingEnabled}
-            menuWidth={240}
-            trigger={
-              <>
-                <BorderGlyph preset={currentFormatting.borderPreset ?? 'all'} />
-                <ToolbarIcon name="chevronDown" size={12} />
-              </>
-            }
-          >
-            {renderBorders}
-          </ToolbarDropdown>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.borders')}>{bordersDropdown}</ToolbarGroup>,
     },
     {
       key: 'merge',
       width: 58,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.merge')}>
-          <ToolbarButton
-            title={t('toolbar.merge.all')}
-            disabled={!mergeEnabled || !canMergeAll}
-            onClick={() => onMerge?.('all')}
-            style={{ borderRadius: '4px 0 0 4px' }}
-            testId="xlsx-merge-all"
-          >
-            <ToolbarIcon name="merge" />
-          </ToolbarButton>
-          <ToolbarDropdown
-            title={t('toolbar.mergeCells')}
-            disabled={!mergeEnabled || (!canMergeAll && !selectionShape?.canUnmerge)}
-            menuWidth={220}
-            style={{
-              minWidth: 20,
-              width: 20,
-              padding: 0,
-              borderRadius: '0 4px 4px 0',
-            }}
-            trigger={<ToolbarIcon name="chevronDown" size={13} />}
-          >
-            {renderMerge}
-          </ToolbarDropdown>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.merge')}>{mergeButtons}</ToolbarGroup>,
     },
     {
       key: 'alignment',
       width: 118,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.alignment')}>
-          <ToolbarDropdown
-            title={t('toolbar.horizontalAlignment')}
-            disabled={!formattingEnabled}
-            menuWidth={180}
-            trigger={
-              <>
-                <HorizontalAlignmentGlyph value={currentFormatting.horizontalAlignment ?? 'left'} />
-                <ToolbarIcon name="chevronDown" size={12} />
-              </>
-            }
-          >
-            {renderHorizontalAlignment}
-          </ToolbarDropdown>
-          <ToolbarDropdown
-            title={t('toolbar.verticalAlignment')}
-            disabled={!formattingEnabled}
-            menuWidth={180}
-            trigger={
-              <>
-                <VerticalAlignmentGlyph value={currentFormatting.verticalAlignment ?? 'middle'} />
-                <ToolbarIcon name="chevronDown" size={12} />
-              </>
-            }
-          >
-            {renderVerticalAlignment}
-          </ToolbarDropdown>
-          <ToolbarDropdown
-            title={t('toolbar.textWrapping')}
-            disabled={!formattingEnabled}
-            menuWidth={180}
-            trigger={
-              <>
-                <ToolbarIcon name="wrap" />
-                <ToolbarIcon name="chevronDown" size={12} />
-              </>
-            }
-          >
-            {renderWrapping}
-          </ToolbarDropdown>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.alignment')}>{alignmentDropdowns}</ToolbarGroup>,
     },
   ];
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { ToolbarIcon } from './ToolbarIcon';
 
 /**
  * The editor chrome's colours and font. Each reads a `--xlsx-*` CSS variable a
@@ -13,6 +14,7 @@ export const toolbarColors = {
   active: 'var(--xlsx-active-bg, #d3e3fd)',
   activeText: 'var(--xlsx-active-text, #3c4043)',
   border: 'var(--xlsx-border, #c7cacf)',
+  divider: 'var(--xlsx-divider, #c7cacf)',
   surface: 'var(--xlsx-menu-bg, #ffffff)',
   shadow: 'var(--xlsx-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
   rail: 'var(--xlsx-toolbar-rail-bg, #edf2fa)',
@@ -25,13 +27,13 @@ const baseButtonStyle: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   gap: 2,
-  minWidth: 28,
-  height: 28,
+  minWidth: 'var(--xlsx-button-size, 28px)',
+  height: 'var(--xlsx-button-size, 28px)',
   padding: '0 5px',
   border: 0,
-  borderRadius: 4,
+  borderRadius: 'var(--xlsx-button-radius, 4px)',
   color: toolbarColors.text,
-  font: `500 13px ${chromeFont}`,
+  font: `var(--xlsx-control-font-weight, 500) var(--xlsx-control-font-size, 13px) ${chromeFont}`,
   lineHeight: 1,
   whiteSpace: 'nowrap',
   boxSizing: 'border-box',
@@ -129,7 +131,7 @@ export function ToolbarGroup({
   );
 }
 
-export function ToolbarSeparator() {
+export function ToolbarSeparator({ style }: { style?: CSSProperties }) {
   return (
     <div
       role="separator"
@@ -137,8 +139,9 @@ export function ToolbarSeparator() {
         width: 1,
         height: 24,
         margin: '0 5px',
-        background: toolbarColors.border,
+        background: toolbarColors.divider,
         flex: '0 0 auto',
+        ...style,
       }}
     />
   );
@@ -309,7 +312,7 @@ export function ToolbarMenuItem({
         {icon}
       </span>
       <span style={{ flex: 1 }}>{label}</span>
-      {selected && <span aria-hidden="true">✓</span>}
+      {selected && <ToolbarIcon name="check" size={16} />}
     </button>
   );
 }
@@ -318,7 +321,7 @@ export function ToolbarMenuSeparator() {
   return (
     <div
       role="separator"
-      style={{ height: 1, margin: '5px 2px', background: toolbarColors.border }}
+      style={{ height: 1, margin: '5px 2px', background: toolbarColors.divider }}
     />
   );
 }

@@ -17,6 +17,8 @@ export interface EditableComboboxProps {
   width?: number;
   inputStyle?: CSSProperties;
   testId?: string;
+  /** False draws the value and chevron without a box, as a dropdown trigger. */
+  bordered?: boolean;
 }
 
 export function EditableCombobox({
@@ -28,6 +30,7 @@ export function EditableCombobox({
   width = 72,
   inputStyle,
   testId,
+  bordered = true,
 }: EditableComboboxProps) {
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
@@ -83,9 +86,9 @@ export function EditableCombobox({
         alignItems: 'center',
         width,
         height: 28,
-        border: `1px solid ${toolbarColors.border}`,
+        border: bordered ? `1px solid ${toolbarColors.border}` : 0,
         borderRadius: 4,
-        background: toolbarColors.surface,
+        background: bordered ? toolbarColors.surface : 'transparent',
         opacity: disabled ? 0.48 : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
@@ -130,7 +133,9 @@ export function EditableCombobox({
           outline: 0,
           background: 'transparent',
           color: toolbarColors.text,
-          font: `500 13px ${chromeFont}`,
+          font: bordered
+            ? `500 13px ${chromeFont}`
+            : `var(--xlsx-control-font-weight, 500) var(--xlsx-control-font-size, 13px) ${chromeFont}`,
           boxSizing: 'border-box',
           ...inputStyle,
         }}

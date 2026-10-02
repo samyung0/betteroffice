@@ -67,7 +67,7 @@ import {
   chromeFont,
   toolbarColors,
 } from './components/ui/ToolbarPrimitives';
-import { ToolbarIcon } from './components/ui/ToolbarIcon';
+import { IconSetContext, type IconSet, ToolbarIcon } from './components/ui/ToolbarIcon';
 import {
   expandRangeToMergedCells,
   PresenceStrip,
@@ -131,10 +131,17 @@ export interface XlsxEditorProps {
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
   /**
-   * Flat chrome for hosts with their own toolbars: the formatting toolbar and
-   * the formula bar as plain 40px rows, without the rounded toolbar rail.
+   * Flat chrome for hosts with their own toolbars: the formatting toolbar as one
+   * 40px row (save, PNG export and print in its menu) over a 40px formula bar.
    */
   singleRowToolbar?: boolean;
+  /** Replaces every toolbar icon; without it the built-in drawings stay. */
+  icons?: IconSet;
+  showSearchMenus?: boolean;
+  showProposals?: boolean;
+  showFontPicker?: boolean;
+  showFontSizePicker?: boolean;
+  showZoomControl?: boolean;
 }
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -359,13 +366,12 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     background: 'var(--xlsx-chrome-bg, #ffffff)',
     color: 'var(--xlsx-text, #0f172a)',
   },
-  flatToolbar: {
-    height: 40,
-    margin: 0,
-    padding: '0 8px',
-    borderRadius: 0,
-    borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
-    background: 'var(--xlsx-chrome-bg, #ffffff)',
+  flatFormulaGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    flex: 1,
+    minWidth: 0,
   },
   flatRail: {
     display: 'flex',
@@ -403,11 +409,14 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
  */
 export function XlsxEditor({
   i18n,
+  icons,
   ...props
 }: XlsxEditorProps) {
   return (
     <LocaleProvider i18n={i18n}>
-      <XlsxEditorContent {...props} />
+      <IconSetContext.Provider value={icons ?? null}>
+        <XlsxEditorContent {...props} />
+      </IconSetContext.Provider>
     </LocaleProvider>
   );
 }
@@ -423,7 +432,12 @@ function XlsxEditorContent({
   className,
   readOnly = false,
   singleRowToolbar = false,
-}: Omit<XlsxEditorProps, 'i18n'>) {
+  showSearchMenus = true,
+  showProposals = true,
+  showFontPicker = true,
+  showFontSizePicker = true,
+  showZoomControl = true,
+}: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
@@ -1990,42 +2004,53 @@ function XlsxEditorContent({
           canUndo={historyState.canUndo}
           canRedo={historyState.canRedo}
           onPrint={print}
+          onSave={sheetInfo ? save : undefined}
+          onExportPng={sheetInfo && pngExportAvailable ? exportPng : undefined}
           zoom={zoom}
           onZoomChange={setZoom}
           onFormat={formatSelection}
           onMerge={mergeSelection}
+          singleRow={singleRowToolbar}
+          showSearchMenus={showSearchMenus}
+          showFontPicker={showFontPicker}
+          showFontSizePicker={showFontSizePicker}
+          showZoomControl={showZoomControl}
         >
-          <EditorToolbar.Toolbar
-            style={singleRowToolbar ? xlsxToolbarStyles.flatToolbar : undefined}
-          />
+          <EditorToolbar.Toolbar />
           <div
             style={singleRowToolbar ? xlsxToolbarStyles.flatRail : xlsxToolbarStyles.rail}
             role="group"
             aria-label={t('toolbar.formulaBarLabel')}
           >
-            <ToolbarGroup
-              style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
-              label={t('toolbar.fileActionsLabel')}
-            >
-              <ToolbarButton
-                testId="xlsx-save"
-                onClick={save}
-                disabled={!sheetInfo}
-                title={t('toolbar.save')}
+            {!singleRowToolbar && (
+              <ToolbarGroup
+                style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
+                label={t('toolbar.fileActionsLabel')}
               >
-                <ToolbarIcon name="save" size={18} />
-              </ToolbarButton>
-              <ToolbarButton
-                testId="xlsx-export-png"
-                onClick={exportPng}
-                disabled={!sheetInfo || !pngExportAvailable}
-                title={t('toolbar.exportPng')}
-              >
-                <ToolbarIcon name="image" size={18} />
-              </ToolbarButton>
-            </ToolbarGroup>
+                <ToolbarButton
+                  testId="xlsx-save"
+                  onClick={save}
+                  disabled={!sheetInfo}
+                  title={t('toolbar.save')}
+                >
+                  <ToolbarIcon name="save" size={18} />
+                </ToolbarButton>
+                <ToolbarButton
+                  testId="xlsx-export-png"
+                  onClick={exportPng}
+                  disabled={!sheetInfo || !pngExportAvailable}
+                  title={t('toolbar.exportPng')}
+                >
+                  <ToolbarIcon name="image" size={18} />
+                </ToolbarButton>
+              </ToolbarGroup>
+            )}
             <div
-              style={xlsxToolbarStyles.formulaGroup}
+              style={
+                singleRowToolbar
+                  ? xlsxToolbarStyles.flatFormulaGroup
+                  : xlsxToolbarStyles.formulaGroup
+              }
               role="group"
               aria-label={t('toolbar.formulaBarLabel')}
             >
@@ -2071,7 +2096,7 @@ function XlsxEditorContent({
               sheetNames={sheetInfo?.sheetNames ?? []}
               activeSheet={activeSheet}
             />
-            {proposalsAvailable && (
+            {proposalsAvailable && showProposals && (
               <div style={xlsxToolbarStyles.proposals}>
                 <ToolbarButton
                   testId="xlsx-proposals-button"
@@ -2095,7 +2120,7 @@ function XlsxEditorContent({
         </EditorToolbar>
         </div>
       )}
-      {!readOnly && proposalsAvailable && proposalsPanelOpen && (
+      {!readOnly && proposalsAvailable && showProposals && proposalsPanelOpen && (
         <ProposalsPanel
           proposals={proposals}
           staleFor={staleFor}

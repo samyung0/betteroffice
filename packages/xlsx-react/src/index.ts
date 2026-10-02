@@ -38,4 +38,12 @@ export {
   ToolbarMenuSeparator,
   ToolbarSeparator,
 } from './components/ui/ToolbarPrimitives';
+export {
+  DRAWN_ICON_NAMES,
+  TOOLBAR_ICON_NAMES,
+  type DrawnIconName,
+  type IconProps,
+  type IconSet,
+  type ToolbarIconName,
+} from './components/ui/ToolbarIcon';
 export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';

@@ -89,7 +89,9 @@ export function ProposalsPanel({
                 </span>
               </div>
               {proposal.note && (
-                <div style={{ color: 'var(--xlsx-text, #404040)', margin: '4px 0' }}>{proposal.note}</div>
+                <div style={{ color: 'var(--xlsx-text, #404040)', margin: '4px 0' }}>
+                  {proposal.note}
+                </div>
               )}
               <ul style={{ listStyle: 'none', margin: '6px 0', padding: 0 }}>
                 {proposal.cells.map((cell) => (
@@ -99,7 +101,9 @@ export function ProposalsPanel({
                     style={{ fontVariantNumeric: 'tabular-nums', lineHeight: 1.5 }}
                   >
                     <strong data-testid="xlsx-proposal-cell-a1">{cell.a1}</strong>:{' '}
-                    <span style={{ color: 'var(--xlsx-text-muted, #909090)' }}>{cell.oldText || '∅'}</span>{' '}
+                    <span style={{ color: 'var(--xlsx-text-muted, #909090)' }}>
+                      {cell.oldText || '∅'}
+                    </span>{' '}
                     {t('proposals.changeArrow')}{' '}
                     <span data-testid="xlsx-proposal-cell-new" style={{ color }}>
                       {cell.newText}
