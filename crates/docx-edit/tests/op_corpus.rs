@@ -275,10 +275,11 @@ fn undo_re_anchors_a_continued_fields_end_only_with_its_own_text() {
 
 #[test]
 fn a_continued_fields_tail_stays_in_it_when_it_holds_more_than_text() {
-    // A page break in the runs ending a continued result's first paragraph
-    // keeps it and the runs before it in the field, so the save writes it
-    // where it was (its flow break follows the paragraph, as for any field);
-    // plain runs after it are text after the field.
+    // A page break or a formatted tab in the runs ending a continued result's
+    // first paragraph keeps it and the runs before it in the field, so the
+    // save writes it where it was (a break's flow break follows the
+    // paragraph, as for any field); plain runs after it are text after the
+    // field.
     let field = |tail: &str| {
         format!(
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>INCLUDETEXT x</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r>{tail}</w:p><w:p w14:paraId="22222222"><w:r><w:t>C</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#
@@ -293,6 +294,15 @@ fn a_continued_fields_tail_stays_in_it_when_it_holds_more_than_text() {
         (
             r#"<w:r><w:br w:type="page"/><w:t>B</w:t></w:r><w:r><w:t>D</w:t></w:r>"#,
             "[field]D¶[pageBreak]C¶",
+        ),
+        // A tab of its own formatting stays too; a plain one is text.
+        (
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:tab/></w:r><w:r><w:t>D</w:t></w:r>"#,
+            "[field]D¶C¶",
+        ),
+        (
+            r#"<w:r><w:tab/></w:r><w:r><w:t>D</w:t></w:r>"#,
+            "[field]A\tD¶C¶",
         ),
     ] {
         let xml = field(tail);

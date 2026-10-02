@@ -2666,8 +2666,31 @@ test.each(
       ["a DATE result", p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`)],
       ["a link then own text", p("11111111", `${run("a ")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${link(run("AA"))}${run("yy")}`) + p("33333333", `${run("zz")}${char("end")}${run(" b")}`)],
       ...Object.entries(untouchedTails).map(([name, [xml]]) => [name, xml] as const),
+      ["a bold tab first in the tail", p("11111111", `${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}<w:r><w:rPr><w:b/></w:rPr><w:tab/></w:r>${run("A")}`) + p("33333333", `${run("D")}${char("end")}`)],
     ].map(([name, xml]) => [where, name, xml] as const)
   )
 )("%s | %s: the projector and the engine seed agree", async (where, _, xml) => {
   expect(await parity(matrixDocx(where, xml), STORY[where][0])).toBe(true);
+});
+
+// Round 4 recheck (decided 2026-10-03): a tab run with its own formatting ending a continued result stays in the
+// field, as do the runs before it, so an untouched save keeps the tab's formatting (the save drops a tab unit's own
+// formatting). Expected: the save before the result's tail became text (dcf7d9b5 through 86744da3), byte for byte.
+const plainRun = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
+test.each(
+  ["<w:b/>", `<w:u w:val="single"/>`, `<w:highlight w:val="yellow"/>`, `<w:color w:val="FF0000"/>`].flatMap((rpr) =>
+    ["first", "last", "between"].map((place) => [rpr, place] as const)
+  )
+)("an untouched continued result with a %s tab %s in its tail saves as before", async (rpr, place) => {
+  const tab = `<w:r><w:rPr>${rpr}</w:rPr><w:tab/></w:r>`;
+  const tailXml = place === "first" ? `${tab}${plainRun("A")}` : place === "last" ? `${plainRun("A")}${tab}` : `${plainRun("A")}${tab}${plainRun("B")}`;
+  const bytes = matrixDocx("body", p("11111111", `${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}${tailXml}`) + p("33333333", `${plainRun("D")}${char("end")}`));
+  const session = await open(bytes);
+  const saved = documentXml(await publish(bytes, session.encodeState()));
+  session.destroy();
+  // The field's characters take its result's first run's formatting.
+  const own = place === "first" ? `<w:rPr>${rpr}</w:rPr>` : "";
+  expect(saved.match(/<w:p w14:paraId="11111111">[\s\S]*?<\/w:p>/)![0]).toBe(
+    `<w:p w14:paraId="11111111"><w:r>${own}<w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DOCVARIABLE v </w:instrText></w:r><w:r>${own}<w:fldChar w:fldCharType="separate"/></w:r>${tailXml}</w:p>`
+  );
 });

@@ -571,16 +571,19 @@ function fieldJson(field: SimpleField | ComplexField): string {
 }
 
 /**
- * A field whose result continues into a later paragraph, and the plain runs (text and tabs) that end its result in
- * this one, after its projected children: ordinary text after the field's embed (`continued_result_tail` in
+ * A field whose result continues into a later paragraph, and the plain runs (text, and tabs without formatting) that
+ * end its result in this one, after its projected children: ordinary text after the field's embed (`continued_result_tail` in
  * crates/docx-edit/src/seed.rs).
  */
 function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | ComplexField, Run[]] {
   const inline = value.type === 'complexField' && value.continuation?.end && !value.continuation.separate
     ? value.structuredResult?.inline ?? []
     : [];
+  // The save drops a tab's own formatting (seed.rs).
   const plain = (node: FieldInlineContent) =>
-    node.type === 'run' && node.content.every((content) => content.type === 'text' || content.type === 'tab');
+    node.type === 'run' &&
+    node.content.every((content) => content.type === 'text' || content.type === 'tab') &&
+    !(Object.keys(node.formatting ?? {}).length && node.content.some((content) => content.type === 'tab'));
   let tail = 0;
   while (tail < inline.length && plain(inline[inline.length - 1 - tail]!)) tail += 1;
   if (value.type !== 'complexField' || tail === 0) return [value, []];
