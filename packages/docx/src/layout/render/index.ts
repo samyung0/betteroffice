@@ -34,6 +34,7 @@ export { loadGlyphOutlineProvider } from './glyphOutlineWasm';
 
 export {
   buildMirrorPage,
+  buildMirrorTextPage,
   MIRROR_CLASS_NAMES,
   type BuildMirrorPageOptions,
   type MirrorLabels,

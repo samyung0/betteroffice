@@ -7,12 +7,18 @@
  * accessible content of the canvas. Rebuilt whenever the page's display list
  * changes — the same trigger that re-rasters the canvas.
  *
+ * Pages away from the viewport (`full` false) mount the plain-text form
+ * (`buildMirrorTextPage`): the same accessible text without positioned runs,
+ * so screen readers reach the whole document without every scroll frame
+ * restyling every page's positioned mirror.
+ *
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
 import { useEffect, useRef } from 'react';
 import {
   buildMirrorPage,
+  buildMirrorTextPage,
   displayPageRevision,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
@@ -23,26 +29,39 @@ export function CanvasPageMirror({
   page,
   zoom = 1,
   defer = false,
+  full = true,
 }: {
   page: DisplayPage;
   zoom?: number;
   /** Off-window pages build at idle time instead of inside the mount flush. */
   defer?: boolean;
+  /** Positioned mirror near the viewport; plain accessible text elsewhere. */
+  full?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   // Position-shift deltas mutate primitives in place — identity alone is stale.
-  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
+  const builtForRef = useRef<{
+    page: DisplayPage;
+    revision: number;
+    t: TFunction;
+    full: boolean;
+  } | null>(null);
   const { t } = useTranslation();
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const built = builtForRef.current;
-    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
+    if (
+      built?.page === page &&
+      built.revision === displayPageRevision(page) &&
+      built.t === t &&
+      built.full === full
+    ) {
       return;
     }
     const build = (): void => {
-      const mirror = buildMirrorPage(page, {
+      const mirror = (full ? buildMirrorPage : buildMirrorTextPage)(page, {
         labels: {
           page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
           header: t('a11y.headerLabel'),
@@ -53,9 +72,13 @@ export function CanvasPageMirror({
       // Clearing in effect cleanup creates a detached-DOM window on every page
       // update; unmounting already removes the host and its complete subtree.
       host.replaceChildren(mirror);
-      builtForRef.current = { page, revision: displayPageRevision(page), t };
+      builtForRef.current = { page, revision: displayPageRevision(page), t, full };
     };
-    if (!defer) {
+    // A page crossing the viewport window already holds the other form of its
+    // mirror, so the swap waits for idle time instead of a scroll frame.
+    const swapOnly =
+      built?.page === page && built.revision === displayPageRevision(page) && built.t === t;
+    if (!defer && !swapOnly) {
       build();
       return;
     }
@@ -65,7 +88,7 @@ export function CanvasPageMirror({
     }
     const id = setTimeout(build, 150);
     return () => clearTimeout(id);
-  }, [page, t, defer]);
+  }, [page, t, defer, full]);
 
   return (
     <div

@@ -138,11 +138,6 @@ export function buildMirrorPage(
   pageEl.style.position = 'relative';
   pageEl.style.width = `${page.width}px`;
   pageEl.style.height = `${page.height}px`;
-  // Off-screen mirror pages skip style, layout and paint until they near the
-  // viewport, and stay in the accessibility tree, find-in-page and layout
-  // queries. Without it every scroll frame re-rendered every page's mirror
-  // (one element per glyph run: 100k+ on a 60-page document).
-  pageEl.style.setProperty('content-visibility', 'auto');
   pageEl.style.opacity = '0';
   pageEl.style.pointerEvents = 'none';
 
@@ -171,6 +166,55 @@ export function buildMirrorPage(
   }
 
   return pageEl;
+}
+
+/**
+ * The mirror of a page away from the viewport: the accessible tree of
+ * {@link buildMirrorPage} (roles, labels, links, language and text nodes in
+ * reading order) without positioned runs or geometry. Elements that carry no
+ * meaning for assistive technology unwrap into their text and empty ones go,
+ * so a long document keeps every page readable by a screen reader while only
+ * the pages near the viewport hold the full positioned mirror (one element per
+ * glyph run, 100k+ on a 60-page document, styled and laid out on every scroll
+ * frame).
+ */
+export function buildMirrorTextPage(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions = {}
+): HTMLElement {
+  const pageEl = buildMirrorPage(page, options);
+  pageEl.classList.add(MIRROR_TEXT_PAGE_CLASS);
+  pageEl.style.overflow = 'hidden';
+  pageEl.style.setProperty('contain', 'strict');
+  flattenMirrorChildren(pageEl);
+  return pageEl;
+}
+
+/** Marks a page built by {@link buildMirrorTextPage}. */
+export const MIRROR_TEXT_PAGE_CLASS = 'layout-page-mirror-text';
+
+function flattenMirrorChildren(el: Element): void {
+  for (const child of Array.from(el.children)) {
+    flattenMirrorChildren(child);
+    child.removeAttribute('style');
+    if (carriesMeaning(child)) continue;
+    if (child.textContent) child.replaceWith(...Array.from(child.childNodes));
+    else child.remove();
+  }
+}
+
+function carriesMeaning(el: Element): boolean {
+  if (el.tagName === 'A') return true;
+  for (const name of el.getAttributeNames()) {
+    if (name === 'role' || name === 'tabindex' || name.startsWith('aria-')) return true;
+    if (
+      (name === 'lang' || name === 'dir') &&
+      el.getAttribute(name) !== el.parentElement?.closest(`[${name}]`)?.getAttribute(name)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // one HfRegion → its painter-contract wrapper. children are placed with a

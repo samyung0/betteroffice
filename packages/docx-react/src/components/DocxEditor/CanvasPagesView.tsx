@@ -85,10 +85,10 @@ export function CanvasPagedArea({
   );
 }
 
-// Pages within this many pages of the viewport keep live bitmaps; everything
-// farther keeps its canvas ELEMENT (stable identity, exact geometry for
-// pointer routing/overlays/scroll math) but releases its backing store. Only
-// pixels are windowed — never DOM structure.
+// Pages within this many pages of the viewport keep live bitmaps and the
+// positioned a11y mirror; everything farther keeps its canvas ELEMENT (stable
+// identity, exact geometry for pointer routing/overlays/scroll math) but
+// releases its backing store, and its mirror keeps only the accessible text.
 const PAGE_WINDOW_BUFFER = 2;
 // Documents at or below this page count never window — zero behavior change
 // for ordinary documents.
@@ -153,7 +153,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} full={!deferChrome} />
       {interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
@@ -554,9 +554,10 @@ export function CanvasPagesView({
           const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
           // per-page wrapper so the mirror positions 1:1 over its canvas.
-          // Every page keeps its full DOM (canvas element, a11y mirror, SDT
-          // overlay) — the page window releases only bitmap backing stores,
-          // so the accessible document and page geometry never shrink.
+          // Every page keeps its DOM (canvas element, a11y mirror, SDT
+          // overlay); the page window releases bitmap backing stores and
+          // swaps the mirror of far pages for its plain-text form, so the
+          // accessible document and page geometry never shrink.
           return (
             <CanvasPageSurface
               key={surfaceKey}
