@@ -936,6 +936,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleDocxFileChange,
     handleInsertImageClick,
     handleImageFileChange,
+    insertImageFile,
   } = useFileIO({
     pagedEditorRef,
     displayList: canvasRenderer.displayList,
@@ -1307,13 +1308,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         openReplace(session ? yrsSelectedText(session) : '');
       },
       onAddComment: () => void handleContextMenuAction('addComment'),
+      onInsertImageFile: insertImageFile,
       showComments: showCommentsSidebar,
       onToggleComments: () => {
         setShowCommentsSidebar((visible) => !visible);
         setExpandedSidebarItem(null);
       },
     }),
-    [handleContextMenuAction, openReplace, showCommentsSidebar, setShowCommentsSidebar]
+    [
+      handleContextMenuAction,
+      insertImageFile,
+      openReplace,
+      showCommentsSidebar,
+      setShowCommentsSidebar,
+    ]
   );
 
   // Canvas-mode find highlights. The bridge stores the live display range on every

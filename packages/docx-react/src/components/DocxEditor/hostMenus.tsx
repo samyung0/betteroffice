@@ -32,7 +32,8 @@ export interface HostMenu {
 
 export interface DocxMenuModel {
   menus: HostMenu[];
-  run: (id: string, value?: string) => void;
+  /** `file` comes with Insert › Image when the host picked the image. */
+  run: (id: string, value?: string, file?: File) => void;
 }
 
 /** Commands that live outside the toolbar context. */
@@ -40,6 +41,7 @@ export interface HostMenuActions {
   onEditAction: (action: TextContextAction) => void;
   onFindReplace?: () => void;
   onAddComment: () => void;
+  onInsertImageFile: (file: File) => void;
   showComments: boolean;
   onToggleComments: () => void;
 }
@@ -240,7 +242,7 @@ export function HostMenus({
   ]);
 
   const run = useMemo(
-    () => (id: string, value?: string) => {
+    () => (id: string, value?: string, file?: File) => {
       const { actions: act, ctx: c } = latest.current;
       const [command, argument] = id.split(':');
       // Formatting returns focus to the page; dialogs and pickers keep theirs.
@@ -282,7 +284,8 @@ export function HostMenus({
           c.onZoomChange?.(Number(argument) / 100);
           return;
         case 'insert-image':
-          c.onInsertImage?.();
+          if (file) act.onInsertImageFile(file);
+          else c.onInsertImage?.();
           return;
         case 'insert-table': {
           const [rows, cols] = (value ?? '').split('x').map(Number);

@@ -249,13 +249,9 @@ export function useFileIO({
     imageInputRef.current?.click();
   }, []);
 
-  const handleImageFileChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      // Reset the input so the same file can be selected again
-      e.target.value = '';
-      if (!file) return;
-
+  /** Inserts an image file at the selection, as Insert › Image does. */
+  const insertImageFile = useCallback(
+    (file: File) => {
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = reader.result;
@@ -292,6 +288,16 @@ export function useFileIO({
     [focusActiveEditor, onError, pagedEditorRef]
   );
 
+  const handleImageFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset the input so the same file can be selected again
+      e.target.value = '';
+      if (file) insertImageFile(file);
+    },
+    [insertImageFile]
+  );
+
   return {
     imageInputRef,
     docxInputRef,
@@ -302,5 +308,6 @@ export function useFileIO({
     handleDocxFileChange,
     handleInsertImageClick,
     handleImageFileChange,
+    insertImageFile,
   };
 }

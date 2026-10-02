@@ -20,6 +20,11 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 export { ICON_NAMES, type IconName, type IconSet } from './components/ui/Icons';
+export type {
+  DocxMenuModel,
+  HostMenu,
+  HostMenuEntry,
+} from './components/DocxEditor/hostMenus';
 export {
   DocxDisplayListViewer,
   DocxViewer,
