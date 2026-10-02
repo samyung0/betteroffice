@@ -28,6 +28,7 @@ import type { ListState } from './ui/ListButtons';
 import { LineSpacingPicker } from './ui/LineSpacingPicker';
 import { StylePicker } from './ui/StylePicker';
 import { MaterialSymbol } from './ui/MaterialSymbol';
+import { useToolbarRowScroll } from './useToolbarRowScroll';
 import { ZoomControl } from './ui/ZoomControl';
 import { TableBorderPicker } from './ui/TableBorderPicker';
 import { TableBorderColorPicker } from './ui/TableBorderColorPicker';
@@ -443,6 +444,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
   } = props;
 
   const barRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  useToolbarRowScroll(rowRef, singleRow && !inline);
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -959,7 +962,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
         onMouseDown={handleBarMouseDown}
         onMouseUp={handleBarMouseUp}
       >
-        <div className="oox-formatting-bar__scroll">
+        <div ref={rowRef} className="oox-formatting-bar__scroll">
           {leading}
           {history}
           {groups}

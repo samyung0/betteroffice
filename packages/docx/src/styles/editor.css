@@ -825,6 +825,34 @@
 .oox-root .oox-formatting-bar [role='menubar'] button:hover {
   background: var(--doc-bg-hover) !important;
 }
+/* Fades at an edge with more to scroll (data-scroll-* from useToolbarRowScroll).
+ * Overlays, not a mask: a mask would clip the toolbar's fixed-position menus. */
+.oox-root .oox-formatting-bar__scroll::before,
+.oox-root .oox-formatting-bar__scroll::after {
+  position: sticky;
+  z-index: 1;
+  flex: none;
+  align-self: stretch;
+  width: 28px;
+  pointer-events: none;
+  content: '';
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.oox-root .oox-formatting-bar__scroll::before {
+  left: 0;
+  margin-right: -28px;
+  background: linear-gradient(to right, var(--doc-toolbar-bg), transparent);
+}
+.oox-root .oox-formatting-bar__scroll::after {
+  right: 0;
+  margin-left: -28px;
+  background: linear-gradient(to left, var(--doc-toolbar-bg), transparent);
+}
+.oox-root .oox-formatting-bar__scroll[data-scroll-start]::before,
+.oox-root .oox-formatting-bar__scroll[data-scroll-end]::after {
+  opacity: 1;
+}
 
 /* Outline / navigation toggle button (shown when the panel is collapsed).
  * Google-Docs-style filled circular control: a resting disc + ring so it
