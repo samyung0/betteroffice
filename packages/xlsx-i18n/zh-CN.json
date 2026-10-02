@@ -7,10 +7,45 @@
     "formulaBarLabel": null,
     "nameBoxPlaceholder": null,
     "formulaPlaceholder": null,
-    "save": null,
+    "save": "保存",
     "exportPng": null,
-    "undo": null,
-    "redo": null
+    "undo": "撤销",
+    "redo": "重做",
+    "print": "打印",
+    "bold": "粗体",
+    "italic": "斜体",
+    "strikethrough": "删除线",
+    "numberFormats": {
+      "automatic": "自动",
+      "plainText": "纯文本",
+      "number": "数字",
+      "percent": "百分比",
+      "scientific": "科学计数",
+      "currency": "货币",
+      "date": "日期",
+      "time": "时间"
+    },
+    "horizontalAlign": {
+      "left": "左对齐",
+      "center": "居中",
+      "right": "右对齐"
+    },
+    "verticalAlign": {
+      "top": "顶端对齐",
+      "middle": "垂直居中",
+      "bottom": "底端对齐"
+    },
+    "wrapping": {
+      "overflow": "溢出",
+      "wrap": "自动换行",
+      "clip": "截断"
+    },
+    "merge": {
+      "all": "全部合并",
+      "horizontal": "水平合并",
+      "vertical": "垂直合并",
+      "unmerge": "取消合并"
+    }
   },
   "editor": {
     "appLabel": null,
@@ -36,5 +71,47 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "hostMenus": {
+    "file": "文件",
+    "edit": "编辑",
+    "view": "查看",
+    "insert": "插入",
+    "format": "格式",
+    "download": "下载",
+    "excelWorkbook": "Microsoft Excel (.xlsx)",
+    "pngImage": "PNG 图片（可见区域）",
+    "selectAll": "全选",
+    "delete": "删除",
+    "deleteValues": "值",
+    "deleteRow": "行",
+    "deleteRows": "{count} 行",
+    "deleteColumn": "列",
+    "deleteColumns": "{count} 列",
+    "freeze": "冻结",
+    "noRows": "不冻结行",
+    "oneRow": "1 行",
+    "twoRows": "2 行",
+    "upToRow": "冻结至第 {row} 行",
+    "noColumns": "不冻结列",
+    "oneColumn": "1 列",
+    "twoColumns": "2 列",
+    "upToColumn": "冻结至 {column} 列",
+    "zoom": "缩放",
+    "rowAbove": "在上方插入行",
+    "rowsAbove": "在上方插入 {count} 行",
+    "rowBelow": "在下方插入行",
+    "rowsBelow": "在下方插入 {count} 行",
+    "columnLeft": "在左侧插入列",
+    "columnsLeft": "在左侧插入 {count} 列",
+    "columnRight": "在右侧插入列",
+    "columnsRight": "在右侧插入 {count} 列",
+    "sheet": "工作表",
+    "number": "数字",
+    "text": "文本",
+    "alignment": "对齐",
+    "wrapping": "换行",
+    "mergeCells": "合并单元格",
+    "clearFormatting": "清除格式"
   }
 }

@@ -1266,6 +1266,18 @@ describe('XlsxEditor menu commands', () => {
     expect(view.state().canUndo).toBe(true);
   });
 
+  it('reports the visible part of the sheet in sheet pixels, at any zoom', async () => {
+    const view = await mountCommands();
+    expect(view.api().visibleViewport()).toEqual({ x: 0, y: 0, ...VIEWPORT });
+    await view.run('zoom:200');
+    expect(view.api().visibleViewport()).toEqual({
+      x: 0,
+      y: 0,
+      width: VIEWPORT.width / 2,
+      height: VIEWPORT.height / 2,
+    });
+  });
+
   it('runs the toolbar commands a menu repeats: merge, wrapping and zoom', async () => {
     const view = await mountCommands();
     await view.select({ row: 2, col: 1 }, { row: 3, col: 2 });

@@ -46,6 +46,7 @@ import type {
   Selection,
   SelectionLimits,
   SheetInfo,
+  Viewport,
   WorkbookHandle,
 } from '@betteroffice/xlsx';
 import type {
@@ -105,6 +106,8 @@ export interface XlsxEditorApi {
   selectCells: (sheet: number, selection: Selection) => boolean;
   /** Runs a menu command on the current selection, as its toolbar button would. */
   run: (command: XlsxCommand) => void;
+  /** The part of the active sheet on screen, in sheet pixels (for an image of it). */
+  visibleViewport: () => Viewport | null;
 }
 
 export interface XlsxEditorCollaborationOptions {
@@ -742,6 +745,17 @@ function XlsxEditorContent({
             },
             selectCells,
             run: (command) => runCommandRef.current(command),
+            visibleViewport: () => {
+              const scroll = scrollRef.current;
+              if (!scroll || !scroll.clientWidth || !scroll.clientHeight) return null;
+              const scale = zoomRef.current;
+              return {
+                x: scroll.scrollLeft / scale,
+                y: scroll.scrollTop / scale,
+                width: scroll.clientWidth / scale,
+                height: scroll.clientHeight / scale,
+              };
+            },
           });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
