@@ -105,6 +105,7 @@ import { useDocumentHistory } from '../hooks/useHistory';
 
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
+import type { IconSet } from './ui/Icons';
 
 // Paginated editor
 import { type PagedEditorRef, DEFAULT_PAGE_WIDTH } from './DocxEditor/PagedEditor';
@@ -199,6 +200,8 @@ export interface DocxEditorProps {
   showOutline?: boolean;
   /** Whether to show the floating outline toggle button (default: true) */
   showOutlineButton?: boolean;
+  /** Replaces the built-in Material icons everywhere in the editor chrome. */
+  icons?: IconSet;
   /**
    * Custom list of fonts shown in the toolbar's font-family dropdown.
    * Strings render in the "Other" group; pass `FontOption[]` for category
@@ -598,6 +601,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     loadingIndicator,
     showOutline: showOutlineProp = false,
     showOutlineButton = true,
+    icons,
     fontFamilies,
     fonts,
     watermarkPresets,
@@ -1778,6 +1782,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     <>
       <DocxEditorShell
         i18n={i18n}
+        icons={icons}
         isDark={isDark}
         onEditorError={handleEditorError}
         containerRef={containerRef}

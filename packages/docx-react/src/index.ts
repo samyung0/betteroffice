@@ -19,6 +19,7 @@ export {
   type DocxEditorCollaborationOptions,
   type EditorMode,
 } from './components/DocxEditor';
+export { ICON_NAMES, type IconName, type IconSet } from './components/ui/Icons';
 export {
   DocxDisplayListViewer,
   DocxViewer,

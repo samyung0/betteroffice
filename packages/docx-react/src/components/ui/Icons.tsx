@@ -5,7 +5,8 @@
  * Source: https://fonts.google.com/icons
  */
 
-import type { CSSProperties } from 'react';
+import { createContext, useContext } from 'react';
+import type { ComponentType, CSSProperties } from 'react';
 
 export interface IconProps {
   size?: number;
@@ -825,7 +826,7 @@ export function IconAgentSparkle(props: IconProps) {
 // ICON MAP - for MaterialSymbol compatibility
 // ============================================================================
 
-const iconMap: Record<string, React.ComponentType<IconProps>> = {
+const iconMap = {
   undo: IconUndo,
   redo: IconRedo,
   print: IconPrint,
@@ -934,7 +935,20 @@ const iconMap: Record<string, React.ComponentType<IconProps>> = {
   format_textdirection_r_to_l: IconTextDirectionRtl,
   // Agent
   'agent-sparkle': IconAgentSparkle,
-};
+} satisfies Record<string, ComponentType<IconProps>>;
+
+/** Every name `MaterialSymbol` renders. */
+export type IconName = keyof typeof iconMap;
+export const ICON_NAMES = Object.keys(iconMap) as IconName[];
+
+/**
+ * A host's replacement for the built-in Material set. It names every icon, so
+ * a host set never falls back to Material for some names.
+ */
+export type IconSet = Record<IconName, ComponentType<IconProps>>;
+
+/** Provided by `DocxEditor`'s `icons` prop; null keeps the built-in set. */
+export const IconSetContext = createContext<IconSet | null>(null);
 
 /**
  * MaterialSymbol-compatible component using inline SVGs
@@ -952,7 +966,7 @@ export function MaterialSymbol({
   className?: string;
   style?: CSSProperties;
 }) {
-  const IconComponent = iconMap[name];
+  const IconComponent = (useContext(IconSetContext) ?? iconMap)[name as IconName];
 
   if (!IconComponent) {
     // Fallback: render the name as text (for debugging)

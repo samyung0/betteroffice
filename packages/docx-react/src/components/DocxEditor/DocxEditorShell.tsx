@@ -3,6 +3,7 @@ import type { SectionProperties, TabStop } from '@betteroffice/docx/types/docume
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import { LocaleProvider } from '../../i18n';
 import { cn } from '../../lib/utils';
+import { IconSetContext, type IconSet } from '../ui/Icons';
 import { ErrorBoundary, ErrorProvider } from '../ErrorBoundary';
 import { HorizontalRuler } from '../ui/HorizontalRuler';
 import { VerticalRuler, RULER_WIDTH } from '../ui/VerticalRuler';
@@ -71,6 +72,7 @@ interface OutlineProps {
  */
 export function DocxEditorShell({
   i18n,
+  icons,
   isDark,
   onEditorError,
   containerRef,
@@ -105,6 +107,7 @@ export function DocxEditorShell({
   fileInputs,
 }: {
   i18n: React.ComponentProps<typeof LocaleProvider>['i18n'];
+  icons: IconSet | undefined;
   isDark?: boolean;
   onEditorError: (error: Error) => void;
   containerRef: RefObject<HTMLDivElement | null>;
@@ -140,6 +143,7 @@ export function DocxEditorShell({
 }) {
   return (
     <LocaleProvider i18n={i18n}>
+      <IconSetContext.Provider value={icons ?? null}>
       <ErrorProvider>
         <ErrorBoundary onError={onEditorError}>
           <div
@@ -286,6 +290,7 @@ export function DocxEditorShell({
           </div>
         </ErrorBoundary>
       </ErrorProvider>
+      </IconSetContext.Provider>
     </LocaleProvider>
   );
 }

@@ -16,7 +16,7 @@ import {
   SelectTrigger,
 } from './Select';
 import { cn } from '../../lib/utils';
-import { IconLineSpacing } from './Icons';
+import { MaterialSymbol } from './Icons';
 import { useTranslation } from '../../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 
@@ -99,7 +99,7 @@ export function LineSpacingPicker({
         aria-label={t('lineSpacing.label')}
         title={t('lineSpacing.lineSpacingTitle', { label: getOptionLabel(currentOption) })}
       >
-        <IconLineSpacing className="h-5 w-5 shrink-0" />
+        <MaterialSymbol name="format_line_spacing" size={20} className="shrink-0" />
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
