@@ -711,8 +711,9 @@ export function createDisplayListQueries(
   // primitive whose doc range meets [from, to) can contribute, and their page
   // indices map back. The selection overlay asks a superseded facade (no
   // handle) for the caret during typing; on a 60-page document the whole list
-  // is ~30 MB of JSON to serialize and parse per call. A serialized list whose
-  // pages changed in place since keeps answering from that string.
+  // is ~30 MB of JSON to serialize and parse per call. A facade that never got
+  // a handle and serialized its list keeps answering from that string while
+  // its pages are unchanged in place since.
   const rangeRectsJsonArg = (from: number, to: number): string => {
     if (
       json !== null &&
@@ -1171,6 +1172,11 @@ export function createDisplayListQueries(
         // finalizer may close it here anymore
         handle = null;
         handleFinalizers?.unregister(finalizerToken);
+        // the whole-list string this facade opened the handle with goes too:
+        // a superseded facade answers from its current pages (rangeRectsJsonArg)
+        // instead of parsing the whole list again in wasm
+        json = null;
+        jsonRevisions = null;
       }
       return transferred;
     },

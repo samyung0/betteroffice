@@ -72,7 +72,36 @@ describe('superseded range queries', () => {
       );
     }
     expect(inputs.length).toBe(ranges.length);
-    // a caret-sized range ships a page or two, not the 40-page list
-    expect(Math.max(...inputs.slice(0, 2))).toBeLessThan(whole.length / 10);
+    // a caret-sized range ships a page or two, not the 40-page list, although
+    // `first` opened its handle with the whole-list string
+    const caretSized = inputs.filter((_, index) => ranges[index][1] - ranges[index][0] === 1);
+    expect(Math.max(...caretSized)).toBeLessThan(whole.length / 10);
+  });
+
+  test('answer from the current pages once the handle has been handed on', () => {
+    const inputs: number[] = [];
+    const recording: RustDisplayListQueryEngine = {
+      ...engine,
+      rangeRectsJson: (displayList, from, to) => {
+        inputs.push(displayList.length);
+        return engine.rangeRectsJson(displayList, from, to);
+      },
+    };
+    const pages = Array.from({ length: 40 }, (_, index) => page(index));
+    const shifted: DisplayList = { pages };
+    const first = createDisplayListQueries(shifted, recording);
+    first.rangeRects(1, 2); // opens the handle with the whole-list string
+    createDisplayListQueries({ pages: [...pages] }, recording, first).rangeRects(1, 2);
+    // a later frame shifts page 0 in place, as applyFrameDeltaOwned does
+    for (const primitive of pages[0].primitives as Array<{ docStart: number; docEnd: number }>) {
+      primitive.docStart += 1;
+      primitive.docEnd += 1;
+    }
+    Object.defineProperty(pages[0], '__betterofficePageRevision', { value: 1, configurable: true });
+    expect(first.rangeRects(2, 3)).toEqual(
+      JSON.parse(engine.rangeRectsJson(JSON.stringify(shifted), 2, 3))
+    );
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toBeLessThan(JSON.stringify(shifted).length / 10);
   });
 });
