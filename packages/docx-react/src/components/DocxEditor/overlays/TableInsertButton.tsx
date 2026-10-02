@@ -8,6 +8,7 @@
  */
 
 import React from 'react';
+import { DrawnIcon } from '../../ui/Icons';
 
 export interface TableInsertButtonProps {
   type: 'row' | 'column';
@@ -54,9 +55,11 @@ export function TableInsertButton({
       title={label}
       aria-label={label}
     >
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-        <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
+      <DrawnIcon name="table-insert" size={12}>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        </svg>
+      </DrawnIcon>
     </button>
   );
 }

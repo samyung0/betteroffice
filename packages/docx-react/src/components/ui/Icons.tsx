@@ -6,7 +6,7 @@
  */
 
 import { createContext, useContext } from 'react';
-import type { ComponentType, CSSProperties } from 'react';
+import type { ComponentType, CSSProperties, ReactNode } from 'react';
 
 export interface IconProps {
   size?: number;
@@ -949,16 +949,62 @@ const iconMap = {
 
 /** Every name `MaterialSymbol` renders. */
 export type IconName = keyof typeof iconMap;
-export const ICON_NAMES = Object.keys(iconMap) as IconName[];
 
 /**
- * A host's replacement for the built-in Material set. It names every icon, so
- * a host set never falls back to Material for some names.
+ * Icons the editor draws inline instead of from the Material set: the
+ * right-click menu, the link popup and the table insert overlay. `DrawnIcon`
+ * renders them.
  */
-export type IconSet = Record<IconName, ComponentType<IconProps>>;
+export const DRAWN_ICON_NAMES = [
+  'menu-cut',
+  'menu-copy',
+  'menu-paste',
+  'menu-delete',
+  'menu-select-all',
+  'menu-row-above',
+  'menu-row-below',
+  'menu-row-delete',
+  'menu-column-left',
+  'menu-column-right',
+  'menu-column-delete',
+  'menu-merge-cells',
+  'menu-split-cell',
+  'menu-select-table',
+  'menu-delete-table',
+  'menu-comment',
+  'link-open',
+  'link-copy',
+  'link-edit',
+  'link-remove',
+  'link-text',
+  'link-url',
+  'table-insert',
+] as const;
+export type DrawnIconName = (typeof DRAWN_ICON_NAMES)[number];
+
+/**
+ * A host's replacement for the built-in icons, Material and drawn alike. It
+ * names every icon, so a host set never falls back to the built-in ones.
+ */
+export type IconSet = Record<IconName | DrawnIconName, ComponentType<IconProps>>;
+export const ICON_NAMES = [...Object.keys(iconMap), ...DRAWN_ICON_NAMES] as (keyof IconSet)[];
 
 /** Provided by `DocxEditor`'s `icons` prop; null keeps the built-in set. */
 export const IconSetContext = createContext<IconSet | null>(null);
+
+/** The host set's `name` when there is one, else the editor's own drawing. */
+export function DrawnIcon({
+  name,
+  size,
+  children,
+}: {
+  name: DrawnIconName;
+  size: number;
+  children: ReactNode;
+}) {
+  const Icon = useContext(IconSetContext)?.[name];
+  return Icon ? <Icon size={size} /> : <>{children}</>;
+}
 
 /**
  * MaterialSymbol-compatible component using inline SVGs

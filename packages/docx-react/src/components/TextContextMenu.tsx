@@ -10,6 +10,7 @@ import { useTranslation } from '../i18n';
 import { en as defaultLocale } from '@betteroffice/docx-i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import { Z_INDEX } from '../styles/zIndex';
+import { DrawnIcon, type DrawnIconName } from './ui/Icons';
 
 // ============================================================================
 // TYPES
@@ -336,40 +337,45 @@ const CommentIcon = () => (
  * Get icon for action
  */
 function getActionIcon(action: TextContextAction): React.ReactNode {
+  const drawn = (name: DrawnIconName, drawing: React.ReactNode) => (
+    <DrawnIcon name={name} size={16}>
+      {drawing}
+    </DrawnIcon>
+  );
   switch (action) {
     case 'cut':
-      return <CutIcon />;
+      return drawn('menu-cut', <CutIcon />);
     case 'copy':
-      return <CopyIcon />;
+      return drawn('menu-copy', <CopyIcon />);
     case 'paste':
     case 'pasteAsPlainText':
-      return <PasteIcon />;
+      return drawn('menu-paste', <PasteIcon />);
     case 'delete':
-      return <DeleteIcon />;
+      return drawn('menu-delete', <DeleteIcon />);
     case 'selectAll':
-      return <SelectAllIcon />;
+      return drawn('menu-select-all', <SelectAllIcon />);
     case 'addRowAbove':
-      return <AddRowAboveIcon />;
+      return drawn('menu-row-above', <AddRowAboveIcon />);
     case 'addRowBelow':
-      return <AddRowBelowIcon />;
+      return drawn('menu-row-below', <AddRowBelowIcon />);
     case 'deleteRow':
-      return <DeleteRowIcon />;
+      return drawn('menu-row-delete', <DeleteRowIcon />);
     case 'addColumnLeft':
-      return <AddColumnLeftIcon />;
+      return drawn('menu-column-left', <AddColumnLeftIcon />);
     case 'addColumnRight':
-      return <AddColumnRightIcon />;
+      return drawn('menu-column-right', <AddColumnRightIcon />);
     case 'deleteColumn':
-      return <DeleteColumnIcon />;
+      return drawn('menu-column-delete', <DeleteColumnIcon />);
     case 'mergeCells':
-      return <MergeCellsIcon />;
+      return drawn('menu-merge-cells', <MergeCellsIcon />);
     case 'splitCell':
-      return <SplitCellIcon />;
+      return drawn('menu-split-cell', <SplitCellIcon />);
     case 'selectTable':
-      return <SelectTableIcon />;
+      return drawn('menu-select-table', <SelectTableIcon />);
     case 'deleteTable':
-      return <DeleteTableIcon />;
+      return drawn('menu-delete-table', <DeleteTableIcon />);
     case 'addComment':
-      return <CommentIcon />;
+      return drawn('menu-comment', <CommentIcon />);
     default:
       return null;
   }

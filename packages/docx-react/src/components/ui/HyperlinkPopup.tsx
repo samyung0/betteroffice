@@ -10,6 +10,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { CSSProperties } from 'react';
 import { toast } from 'sonner';
 import { useTranslation } from '../../i18n';
+import { DrawnIcon } from './Icons';
 
 // ============================================================================
 // TYPES
@@ -382,7 +383,9 @@ export function HyperlinkPopup({
         {/* Text field */}
         <div style={EDIT_ROW_STYLE}>
           <span style={ICON_STYLE}>
-            <TextIcon />
+            <DrawnIcon name="link-text" size={18}>
+              <TextIcon />
+            </DrawnIcon>
           </span>
           <input
             ref={textInputRef}
@@ -400,7 +403,9 @@ export function HyperlinkPopup({
         {/* URL field + Apply */}
         <div style={{ ...EDIT_ROW_STYLE, marginBottom: 0 }}>
           <span style={ICON_STYLE}>
-            <LinkIcon />
+            <DrawnIcon name="link-url" size={18}>
+              <LinkIcon />
+            </DrawnIcon>
           </span>
           <input
             type="text"
@@ -443,7 +448,9 @@ export function HyperlinkPopup({
     >
       {/* Globe icon */}
       <span style={ICON_STYLE}>
-        <GlobeIcon />
+        <DrawnIcon name="link-open" size={18}>
+          <GlobeIcon />
+        </DrawnIcon>
       </span>
 
       {/* Clickable URL */}
@@ -465,17 +472,23 @@ export function HyperlinkPopup({
 
       {/* Copy button */}
       <PopupIconButton title={t('hyperlinkPopup.copyLink')} onClick={handleCopy}>
-        <CopyIcon />
+        <DrawnIcon name="link-copy" size={18}>
+          <CopyIcon />
+        </DrawnIcon>
       </PopupIconButton>
 
       {!readOnly && (
         <>
           <PopupIconButton title={t('hyperlinkPopup.editLink')} onClick={handleEditClick}>
-            <EditIcon />
+            <DrawnIcon name="link-edit" size={18}>
+              <EditIcon />
+            </DrawnIcon>
           </PopupIconButton>
 
           <PopupIconButton title={t('hyperlinkPopup.removeLink')} onClick={onRemove}>
-            <UnlinkIcon />
+            <DrawnIcon name="link-remove" size={18}>
+              <UnlinkIcon />
+            </DrawnIcon>
           </PopupIconButton>
         </>
       )}
