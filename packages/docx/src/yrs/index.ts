@@ -1258,7 +1258,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         ownsResidentFontStore = true;
       }
       const id = session.register_measure_font(bytes);
-      residentFonts.push(bytes.slice());
+      // Kept by reference for the worker replay, which copies it per snapshot:
+      // the font registry hands over shared, never-written font buffers.
+      residentFonts.push(bytes);
       residentFontsRevision += 1;
       return id;
     },
