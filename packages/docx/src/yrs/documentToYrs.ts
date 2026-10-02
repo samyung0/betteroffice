@@ -530,7 +530,7 @@ function fieldPayload(
       dirty: field.dirty ?? false,
       displayMode,
       hasCachedResult: displayText.length > 0,
-      fieldData: JSON.stringify(field),
+      fieldData: fieldJson(field),
       modelKind: 'field',
       ...(field.type === 'complexField' && field.continuation ? { continuationId: field.continuation.id } : {}),
     },
@@ -555,6 +555,19 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
       rId: hyperlink.rId ?? null,
     },
   };
+}
+
+/** Fields `continuedResultTail` trimmed: seed.rs serializes them with sorted keys, as it does every changed value. */
+const trimmedFields = new WeakSet<object>();
+
+/** A field's data as seed.rs stores it (`source_json`, `js_json` for a field it changed). */
+function fieldJson(field: SimpleField | ComplexField): string {
+  if (!trimmedFields.has(field)) return JSON.stringify(field);
+  return JSON.stringify(field, (_, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : value
+  );
 }
 
 /**
@@ -582,6 +595,7 @@ function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | 
     ...(value.fieldTree?.result?.inline ? { fieldTree: { ...value.fieldTree, result: { ...value.fieldTree.result, inline: kept } } } : {}),
     ...(!fieldResult.length && first ? { formatting: first.formatting } : {}),
   };
+  trimmedFields.add(field);
   return [field, inline.slice(inline.length - tail) as Run[]];
 }
 
@@ -635,7 +649,7 @@ function fieldToUnits(
     ),
   };
   const field = fieldPayload(visible, styleFormatting);
-  field.payload.fieldData = JSON.stringify(value);
+  field.payload.fieldData = fieldJson(value);
   field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
   return units;

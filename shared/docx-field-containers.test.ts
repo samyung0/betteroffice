@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { E as commentEnd, S as commentStart, STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, partXml, prime, ref as commentRef, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
+import { E as commentEnd, S as commentStart, STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, parity, partXml, prime, ref as commentRef, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -2656,4 +2656,18 @@ test.each(Object.keys(untouchedTails))("an untouched file with %s saves as befor
   const saved = documentXml(await publish(bytes, session.encodeState()));
   session.destroy();
   expect(saved.replaceAll(' xml:space="preserve"', "").match(/<w:p w14:paraId="11111111">[\s\S]*?<\/w:p>/)![0]).toBe(expected);
+});
+
+// Round 4 review, finding 5: the projector (documentToYrs) reads a continued field's result tail as the engine seed
+// does, its field data included, in every story.
+test.each(
+  (["body", "cell", "header", "footnote"] as const).flatMap((where) =>
+    [
+      ["a DATE result", p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`)],
+      ["a link then own text", p("11111111", `${run("a ")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${link(run("AA"))}${run("yy")}`) + p("33333333", `${run("zz")}${char("end")}${run(" b")}`)],
+      ...Object.entries(untouchedTails).map(([name, [xml]]) => [name, xml] as const),
+    ].map(([name, xml]) => [where, name, xml] as const)
+  )
+)("%s | %s: the projector and the engine seed agree", async (where, _, xml) => {
+  expect(await parity(matrixDocx(where, xml), STORY[where][0])).toBe(true);
 });
