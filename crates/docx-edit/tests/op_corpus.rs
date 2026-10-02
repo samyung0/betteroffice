@@ -274,6 +274,37 @@ fn undo_re_anchors_a_continued_fields_end_only_with_its_own_text() {
 }
 
 #[test]
+fn a_continued_fields_tail_stays_in_it_when_it_holds_more_than_text() {
+    // A page break in the runs ending a continued result's first paragraph
+    // keeps it and the runs before it in the field, so the save writes it
+    // where it was (its flow break follows the paragraph, as for any field);
+    // plain runs after it are text after the field.
+    let field = |tail: &str| {
+        format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>INCLUDETEXT x</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r>{tail}</w:p><w:p w14:paraId="22222222"><w:r><w:t>C</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#
+        )
+    };
+    for (tail, expected) in [
+        ("", "[field]A¶C¶"),
+        (
+            r#"<w:r><w:br w:type="page"/><w:t>B</w:t></w:r>"#,
+            "[field]¶[pageBreak]C¶",
+        ),
+        (
+            r#"<w:r><w:br w:type="page"/><w:t>B</w:t></w:r><w:r><w:t>D</w:t></w:r>"#,
+            "[field]D¶[pageBreak]C¶",
+        ),
+    ] {
+        let xml = field(tail);
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.into_bytes())]).unwrap();
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        assert_eq!(slot_units(&doc), expected, "{tail}");
+    }
+}
+
+#[test]
 fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
     // Decided 2026-10-02: the result text ending the first paragraph of a
     // field that continues is text after its embed; the join after Enter in

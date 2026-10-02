@@ -558,22 +558,29 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
 }
 
 /**
- * A field whose result continues into a later paragraph, and the runs that end its result in this one, after its
- * projected children: ordinary text after the field's embed (`continued_result_tail` in crates/docx-edit/src/seed.rs).
+ * A field whose result continues into a later paragraph, and the plain runs (text and tabs) that end its result in
+ * this one, after its projected children: ordinary text after the field's embed (`continued_result_tail` in
+ * crates/docx-edit/src/seed.rs).
  */
 function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | ComplexField, Run[]] {
   const inline = value.type === 'complexField' && value.continuation?.end && !value.continuation.separate
     ? value.structuredResult?.inline ?? []
     : [];
+  const plain = (node: FieldInlineContent) =>
+    node.type === 'run' && node.content.every((content) => content.type === 'text' || content.type === 'tab');
   let tail = 0;
-  while (tail < inline.length && inline[inline.length - 1 - tail]!.type === 'run') tail += 1;
+  while (tail < inline.length && plain(inline[inline.length - 1 - tail]!)) tail += 1;
   if (value.type !== 'complexField' || tail === 0) return [value, []];
   const kept = inline.slice(0, inline.length - tail);
+  const fieldResult = shownRuns(kept);
+  // With no result run left, the field takes its first one's formatting, which its characters save with (seed.rs).
+  const first = value.fieldResult[0];
   const field: ComplexField = {
     ...value,
     structuredResult: { ...value.structuredResult, inline: kept },
-    fieldResult: shownRuns(kept),
+    fieldResult,
     ...(value.fieldTree?.result?.inline ? { fieldTree: { ...value.fieldTree, result: { ...value.fieldTree.result, inline: kept } } } : {}),
+    ...(!fieldResult.length && first ? { formatting: first.formatting } : {}),
   };
   return [field, inline.slice(inline.length - tail) as Run[]];
 }

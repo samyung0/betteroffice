@@ -2626,3 +2626,34 @@ test.each([
   expect(matrixUnits(session, story)).toBe(before.replace(where === "body" ? "word" : "ab", where === "body" ? "wordZ" : "abZ"));
   session.destroy();
 });
+
+// Round 4 review, finding 4: a field whose result continues keeps in its own data any run that is more than text and
+// tabs (a page break, a comment's reference), and its characters keep the formatting its whole result lent them, so an
+// untouched file saves as it did before the result's tail became text.
+const untouchedTails: Record<string, [string, string]> = {
+  "a page break in the tail": [
+    p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:br w:type="page"/><w:t>B</w:t></w:r>`) + p("33333333", `${run("C")}${char("end")}`),
+    '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:br w:type="page"/><w:t>B</w:t></w:r></w:p>',
+  ],
+  "a page break before plain text in the tail": [
+    p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:br w:type="page"/><w:t>B</w:t></w:r>${run("D")}`) + p("33333333", `${run("C")}${char("end")}`),
+    '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:br w:type="page"/><w:t>B</w:t></w:r><w:r><w:t>D</w:t></w:r></w:p>',
+  ],
+  "a bibliography entry with an italic title": [
+    `<w:p w14:paraId="11111111"><w:pPr><w:pStyle w:val="Bibliography"/></w:pPr>${char("begin")}${instr(" BIBLIOGRAPHY ")}${char("separate")}${run("Smith, J. (2020). ")}<w:r><w:rPr><w:i/><w:iCs/></w:rPr><w:t>Title.</w:t></w:r>${run(" Pub.")}</w:p>` +
+      p("33333333", `${run("Doe, A. (2021). ")}${char("end")}`),
+    '<w:p w14:paraId="11111111"><w:pPr><w:pStyle w:val="Bibliography"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> BIBLIOGRAPHY </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Smith, J. (2020). </w:t></w:r><w:r><w:rPr><w:i/><w:iCs/></w:rPr><w:t>Title.</w:t></w:r><w:r><w:t> Pub.</w:t></w:r></w:p>',
+  ],
+  "a comment ending with its reference in the tail": [
+    p("11111111", `${commentStart(1)}${run("x")}${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}${run("AB")}${commentEnd(1)}${commentRef(1)}${run("CD")}`) + p("33333333", `${run("EF")}${char("end")}${run("y")}`),
+    '<w:p w14:paraId="11111111"><w:commentRangeStart w:id="1"/><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DOCVARIABLE v </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>AB</w:t></w:r><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r><w:r><w:t>CD</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
+  ],
+};
+test.each(Object.keys(untouchedTails))("an untouched file with %s saves as before", async (shape) => {
+  const [xml, expected] = untouchedTails[shape]!;
+  const bytes = matrixDocx("body", xml);
+  const session = await open(bytes);
+  const saved = documentXml(await publish(bytes, session.encodeState()));
+  session.destroy();
+  expect(saved.replaceAll(' xml:space="preserve"', "").match(/<w:p w14:paraId="11111111">[\s\S]*?<\/w:p>/)![0]).toBe(expected);
+});
