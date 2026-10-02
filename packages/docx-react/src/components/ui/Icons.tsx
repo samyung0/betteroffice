@@ -696,6 +696,14 @@ export function IconKeyboardArrowRight(props: IconProps) {
   );
 }
 
+export function IconMenu(props: IconProps) {
+  return (
+    <SvgIcon {...props}>
+      <path d="M120-240v-80h720v80H120Zm0-200v-80h720v80H120Zm0-200v-80h720v80H120Z" />
+    </SvgIcon>
+  );
+}
+
 export function IconMoreVert(props: IconProps) {
   return (
     <SvgIcon {...props}>
@@ -916,6 +924,7 @@ const iconMap = {
   keyboard_arrow_left: IconKeyboardArrowLeft,
   keyboard_arrow_right: IconKeyboardArrowRight,
   more_vert: IconMoreVert,
+  menu: IconMenu,
   // Page break
   page_break: IconPageBreak,
   // Watermark

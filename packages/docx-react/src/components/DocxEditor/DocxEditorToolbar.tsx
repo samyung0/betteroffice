@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
 import type { Theme, Document } from '@betteroffice/docx/types/document';
 import { EditorToolbar } from '../EditorToolbar';
-import { ToolbarSeparator, type SelectionFormatting, type FormattingAction } from '../Toolbar';
+import {
+  ToolbarGroup,
+  ToolbarSeparator,
+  type SelectionFormatting,
+  type FormattingAction,
+} from '../Toolbar';
 import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
@@ -176,9 +181,11 @@ export function DocxEditorToolbar({
           singleRow && (
             <>
               {showOutlineButton && (
-                <OutlineToolbarToggle active={showOutline} onClick={onToggleOutline} />
+                <ToolbarGroup>
+                  <OutlineToolbarToggle active={showOutline} onClick={onToggleOutline} />
+                </ToolbarGroup>
               )}
-              <EditorToolbar.MenuBar />
+              <EditorToolbar.MenuBar folded />
             </>
           )
         }

@@ -31,6 +31,8 @@ export interface FontSizePickerProps {
   width?: number | string;
   minSize?: number;
   maxSize?: number;
+  /** Show the step-down and step-up buttons (default: true). */
+  showSteps?: boolean;
 }
 
 // ============================================================================
@@ -88,6 +90,7 @@ export function FontSizePicker({
   placeholder = '11',
   minSize = DEFAULT_MIN_SIZE,
   maxSize = DEFAULT_MAX_SIZE,
+  showSteps = true,
 }: FontSizePickerProps) {
   const { t } = useTranslation();
   const [isEditing, setIsEditing] = useState(false);
@@ -224,12 +227,13 @@ export function FontSizePicker({
       onMouseDown={handleMouseDown}
     >
       {/* Decrease button */}
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
-          disabled && 'opacity-30 cursor-not-allowed'
+      {showSteps && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className={cn(
+            'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
+            disabled && 'opacity-30 cursor-not-allowed'
         )}
         onMouseDown={handleDecrease}
         disabled={disabled || currentValue <= minSize}
@@ -238,6 +242,7 @@ export function FontSizePicker({
       >
         <MaterialSymbol name="remove" size={18} />
       </Button>
+      )}
 
       {/* Font size input/display */}
       <div className="relative">
@@ -317,12 +322,13 @@ export function FontSizePicker({
       )}
 
       {/* Increase button */}
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
-          disabled && 'opacity-30 cursor-not-allowed'
+      {showSteps && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className={cn(
+            'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
+            disabled && 'opacity-30 cursor-not-allowed'
         )}
         onMouseDown={handleIncrease}
         disabled={disabled || currentValue >= maxSize}
@@ -331,6 +337,7 @@ export function FontSizePicker({
       >
         <MaterialSymbol name="add" size={18} />
       </Button>
+      )}
     </div>
   );
 }

@@ -29,6 +29,8 @@ export interface ZoomControlProps {
   disabled?: boolean;
   className?: string;
   compact?: boolean;
+  /** Show the zoom-out and zoom-in buttons (default: true). */
+  showSteps?: boolean;
 }
 
 // ============================================================================
@@ -55,6 +57,7 @@ export function ZoomControl({
   disabled = false,
   className,
   compact = false,
+  showSteps = true,
 }: ZoomControlProps) {
   const { t } = useTranslation();
   const displayLabel = React.useMemo(() => {
@@ -88,20 +91,22 @@ export function ZoomControl({
 
   return (
     <div className="flex items-center">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          btnCls,
-          'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
-          (disabled || !prevLevel) && 'opacity-30 cursor-not-allowed'
-        )}
-        onClick={() => prevLevel && onChange?.(prevLevel.value)}
-        disabled={disabled || !prevLevel}
-        aria-label={t('zoom.zoomOut')}
-      >
-        <MaterialSymbol name="remove" size={18} />
-      </Button>
+      {showSteps && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className={cn(
+            btnCls,
+            'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-r-none',
+            (disabled || !prevLevel) && 'opacity-30 cursor-not-allowed'
+          )}
+          onClick={() => prevLevel && onChange?.(prevLevel.value)}
+          disabled={disabled || !prevLevel}
+          aria-label={t('zoom.zoomOut')}
+        >
+          <MaterialSymbol name="remove" size={18} />
+        </Button>
+      )}
       <Select value={value.toString()} onValueChange={handleValueChange} disabled={disabled}>
         <SelectTrigger
           className={cn(
@@ -121,20 +126,22 @@ export function ZoomControl({
           ))}
         </SelectContent>
       </Select>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          btnCls,
-          'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
-          (disabled || !nextLevel) && 'opacity-30 cursor-not-allowed'
-        )}
-        onClick={() => nextLevel && onChange?.(nextLevel.value)}
-        disabled={disabled || !nextLevel}
-        aria-label={t('zoom.zoomIn')}
-      >
-        <MaterialSymbol name="add" size={18} />
-      </Button>
+      {showSteps && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className={cn(
+            btnCls,
+            'text-muted-foreground hover:text-foreground hover:bg-muted/80 rounded-l-none',
+            (disabled || !nextLevel) && 'opacity-30 cursor-not-allowed'
+          )}
+          onClick={() => nextLevel && onChange?.(nextLevel.value)}
+          disabled={disabled || !nextLevel}
+          aria-label={t('zoom.zoomIn')}
+        >
+          <MaterialSymbol name="add" size={18} />
+        </Button>
+      )}
     </div>
   );
 }

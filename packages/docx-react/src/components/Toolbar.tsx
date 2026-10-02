@@ -697,7 +697,13 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const zoomGroup = showZoomControl && (
     <ToolbarGroup label={t('formattingBar.groups.zoom')}>
-      <ZoomControl value={zoom} onChange={onZoomChange} disabled={disabled} compact />
+      <ZoomControl
+        value={zoom}
+        onChange={onZoomChange}
+        disabled={disabled}
+        compact
+        showSteps={!singleRow}
+      />
     </ToolbarGroup>
   );
 
@@ -742,6 +748,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
               disabled={disabled}
               width={42}
               placeholder="11"
+              showSteps={!singleRow}
             />
           )}
         </ToolbarGroup>
