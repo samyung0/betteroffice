@@ -328,6 +328,9 @@ const CARET_BLINK_MS = 530;
 
 /** The strip's room beside the slide number; thumbnails fill it at their slide's aspect ratio. */
 const THUMBNAIL_WIDTH = 126;
+/** Below this editor width the strip is a row of smaller thumbnails under the slide. */
+const NARROW_LAYOUT_WIDTH = 640;
+const NARROW_THUMBNAIL_WIDTH = 96;
 
 /** Screen-space diameter of a resize grip. */
 const HANDLE_SIZE = 9;
@@ -426,6 +429,8 @@ function PptxEditorContent({
   onPendingChangeRef.current = onPendingChange;
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [narrowLayout, setNarrowLayout] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pictureInputRef = useRef<HTMLInputElement>(null);
   const [stageFocused, setStageFocused] = useState(false);
@@ -849,6 +854,16 @@ function PptxEditorContent({
     update();
     const observer = new ResizeObserver(update);
     observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const update = () => setNarrowLayout(root.clientWidth < NARROW_LAYOUT_WIDTH);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(root);
     return () => observer.disconnect();
   }, []);
 
@@ -2317,7 +2332,7 @@ function PptxEditorContent({
     : null;
 
   return (
-    <div className={className} style={styles.root}
+    <div ref={rootRef} className={className} style={styles.root}
       onKeyDownCapture={(event) => {
         if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
           event.preventDefault();
@@ -2436,8 +2451,11 @@ function PptxEditorContent({
           </button>
         )}
       </div>
-      <div style={styles.workspace}>
-        <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
+      <div style={narrowLayout ? styles.narrowWorkspace : styles.workspace}>
+        <aside
+          style={narrowLayout ? styles.narrowSlideStrip : styles.slideStrip}
+          aria-label={t('slides.panelLabel')}
+        >
           {model?.snapshot.slides.map((slide, index) => {
             const slidePresence = remotePeersBySlide.get(slide.id);
             const thumbnail = model.thumbnails.get(slide.id);
@@ -2446,13 +2464,14 @@ function PptxEditorContent({
                 type="button"
                 key={slide.id}
                 aria-current={index === currentSlide ? 'page' : undefined}
-                style={slideButton(index === currentSlide)}
+                style={slideButton(index === currentSlide, narrowLayout)}
                 onClick={() => selectSlide(index)}
               >
                 <span style={styles.slideNumber}>{index + 1}</span>
                 <span
                   style={{
                     ...styles.slidePreview,
+                    width: narrowLayout ? NARROW_THUMBNAIL_WIDTH : THUMBNAIL_WIDTH,
                     ...(thumbnail
                       ? { aspectRatio: `${thumbnail.width} / ${thumbnail.height}` }
                       : { aspectRatio: '16 / 9', padding: 8 }),
@@ -2862,6 +2881,9 @@ function SlideThumbnail({
     const scale = THUMBNAIL_WIDTH / frame.width;
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
+    // Fills its frame, which is narrower in the narrow layout.
+    canvas.style.width = '100%';
+    canvas.style.height = 'auto';
     void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
   }, [frame, resolveImage]);
   return <canvas ref={canvasRef} style={styles.thumbnailCanvas} aria-hidden="true" />;
@@ -3184,6 +3206,19 @@ const styles: Record<string, CSSProperties> = {
     overflowX: 'auto',
   },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
+  narrowWorkspace: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 },
+  narrowSlideStrip: {
+    display: 'flex',
+    flex: '0 0 auto',
+    order: 1,
+    gap: 8,
+    padding: '8px 10px',
+    overflowX: 'auto',
+    overflowY: 'hidden',
+    background: 'var(--pptx-strip-bg, #eef1f5)',
+    borderTop: '1px solid var(--pptx-divider, #d8dee9)',
+    boxSizing: 'border-box',
+  },
   slideStrip: {
     width: 184,
     padding: '14px 10px',
@@ -3403,13 +3438,12 @@ function presenceChip(color: string, sameSlide: boolean): CSSProperties {
   };
 }
 
-function slideButton(active: boolean): CSSProperties {
+function slideButton(active: boolean, narrow: boolean): CSSProperties {
   return {
     display: 'flex',
     alignItems: 'flex-start',
     gap: 7,
-    width: '100%',
-    marginBottom: 12,
+    ...(narrow ? { flex: '0 0 auto' } : { width: '100%', marginBottom: 12 }),
     padding: 4,
     border: active ? '2px solid var(--pptx-accent, #325ee6)' : '2px solid transparent',
     borderRadius: 5,
