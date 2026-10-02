@@ -324,7 +324,8 @@ describe('FrameDelta typed value decoding', () => {
   });
 
   it('decodes inherited names as fields and rejects repeated keys', () => {
-    expect(page(frameWith([['constructor', i64(1n)]])).constructor).toBe(1);
+    const decoded = page(frameWith([['constructor', i64(1n)]]));
+    expect(Object.getOwnPropertyDescriptor(decoded, 'constructor')?.value).toBe(1);
     expect(() => page(frameWith([['note', i64(1n)], ['note', i64(2n)]]))).toThrow(
       'duplicate object key note'
     );

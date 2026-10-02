@@ -343,6 +343,16 @@ export function onDisplayListQuerySourceFailure(listener: (error: Error) => void
   };
 }
 
+/**
+ * Whether a primitive's doc range meets [lo, hi): a superset of what hit.rs
+ * reads for body range rects (text and glyph runs, images, inline shapes).
+ */
+function meetsRange(primitive: DisplayPrimitive, lo: number, hi: number): boolean {
+  const { docStart, docEnd } = primitive;
+  if (typeof docStart !== 'number' || typeof docEnd !== 'number') return false;
+  return docStart === docEnd ? docStart >= lo && docStart < hi : docEnd > lo && docStart < hi;
+}
+
 /** A trap (panic) rather than a returned `Err`, which arrives as a string. */
 function isWasmTrap(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -690,10 +700,35 @@ export function createDisplayListQueries(
     }
     const raw = runQuery(
       eng?.rangeRectsByHandle && ((h: number) => eng!.rangeRectsByHandle!(h, from, to)),
-      () => eng!.rangeRectsJson(getJson(), from, to),
+      () => rangeRectsJsonArg(from, to),
       'range_rects'
     );
     return parseQuery(raw, [], 'range_rects');
+  };
+
+  // The JSON-arg body range query without serializing the whole list: body
+  // rects are page-local (hit.rs collect_range_rects), so only pages holding a
+  // primitive whose doc range meets [from, to) can contribute, and their page
+  // indices map back. The selection overlay asks a superseded facade (no
+  // handle) for the caret during typing; on a 60-page document the whole list
+  // is ~30 MB of JSON to serialize and parse per call. A serialized list whose
+  // pages changed in place since keeps answering from that string.
+  const rangeRectsJsonArg = (from: number, to: number): string => {
+    if (
+      json !== null &&
+      !list.pages.every((page, index) => displayPageRevision(page) === jsonRevisions?.[index])
+    ) {
+      return eng!.rangeRectsJson(json, from, to);
+    }
+    const lo = Math.min(from, to);
+    const hi = Math.max(from, to);
+    const indices: number[] = [];
+    list.pages.forEach((page, index) => {
+      if (page.primitives.some((primitive) => meetsRange(primitive, lo, hi))) indices.push(index);
+    });
+    const subset = JSON.stringify({ ...list, pages: indices.map((index) => list.pages[index]) });
+    const rects = JSON.parse(eng!.rangeRectsJson(subset, from, to)) as DisplayListRect[];
+    return JSON.stringify(rects.map((rect) => ({ ...rect, pageIndex: indices[rect.pageIndex] })));
   };
 
   const verticalMove = (
