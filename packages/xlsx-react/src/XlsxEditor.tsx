@@ -58,8 +58,12 @@ import { LocaleProvider, useTranslation } from './i18n';
 import { EditorToolbar } from './components/EditorToolbar';
 import type {
   FormattingAction,
+  HorizontalAlignment,
   MergeAction,
+  NumberFormat,
   SelectionFormatting,
+  TextWrapping,
+  VerticalAlignment,
 } from './components/Toolbar';
 import {
   ToolbarButton,
@@ -68,6 +72,15 @@ import {
   toolbarColors,
 } from './components/ui/ToolbarPrimitives';
 import { IconSetContext, type IconSet, ToolbarIcon } from './components/ui/ToolbarIcon';
+import {
+  ALL_STYLE_PROPERTIES,
+  type FreezeAmount,
+  frozenCount,
+  freezePaneOp,
+  newSheetName,
+  type XlsxCommand,
+  type XlsxCommandState,
+} from './commands';
 import {
   expandRangeToMergedCells,
   PresenceStrip,
@@ -90,6 +103,8 @@ export interface XlsxEditorApi {
   save: () => Uint8Array;
   /** Scrolls the focus cell into view. */
   selectCells: (sheet: number, selection: Selection) => boolean;
+  /** Runs a menu command on the current selection, as its toolbar button would. */
+  run: (command: XlsxCommand) => void;
 }
 
 export interface XlsxEditorCollaborationOptions {
@@ -135,6 +150,9 @@ export interface XlsxEditorProps {
    * 40px row (save, PNG export and print in its menu) over a 40px formula bar.
    */
   singleRowToolbar?: boolean;
+  /** Called with what a host menu shows enabled and checked, whenever it changes. */
+  onCommandStateChange?: (state: XlsxCommandState) => void;
+  showCustomNumberFormat?: boolean;
   /** Replaces every toolbar icon; without it the built-in drawings stay. */
   icons?: IconSet;
   showSearchMenus?: boolean;
@@ -432,6 +450,8 @@ function XlsxEditorContent({
   className,
   readOnly = false,
   singleRowToolbar = false,
+  onCommandStateChange,
+  showCustomNumberFormat = true,
   showSearchMenus = true,
   showProposals = true,
   showFontPicker = true,
@@ -473,6 +493,9 @@ function XlsxEditorContent({
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
   const onChangeRef = useRef(onChange);
+  const runCommandRef = useRef<(command: XlsxCommand) => void>(() => {});
+  const onCommandStateChangeRef = useRef(onCommandStateChange);
+  onCommandStateChangeRef.current = onCommandStateChange;
   onChangeRef.current = onChange;
   const readOnlyRef = useRef(readOnly);
   readOnlyRef.current = readOnly;
@@ -718,6 +741,7 @@ function XlsxEditorContent({
               return handle!.save();
             },
             selectCells,
+            run: (command) => runCommandRef.current(command),
           });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
@@ -1963,6 +1987,132 @@ function XlsxEditorContent({
     }
   };
 
+  // ops on the selection that no toolbar button carries, as one undo step.
+  const applyStructure = (ops: unknown[]) => {
+    const handle = handleRef.current;
+    if (!handle || readOnly || !settlePendingEditsRef.current()) return false;
+    try {
+      applyResult(handle.applyOps(ops));
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  };
+
+  const freeze = (rows: number, columns: number) =>
+    applyStructure([freezePaneOp(activeSheet, rows, columns)]);
+
+  runCommandRef.current = (command: XlsxCommand) => {
+    const range = selection ? normalizeRange(selection) : null;
+    const rows = range ? range.bottom - range.top + 1 : 0;
+    const columns = range ? range.right - range.left + 1 : 0;
+    const sheet = activeSheet;
+    if (command === 'undo') return undo();
+    if (command === 'redo') return redo();
+    if (command === 'cut') return void cutSelection();
+    if (command === 'copy') return void copySelection();
+    if (command === 'paste') return void pasteSelection();
+    if (command === 'deleteValues') return clearCells();
+    if (command === 'bold' || command === 'italic' || command === 'strikethrough')
+      return formatSelection(command);
+    if (command === 'insertSheet') {
+      if (!sheetInfo) return;
+      const index = activeSheet + 1;
+      if (applyStructure([{ type: 'addSheet', index, name: newSheetName(sheetInfo.sheetNames) }]))
+        switchSheet(index);
+      return;
+    }
+    if (command === 'selectAll') {
+      if (!sheetInfo) return;
+      const { rows: lastRows, cols: lastCols } = limits();
+      setSelection({
+        anchor: { row: 0, col: 0 },
+        focus: { row: lastRows - 1, col: lastCols - 1 },
+      });
+      return;
+    }
+    const [kind, value] = command.split(':') as [string, string | undefined];
+    if (kind === 'zoom') return setZoom(Number(value) / 100);
+    if (kind === 'merge') return mergeSelection(value as MergeAction);
+    if (kind === 'numberFormat')
+      return formatSelection({ type: 'numberFormat', value: value as NumberFormat });
+    if (kind === 'align')
+      return formatSelection({
+        type: 'horizontalAlignment',
+        value: value as HorizontalAlignment,
+      });
+    if (kind === 'valign')
+      return formatSelection({ type: 'verticalAlignment', value: value as VerticalAlignment });
+    if (kind === 'wrap')
+      return formatSelection({ type: 'textWrapping', value: value as TextWrapping });
+    if (!range || !sheetInfo) return;
+    const amount = (value === 'current' ? value : Number(value)) as FreezeAmount;
+    if (kind === 'freezeRows')
+      return void freeze(frozenCount(amount, selection!.focus.row), sheetInfo.frozenCols);
+    if (kind === 'freezeColumns')
+      return void freeze(sheetInfo.frozenRows, frozenCount(amount, selection!.focus.col));
+    const cells = {
+      start: { row: range.top, col: range.left },
+      end: { row: range.bottom, col: range.right },
+    };
+    const ops: Record<string, unknown[]> = {
+      insertRowAbove: [{ type: 'insertRows', sheet, at: range.top, count: rows }],
+      insertRowBelow: [{ type: 'insertRows', sheet, at: range.bottom + 1, count: rows }],
+      insertColumnLeft: [{ type: 'insertCols', sheet, at: range.left, count: columns }],
+      insertColumnRight: [{ type: 'insertCols', sheet, at: range.right + 1, count: columns }],
+      deleteRows: [{ type: 'deleteRows', sheet, at: range.top, count: rows }],
+      deleteColumns: [{ type: 'deleteCols', sheet, at: range.left, count: columns }],
+      clearFormatting: [
+        {
+          type: 'patchRangeStyle',
+          sheet,
+          range: cells,
+          patch: { clear: [...ALL_STYLE_PROPERTIES] },
+        },
+        { type: 'setRangeNumberFormat', sheet, range: cells, format: { type: 'automatic' } },
+      ],
+    };
+    if (ops[command]) applyStructure(ops[command]);
+  };
+
+  const focusRow = selection?.focus.row ?? -1;
+  const focusColumn = selection?.focus.col ?? -1;
+  const frozenRows = sheetInfo?.frozenRows ?? 0;
+  const frozenColumns = sheetInfo?.frozenCols ?? 0;
+  const canUnmerge = mergedRanges.length > 0;
+  const commandState = useMemo<XlsxCommandState>(
+    () => ({
+      canUndo: historyState.canUndo,
+      canRedo: historyState.canRedo,
+      selection:
+        focusRow < 0
+          ? null
+          : { rows: selectionRows, columns: selectionColumns, focusRow, focusColumn },
+      frozenRows,
+      frozenColumns,
+      formatting: selectionFormatting,
+      canMerge: selectionRows > 1 || selectionColumns > 1,
+      canUnmerge,
+      zoom,
+    }),
+    [
+      historyState,
+      focusRow,
+      focusColumn,
+      selectionRows,
+      selectionColumns,
+      frozenRows,
+      frozenColumns,
+      selectionFormatting,
+      canUnmerge,
+      zoom,
+    ]
+  );
+  useEffect(() => {
+    onCommandStateChangeRef.current?.(commandState);
+  }, [commandState]);
+
   return (
     <div
       className={className}
@@ -2004,14 +2154,13 @@ function XlsxEditorContent({
           canUndo={historyState.canUndo}
           canRedo={historyState.canRedo}
           onPrint={print}
-          onSave={sheetInfo ? save : undefined}
-          onExportPng={sheetInfo && pngExportAvailable ? exportPng : undefined}
           zoom={zoom}
           onZoomChange={setZoom}
           onFormat={formatSelection}
           onMerge={mergeSelection}
           singleRow={singleRowToolbar}
           showSearchMenus={showSearchMenus}
+          showCustomNumberFormat={showCustomNumberFormat}
           showFontPicker={showFontPicker}
           showFontSizePicker={showFontSizePicker}
           showZoomControl={showZoomControl}

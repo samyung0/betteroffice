@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, expect, test } from 'bun:test';
 import { en } from '@betteroffice/xlsx-i18n';
 import type { ComponentProps } from 'react';
 import { Toolbar } from './Toolbar';
@@ -41,43 +41,41 @@ test('a host icon set replaces every built-in icon, the drawn glyphs included', 
     </IconSetContext.Provider>
   );
   expect(container.querySelector('svg')).toBeNull();
-  for (const name of ['menu', 'undo', 'bold', 'borderAll', 'alignTextLeft', 'alignCellMiddle'])
+  for (const name of ['undo', 'bold', 'borderAll', 'alignTextLeft', 'alignCellMiddle'])
     expect(container.querySelector(`[data-host-icon="${name}"]`)).not.toBeNull();
 });
 
-test('the menu holds save, PNG export and print, and the row drops search and size steps', () => {
-  const onSave = mock(noop);
-  const onExportPng = mock(noop);
-  const onPrint = mock(noop);
+test("the row follows Google Sheets' order, with no menu, print, search, size steps or overflow", () => {
   const { getByRole, getByTestId, queryByRole } = render(
-    <SingleRow
-      onSave={onSave}
-      onExportPng={onExportPng}
-      onPrint={onPrint}
-      showSearchMenus={false}
-    />
+    <SingleRow onPrint={noop} showSearchMenus={false} showCustomNumberFormat={false} />
   );
   const bar = getByRole('toolbar');
   expect(bar.dataset.layout).toBe('single-row');
-  expect(queryByRole('button', { name: en.toolbar.searchMenus })).toBeNull();
-  expect(queryByRole('button', { name: en.toolbar.print })).toBeNull();
-  expect(queryByRole('button', { name: en.toolbar.increaseFontSize })).toBeNull();
-  expect(queryByRole('button', { name: en.toolbar.decreaseFontSize })).toBeNull();
-  expect(queryByRole('button', { name: en.toolbar.more })).toBeNull();
-  // Zoom stays pinned outside the scrolling groups.
-  const row = getByTestId('xlsx-toolbar-row');
-  expect(within(row).queryByTestId('xlsx-zoom')).toBeNull();
-  getByTestId('xlsx-zoom');
+  const groups = within(getByTestId('xlsx-toolbar-row'))
+    .getAllByRole('group')
+    .map((group) => group.getAttribute('aria-label'));
+  expect(groups).toEqual([
+    en.toolbar.groups.history,
+    en.toolbar.groups.zoom,
+    en.toolbar.groups.number,
+    en.toolbar.groups.font,
+    en.toolbar.fontSize,
+    en.toolbar.groups.text,
+    en.toolbar.groups.borders,
+    en.toolbar.groups.alignment,
+  ]);
+  for (const name of [
+    en.toolbar.searchMenus,
+    en.toolbar.print,
+    en.toolbar.increaseFontSize,
+    en.toolbar.decreaseFontSize,
+    en.toolbar.more,
+  ])
+    expect(queryByRole('button', { name })).toBeNull();
 
-  for (const [label, handler] of [
-    [en.toolbar.save, onSave],
-    [en.toolbar.exportPng, onExportPng],
-    [en.toolbar.print, onPrint],
-  ] as const) {
-    fireEvent.click(getByRole('button', { name: en.toolbar.menu }));
-    fireEvent.click(getByRole('menuitem', { name: label }));
-    expect(handler).toHaveBeenCalledTimes(1);
-  }
+  fireEvent.click(getByRole('button', { name: en.toolbar.moreNumberFormats }));
+  getByRole('menuitem', { name: en.toolbar.numberFormats.percent });
+  expect(queryByRole('menuitem', { name: en.toolbar.numberFormats.custom })).toBeNull();
 });
 
 test('showFontPicker, showFontSizePicker and showZoomControl drop their controls', () => {

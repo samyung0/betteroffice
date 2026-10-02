@@ -21,7 +21,6 @@ export const TOOLBAR_ICON_NAMES = [
   'verticalAlignCenter',
   'wrap',
   'more',
-  'menu',
   'chevronDown',
   'remove',
   'add',
@@ -187,7 +186,6 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
           <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
         </>
       )}
-      {name === 'menu' && <path d="M4 6h16M4 12h16M4 18h16" />}
       {name === 'chevronDown' && <path d="m7 10 5 5 5-5" />}
       {name === 'remove' && <path d="M5 12h14" />}
       {name === 'add' && <path d="M12 5v14M5 12h14" />}

@@ -11,6 +11,13 @@ export type {
 } from './XlsxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
+  XLSX_COMMANDS,
+  ZOOM_PERCENTS,
+  isXlsxCommand,
+  type XlsxCommand,
+  type XlsxCommandState,
+} from './commands';
+export {
   Toolbar,
   XlsxToolbar,
   type ToolbarProps,

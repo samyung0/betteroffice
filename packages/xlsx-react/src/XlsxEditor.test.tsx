@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
+import type { XlsxCommand, XlsxCommandState } from './commands';
 import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -1132,5 +1133,149 @@ describe('XlsxEditor pending host edits', () => {
     fireEvent.change(editor, { target: { value: 'Second draft' } });
     fireEvent.blur(editor);
     expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
+  });
+});
+
+describe('XlsxEditor menu commands', () => {
+  // Budget: A1 title, A2 "Item", A3..A6 "Line item 1..4"; B2..D2 Q1, Q2, Total.
+  async function mountCommands() {
+    let api: XlsxEditorApi | undefined;
+    let state: XlsxCommandState | undefined;
+    render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onCommandStateChange={(next) => {
+          state = next;
+        }}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const select = (anchor: CellAddr, focus: CellAddr = anchor) =>
+      act(async () => {
+        api!.selectCells(api!.handle.sheetInfo().activeSheet, { anchor, focus });
+      });
+    const run = (command: XlsxCommand) =>
+      act(async () => {
+        api!.run(command);
+      });
+    const column = (col: number, rows = 8) =>
+      Array.from({ length: rows }, (_, row) => api!.handle.cell(0, row, col).input);
+    const row = (at: number, cols = 4) =>
+      Array.from({ length: cols }, (_, col) => api!.handle.cell(0, at, col).input);
+    return { api: () => api!, state: () => state!, select, run, column, row };
+  }
+
+  it('inserts as many rows as are selected above the selection, as one undo step', async () => {
+    const view = await mountCommands();
+    const before = view.column(0);
+    await view.select({ row: 2, col: 0 }, { row: 3, col: 1 });
+    await view.run('insertRowAbove');
+    expect(view.column(0, 10)).toEqual([...before.slice(0, 2), '', '', ...before.slice(2)]);
+    await view.run('undo');
+    expect(view.column(0)).toEqual(before);
+  });
+
+  it('inserts rows below the selection', async () => {
+    const view = await mountCommands();
+    const before = view.column(0);
+    await view.select({ row: 2, col: 0 });
+    await view.run('insertRowBelow');
+    expect(view.column(0, 9)).toEqual([...before.slice(0, 3), '', ...before.slice(3)]);
+  });
+
+  it('inserts columns left and right of the selection', async () => {
+    const view = await mountCommands();
+    const header = view.row(1);
+    await view.select({ row: 1, col: 1 });
+    await view.run('insertColumnLeft');
+    expect(view.row(1, 5)).toEqual([header[0], '', ...header.slice(1)]);
+    await view.select({ row: 1, col: 2 });
+    await view.run('insertColumnRight');
+    expect(view.row(1, 6)).toEqual([header[0], '', header[1], '', ...header.slice(2)]);
+  });
+
+  it('deletes the selected rows and columns', async () => {
+    const view = await mountCommands();
+    const before = view.column(0);
+    await view.select({ row: 2, col: 0 }, { row: 3, col: 0 });
+    await view.run('deleteRows');
+    expect(view.column(0, 4)).toEqual([...before.slice(0, 2), ...before.slice(4, 6)]);
+    const header = view.row(1);
+    await view.select({ row: 1, col: 1 });
+    await view.run('deleteColumns');
+    expect(view.row(1, 3)).toEqual([header[0], ...header.slice(2)]);
+  });
+
+  it('deletes the values of the selected cells', async () => {
+    const view = await mountCommands();
+    await view.select({ row: 2, col: 0 }, { row: 2, col: 2 });
+    await view.run('deleteValues');
+    expect(view.row(2, 3)).toEqual(['', '', '']);
+    expect(view.row(3, 1)).toEqual(['Line item 2']);
+  });
+
+  it('freezes rows and columns, by count or up to the selection, independently', async () => {
+    const view = await mountCommands();
+    const frozen = () => {
+      const info = view.api().handle.sheetInfo();
+      return [info.frozenRows, info.frozenCols];
+    };
+    await view.select({ row: 3, col: 2 });
+    await view.run('freezeRows:1');
+    expect(frozen()).toEqual([1, 0]);
+    await view.run('freezeColumns:current');
+    expect(frozen()).toEqual([1, 3]);
+    await view.run('freezeRows:current');
+    expect(frozen()).toEqual([4, 3]);
+    expect([view.state().frozenRows, view.state().frozenColumns]).toEqual([4, 3]);
+    await view.run('freezeRows:0');
+    await view.run('freezeColumns:2');
+    expect(frozen()).toEqual([0, 2]);
+    await view.run('freezeColumns:0');
+    expect(frozen()).toEqual([0, 0]);
+  });
+
+  it('adds a sheet after the active one and opens it', async () => {
+    const view = await mountCommands();
+    await view.run('insertSheet');
+    const info = view.api().handle.sheetInfo();
+    expect(info.sheetNames).toEqual(['Budget', 'Sheet4', 'Summary', 'Styled']);
+    expect(info.activeSheet).toBe(1);
+  });
+
+  it('clears every style and the number format of the selection', async () => {
+    const view = await mountCommands();
+    await view.select({ row: 2, col: 1 }, { row: 3, col: 2 });
+    await view.run('bold');
+    await view.run('numberFormat:percent');
+    await view.run('align:center');
+    let formatting = view.api().handle.selectionFormatting(0, 'B3:C4');
+    expect([formatting.bold, formatting.numberFormat, formatting.horizontalAlignment]).toEqual([
+      true,
+      'percent',
+      'center',
+    ]);
+    await view.run('clearFormatting');
+    formatting = view.api().handle.selectionFormatting(0, 'B3:C4');
+    expect(formatting.bold).toBe(false);
+    expect(formatting.numberFormat).toBe('automatic');
+    expect(formatting.horizontalAlignment).not.toBe('center');
+    expect(view.state().canUndo).toBe(true);
+  });
+
+  it('runs the toolbar commands a menu repeats: merge, wrapping and zoom', async () => {
+    const view = await mountCommands();
+    await view.select({ row: 2, col: 1 }, { row: 3, col: 2 });
+    expect(view.state().canMerge).toBe(true);
+    await view.run('merge:all');
+    expect(view.api().handle.mergedRanges(0, 'B3:C4')).toHaveLength(1);
+    expect(view.state().canUnmerge).toBe(true);
+    await view.run('wrap:wrap');
+    expect(view.api().handle.selectionFormatting(0, 'B3').textWrapping).toBe('wrap');
+    await view.run('zoom:150');
+    expect(view.state().zoom).toBe(1.5);
   });
 });

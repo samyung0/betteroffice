@@ -103,21 +103,20 @@ export interface ToolbarProps {
   canUndo?: boolean;
   canRedo?: boolean;
   onPrint?: () => void;
-  /** The single row's menu items; the two-row layout leaves these to the host. */
-  onSave?: () => void;
-  onExportPng?: () => void;
   zoom?: number;
   onZoomChange?: (zoom: number) => void;
   fontFamilies?: readonly string[];
   fontSizes?: readonly number[];
   disabled?: boolean;
   /**
-   * One flat 40px row: a menu (save, PNG export, print) at the left, the groups
-   * scrolling sideways (a vertical wheel scrolls them) and zoom pinned at the
-   * right, with no overflow menu and no font size steps.
+   * One flat 40px row ordered after Google Sheets, its groups scrolling sideways
+   * (a vertical wheel scrolls them), with no print button, overflow menu or font
+   * size steps: the host's own menus carry file commands.
    */
   singleRow?: boolean;
   showSearchMenus?: boolean;
+  /** False leaves "Custom number format…" out of the number format menu. */
+  showCustomNumberFormat?: boolean;
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
@@ -354,8 +353,6 @@ export function Toolbar(explicitProps: ToolbarProps) {
     canUndo = false,
     canRedo = false,
     onPrint,
-    onSave,
-    onExportPng,
     zoom = 1,
     onZoomChange,
     fontFamilies = DEFAULT_FONT_FAMILIES,
@@ -363,6 +360,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     disabled = false,
     singleRow = false,
     showSearchMenus = true,
+    showCustomNumberFormat = true,
     showFontPicker = true,
     showFontSizePicker = true,
     showZoomControl = true,
@@ -410,16 +408,18 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const renderNumberFormats = (close: () => void) => (
     <>
-      {NUMBER_FORMATS.map((format) => (
-        <ToolbarMenuItem
-          key={format}
-          label={t(`toolbar.numberFormats.${format}`)}
-          selected={currentFormatting.numberFormat === format}
-          disabled={!formattingEnabled}
-          onClick={() => apply({ type: 'numberFormat', value: format })}
-          close={close}
-        />
-      ))}
+      {NUMBER_FORMATS.filter((format) => showCustomNumberFormat || format !== 'custom').map(
+        (format) => (
+          <ToolbarMenuItem
+            key={format}
+            label={t(`toolbar.numberFormats.${format}`)}
+            selected={currentFormatting.numberFormat === format}
+            disabled={!formattingEnabled}
+            onClick={() => apply({ type: 'numberFormat', value: format })}
+            close={close}
+          />
+        )
+      )}
     </>
   );
 
@@ -755,23 +755,23 @@ export function Toolbar(explicitProps: ToolbarProps) {
     </>
   );
 
-  const colorPickers = (
-    <>
-      <ColorPicker
-        mode="text"
-        value={currentFormatting.textColor ?? '#000000'}
-        label={t('toolbar.textColor')}
-        disabled={!formattingEnabled}
-        onChange={(value) => apply({ type: 'textColor', value })}
-      />
-      <ColorPicker
-        mode="fill"
-        value={currentFormatting.fillColor ?? '#ffffff'}
-        label={t('toolbar.fillColor')}
-        disabled={!formattingEnabled}
-        onChange={(value) => apply({ type: 'fillColor', value })}
-      />
-    </>
+  const textColorPicker = (
+    <ColorPicker
+      mode="text"
+      value={currentFormatting.textColor ?? '#000000'}
+      label={t('toolbar.textColor')}
+      disabled={!formattingEnabled}
+      onChange={(value) => apply({ type: 'textColor', value })}
+    />
+  );
+  const fillColorPicker = (
+    <ColorPicker
+      mode="fill"
+      value={currentFormatting.fillColor ?? '#ffffff'}
+      label={t('toolbar.fillColor')}
+      disabled={!formattingEnabled}
+      onChange={(value) => apply({ type: 'fillColor', value })}
+    />
   );
 
   const bordersDropdown = (
@@ -863,73 +863,48 @@ export function Toolbar(explicitProps: ToolbarProps) {
   );
 
   if (singleRow) {
-    const fileMenu = (
-      <ToolbarDropdown
-        title={t('toolbar.menu')}
-        menuWidth={200}
-        testId="xlsx-menu"
-        trigger={<ToolbarIcon name="menu" />}
-      >
-        {(close) => (
-          <>
-            <ToolbarMenuItem
-              icon={<ToolbarIcon name="save" size={16} />}
-              label={t('toolbar.save')}
-              disabled={disabled || !onSave}
-              onClick={onSave}
-              close={close}
-            />
-            <ToolbarMenuItem
-              icon={<ToolbarIcon name="image" size={16} />}
-              label={t('toolbar.exportPng')}
-              disabled={disabled || !onExportPng}
-              onClick={onExportPng}
-              close={close}
-            />
-            <ToolbarMenuItem
-              icon={<ToolbarIcon name="print" size={16} />}
-              label={t('toolbar.print')}
-              disabled={disabled || !onPrint}
-              onClick={onPrint}
-              close={close}
-            />
-          </>
-        )}
-      </ToolbarDropdown>
-    );
-    const groups: Array<{ key: string; label: string; node: ReactNode }> = [
+    // Google Sheets' order: history, zoom, number formats, font, size, text,
+    // cell (fill, borders, merge), alignment.
+    const groups: Array<{ key: string; label: string; node: ReactNode } | false> = [
+      showSearchMenus && { key: 'search', label: t('toolbar.groups.search'), node: searchButton },
       {
-        key: 'file',
-        label: t('toolbar.fileActionsLabel'),
+        key: 'history',
+        label: t('toolbar.groups.history'),
         node: (
           <>
-            {fileMenu}
-            {showSearchMenus && searchButton}
+            {historyButtons}
+            {paintButton}
           </>
         ),
       },
-      { key: 'history', label: t('toolbar.groups.history'), node: historyButtons },
-      { key: 'paint', label: t('toolbar.groups.paintFormat'), node: paintButton },
+      showZoomControl && { key: 'zoom', label: t('toolbar.groups.zoom'), node: zoomControl },
       { key: 'number', label: t('toolbar.groups.number'), node: numberButtons },
-    ];
-    if (showFontPicker || showFontSizePicker)
-      groups.push({
-        key: 'font',
-        label: t('toolbar.groups.font'),
+      showFontPicker && { key: 'font', label: t('toolbar.groups.font'), node: fontFamilyPicker },
+      showFontSizePicker && { key: 'size', label: t('toolbar.fontSize'), node: fontSizeBox },
+      {
+        key: 'text',
+        label: t('toolbar.groups.text'),
         node: (
           <>
-            {showFontPicker && fontFamilyPicker}
-            {showFontSizePicker && fontSizeBox}
+            {textButtons}
+            {textColorPicker}
           </>
         ),
-      });
-    groups.push(
-      { key: 'text', label: t('toolbar.groups.text'), node: textButtons },
-      { key: 'colors', label: t('toolbar.groups.colors'), node: colorPickers },
-      { key: 'borders', label: t('toolbar.groups.borders'), node: bordersDropdown },
-      { key: 'merge', label: t('toolbar.groups.merge'), node: mergeButtons },
-      { key: 'alignment', label: t('toolbar.groups.alignment'), node: alignmentDropdowns }
-    );
+      },
+      {
+        key: 'cell',
+        label: t('toolbar.groups.borders'),
+        node: (
+          <>
+            {fillColorPicker}
+            {bordersDropdown}
+            {mergeButtons}
+          </>
+        ),
+      },
+      { key: 'alignment', label: t('toolbar.groups.alignment'), node: alignmentDropdowns },
+      Boolean(children) && { key: 'custom', label: t('toolbar.more'), node: children },
+    ];
     return (
       <div
         ref={rootRef}
@@ -968,32 +943,18 @@ export function Toolbar(explicitProps: ToolbarProps) {
               scrollbarWidth: 'none',
             }}
           >
-            {groups.map((group, index) => (
-              <Fragment key={group.key}>
-                {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
-                <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
-              </Fragment>
-            ))}
+            {groups
+              .filter((group) => group !== false)
+              .map((group, index) => (
+                <Fragment key={group.key}>
+                  {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
+                  <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
+                </Fragment>
+              ))}
           </div>
           <EdgeFade side="start" visible={rowEdges.start} />
           <EdgeFade side="end" visible={rowEdges.end} />
         </div>
-        {(showZoomControl || children) && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              flex: '0 0 auto',
-              height: '100%',
-              paddingLeft: 8,
-            }}
-          >
-            {showZoomControl && (
-              <ToolbarGroup label={t('toolbar.groups.zoom')}>{zoomControl}</ToolbarGroup>
-            )}
-            {children}
-          </div>
-        )}
       </div>
     );
   }
@@ -1106,7 +1067,12 @@ export function Toolbar(explicitProps: ToolbarProps) {
     {
       key: 'colors',
       width: 58,
-      node: <ToolbarGroup label={t('toolbar.groups.colors')}>{colorPickers}</ToolbarGroup>,
+      node: (
+        <ToolbarGroup label={t('toolbar.groups.colors')}>
+          {textColorPicker}
+          {fillColorPicker}
+        </ToolbarGroup>
+      ),
     },
     {
       key: 'borders',
