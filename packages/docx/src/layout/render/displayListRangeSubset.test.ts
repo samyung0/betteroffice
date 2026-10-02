@@ -103,5 +103,17 @@ describe('superseded range queries', () => {
     );
     expect(inputs).toHaveLength(1);
     expect(inputs[0]).toBeLessThan(JSON.stringify(shifted).length / 10);
+    // a JSON-arg hit test serializes the whole list again; range queries on
+    // the superseded facade still answer from its current pages
+    first.hitTestRegions(0, 110, 95);
+    for (const primitive of pages[0].primitives as Array<{ docStart: number; docEnd: number }>) {
+      primitive.docStart += 1;
+      primitive.docEnd += 1;
+    }
+    Object.defineProperty(pages[0], '__betterofficePageRevision', { value: 2, configurable: true });
+    expect(first.rangeRects(3, 4)).toEqual(
+      JSON.parse(engine.rangeRectsJson(JSON.stringify(shifted), 3, 4))
+    );
+    expect(inputs.at(-1)).toBeLessThan(JSON.stringify(shifted).length / 10);
   });
 });

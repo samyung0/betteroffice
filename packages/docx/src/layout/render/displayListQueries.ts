@@ -711,12 +711,14 @@ export function createDisplayListQueries(
   // primitive whose doc range meets [from, to) can contribute, and their page
   // indices map back. The selection overlay asks a superseded facade (no
   // handle) for the caret during typing; on a 60-page document the whole list
-  // is ~30 MB of JSON to serialize and parse per call. A facade that never got
-  // a handle and serialized its list keeps answering from that string while
-  // its pages are unchanged in place since.
+  // is ~30 MB of JSON to serialize and parse per call. A superseded facade
+  // answers from its current pages, which later frames shift in place. A
+  // current facade that answers by JSON (no session handle) and serialized its
+  // list keeps using that string once its pages changed in place since.
   const rangeRectsJsonArg = (from: number, to: number): string => {
     if (
       json !== null &&
+      !superseded &&
       !list.pages.every((page, index) => displayPageRevision(page) === jsonRevisions?.[index])
     ) {
       return eng!.rangeRectsJson(json, from, to);
