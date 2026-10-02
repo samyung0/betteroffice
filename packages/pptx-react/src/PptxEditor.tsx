@@ -2337,6 +2337,7 @@ function PptxEditorContent({
       value: layout.partPath ?? '',
       label: layout.label ?? t('toolbar.layoutOption', { number: index + 1 }),
     })),
+    slideIndex: currentSlide,
   };
   const commandStateKey = JSON.stringify(commandState);
   useEffect(() => {

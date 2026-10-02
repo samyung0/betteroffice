@@ -88,6 +88,7 @@ describe('PptxEditor host commands', () => {
     expect(run('slide.moveDown')).toBe(true);
     expect(slideIds().slice(0, 2)).toEqual([ids[1], ids[0]]);
     expect(state().enabled['slide.moveUp']).toBe(true);
+    expect(state().slideIndex).toBe(1);
 
     expect(run('slide.moveToEnd')).toBe(true);
     expect(slideIds()[ids.length - 1]).toBe(ids[0]);

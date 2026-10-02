@@ -49,4 +49,6 @@ export interface PptxCommandState {
   borderWeight: string | null;
   /** `slide.newWithLayout`'s values, labelled. */
   slideLayouts: ReadonlyArray<{ value: string; label: string }>;
+  /** The current slide, 0-based. */
+  slideIndex: number;
 }
