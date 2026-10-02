@@ -307,8 +307,8 @@ const INSERT_IMAGE_TYPES: Record<string, string> = {
 /** Windows/Office caret phase. */
 const CARET_BLINK_MS = 530;
 
-/** Slide strip thumbnails fill this width at their slide's aspect ratio. */
-const THUMBNAIL_WIDTH = 132;
+/** The strip's room beside the slide number; thumbnails fill it at their slide's aspect ratio. */
+const THUMBNAIL_WIDTH = 126;
 
 /** Screen-space diameter of a resize grip. */
 const HANDLE_SIZE = 9;
@@ -2995,6 +2995,7 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    flex: '0 0 auto',
     width: THUMBNAIL_WIDTH,
     overflow: 'hidden',
     background: '#ffffff',
