@@ -202,10 +202,10 @@ function assertCommentsCover(
   const covers = (text: unknown, ranges: Array<[number, number]> | undefined) =>
     text instanceof Y.Text && ranges
       ? // A reversed range (typing in an empty one) holds what lies between its
-        // ends, and the units on either side of them.
+        // ends; a join or Backspace beside it lands with the timing difference.
         ranges
           .map(([start, end]) =>
-            (start > end ? units(text).ids.slice(Math.max(end - 1, 0), start + 1) : units(text).ids.slice(start, end)).join(",")
+            (start > end ? units(text).ids.slice(end, start) : units(text).ids.slice(start, end)).join(",")
           )
           .join("|")
       : undefined;

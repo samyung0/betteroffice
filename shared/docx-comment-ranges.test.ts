@@ -1072,6 +1072,41 @@ test("a comment range reversed before a capture refuses edits after it that touc
         }
 });
 
+// Follow-up item 5: a comment range typing reversed before a capture covers what lies between its ends, not the units
+// beside them, so a join or Backspace beside it after the capture lands with the accepted timing difference instead
+// of refusing, and never silently (the reviewer's rv4-s rows).
+test("a join or Backspace beside a comment range reversed before a capture lands with the timing difference", async () => {
+  await prime();
+  const textAt44 = (s: YrsSession, st: string) => ({ story: st, paraId: "44444444", offset: matrixLen(s, st, "44444444") });
+  const typeQ = (comment: (s: YrsSession, st: string) => void): MatrixEdit => (s, st) => {
+    comment(s, st);
+    s.insertText(textAt44(s, st), "Q");
+  };
+  const emptyAtEnd = typeQ((s, st) => matrixComment(s, st, ["44444444", matrixLen(s, st, "44444444")], ["44444444", matrixLen(s, st, "44444444")]));
+  const over44 = typeQ((s, st) => matrixComment(s, st, ["44444444", 0], ["44444444", matrixLen(s, st, "44444444")]));
+  const backspaceBeforeQ: MatrixEdit = (s, st) => void s.deleteAt({ story: st, paraId: "44444444", offset: matrixTextStart(s, st, "44444444") }, "backward");
+  const joinNext: MatrixEdit = (s, st) => void s.deleteAt(textAt44(s, st), "forward");
+  const joinPrev: MatrixEdit = (s, st) => void s.deleteAt({ story: st, paraId: "44444444", offset: 0 }, "backward");
+  const three = (x: string) => matrixParagraph("33333333", matrixRun("prev")) + matrixParagraph("44444444", x) + matrixParagraph("45454545", matrixRun("next"));
+  const bmMark = `<w:bookmarkStart w:id="5" w:name="m5"/><w:bookmarkEnd w:id="5"/>`;
+  const rows: Array<[string, string, MatrixEdit, MatrixEdit]> = [
+    ["prev[CB]¶[CB]¶next | empty, Backspace before Q", matrixParagraph("33333333", matrixRun("prev") + matrixCB) + matrixParagraph("44444444", matrixCB) + matrixParagraph("45454545", matrixRun("next")), emptyAtEnd, backspaceBeforeQ],
+    ["prev[CB]¶[CB]¶next | empty, join next", matrixParagraph("33333333", matrixRun("prev") + matrixCB) + matrixParagraph("44444444", matrixCB) + matrixParagraph("45454545", matrixRun("next")), emptyAtEnd, joinNext],
+    ["prev¶<bm/>[PB][CB]¶next | empty, Backspace before Q", three(bmMark + PB + matrixCB), emptyAtEnd, backspaceBeforeQ],
+    ["prev¶<bm/>[PB][CB]¶next | empty, join prev", three(bmMark + PB + matrixCB), emptyAtEnd, joinPrev],
+    ["prev¶<bm/>[PB][CB]¶next | over, Backspace before Q", three(bmMark + PB + matrixCB), over44, backspaceBeforeQ],
+    ["prev¶<bm/>[PB][CB]¶next | over, join prev", three(bmMark + PB + matrixCB), over44, joinPrev],
+    ["prev¶[PB][CB]¶next | empty, join next", three(PB + matrixCB), emptyAtEnd, joinNext],
+    ["prev¶abc¶next | empty, join next", three(matrixRun("abc")), emptyAtEnd, joinNext],
+  ];
+  for (const where of ["body", "cell", "header"] as MatrixWhere[])
+    for (const [name, xml, before, after] of rows) {
+      const id = `${where} | ${name}`;
+      const row = await runRow({ id, bytes: matrixDocx(where, xml), where, before, after });
+      expect(`${id}: ${row.cls}`).toMatch(/: timing/);
+    }
+});
+
 // Decided 2026-10-02: Undo and Redo re-anchor the comment ranges and bookmarks in text they restore, so another
 // replica, a peer and the save place them where the editor shows them (they followed the restored text only in the
 // session that pressed Undo), and a bookmark in text that Redo deletes again comes back with the next Undo.
