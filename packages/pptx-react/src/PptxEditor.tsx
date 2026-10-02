@@ -142,6 +142,11 @@ export interface PptxEditorApi {
   selectText: (target: PptxTextSelectionTarget) => boolean;
   /** Runs a host menu command; false when it is unavailable now. */
   runCommand: (id: PptxCommandId, value?: string) => boolean;
+  /**
+   * Inserts an image a host picked, as the toolbar's image button does; the
+   * name's extension gives its type. Rejects when inserting is unavailable.
+   */
+  insertImage: (bytes: Uint8Array, name: string) => Promise<void>;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -421,6 +426,9 @@ function PptxEditorContent({
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const runCommandRef = useRef<(id: PptxCommandId, value?: string) => boolean>(() => false);
+  const insertImageRef = useRef<(bytes: Uint8Array, name: string) => Promise<void>>(() =>
+    Promise.resolve()
+  );
   const onCommandStateRef = useRef(onCommandState);
   onCommandStateRef.current = onCommandState;
   const onChangeRef = useRef(onChange);
@@ -791,6 +799,10 @@ function PptxEditorContent({
             focus: () => stageRef.current?.focus(),
             runCommand: (id, value) =>
               handleRef.current === opened && runCommandRef.current(id, value),
+            insertImage: (bytes, name) =>
+              handleRef.current === opened
+                ? insertImageRef.current(bytes, name)
+                : Promise.reject(new Error('Presentation is no longer open')),
           });
         } catch (value) {
           setLoading(false);
@@ -1238,6 +1250,21 @@ function PptxEditorContent({
     }
   };
 
+  /** Inserts a picked image, reported as pending input until it lands. */
+  const insertPictureFile = (file: File) => {
+    const pending = pendingInputRef.current;
+    onPendingChangeRef.current?.(true);
+    const operation = insertPicture(file);
+    pending.add(operation);
+    void operation.catch(() => {}).finally(() => {
+      pending.delete(operation);
+      if (pendingInputRef.current === pending && !pending.size) {
+        onPendingChangeRef.current?.(false);
+      }
+    });
+    return operation;
+  };
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (!event.isPrimary || event.button !== 0) return;
     const handle = handleRef.current;
@@ -1660,6 +1687,14 @@ function PptxEditorContent({
       return;
     }
     if (canvasReview.reviewing) return;
+    // Delete or Backspace on a selected object (not text being edited) deletes it.
+    if ((event.key === 'Delete' || event.key === 'Backspace') && !modifier && !selection) {
+      if (!readOnly && shapeSelection) {
+        event.preventDefault();
+        deleteShape();
+      }
+      return;
+    }
     if (!selection && !selectedShapeStoryId) return;
     if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
@@ -2240,6 +2275,11 @@ function PptxEditorContent({
     'arrange.sendToBack': editable && objectActive,
   };
 
+  insertImageRef.current = (bytes, name) =>
+    commandEnabled['insert.image']
+      ? insertPictureFile(new File([bytes.slice()], name))
+      : Promise.reject(new Error('Inserting an image is unavailable'));
+
   runCommandRef.current = (id, value) => {
     if (!commandEnabled[id]) return false;
     if (id === 'file.save') void save();
@@ -2422,18 +2462,7 @@ function PptxEditorContent({
           onChange={(event) => {
             const file = event.currentTarget.files?.[0];
             event.currentTarget.value = '';
-            if (file) {
-              const pending = pendingInputRef.current;
-              onPendingChangeRef.current?.(true);
-              const operation = insertPicture(file);
-              pending.add(operation);
-              void operation.catch(() => {}).finally(() => {
-                pending.delete(operation);
-                if (pendingInputRef.current === pending && !pending.size) {
-                  onPendingChangeRef.current?.(false);
-                }
-              });
-            }
+            if (file) void insertPictureFile(file).catch(() => {});
           }}
         />
         {showPresentButton && (

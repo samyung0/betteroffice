@@ -1,7 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, it, spyOn } from 'bun:test';
-import type { PresentationHandle, SlideDisplayList } from '@betteroffice/pptx';
-import { PresentationOverlay } from './PresentationOverlay';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { initWasm, openPresentation, type SlideDisplayList } from '@betteroffice/pptx/viewer';
+import { PresentationOverlay, type PresentationSource } from './PresentationOverlay';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -53,7 +55,7 @@ it('only presents the latest slide when an earlier image resolves late', async (
   );
   const handle = {
     layoutSlide: (index: number) => frame(String(index)),
-  } as PresentationHandle;
+  } satisfies PresentationSource;
   const errors: unknown[] = [];
   try {
     const view = render(
@@ -98,7 +100,7 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
       layouts.push(index);
       return { ...frame(''), primitives: [] };
     },
-  } as unknown as PresentationHandle;
+  } satisfies PresentationSource;
   let exits = 0;
   const props = {
     handle,
@@ -128,4 +130,59 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
   view.unmount();
   expect(document.activeElement).toBe(focusTarget);
   focusTarget.remove();
+});
+
+it('presents a deck through the viewer handle', async () => {
+  const root = resolve(import.meta.dir, '../../../..');
+  const [wasm, deck, font] = await Promise.all([
+    readFile(resolve(root, 'packages/pptx/src/wasm/generated/viewer/pptx_view_wasm_bg.wasm')),
+    readFile(resolve(root, 'apps/demo/public/betteroffice-demo.pptx')),
+    readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')),
+  ]);
+  await initWasm(wasm);
+  const handle = openPresentation(deck, { fonts: [{ family: 'Liberation Sans', bytes: font }] });
+  const slideCount = handle.snapshot().slides.length;
+  const draws = new Map<HTMLCanvasElement, number>();
+  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    function (this: HTMLCanvasElement) {
+      return new Proxy(
+        {},
+        {
+          get: (_target, key) =>
+            key === 'drawImage'
+              ? () => draws.set(this, (draws.get(this) ?? 0) + 1)
+              : key === 'measureText'
+                ? () => ({ width: 0 })
+                : () => {},
+        }
+      ) as CanvasRenderingContext2D;
+    } as unknown as typeof HTMLCanvasElement.prototype.getContext
+  );
+  const errors: unknown[] = [];
+  try {
+    const view = render(
+      <PresentationOverlay
+        handle={handle}
+        slideCount={slideCount}
+        startIndex={0}
+        resolveImage={() => null}
+        label="Presentation"
+        counterLabel={(current, total) => `${current} / ${total}`}
+        exitLabel="Exit"
+        previousLabel="Previous"
+        nextLabel="Next"
+        onExit={() => {}}
+        onError={(error) => errors.push(error)}
+      />
+    );
+    const displayed = view.container.querySelector('canvas')!;
+    await waitFor(() => expect(draws.get(displayed)).toBe(1));
+    fireEvent.click(view.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(draws.get(displayed)).toBe(2));
+    expect(view.getByText(`2 / ${slideCount}`)).toBeTruthy();
+    expect(errors).toEqual([]);
+  } finally {
+    context.mockRestore();
+    handle.dispose();
+  }
 });

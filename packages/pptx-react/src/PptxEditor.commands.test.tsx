@@ -31,6 +31,23 @@ afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
 });
 
+const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
+
+/** Images report a 400×200 size at once; returns the real Image to restore. */
+function useFakeImage() {
+  const originalImage = globalThis.Image;
+  class FakeImage {
+    onload: (() => void) | null = null;
+    naturalWidth = 400;
+    naturalHeight = 200;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  globalThis.Image = FakeImage as unknown as typeof Image;
+  return originalImage;
+}
+
 async function open(readOnly = false) {
   const opened: PptxEditorApi[] = [];
   const states: PptxCommandState[] = [];
@@ -91,16 +108,7 @@ describe('PptxEditor host commands', () => {
   }, 60_000);
 
   it('deletes the selected object only', async () => {
-    const originalImage = globalThis.Image;
-    class FakeImage {
-      onload: (() => void) | null = null;
-      naturalWidth = 400;
-      naturalHeight = 200;
-      set src(_value: string) {
-        queueMicrotask(() => this.onload?.());
-      }
-    }
-    globalThis.Image = FakeImage as unknown as typeof Image;
+    const originalImage = useFakeImage();
     try {
       const { api, errors, run, state, view } = await open();
       const shapes = () => api.handle.snapshot().slides[0].shapes.length;
@@ -108,9 +116,7 @@ describe('PptxEditor host commands', () => {
       expect(state().enabled['edit.delete']).toBe(false);
       expect(run('edit.delete')).toBe(false);
 
-      const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'logo.png', {
-        type: 'image/png',
-      });
+      const file = new File([PNG], 'logo.png', { type: 'image/png' });
       await act(async () => {
         fireEvent.change(view.getByTestId('pptx-insert-image-input'), {
           target: { files: [file] },
@@ -130,8 +136,49 @@ describe('PptxEditor host commands', () => {
     }
   }, 60_000);
 
+  it('inserts a host-picked image and deletes a selected object with Delete or Backspace', async () => {
+    const originalImage = useFakeImage();
+    try {
+      const { api, errors, run, view } = await open();
+      const shapes = () => api.handle.snapshot().slides[0].shapes;
+      const before = shapes().length;
+      const stage = view.getByRole('application');
+
+      await act(async () => {
+        await api.insertImage(PNG, 'chart.png');
+      });
+      expect(shapes().length).toBe(before + 1);
+      const added = shapes()[before];
+      expect(added.kind).toBe('picture');
+      expect(added.name).toBe('chart.png');
+
+      fireEvent.keyDown(stage, { key: 'Delete' });
+      expect(shapes().length).toBe(before);
+      expect(run('edit.undo')).toBe(true);
+      expect(shapes().map((shape) => shape.id)).toContain(added.id);
+
+      await act(async () => {
+        await api.insertImage(PNG, 'second.png');
+      });
+      fireEvent.keyDown(stage, { key: 'Backspace' });
+      expect(shapes().length).toBe(before + 1);
+
+      // While text is being edited, Backspace edits the text, not the box.
+      const textShape = shapes().find((shape) => shape.textStories.length > 0)!;
+      const story = textShape.textStories[0];
+      act(() => {
+        api.selectText({ slide: 1, shapeId: textShape.id, storyId: story.id, start: 1, end: 1 });
+      });
+      fireEvent.keyDown(view.getByTestId('pptx-text-input'), { key: 'Backspace' });
+      expect(shapes().map((shape) => shape.id)).toContain(textShape.id);
+      expect(errors).toEqual([]);
+    } finally {
+      globalThis.Image = originalImage;
+    }
+  }, 60_000);
+
   it('validates values and refuses edits when read-only', async () => {
-    const { run, slideIds, state } = await open(true);
+    const { api, run, slideIds, state } = await open(true);
     const ids = slideIds();
     expect(state().enabled['view.present']).toBe(true);
     expect(run('view.zoom', '1.5')).toBe(true);
@@ -141,5 +188,6 @@ describe('PptxEditor host commands', () => {
     expect(run('slide.new')).toBe(false);
     expect(run('insert.shape', 'ellipse')).toBe(false);
     expect(slideIds()).toEqual(ids);
+    await expect(api.insertImage(PNG, 'logo.png')).rejects.toThrow('unavailable');
   }, 60_000);
 });

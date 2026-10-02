@@ -1,5 +1,10 @@
-import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
-import type { CanvasImageResolver, PresentationHandle } from '@betteroffice/pptx';
+import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx/viewer';
+import type { CanvasImageResolver, SlideDisplayList } from '@betteroffice/pptx/viewer';
+
+/** What presenting needs from a deck: the editor's or the viewer's handle. */
+export interface PresentationSource {
+  layoutSlide(slideIndex: number): SlideDisplayList;
+}
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
@@ -16,7 +21,7 @@ export function PresentationOverlay({
   onExit,
   onError,
 }: {
-  handle: PresentationHandle;
+  handle: PresentationSource;
   slideCount: number;
   startIndex: number;
   resolveImage: CanvasImageResolver;
