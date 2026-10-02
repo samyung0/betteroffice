@@ -169,6 +169,8 @@ export interface DocxEditorProps {
   showZoomControl?: boolean;
   /** Whether to show the toolbar's font family picker (default: true) */
   showFontPicker?: boolean;
+  /** Whether to show the toolbar's font size box (default: true) */
+  showFontSizePicker?: boolean;
   /** Whether to show page margin guides/boundaries (default: false) */
   showMarginGuides?: boolean;
   /** Color for margin guides (default: '#c0c0c0') */
@@ -595,6 +597,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showHelpMenu = true,
     showZoomControl = true,
     showFontPicker = true,
+    showFontSizePicker = true,
     showMarginGuides: _showMarginGuides = false,
     marginGuideColor: _marginGuideColor,
     showRuler = false,
@@ -1882,6 +1885,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               zoom={state.zoom}
               showZoomControl={showZoomControl}
               showFontPicker={showFontPicker}
+              showFontSizePicker={showFontSizePicker}
               onFormat={handleFormat}
               onUndo={undoActiveEditor}
               onRedo={redoActiveEditor}

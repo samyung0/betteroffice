@@ -61,6 +61,7 @@ export function DocxEditorToolbar({
   zoom,
   showZoomControl,
   showFontPicker,
+  showFontSizePicker,
   // Handlers
   onFormat,
   onUndo,
@@ -112,6 +113,7 @@ export function DocxEditorToolbar({
   zoom: number;
   showZoomControl: boolean;
   showFontPicker: boolean;
+  showFontSizePicker: boolean;
   onFormat: (action: FormattingAction) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -154,6 +156,7 @@ export function DocxEditorToolbar({
         onSave={onSave}
         showZoomControl={showZoomControl}
         showFontPicker={showFontPicker}
+        showFontSizePicker={showFontSizePicker}
         zoom={zoom}
         onZoomChange={onZoomChange}
         onRefocusEditor={onRefocusEditor}
