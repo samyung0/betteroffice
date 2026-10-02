@@ -50,10 +50,13 @@ import type {
   PptxZoom,
   SelectionFormatting,
   ShapeFormattingAction,
+  ShapeZOrder,
   SlideLayoutOption,
 } from './components/Toolbar';
 import { SHAPE_PRESETS } from './components/Toolbar';
 import { toolbarFont } from './components/ui/ToolbarPrimitives';
+import { IconSetContext, type IconSet } from './components/ui/ToolbarIcon';
+import { PPTX_COMMAND_IDS, type PptxCommandId, type PptxCommandState } from './commands';
 import {
   RESIZE_HANDLES,
   canResizeShape,
@@ -137,6 +140,8 @@ export interface PptxEditorApi {
   save: () => Uint8Array;
   /** Also navigates to the slide. */
   selectText: (target: PptxTextSelectionTarget) => boolean;
+  /** Runs a host menu command; false when it is unavailable now. */
+  runCommand: (id: PptxCommandId, value?: string) => boolean;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -170,6 +175,20 @@ export interface PptxEditorProps {
   readOnly?: boolean;
   /** A flat toolbar row of `--pptx-toolbar-height` (40px) instead of the rounded rail. */
   singleRowToolbar?: boolean;
+  /** Replaces every toolbar icon; without it the built-in drawings stay. */
+  icons?: IconSet;
+  /** The agent proposals button and panel, when the engine supports them. */
+  showProposals?: boolean;
+  /** The toolbar's Present button; hosts with their own run `view.present`. */
+  showPresentButton?: boolean;
+  /** Single-row toolbar controls hosts hide on narrow screens. */
+  showFontPicker?: boolean;
+  showFontSizePicker?: boolean;
+  showZoomControl?: boolean;
+  /** Receives the current slide's PNG; without it, exporting downloads the file. */
+  onExportPng?: (bytes: Uint8Array, fileName: string) => void;
+  /** Called whenever what `runCommand` can do changes, for host menus. */
+  onCommandState?: (state: PptxCommandState) => void;
 }
 
 interface EditorModel {
@@ -324,11 +343,14 @@ const initialStyle: EffectiveTextStyle = {
 
 export function PptxEditor({
   i18n,
+  icons,
   ...props
 }: PptxEditorProps) {
   return (
     <LocaleProvider i18n={i18n}>
-      <PptxEditorContent {...props} />
+      <IconSetContext.Provider value={icons ?? null}>
+        <PptxEditorContent {...props} />
+      </IconSetContext.Provider>
     </LocaleProvider>
   );
 }
@@ -349,7 +371,14 @@ function PptxEditorContent({
   onSaveRequest,
   readOnly = false,
   singleRowToolbar = false,
-}: Omit<PptxEditorProps, 'i18n'>) {
+  showProposals = true,
+  showPresentButton = true,
+  showFontPicker = true,
+  showFontSizePicker = true,
+  showZoomControl = true,
+  onExportPng,
+  onCommandState,
+}: Omit<PptxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
@@ -388,6 +417,9 @@ function PptxEditorContent({
   }, []);
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
+  const runCommandRef = useRef<(id: PptxCommandId, value?: string) => boolean>(() => false);
+  const onCommandStateRef = useRef(onCommandState);
+  onCommandStateRef.current = onCommandState;
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
   const onPendingChangeRef = useRef(onPendingChange);
@@ -752,6 +784,8 @@ function PptxEditorContent({
             },
             selectText,
             focus: () => stageRef.current?.focus(),
+            runCommand: (id, value) =>
+              handleRef.current === opened && runCommandRef.current(id, value),
           });
         } catch (value) {
           setLoading(false);
@@ -2077,12 +2111,188 @@ function PptxEditorContent({
       .then(async (blob) => {
         const bytes = new Uint8Array(await blob.arrayBuffer());
         if (handleRef.current !== handle) return;
-        downloadBytes(bytes, pngName(fileName, currentSlide), 'image/png');
+        const name = pngName(fileName, currentSlide);
+        if (onExportPng) onExportPng(bytes, name);
+        else downloadBytes(bytes, name, 'image/png');
       })
       .catch((value: unknown) => {
         if (handleRef.current === handle) reportError(value);
       });
   };
+
+  const textActive =
+    !canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null);
+  const shapeActive = !canvasReview.reviewing && selectedShape?.kind === 'shape';
+  const objectActive = !canvasReview.reviewing && Boolean(selectedShape);
+  const editable = Boolean(model) && !readOnly && !canvasReview.reviewing;
+
+  const changeTool = (tool: PptxEditorTool) => {
+    canvasReview.setEnabled(false);
+    setActiveTool(tool);
+    if (tool !== 'select') {
+      setSelection(null);
+      setShapeSelection(null);
+    }
+    setTextBoxPreview(null);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    stageRef.current?.focus();
+  };
+
+  /** Deletes the current slide; the next one (or the new last one) becomes current. */
+  const deleteSlide = () => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    if (!handle || !current || !slide || readOnly) return;
+    try {
+      handle.deleteSlide(slide.id);
+      clearSelection();
+      refreshAt(current.slideIndex, true, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const moveSlide = (toIndex: number) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    if (!handle || !current || !slide || readOnly) return;
+    try {
+      handle.moveSlide(slide.id, toIndex);
+      refreshAt(toIndex, true, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const deleteShape = () => {
+    const handle = handleRef.current;
+    if (!handle || !shapeSelection || readOnly) return;
+    try {
+      handle.removeShape(shapeSelection.slideId, shapeSelection.shapeId);
+      clearSelection();
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const lastSlide = slideCount - 1;
+  const alignCommands = {
+    'format.alignLeft': 'l',
+    'format.alignCenter': 'ctr',
+    'format.alignRight': 'r',
+    'format.alignJustify': 'just',
+  } as const satisfies Partial<Record<PptxCommandId, ParagraphAlignment>>;
+  const arrangeCommands = {
+    'arrange.bringToFront': 'front',
+    'arrange.bringForward': 'forward',
+    'arrange.sendBackward': 'backward',
+    'arrange.sendToBack': 'back',
+  } as const satisfies Partial<Record<PptxCommandId, ShapeZOrder>>;
+  const commandEnabled: Record<PptxCommandId, boolean> = {
+    'file.save': Boolean(model),
+    'file.exportPng': Boolean(model?.frame),
+    'edit.undo': editable && historyState.canUndo,
+    'edit.redo': editable && historyState.canRedo,
+    'edit.delete': editable && objectActive && selection === null,
+    'view.present': slideCount > 0,
+    'view.zoom': Boolean(model),
+    'insert.textBox': editable && slideCount > 0,
+    'insert.image': editable && slideCount > 0,
+    'insert.shape': editable && slideCount > 0,
+    'slide.new': editable,
+    'slide.newWithLayout': editable && slideLayouts.length > 0,
+    'slide.delete': editable && slideCount > 0,
+    'slide.moveUp': editable && currentSlide > 0,
+    'slide.moveDown': editable && currentSlide < lastSlide,
+    'slide.moveToStart': editable && currentSlide > 0,
+    'slide.moveToEnd': editable && currentSlide < lastSlide,
+    'format.bold': editable && textActive,
+    'format.italic': editable && textActive,
+    'format.underline': editable && textActive,
+    'format.alignLeft': editable && textActive,
+    'format.alignCenter': editable && textActive,
+    'format.alignRight': editable && textActive,
+    'format.alignJustify': editable && textActive,
+    'format.borderWeight': editable && shapeActive,
+    'arrange.bringToFront': editable && objectActive,
+    'arrange.bringForward': editable && objectActive,
+    'arrange.sendBackward': editable && objectActive,
+    'arrange.sendToBack': editable && objectActive,
+  };
+
+  runCommandRef.current = (id, value) => {
+    if (!commandEnabled[id]) return false;
+    if (id === 'file.save') void save();
+    else if (id === 'file.exportPng') exportPng();
+    else if (id === 'edit.undo') history('undo');
+    else if (id === 'edit.redo') history('redo');
+    else if (id === 'edit.delete') deleteShape();
+    else if (id === 'view.present') startPresenting();
+    else if (id === 'view.zoom') {
+      const scale = Number(value);
+      if (value === 'fit') setZoom('fit');
+      else if (Number.isFinite(scale) && scale >= 0.25 && scale <= 4) setZoom(scale);
+      else return false;
+    } else if (id === 'insert.textBox') changeTool('textBox');
+    else if (id === 'insert.image') pictureInputRef.current?.click();
+    else if (id === 'insert.shape') {
+      if (!SHAPE_PRESETS.some((preset) => preset.geometry === value)) return false;
+      changeTool(`shape:${value as PptxShapePreset}`);
+    } else if (id === 'slide.new') addSlide();
+    else if (id === 'slide.newWithLayout') {
+      const layout = slideLayouts.find((option) => (option.partPath ?? '') === value);
+      if (!layout) return false;
+      addSlide(layout.partPath);
+    } else if (id === 'slide.delete') deleteSlide();
+    else if (id === 'slide.moveUp') moveSlide(currentSlide - 1);
+    else if (id === 'slide.moveDown') moveSlide(currentSlide + 1);
+    else if (id === 'slide.moveToStart') moveSlide(0);
+    else if (id === 'slide.moveToEnd') moveSlide(lastSlide);
+    else if (id === 'format.bold' || id === 'format.italic' || id === 'format.underline')
+      formatSelection(id === 'format.bold' ? 'bold' : id === 'format.italic' ? 'italic' : 'underline');
+    else if (id in alignCommands)
+      formatSelection({ type: 'align', value: alignCommands[id as keyof typeof alignCommands] });
+    else if (id === 'format.borderWeight') {
+      const width = value === '' ? null : Number(value);
+      if (width !== null && !(Number.isFinite(width) && width > 0)) return false;
+      formatShape({ type: 'strokeWidth', value: width });
+    } else if (id in arrangeCommands)
+      formatShape({ type: 'zOrder', value: arrangeCommands[id as keyof typeof arrangeCommands] });
+    return true;
+  };
+
+  const commandState: PptxCommandState = {
+    enabled: commandEnabled,
+    checked: PPTX_COMMAND_IDS.filter(
+      (id) =>
+        textActive &&
+        ((id === 'format.bold' && selectionFormatting.bold) ||
+          (id === 'format.italic' && selectionFormatting.italic) ||
+          (id === 'format.underline' && selectionFormatting.underline) ||
+          (id in alignCommands &&
+            alignCommands[id as keyof typeof alignCommands] === selectionAlignment))
+    ),
+    zoom: zoom === 'fit' ? 'fit' : String(zoom),
+    borderWeight: shapeActive
+      ? selectedShapeFormatting.strokeWidthPt == null
+        ? ''
+        : String(selectedShapeFormatting.strokeWidthPt)
+      : null,
+    slideLayouts: slideLayouts.map((layout, index) => ({
+      value: layout.partPath ?? '',
+      label: layout.label ?? t('toolbar.layoutOption', { number: index + 1 }),
+    })),
+  };
+  const commandStateKey = JSON.stringify(commandState);
+  useEffect(() => {
+    onCommandStateRef.current?.(JSON.parse(commandStateKey) as PptxCommandState);
+  }, [commandStateKey]);
+
   const shapeDragDelta =
     dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
   const resizingHandle = resizeRef.current?.handle;
@@ -2120,11 +2330,11 @@ function PptxEditorContent({
         {!readOnly && (
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
-          textSelectionActive={!canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null)}
+          textSelectionActive={textActive}
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
-          shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
-          shapeArrangeActive={!canvasReview.reviewing && Boolean(selectedShape)}
+          shapeSelectionActive={shapeActive}
+          shapeArrangeActive={objectActive}
           onShapeFormat={formatShape}
           onInsertSlide={addSlide}
           onInsertImage={canvasReview.reviewing ? undefined : () => pictureInputRef.current?.click()}
@@ -2139,27 +2349,18 @@ function PptxEditorContent({
           zoom={zoom}
           onZoomChange={setZoom}
           activeTool={activeTool}
-          onToolChange={(tool) => {
-            canvasReview.setEnabled(false);
-            setActiveTool(tool);
-            if (tool !== 'select') {
-              setSelection(null);
-              setShapeSelection(null);
-            }
-            setTextBoxPreview(null);
-            pointerGestureRef.current = null;
-            resizeRef.current = null;
-            setResizeDelta(null);
-            stageRef.current?.focus();
-          }}
+          onToolChange={changeTool}
           disabled={!model || slideCount === 0}
           singleRow={singleRowToolbar}
+          showFontPicker={showFontPicker}
+          showFontSizePicker={showFontSizePicker}
+          showZoomControl={showZoomControl}
           style={styles.toolbar}
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
         )}
-        {!readOnly && handleRef.current?.isProposalsAvailable() && (
+        {!readOnly && showProposals && handleRef.current?.isProposalsAvailable() && (
           <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
             aria-expanded={proposalsOpen} style={styles.presentButton}
             onClick={() => { refreshProposals(); setProposalsOpen((open) => !open); }}>
@@ -2220,18 +2421,20 @@ function PptxEditorContent({
             }
           }}
         />
-        <button
-          type="button"
-          onClick={startPresenting}
-          disabled={slideCount === 0}
-          data-testid="pptx-present"
-          style={styles.presentButton}
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M6 4.5v15l13-7.5Z" />
-          </svg>
-          {t('toolbar.present')}
-        </button>
+        {showPresentButton && (
+          <button
+            type="button"
+            onClick={startPresenting}
+            disabled={slideCount === 0}
+            data-testid="pptx-present"
+            style={styles.presentButton}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M6 4.5v15l13-7.5Z" />
+            </svg>
+            {t('toolbar.present')}
+          </button>
+        )}
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
@@ -2503,7 +2706,7 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
-        {!readOnly && proposalsOpen && model && handleRef.current && (
+        {!readOnly && showProposals && proposalsOpen && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
             resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
             onAccept={acceptProposal} onReject={rejectProposal}

@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { ParagraphAlignment } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
@@ -7,6 +7,7 @@ import { EditorToolbarContext } from './EditorToolbarContext';
 import { ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
 import { ToolbarIcon } from './ui/ToolbarIcon';
+import { useToolbarRowScroll } from './useToolbarRowScroll';
 import type { ToolbarIconName } from './ui/ToolbarIcon';
 import {
   ToolbarButton,
@@ -108,8 +109,16 @@ export interface ToolbarProps {
   fontFamilies?: readonly string[];
   fontSizes?: readonly number[];
   disabled?: boolean;
-  /** A flat full-height row for a host-sized toolbar strip, without the rounded rail. */
+  /**
+   * One flat full-height row in Google Slides' order whose groups scroll
+   * sideways. Text and shape controls show only for a matching selection; save,
+   * PNG export and arrange are left to the host's menus.
+   */
   singleRow?: boolean;
+  /** Single row only; hosts hide these on narrow screens. */
+  showFontPicker?: boolean;
+  showFontSizePicker?: boolean;
+  showZoomControl?: boolean;
   className?: string;
   style?: CSSProperties;
   children?: ReactNode;
@@ -160,6 +169,26 @@ function useToolbarProps(props: ToolbarProps): ToolbarProps {
   return context ? { ...context, ...stripUndefined(props) } : props;
 }
 
+/** A fade over a row edge that has more to scroll (useToolbarRowScroll). */
+function EdgeFade({ side, visible }: { side: 'start' | 'end'; visible: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        [side === 'start' ? 'left' : 'right']: 0,
+        width: 28,
+        pointerEvents: 'none',
+        background: `linear-gradient(to ${side === 'start' ? 'right' : 'left'}, var(--pptx-surface, #ffffff), transparent)`,
+        opacity: visible ? 1 : 0,
+        transition: 'opacity 0.15s',
+      }}
+    />
+  );
+}
+
 function nextFontSize(value: number, sizes: readonly number[], direction: -1 | 1): number {
   if (direction > 0) return sizes.find((size) => size > value) ?? value + 1;
   return [...sizes].reverse().find((size) => size < value) ?? Math.max(1, value - 1);
@@ -203,11 +232,16 @@ export function Toolbar(explicitProps: ToolbarProps) {
     fontSizes = DEFAULT_FONT_SIZES,
     disabled = false,
     singleRow = false,
+    showFontPicker = true,
+    showFontSizePicker = true,
+    showZoomControl = true,
     className,
     style,
     children,
   } = useToolbarProps(explicitProps);
   const rootRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const rowEdges = useToolbarRowScroll(rowRef, singleRow);
   const [rootWidth, setRootWidth] = useState(Number.POSITIVE_INFINITY);
   const formattingEnabled = !disabled && textSelectionActive && Boolean(onFormat);
   const shapeFormattingEnabled = !disabled && shapeSelectionActive && Boolean(onShapeFormat);
@@ -258,74 +292,598 @@ export function Toolbar(explicitProps: ToolbarProps) {
     if (shapeFormattingEnabled) onShapeFormat?.(action);
   };
 
+  const fileButtons = (
+    <ToolbarGroup label={t('toolbar.groups.file')}>
+      <ToolbarButton
+        title={t('toolbar.save')}
+        disabled={disabled || !onSave}
+        onClick={onSave}
+        testId="pptx-save"
+      >
+        <ToolbarIcon name="save" size={18} />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.exportPng')}
+        disabled={disabled || !onExportPng}
+        onClick={onExportPng}
+        testId="pptx-export-png"
+      >
+        <ToolbarIcon name="image" size={18} />
+      </ToolbarButton>
+    </ToolbarGroup>
+  );
+
+  const newSlideButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.newSlide')}
+        disabled={!slideEnabled}
+        onClick={() => onInsertSlide?.()}
+        style={singleRow ? undefined : { borderRadius: '4px 0 0 4px' }}
+        testId="pptx-new-slide"
+      >
+        <ToolbarIcon name="newSlide" />
+      </ToolbarButton>
+      <ToolbarDropdown
+        title={t('toolbar.newSlideWithLayout')}
+        disabled={!slideEnabled || slideLayouts.length === 0}
+        menuWidth={230}
+        testId="pptx-new-slide-layout"
+        style={{
+          minWidth: 20,
+          width: 20,
+          padding: 0,
+          ...(singleRow ? {} : { borderRadius: '0 4px 4px 0' }),
+        }}
+        trigger={<ToolbarIcon name="chevronDown" size={13} />}
+      >
+        {(close) => (
+          <>
+            {slideLayouts.map((layout, index) => (
+              <ToolbarMenuItem
+                key={layout.partPath ?? `default-${index}`}
+                label={layout.label ?? t('toolbar.layoutOption', { number: index + 1 })}
+                selected={(layout.partPath ?? null) === (currentLayoutPartPath ?? null)}
+                onClick={() => onInsertSlide?.(layout.partPath)}
+                close={close}
+              />
+            ))}
+          </>
+        )}
+      </ToolbarDropdown>
+    </>
+  );
+
+  const historyButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.undoShortcut')}
+        disabled={disabled || !canUndo || !onUndo}
+        onClick={onUndo}
+        testId="pptx-undo"
+      >
+        <ToolbarIcon name="undo" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.redoShortcut')}
+        disabled={disabled || !canRedo || !onRedo}
+        onClick={onRedo}
+        testId="pptx-redo"
+      >
+        <ToolbarIcon name="redo" />
+      </ToolbarButton>
+    </>
+  );
+
+  const commitZoom = (value: string) => {
+    if (value === fitLabel) {
+      onZoomChange?.('fit');
+      return;
+    }
+    const percent = Number.parseFloat(value.replace('%', ''));
+    if (Number.isFinite(percent) && percent >= 25 && percent <= 400) {
+      onZoomChange?.(percent / 100);
+    }
+  };
+
+  const zoomControl = singleRow ? (
+    <ToolbarDropdown
+      title={t('toolbar.zoomValue', { value: zoomValue })}
+      disabled={disabled || !onZoomChange}
+      menuWidth={120}
+      testId="pptx-zoom"
+      trigger={
+        <>
+          <span>{zoomValue}</span>
+          <ToolbarIcon name="chevronDown" size={13} />
+        </>
+      }
+    >
+      {(close) => (
+        <>
+          {zoomOptions.map((option) => (
+            <ToolbarMenuItem
+              key={option.value}
+              label={option.label}
+              selected={option.value === zoomValue}
+              onClick={() => commitZoom(option.value)}
+              close={close}
+            />
+          ))}
+        </>
+      )}
+    </ToolbarDropdown>
+  ) : (
+    <EditableCombobox
+      value={zoomValue}
+      options={zoomOptions}
+      label={t('toolbar.zoomValue', { value: zoomValue })}
+      disabled={disabled || !onZoomChange}
+      onCommit={commitZoom}
+      width={76}
+      testId="pptx-zoom"
+    />
+  );
+
+  const toolButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.selectToolShortcut')}
+        active={activeTool === 'select'}
+        disabled={!toolEnabled}
+        onClick={() => onToolChange?.('select')}
+        testId="pptx-tool-select"
+      >
+        <ToolbarIcon name="select" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.textBoxTool')}
+        active={activeTool === 'textBox'}
+        disabled={!toolEnabled}
+        onClick={() => onToolChange?.('textBox')}
+        testId="pptx-tool-text-box"
+      >
+        <ToolbarIcon name="textBox" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.insertImage')}
+        disabled={!insertImageEnabled}
+        onClick={() => onInsertImage?.()}
+        testId="pptx-insert-image"
+      >
+        <ToolbarIcon name="insertImage" />
+      </ToolbarButton>
+      <ToolbarDropdown
+        title={t('toolbar.shapeTool')}
+        active={activeTool.startsWith('shape:')}
+        disabled={!toolEnabled}
+        menuWidth={264}
+        testId="pptx-tool-shape"
+        style={{ minWidth: 46, padding: '0 4px' }}
+        trigger={
+          <>
+            <ToolbarIcon name="shape" />
+            <ToolbarIcon name="chevronDown" size={11} />
+          </>
+        }
+      >
+        {(close) => (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(5, 44px)',
+              gap: 4,
+              padding: 2,
+            }}
+          >
+            {SHAPE_PRESETS.map((preset) => (
+              <button
+                key={preset.geometry}
+                type="button"
+                role="menuitem"
+                data-testid={`pptx-shape-${preset.geometry}`}
+                aria-label={t(preset.labelKey)}
+                title={t(preset.labelKey)}
+                onClick={() => {
+                  onToolChange?.(`shape:${preset.geometry}`);
+                  close();
+                }}
+                style={{
+                  appearance: 'none',
+                  display: 'grid',
+                  placeItems: 'center',
+                  width: 44,
+                  height: 38,
+                  padding: 5,
+                  border: `1px solid ${toolbarColors.border}`,
+                  borderRadius: 4,
+                  background:
+                    activeTool === `shape:${preset.geometry}`
+                      ? toolbarColors.active
+                      : toolbarColors.surface,
+                  color: toolbarColors.text,
+                  cursor: 'pointer',
+                }}
+              >
+                <ShapePresetIcon geometry={preset.geometry} />
+              </button>
+            ))}
+          </div>
+        )}
+      </ToolbarDropdown>
+    </>
+  );
+
+  const fontFamilyPicker = (
+    <ToolbarDropdown
+      title={t('toolbar.fontFamily')}
+      disabled={!formattingEnabled}
+      menuWidth={210}
+      testId="pptx-font-family"
+      style={singleRow ? { maxWidth: 160 } : { width: 120, justifyContent: 'space-between' }}
+      trigger={
+        <>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {currentFormatting.fontFamily ?? t('toolbar.mixed')}
+          </span>
+          <ToolbarIcon name="chevronDown" size={13} />
+        </>
+      }
+    >
+      {(close) => (
+        <>
+          {fontFamilies.map((font) => (
+            <ToolbarMenuItem
+              key={font}
+              label={font}
+              selected={currentFormatting.fontFamily === font}
+              onClick={() => apply({ type: 'fontFamily', value: font })}
+              close={close}
+            />
+          ))}
+        </>
+      )}
+    </ToolbarDropdown>
+  );
+
+  const fontSizeBox = (
+    <EditableCombobox
+      value={currentFormatting.fontSize === undefined ? '' : String(fontSize)}
+      options={fontSizeOptions}
+      label={t('toolbar.fontSize')}
+      disabled={!formattingEnabled}
+      onCommit={(value) => {
+        const size = Number.parseFloat(value);
+        if (Number.isFinite(size) && size >= 1 && size <= 400) {
+          apply({ type: 'fontSize', value: size });
+        }
+      }}
+      width={singleRow ? 40 : 50}
+      inputStyle={{ textAlign: 'center', ...(singleRow ? { padding: 0 } : {}) }}
+      chevron={!singleRow}
+      testId="pptx-font-size"
+    />
+  );
+
+  const fontSizeSteps = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.decreaseFontSize')}
+        disabled={!formattingEnabled}
+        onClick={() =>
+          apply({
+            type: 'fontSize',
+            value: nextFontSize(fontSize, fontSizes, -1),
+          })
+        }
+      >
+        <ToolbarIcon name="remove" />
+      </ToolbarButton>
+      {fontSizeBox}
+      <ToolbarButton
+        title={t('toolbar.increaseFontSize')}
+        disabled={!formattingEnabled}
+        onClick={() =>
+          apply({
+            type: 'fontSize',
+            value: nextFontSize(fontSize, fontSizes, 1),
+          })
+        }
+      >
+        <ToolbarIcon name="add" />
+      </ToolbarButton>
+    </>
+  );
+
+  const textButtons = (
+    <>
+      <ToolbarButton
+        title={t('toolbar.boldShortcut')}
+        active={currentFormatting.bold}
+        disabled={!formattingEnabled}
+        onClick={() => apply('bold')}
+        testId="pptx-bold"
+      >
+        <ToolbarIcon name="bold" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.italicShortcut')}
+        active={currentFormatting.italic}
+        disabled={!formattingEnabled}
+        onClick={() => apply('italic')}
+        testId="pptx-italic"
+      >
+        <ToolbarIcon name="italic" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.underlineShortcut')}
+        active={currentFormatting.underline}
+        disabled={!formattingEnabled}
+        onClick={() => apply('underline')}
+        testId="pptx-underline"
+      >
+        <ToolbarIcon name="underline" />
+      </ToolbarButton>
+      <ColorPicker
+        value={currentFormatting.textColor ?? '#000000'}
+        label={t('toolbar.textColor')}
+        disabled={!formattingEnabled}
+        onChange={(value) => apply({ type: 'textColor', value })}
+        testId="pptx-text-color"
+      />
+    </>
+  );
+
+  const alignButtons = ALIGNMENTS.map((alignment) => (
+    <ToolbarButton
+      key={alignment.value}
+      title={t(alignment.labelKey)}
+      active={currentFormatting.align === alignment.value}
+      disabled={!formattingEnabled}
+      onClick={() => apply({ type: 'align', value: alignment.value })}
+      testId={`pptx-align-${alignment.testId}`}
+    >
+      <ToolbarIcon name={alignment.icon} />
+    </ToolbarButton>
+  ));
+
+  const currentAlignment =
+    ALIGNMENTS.find((alignment) => alignment.value === currentFormatting.align) ?? ALIGNMENTS[0];
+  const alignDropdown = (
+    <ToolbarDropdown
+      title={t('toolbar.groups.alignment')}
+      disabled={!formattingEnabled}
+      menuWidth={180}
+      testId="pptx-align"
+      trigger={
+        <>
+          <ToolbarIcon name={currentAlignment.icon} />
+          <ToolbarIcon name="chevronDown" size={13} />
+        </>
+      }
+    >
+      {(close) => (
+        <>
+          {ALIGNMENTS.map((alignment) => (
+            <ToolbarMenuItem
+              key={alignment.value}
+              label={t(alignment.labelKey)}
+              icon={<ToolbarIcon name={alignment.icon} size={16} />}
+              selected={currentFormatting.align === alignment.value}
+              onClick={() => apply({ type: 'align', value: alignment.value })}
+              close={close}
+            />
+          ))}
+        </>
+      )}
+    </ToolbarDropdown>
+  );
+
+  const shapeControls = (
+    <>
+      <ColorPicker
+        value={currentShapeFormatting.fillColor ?? '#d9eaf7'}
+        label={t('toolbar.fillColor')}
+        clearLabel={t('toolbar.noFill')}
+        icon="fillColor"
+        none={!currentShapeFormatting.fillColor}
+        disabled={!shapeFormattingEnabled}
+        onChange={(value) => applyShape({ type: 'fillColor', value })}
+        onClear={() => applyShape({ type: 'fillColor', value: null })}
+        testId="pptx-shape-fill"
+      />
+      <ColorPicker
+        value={currentShapeFormatting.strokeColor ?? '#202124'}
+        label={t('toolbar.borderColor')}
+        clearLabel={t('toolbar.noBorder')}
+        icon="borderColor"
+        none={!currentShapeFormatting.strokeColor}
+        disabled={!shapeFormattingEnabled}
+        onChange={(value) => applyShape({ type: 'strokeColor', value })}
+        onClear={() => applyShape({ type: 'strokeColor', value: null })}
+        testId="pptx-shape-border-color"
+      />
+      <ToolbarDropdown
+        title={t('toolbar.borderWidth')}
+        disabled={!shapeFormattingEnabled}
+        menuWidth={170}
+        testId="pptx-shape-border-width"
+        trigger={<ToolbarIcon name="borderWidth" />}
+      >
+        {(close) => (
+          <>
+            <ToolbarMenuItem
+              label={t('toolbar.noBorder')}
+              selected={currentShapeFormatting.strokeWidthPt === null}
+              onClick={() => applyShape({ type: 'strokeWidth', value: null })}
+              close={close}
+            />
+            {BORDER_WIDTHS.map((width) => (
+              <ToolbarMenuItem
+                key={width}
+                label={t('toolbar.borderWidthValue', { width })}
+                selected={currentShapeFormatting.strokeWidthPt === width}
+                icon={
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 18,
+                      borderTop: `${Math.min(width, 5)}px solid currentColor`,
+                    }}
+                  />
+                }
+                onClick={() => applyShape({ type: 'strokeWidth', value: width })}
+                close={close}
+              />
+            ))}
+          </>
+        )}
+      </ToolbarDropdown>
+      {shapeAdjustment ? (
+        <EditableCombobox
+          value={`${Math.round(shapeAdjustment[1] * 100)}%`}
+          options={(roundRectAdjustment ? CORNER_RADIUS_OPTIONS : SHAPE_ADJUSTMENT_OPTIONS).map(
+            (value) => ({
+              value: String(value),
+              label: `${value}%`,
+            })
+          )}
+          label={t(roundRectAdjustment ? 'toolbar.cornerRadius' : 'toolbar.shapeAdjustment')}
+          disabled={!shapeFormattingEnabled}
+          onCommit={(value) => {
+            const percent = Number.parseFloat(value.replace('%', ''));
+            if (Number.isFinite(percent)) {
+              const maximum = roundRectAdjustment ? 50 : 100;
+              applyShape({
+                type: 'adjust',
+                name: shapeAdjustment[0],
+                value: Math.max(0, Math.min(maximum, percent)) / 100,
+              });
+            }
+          }}
+          width={68}
+          inputStyle={{ textAlign: 'center' }}
+          testId={roundRectAdjustment ? 'pptx-shape-corner-radius' : 'pptx-shape-adjustment'}
+        />
+      ) : null}
+    </>
+  );
+
+  const arrangeDropdown = (
+    <ToolbarDropdown
+      title={t('toolbar.arrange')}
+      disabled={!arrangeEnabled}
+      menuWidth={190}
+      testId="pptx-shape-arrange"
+      trigger={<ToolbarIcon name="bringToFront" />}
+    >
+      {(close) => (
+        <>
+          <ToolbarMenuItem
+            label={t('toolbar.bringForward')}
+            icon={<ToolbarIcon name="bringForward" size={16} />}
+            onClick={() => applyShape({ type: 'zOrder', value: 'forward' })}
+            close={close}
+          />
+          <ToolbarMenuItem
+            label={t('toolbar.sendBackward')}
+            icon={<ToolbarIcon name="sendBackward" size={16} />}
+            onClick={() => applyShape({ type: 'zOrder', value: 'backward' })}
+            close={close}
+          />
+          <ToolbarMenuItem
+            label={t('toolbar.bringToFront')}
+            icon={<ToolbarIcon name="bringToFront" size={16} />}
+            onClick={() => applyShape({ type: 'zOrder', value: 'front' })}
+            close={close}
+          />
+          <ToolbarMenuItem
+            label={t('toolbar.sendToBack')}
+            icon={<ToolbarIcon name="sendToBack" size={16} />}
+            onClick={() => applyShape({ type: 'zOrder', value: 'back' })}
+            close={close}
+          />
+        </>
+      )}
+    </ToolbarDropdown>
+  );
+
+  if (singleRow) {
+    const textActive = formattingEnabled;
+    const shapeActive = shapeFormattingEnabled;
+    const groups: Array<{ key: string; label: string; node: ReactNode } | false> = [
+      { key: 'new-slide', label: t('toolbar.groups.slides'), node: newSlideButtons },
+      { key: 'history', label: t('toolbar.groups.history'), node: historyButtons },
+      showZoomControl && { key: 'zoom', label: t('toolbar.groups.zoom'), node: zoomControl },
+      { key: 'tools', label: t('toolbar.groups.tools'), node: toolButtons },
+      textActive &&
+        (showFontPicker || showFontSizePicker) && {
+          key: 'font',
+          label: t('toolbar.groups.font'),
+          node: (
+            <>
+              {showFontPicker && fontFamilyPicker}
+              {showFontSizePicker && fontSizeBox}
+            </>
+          ),
+        },
+      textActive && { key: 'text', label: t('toolbar.groups.text'), node: textButtons },
+      textActive && { key: 'align', label: t('toolbar.groups.alignment'), node: alignDropdown },
+      shapeActive && { key: 'shape', label: t('toolbar.groups.shape'), node: shapeControls },
+      Boolean(children) && { key: 'custom', label: t('toolbar.more'), node: children },
+    ];
+    return (
+      <div
+        ref={rootRef}
+        className={className}
+        role="toolbar"
+        aria-label={t('toolbar.label')}
+        data-testid="pptx-formatting-toolbar"
+        data-layout="single-row"
+        style={{
+          position: 'relative',
+          display: 'flex',
+          minWidth: 0,
+          height: '100%',
+          color: toolbarColors.text,
+          ...style,
+        }}
+      >
+        <div
+          ref={rowRef}
+          data-testid="pptx-toolbar-row"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            flex: 1,
+            minWidth: 0,
+            height: '100%',
+            overflowX: 'auto',
+            overflowY: 'hidden',
+            scrollbarWidth: 'none',
+          }}
+        >
+          {groups
+            .filter((group) => group !== false)
+            .map((group, index) => (
+              <Fragment key={group.key}>
+                {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
+                <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
+              </Fragment>
+            ))}
+        </div>
+        <EdgeFade side="start" visible={rowEdges.start} />
+        <EdgeFade side="end" visible={rowEdges.end} />
+      </div>
+    );
+  }
+
   const sections: ToolbarSection[] = [
-    {
-      key: 'file',
-      width: 72,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.file')}>
-          <ToolbarButton
-            title={t('toolbar.save')}
-            disabled={disabled || !onSave}
-            onClick={onSave}
-            testId="pptx-save"
-          >
-            <ToolbarIcon name="save" size={18} />
-          </ToolbarButton>
-          <ToolbarButton
-            title={t('toolbar.exportPng')}
-            disabled={disabled || !onExportPng}
-            onClick={onExportPng}
-            testId="pptx-export-png"
-          >
-            <ToolbarIcon name="image" size={18} />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
-    },
+    { key: 'file', width: 72, node: fileButtons },
     {
       key: 'new-slide',
       width: 59,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.slides')}>
-          <ToolbarButton
-            title={t('toolbar.newSlide')}
-            disabled={!slideEnabled}
-            onClick={() => onInsertSlide?.()}
-            style={{ borderRadius: '4px 0 0 4px' }}
-            testId="pptx-new-slide"
-          >
-            <ToolbarIcon name="newSlide" />
-          </ToolbarButton>
-          <ToolbarDropdown
-            title={t('toolbar.newSlideWithLayout')}
-            disabled={!slideEnabled || slideLayouts.length === 0}
-            menuWidth={230}
-            testId="pptx-new-slide-layout"
-            style={{
-              minWidth: 20,
-              width: 20,
-              padding: 0,
-              borderRadius: '0 4px 4px 0',
-            }}
-            trigger={<ToolbarIcon name="chevronDown" size={13} />}
-          >
-            {(close) => (
-              <>
-                {slideLayouts.map((layout, index) => (
-                  <ToolbarMenuItem
-                    key={layout.partPath ?? `default-${index}`}
-                    label={layout.label ?? t('toolbar.layoutOption', { number: index + 1 })}
-                    selected={(layout.partPath ?? null) === (currentLayoutPartPath ?? null)}
-                    onClick={() => onInsertSlide?.(layout.partPath)}
-                    close={close}
-                  />
-                ))}
-              </>
-            )}
-          </ToolbarDropdown>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.slides')}>{newSlideButtons}</ToolbarGroup>,
     },
     {
       key: 'history',
@@ -333,52 +891,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.history')}>
-            <ToolbarButton
-              title={t('toolbar.undoShortcut')}
-              disabled={disabled || !canUndo || !onUndo}
-              onClick={onUndo}
-              testId="pptx-undo"
-            >
-              <ToolbarIcon name="undo" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.redoShortcut')}
-              disabled={disabled || !canRedo || !onRedo}
-              onClick={onRedo}
-              testId="pptx-redo"
-            >
-              <ToolbarIcon name="redo" />
-            </ToolbarButton>
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.history')}>{historyButtons}</ToolbarGroup>
         </>
       ),
     },
     {
       key: 'zoom',
       width: 82,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.zoom')}>
-          <EditableCombobox
-            value={zoomValue}
-            options={zoomOptions}
-            label={t('toolbar.zoomValue', { value: zoomValue })}
-            disabled={disabled || !onZoomChange}
-            onCommit={(value) => {
-              if (value === fitLabel) {
-                onZoomChange?.('fit');
-                return;
-              }
-              const percent = Number.parseFloat(value.replace('%', ''));
-              if (Number.isFinite(percent) && percent >= 25 && percent <= 400) {
-                onZoomChange?.(percent / 100);
-              }
-            }}
-            width={76}
-            testId="pptx-zoom"
-          />
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.zoom')}>{zoomControl}</ToolbarGroup>,
     },
     {
       key: 'tools',
@@ -386,92 +906,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.tools')}>
-            <ToolbarButton
-              title={t('toolbar.selectToolShortcut')}
-              active={activeTool === 'select'}
-              disabled={!toolEnabled}
-              onClick={() => onToolChange?.('select')}
-              testId="pptx-tool-select"
-            >
-              <ToolbarIcon name="select" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.textBoxTool')}
-              active={activeTool === 'textBox'}
-              disabled={!toolEnabled}
-              onClick={() => onToolChange?.('textBox')}
-              testId="pptx-tool-text-box"
-            >
-              <ToolbarIcon name="textBox" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.insertImage')}
-              disabled={!insertImageEnabled}
-              onClick={() => onInsertImage?.()}
-              testId="pptx-insert-image"
-            >
-              <ToolbarIcon name="insertImage" />
-            </ToolbarButton>
-            <ToolbarDropdown
-              title={t('toolbar.shapeTool')}
-              active={activeTool.startsWith('shape:')}
-              disabled={!toolEnabled}
-              menuWidth={264}
-              testId="pptx-tool-shape"
-              style={{ minWidth: 46, padding: '0 4px' }}
-              trigger={
-                <>
-                  <ToolbarIcon name="shape" />
-                  <ToolbarIcon name="chevronDown" size={11} />
-                </>
-              }
-            >
-              {(close) => (
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(5, 44px)',
-                    gap: 4,
-                    padding: 2,
-                  }}
-                >
-                  {SHAPE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.geometry}
-                      type="button"
-                      role="menuitem"
-                      data-testid={`pptx-shape-${preset.geometry}`}
-                      aria-label={t(preset.labelKey)}
-                      title={t(preset.labelKey)}
-                      onClick={() => {
-                        onToolChange?.(`shape:${preset.geometry}`);
-                        close();
-                      }}
-                      style={{
-                        appearance: 'none',
-                        display: 'grid',
-                        placeItems: 'center',
-                        width: 44,
-                        height: 38,
-                        padding: 5,
-                        border: `1px solid ${toolbarColors.border}`,
-                        borderRadius: 4,
-                        background:
-                          activeTool === `shape:${preset.geometry}`
-                            ? toolbarColors.active
-                            : toolbarColors.surface,
-                        color: toolbarColors.text,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <ShapePresetIcon geometry={preset.geometry} />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </ToolbarDropdown>
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.tools')}>{toolButtons}</ToolbarGroup>
         </>
       ),
     },
@@ -481,86 +916,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.font')}>
-            <ToolbarDropdown
-              title={t('toolbar.fontFamily')}
-              disabled={!formattingEnabled}
-              menuWidth={210}
-              testId="pptx-font-family"
-              style={{ width: 120, justifyContent: 'space-between' }}
-              trigger={
-                <>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {currentFormatting.fontFamily ?? t('toolbar.mixed')}
-                  </span>
-                  <ToolbarIcon name="chevronDown" size={13} />
-                </>
-              }
-            >
-              {(close) => (
-                <>
-                  {fontFamilies.map((font) => (
-                    <ToolbarMenuItem
-                      key={font}
-                      label={font}
-                      selected={currentFormatting.fontFamily === font}
-                      onClick={() => apply({ type: 'fontFamily', value: font })}
-                      close={close}
-                    />
-                  ))}
-                </>
-              )}
-            </ToolbarDropdown>
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.font')}>{fontFamilyPicker}</ToolbarGroup>
         </>
       ),
     },
     {
       key: 'font-size',
       width: 116,
-      node: (
-        <ToolbarGroup label={t('toolbar.groups.font')}>
-          <ToolbarButton
-            title={t('toolbar.decreaseFontSize')}
-            disabled={!formattingEnabled}
-            onClick={() =>
-              apply({
-                type: 'fontSize',
-                value: nextFontSize(fontSize, fontSizes, -1),
-              })
-            }
-          >
-            <ToolbarIcon name="remove" />
-          </ToolbarButton>
-          <EditableCombobox
-            value={currentFormatting.fontSize === undefined ? '' : String(fontSize)}
-            options={fontSizeOptions}
-            label={t('toolbar.fontSize')}
-            disabled={!formattingEnabled}
-            onCommit={(value) => {
-              const size = Number.parseFloat(value);
-              if (Number.isFinite(size) && size >= 1 && size <= 400) {
-                apply({ type: 'fontSize', value: size });
-              }
-            }}
-            width={50}
-            inputStyle={{ textAlign: 'center' }}
-            testId="pptx-font-size"
-          />
-          <ToolbarButton
-            title={t('toolbar.increaseFontSize')}
-            disabled={!formattingEnabled}
-            onClick={() =>
-              apply({
-                type: 'fontSize',
-                value: nextFontSize(fontSize, fontSizes, 1),
-              })
-            }
-          >
-            <ToolbarIcon name="add" />
-          </ToolbarButton>
-        </ToolbarGroup>
-      ),
+      node: <ToolbarGroup label={t('toolbar.groups.font')}>{fontSizeSteps}</ToolbarGroup>,
     },
     {
       key: 'text',
@@ -568,42 +931,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.text')}>
-            <ToolbarButton
-              title={t('toolbar.boldShortcut')}
-              active={currentFormatting.bold}
-              disabled={!formattingEnabled}
-              onClick={() => apply('bold')}
-              testId="pptx-bold"
-            >
-              <ToolbarIcon name="bold" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.italicShortcut')}
-              active={currentFormatting.italic}
-              disabled={!formattingEnabled}
-              onClick={() => apply('italic')}
-              testId="pptx-italic"
-            >
-              <ToolbarIcon name="italic" />
-            </ToolbarButton>
-            <ToolbarButton
-              title={t('toolbar.underlineShortcut')}
-              active={currentFormatting.underline}
-              disabled={!formattingEnabled}
-              onClick={() => apply('underline')}
-              testId="pptx-underline"
-            >
-              <ToolbarIcon name="underline" />
-            </ToolbarButton>
-            <ColorPicker
-              value={currentFormatting.textColor ?? '#000000'}
-              label={t('toolbar.textColor')}
-              disabled={!formattingEnabled}
-              onChange={(value) => apply({ type: 'textColor', value })}
-              testId="pptx-text-color"
-            />
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.text')}>{textButtons}</ToolbarGroup>
         </>
       ),
     },
@@ -613,20 +941,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.alignment')}>
-            {ALIGNMENTS.map((alignment) => (
-              <ToolbarButton
-                key={alignment.value}
-                title={t(alignment.labelKey)}
-                active={currentFormatting.align === alignment.value}
-                disabled={!formattingEnabled}
-                onClick={() => apply({ type: 'align', value: alignment.value })}
-                testId={`pptx-align-${alignment.testId}`}
-              >
-                <ToolbarIcon name={alignment.icon} />
-              </ToolbarButton>
-            ))}
-          </ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.alignment')}>{alignButtons}</ToolbarGroup>
         </>
       ),
     },
@@ -637,132 +952,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
         <>
           <ToolbarSeparator />
           <ToolbarGroup label={t('toolbar.groups.shape')}>
-            <ColorPicker
-              value={currentShapeFormatting.fillColor ?? '#d9eaf7'}
-              label={t('toolbar.fillColor')}
-              clearLabel={t('toolbar.noFill')}
-              icon="fillColor"
-              none={!currentShapeFormatting.fillColor}
-              disabled={!shapeFormattingEnabled}
-              onChange={(value) => applyShape({ type: 'fillColor', value })}
-              onClear={() => applyShape({ type: 'fillColor', value: null })}
-              testId="pptx-shape-fill"
-            />
-            <ColorPicker
-              value={currentShapeFormatting.strokeColor ?? '#202124'}
-              label={t('toolbar.borderColor')}
-              clearLabel={t('toolbar.noBorder')}
-              icon="borderColor"
-              none={!currentShapeFormatting.strokeColor}
-              disabled={!shapeFormattingEnabled}
-              onChange={(value) => applyShape({ type: 'strokeColor', value })}
-              onClear={() => applyShape({ type: 'strokeColor', value: null })}
-              testId="pptx-shape-border-color"
-            />
-            <ToolbarDropdown
-              title={t('toolbar.borderWidth')}
-              disabled={!shapeFormattingEnabled}
-              menuWidth={170}
-              testId="pptx-shape-border-width"
-              trigger={<ToolbarIcon name="borderWidth" />}
-            >
-              {(close) => (
-                <>
-                  <ToolbarMenuItem
-                    label={t('toolbar.noBorder')}
-                    selected={currentShapeFormatting.strokeWidthPt === null}
-                    onClick={() => applyShape({ type: 'strokeWidth', value: null })}
-                    close={close}
-                  />
-                  {BORDER_WIDTHS.map((width) => (
-                    <ToolbarMenuItem
-                      key={width}
-                      label={t('toolbar.borderWidthValue', { width })}
-                      selected={currentShapeFormatting.strokeWidthPt === width}
-                      icon={
-                        <span
-                          aria-hidden="true"
-                          style={{
-                            width: 18,
-                            borderTop: `${Math.min(width, 5)}px solid currentColor`,
-                          }}
-                        />
-                      }
-                      onClick={() => applyShape({ type: 'strokeWidth', value: width })}
-                      close={close}
-                    />
-                  ))}
-                </>
-              )}
-            </ToolbarDropdown>
-            {shapeAdjustment ? (
-              <EditableCombobox
-                value={`${Math.round(shapeAdjustment[1] * 100)}%`}
-                options={(roundRectAdjustment
-                  ? CORNER_RADIUS_OPTIONS
-                  : SHAPE_ADJUSTMENT_OPTIONS
-                ).map((value) => ({
-                  value: String(value),
-                  label: `${value}%`,
-                }))}
-                label={t(roundRectAdjustment ? 'toolbar.cornerRadius' : 'toolbar.shapeAdjustment')}
-                disabled={!shapeFormattingEnabled}
-                onCommit={(value) => {
-                  const percent = Number.parseFloat(value.replace('%', ''));
-                  if (Number.isFinite(percent)) {
-                    const maximum = roundRectAdjustment ? 50 : 100;
-                    applyShape({
-                      type: 'adjust',
-                      name: shapeAdjustment[0],
-                      value: Math.max(0, Math.min(maximum, percent)) / 100,
-                    });
-                  }
-                }}
-                width={68}
-                inputStyle={{ textAlign: 'center' }}
-                testId={
-                  roundRectAdjustment
-                    ? 'pptx-shape-corner-radius'
-                    : 'pptx-shape-adjustment'
-                }
-              />
-            ) : null}
-            <ToolbarDropdown
-              title={t('toolbar.arrange')}
-              disabled={!arrangeEnabled}
-              menuWidth={190}
-              testId="pptx-shape-arrange"
-              trigger={<ToolbarIcon name="bringToFront" />}
-            >
-              {(close) => (
-                <>
-                  <ToolbarMenuItem
-                    label={t('toolbar.bringForward')}
-                    icon={<ToolbarIcon name="bringForward" size={16} />}
-                    onClick={() => applyShape({ type: 'zOrder', value: 'forward' })}
-                    close={close}
-                  />
-                  <ToolbarMenuItem
-                    label={t('toolbar.sendBackward')}
-                    icon={<ToolbarIcon name="sendBackward" size={16} />}
-                    onClick={() => applyShape({ type: 'zOrder', value: 'backward' })}
-                    close={close}
-                  />
-                  <ToolbarMenuItem
-                    label={t('toolbar.bringToFront')}
-                    icon={<ToolbarIcon name="bringToFront" size={16} />}
-                    onClick={() => applyShape({ type: 'zOrder', value: 'front' })}
-                    close={close}
-                  />
-                  <ToolbarMenuItem
-                    label={t('toolbar.sendToBack')}
-                    icon={<ToolbarIcon name="sendToBack" size={16} />}
-                    onClick={() => applyShape({ type: 'zOrder', value: 'back' })}
-                    close={close}
-                  />
-                </>
-              )}
-            </ToolbarDropdown>
+            {shapeControls}
+            {arrangeDropdown}
           </ToolbarGroup>
         </>
       ),

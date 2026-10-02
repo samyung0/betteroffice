@@ -1,34 +1,51 @@
-import type { CSSProperties } from 'react';
+import { createContext, useContext } from 'react';
+import type { ComponentType, CSSProperties } from 'react';
 
-export type ToolbarIconName =
-  | 'save'
-  | 'image'
-  | 'insertImage'
-  | 'undo'
-  | 'redo'
-  | 'newSlide'
-  | 'select'
-  | 'textBox'
-  | 'shape'
-  | 'bringToFront'
-  | 'sendToBack'
-  | 'bringForward'
-  | 'sendBackward'
-  | 'fillColor'
-  | 'borderColor'
-  | 'borderWidth'
-  | 'bold'
-  | 'italic'
-  | 'underline'
-  | 'textColor'
-  | 'alignLeft'
-  | 'alignCenter'
-  | 'alignRight'
-  | 'alignJustify'
-  | 'more'
-  | 'chevronDown'
-  | 'remove'
-  | 'add';
+/** Every name `ToolbarIcon` draws. */
+export const TOOLBAR_ICON_NAMES = [
+  'save',
+  'image',
+  'insertImage',
+  'undo',
+  'redo',
+  'newSlide',
+  'select',
+  'textBox',
+  'shape',
+  'bringToFront',
+  'sendToBack',
+  'bringForward',
+  'sendBackward',
+  'fillColor',
+  'borderColor',
+  'borderWidth',
+  'bold',
+  'italic',
+  'underline',
+  'textColor',
+  'alignLeft',
+  'alignCenter',
+  'alignRight',
+  'alignJustify',
+  'more',
+  'chevronDown',
+  'remove',
+  'add',
+  'check',
+] as const;
+
+export type ToolbarIconName = (typeof TOOLBAR_ICON_NAMES)[number];
+
+export interface IconProps {
+  size?: number;
+  style?: CSSProperties;
+}
+
+/** A host's replacement for every toolbar icon. */
+export type IconSet = Record<ToolbarIconName, ComponentType<IconProps>>;
+
+/** Provided by `PptxEditor`'s `icons` prop; null keeps the built-in drawings. */
+export const IconSetContext = createContext<IconSet | null>(null);
 
 export interface ToolbarIconProps {
   name: ToolbarIconName;
@@ -37,6 +54,8 @@ export interface ToolbarIconProps {
 }
 
 export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
+  const HostIcon = useContext(IconSetContext)?.[name];
+  if (HostIcon) return <HostIcon size={size} style={style} />;
   return (
     <svg
       width={size}
@@ -159,6 +178,7 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       {name === 'chevronDown' && <path d="m7 10 5 5 5-5" />}
       {name === 'remove' && <path d="M5 12h14" />}
       {name === 'add' && <path d="M12 5v14M5 12h14" />}
+      {name === 'check' && <path d="m5 12 5 5 9-10" />}
     </svg>
   );
 }
