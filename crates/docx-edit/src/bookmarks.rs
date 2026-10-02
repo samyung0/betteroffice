@@ -82,25 +82,37 @@ pub(crate) fn set(
     Ok(())
 }
 
-/// Re-anchors every bookmark where it stands now. Undo restores deleted text
-/// as new items; markers anchored to the deleted ones resolve through them
-/// only in this session, so a reopened state would place them elsewhere.
-pub(crate) fn rebind(doc: &yrs::Doc) {
+/// Re-anchors the bookmarks and comment ranges an Undo or Redo moved onto the
+/// text it restored (items of this client from clock `restored_from` on). It
+/// restores text as new items, which markers anchored to the old ones follow
+/// only in this session, through yrs's redone links: another replica and the
+/// save would place them elsewhere. A marker in text that stays deleted keeps
+/// its anchor, so the Undo that restores that text brings it back.
+///
+/// Continued field characters keep theirs: re-anchoring them made a rebase of
+/// Undo and Redo of a join that removed a nested continued field refuse (the
+/// matrix's `join nested continued field, undo, redo`), so a peer's Undo and
+/// Redo of a split field while another types in its moved text shows the
+/// field's end early in that peer's editor until it reloads (accepted
+/// 2026-10-02).
+pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32) {
+    let client = doc.client_id();
     let mut txn = doc.transact_mut_with("system");
-    let Some(root) = txn.get_map(ROOT) else {
-        return;
-    };
-    // Continued field characters go with their fields' own items.
-    let entries: Vec<_> = root
-        .iter(&txn)
-        .filter_map(|(_, value)| match value {
-            Out::YMap(entry)
-                if !matches!(entry.get(&txn, "data"), Some(Out::Any(Any::Map(data)))
-                    if matches!(data.get("id"), Some(Any::String(_)))) =>
-            {
-                Some(entry)
-            }
-            _ => None,
+    let entries: Vec<_> = [ROOT, crate::COMMENTS]
+        .into_iter()
+        .filter_map(|name| txn.get_map(name))
+        .flat_map(|root| {
+            root.iter(&txn)
+                .filter_map(|(_, value)| match value {
+                    Out::YMap(entry)
+                        if !matches!(entry.get(&txn, "data"), Some(Out::Any(Any::Map(data)))
+                            if matches!(data.get("id"), Some(Any::String(_)))) =>
+                    {
+                        Some(entry)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
     for entry in entries {
@@ -112,9 +124,22 @@ pub(crate) fn rebind(doc: &yrs::Doc) {
         for encoded in anchors.iter() {
             let fresh = decode_anchor(encoded).ok().and_then(|anchor| {
                 let story = crate::story_ref(&txn, &anchor.story).ok()?;
-                let index = anchor.start.get_offset(&txn)?.index;
-                let sticky = story.sticky_index(&mut txn, index, anchor.start.assoc)?;
-                (sticky != anchor.start).then(|| anchor_value(&anchor.story, &sticky, &sticky))
+                let restore = |sticky: &yrs::StickyIndex| {
+                    let index = sticky.get_offset(&txn)?.index;
+                    let fresh = story.sticky_index(&txn, index, sticky.assoc)?;
+                    let restored = fresh
+                        .id()
+                        .is_some_and(|id| id.client == client && id.clock >= restored_from);
+                    (fresh != *sticky && restored).then_some(fresh)
+                };
+                let (start, end) = (restore(&anchor.start), restore(&anchor.end));
+                (start.is_some() || end.is_some()).then(|| {
+                    anchor_value(
+                        &anchor.story,
+                        start.as_ref().unwrap_or(&anchor.start),
+                        end.as_ref().unwrap_or(&anchor.end),
+                    )
+                })
             });
             changed |= fresh.is_some();
             rebound.push(fresh.unwrap_or_else(|| encoded.clone()));

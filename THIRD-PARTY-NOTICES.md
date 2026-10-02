@@ -99,7 +99,9 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   update decoders reject invalid strings (see issue #224), with a unit test;
 - `follow_redone` (`src/store.rs`) keeps the offset into each redone item, as
   Yjs's `followRedone` does, so a sticky index inside a multi-unit item that
-  Undo and Redo restored resolves to the same unit, with a unit test;
+  Undo and Redo restored resolves to the same unit, and Undo after a delete,
+  Undo and Redo removes only its own step instead of the text typed before it,
+  with unit tests;
 - a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for

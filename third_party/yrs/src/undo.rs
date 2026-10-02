@@ -1012,6 +1012,27 @@ mod test {
     };
 
     #[test]
+    fn undo_after_a_redone_delete_removes_only_its_own_step() {
+        let doc = Doc::with_client_id(1);
+        let txt = doc.get_or_insert_text("test");
+        let mut mgr = UndoManager::new();
+        mgr.expand_scope(&doc, &txt);
+        txt.insert(&mut doc.transact_mut(), 0, "abc");
+        mgr.reset();
+        txt.insert(&mut doc.transact_mut(), 3, "def");
+        mgr.reset();
+        txt.remove_range(&mut doc.transact_mut(), 0, 6);
+        mgr.reset();
+        mgr.undo_blocking();
+        mgr.redo_blocking();
+        mgr.undo_blocking();
+        assert_eq!(txt.get_string(&doc.transact()), "abcdef");
+        // Undoing "def" leaves "abc", as in Yjs.
+        mgr.undo_blocking();
+        assert_eq!(txt.get_string(&doc.transact()), "abc");
+    }
+
+    #[test]
     fn undo_text() {
         let d1 = Doc::with_client_id(1);
         let txt1 = d1.get_or_insert_text("test");

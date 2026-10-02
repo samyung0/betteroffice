@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
-import { addComment as matrixComment, blocks, CB as matrixCB, docx as matrixDocx, len as matrixLen, none, orders, p as matrixParagraph, PB, prime, run as matrixRun, runRow, sig, textStart as matrixTextStart, type Edit as MatrixEdit, type Where as MatrixWhere } from "./matrix/lib";
+import { addComment as matrixComment, blocks, bm, CB as matrixCB, covered as matrixCovered, docx as matrixDocx, len as matrixLen, none, open as matrixOpen, orders, p as matrixParagraph, PB, prime, publish as matrixPublish, run as matrixRun, runRow, sig, textStart as matrixTextStart, type Edit as MatrixEdit, type Where as MatrixWhere } from "./matrix/lib";
 import { parseDocx } from "../packages/docx/src/docx";
 import { repackDocx } from "../packages/docx/src/docx/rezip";
 import { injectReplyRangeMarkers } from "../packages/docx/src/docx/injectReplyRangeMarkers";
@@ -1071,3 +1071,61 @@ test("a comment range reversed before a capture refuses edits after it that touc
           expect(`${id}: ${row.cls}`).not.toMatch(/: silent|: error/);
         }
 });
+
+// Decided 2026-10-02: Undo and Redo re-anchor the comment ranges and bookmarks in text they restore, so another
+// replica, a peer and the save place them where the editor shows them (they followed the restored text only in the
+// session that pressed Undo), and a bookmark in text that Redo deletes again comes back with the next Undo.
+// "hello world" holds an editor comment or a bookmark over "lo wo".
+const undoP = "44444444";
+const undoRange = (start: number, end: number) => ({ story: "body", start: { paraId: undoP, offset: start }, end: { paraId: undoP, offset: end } });
+const undoFlows: Record<string, [(session: YrsSession) => void, string]> = {
+  "delete all, Undo": [(session) => (session.deleteRange(undoRange(0, 11)), session.undo()), "lo wo"],
+  "delete the middle, Undo": [(session) => (session.deleteRange(undoRange(2, 9)), session.undo()), "lo wo"],
+  "type in it, delete all, Undo": [
+    (session) => {
+      session.insertText({ story: "body", paraId: undoP, offset: 6 }, "QQ");
+      session.addUndoBoundary();
+      session.deleteRange(undoRange(0, 13));
+      session.undo();
+    },
+    "lo QQwo",
+  ],
+  "delete all, Undo, Redo, Undo": [
+    (session) => {
+      session.deleteRange(undoRange(0, 11));
+      session.undo();
+      session.redo();
+      session.undo();
+    },
+    "lo wo",
+  ],
+};
+test.each(Object.keys(undoFlows).flatMap((flow) => (["comment", "bookmark"] as const).map((shape) => [shape, flow] as const)))(
+  "a %s over text survives %s in the editor, a peer and the save",
+  async (shape, flow) => {
+    await prime();
+    const bytes = matrixDocx("body", matrixParagraph(undoP, shape === "comment" ? matrixRun("hello world") : matrixRun("hel") + bm(matrixRun("lo wo")) + matrixRun("rld")));
+    const [act, expected] = undoFlows[flow]!;
+    const session = await matrixOpen(bytes);
+    if (shape === "comment") matrixComment(session, "body", [undoP, 3], [undoP, 8]);
+    session.addUndoBoundary();
+    const peer = await matrixOpen(bytes);
+    peer.applyUpdate(session.encodeStateAsUpdate(peer.encodeStateVector()));
+    act(session);
+    peer.applyUpdate(session.encodeStateAsUpdate(peer.encodeStateVector()));
+    const saved = await matrixPublish(bytes, session.encodeState());
+    if (shape === "comment") {
+      expect(matrixCovered(session, "body")).toEqual([expected]);
+      expect(matrixCovered(peer, "body")).toEqual([expected]);
+      expect(sig(saved, "word/document.xml")).toStartWith(`hel<c1${expected}c1>Rrld¶`);
+      const reopened = await matrixOpen(saved);
+      expect(matrixCovered(reopened, "body")).toEqual([expected]);
+      reopened.destroy();
+    } else {
+      expect(sig(saved, "word/document.xml")).toStartWith(`helB5${expected}E5rld¶`);
+      expect(sig(await matrixPublish(bytes, peer.encodeState()), "word/document.xml")).toStartWith(`helB5${expected}E5rld¶`);
+    }
+    session.destroy();
+    peer.destroy();
+  }
+);

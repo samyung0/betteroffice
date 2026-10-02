@@ -2187,6 +2187,61 @@ test("Enter, Undo, Redo keeps a split field's end after its moved run", async ()
   expect(plain.saved).toContain("yy]");
 });
 
+// Round 3 review, finding 1: one peer's Undo and Redo of Enter in a field while another types in the moved run. The
+// other peer and the save agree on the text and where the field ends; the peer that pressed Redo shows the field's
+// end early until it reloads, since its field-end marker is not re-anchored (accepted 2026-10-02: re-anchoring it
+// made the matrix's "join nested continued field, undo, redo" rebases refuse).
+test.each(["yy", "yyyy"])("Undo, Redo of a split L(AA)%s beside a peer's typing in the moved run: the peer and the save agree", async (moved) => {
+  const bytes = paragraph(field(link(run("AA")) + run(moved), " REF a \\h "));
+  const A = await open(bytes);
+  const B = await open(bytes);
+  A.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(A, "AA") + 1 });
+  const sync = () => {
+    const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+    A.applyUpdate(toA);
+    B.applyUpdate(toB);
+  };
+  sync();
+  A.undo();
+  A.redo();
+  B.insertText({ ...startOf(B, 1), offset: 2 }, "W");
+  sync();
+  const saved = await publish(bytes, A.encodeState());
+  const reopened = await open(saved);
+  expect(matrixUnits(reopened, "body")).toBe(matrixUnits(B, "body"));
+  // Every character once; Redo re-inserting the moved run can put W after it (Yjs Undo semantics, as for item 1).
+  expect([...bodyText(saved)].sort().join("")).toBe([...`a A¶AW${moved} b`].sort().join(""));
+  for (const session of [A, B, reopened]) session.destroy();
+});
+
+// Round 3 review, finding 2: Undo after a redone deletion removes only its own step (the vendored yrs followed a
+// redone item to its start, so this Undo also took the text typed in the step before).
+test("Undo after deleting, undoing and redoing removes only its own step", async () => {
+  const bytes = docx(p("11111111", run("x")) + tail);
+  const session = await open(bytes);
+  const at = (offset: number) => ({ story: "body", paraId: "11111111", offset });
+  const text = () => session.paragraphs("body")[0]!.text;
+  session.insertText(at(1), "abc");
+  session.addUndoBoundary();
+  session.insertText(at(4), "def");
+  session.addUndoBoundary();
+  session.deleteRange({ story: "body", start: at(0), end: at(7) });
+  session.addUndoBoundary();
+  session.undo();
+  session.redo();
+  session.undo();
+  expect(text()).toBe("xabcdef");
+  session.undo();
+  expect(text()).toBe("xabc");
+  session.undo();
+  expect(text()).toBe("x");
+  session.redo();
+  expect(text()).toBe("xabc");
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(saved)).toBe("xabc");
+});
+
 // Follow-up 3 (rv5-tab): a join gives the field the text its seed shows, without the tab of its moved run.
 test("Enter then Backspace in a field whose moved run holds a tab restores the field's shown text", async () => {
   const bytes = paragraph(field(link(run("AA")) + `<w:r><w:t>y</w:t><w:tab/><w:t>z</w:t></w:r>`, " REF a \\h "));

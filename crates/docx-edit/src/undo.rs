@@ -178,20 +178,31 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let restored_from = self.next_clock();
         let applied = self.inner.undo_blocking();
         if applied {
-            crate::bookmarks::rebind(&self.doc);
+            crate::bookmarks::rebind(&self.doc, restored_from);
         }
         applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
+        let restored_from = self.next_clock();
         let applied = self.inner.redo_blocking();
         if applied {
-            crate::bookmarks::rebind(&self.doc);
+            crate::bookmarks::rebind(&self.doc, restored_from);
         }
         applied
+    }
+
+    /// The clock this client's next item takes: an Undo or Redo's restored
+    /// text starts there.
+    fn next_clock(&self) -> u32 {
+        self.doc
+            .transact()
+            .state_vector()
+            .get(&self.doc.client_id())
     }
 
     pub fn can_undo(&self) -> bool {
