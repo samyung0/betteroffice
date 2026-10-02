@@ -1164,3 +1164,37 @@ test.each(Object.keys(undoFlows).flatMap((flow) => (["comment", "bookmark"] as c
     peer.destroy();
   }
 );
+
+// Two peers: B types at the paragraph's start while A deletes the text and undoes (a comment), or deletes, undoes,
+// redoes and undoes (a bookmark). Both peers and the reopened save keep the marker over "lo wo" and every character.
+test.each(["comment", "bookmark"] as const)("a %s over text keeps its place on both peers when one undoes beside the other's typing", async (shape) => {
+  await prime();
+  const bytes = matrixDocx("body", matrixParagraph(undoP, shape === "comment" ? matrixRun("hello world") : matrixRun("hel") + bm(matrixRun("lo wo")) + matrixRun("rld")));
+  const A = await matrixOpen(bytes);
+  if (shape === "comment") matrixComment(A, "body", [undoP, 3], [undoP, 8]);
+  A.addUndoBoundary();
+  const B = await matrixOpen(bytes);
+  B.applyUpdate(A.encodeStateAsUpdate(B.encodeStateVector()));
+  A.deleteRange(undoRange(0, 11));
+  A.undo();
+  if (shape === "bookmark") {
+    A.redo();
+    A.undo();
+  }
+  B.insertText({ story: "body", paraId: undoP, offset: 0 }, "Z");
+  const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+  A.applyUpdate(toA);
+  B.applyUpdate(toB);
+  const saved = await matrixPublish(bytes, A.encodeState());
+  const reopened = await matrixOpen(saved);
+  const text = sig(saved, "word/document.xml").split("¶")[0]!;
+  expect([...text.replace(/<c1|c1>R|B5|E5/g, "")].sort().join("")).toBe([..."Zhello world"].sort().join(""));
+  if (shape === "comment") {
+    for (const session of [A, B, reopened]) expect(matrixCovered(session, "body")).toEqual(["lo wo"]);
+    expect(text).toContain("<c1lo woc1>R");
+  } else {
+    expect(text).toContain("B5lo woE5");
+    expect(sig(await matrixPublish(bytes, B.encodeState()), "word/document.xml").split("¶")[0]).toBe(text);
+  }
+  for (const session of [A, B, reopened]) session.destroy();
+});
