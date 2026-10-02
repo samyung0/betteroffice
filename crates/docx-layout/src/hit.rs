@@ -1236,7 +1236,14 @@ fn collect_range_rects(
     out: &mut Vec<RangeRect>,
 ) {
     let mut pending: Vec<(RectOwner<'_>, RangeRect)> = Vec::new();
-    for h in text_hits(prims) {
+    // Build hits only for runs the range touches: a hit computes glyph bounds,
+    // so building one per primitive made every caret lookup O(document glyphs).
+    let touches = |primitive: &&Primitive| match text_doc_range(primitive) {
+        Some((start, end)) if start == end => start >= from && start < to,
+        Some((start, end)) => end > from && start < to,
+        None => false,
+    };
+    for h in prims.iter().filter(touches).filter_map(text_hit) {
         // blank-line marker: zero-length span selects as a thin sliver
         if h.doc_start == h.doc_end {
             if h.doc_start >= from && h.doc_start < to {
@@ -2118,6 +2125,43 @@ mod tests {
 
         assert_eq!(movement.position, 2511);
         assert_eq!(hit_builds, 4);
+    }
+
+    #[test]
+    fn range_rects_materialize_hits_only_for_touched_runs() {
+        let pages: Vec<serde_json::Value> = (0..500)
+            .map(|page_index| {
+                let doc_start = page_index * 10 + 1;
+                serde_json::json!({
+                    "pageIndex": page_index,
+                    "width": 500,
+                    "height": 500,
+                    "primitives": [{
+                        "kind": "text",
+                        "text": "x",
+                        "x": 100,
+                        "baselineY": 100,
+                        "width": 10,
+                        "font": "400 16px Calibri",
+                        "color": "#000000",
+                        "docStart": doc_start,
+                        "docEnd": doc_start + 1,
+                        "blockId": page_index,
+                        "lineIndex": 0
+                    }]
+                })
+            })
+            .collect();
+        let display_list: DisplayList =
+            serde_json::from_value(serde_json::json!({ "pages": pages })).unwrap();
+
+        TEXT_HIT_BUILD_COUNT.with(|count| count.set(0));
+        let rects = range_rects(&display_list, 2501, 2502);
+        let hit_builds = TEXT_HIT_BUILD_COUNT.with(std::cell::Cell::get);
+
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].page_index, 250);
+        assert_eq!(hit_builds, 1);
     }
 
     /// Range queries walk every text primitive for overlap, but caret-stop
