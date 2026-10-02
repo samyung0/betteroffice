@@ -2187,11 +2187,31 @@ test("Enter, Undo, Redo keeps a split field's end after its moved run", async ()
   expect(plain.saved).toContain("yy]");
 });
 
-// Round 3 review, finding 1: one peer's Undo and Redo of Enter in a field while another types in the moved run. The
-// other peer and the save agree on the text and where the field ends; the peer that pressed Redo shows the field's
-// end early until it reloads, since its field-end marker is not re-anchored (accepted 2026-10-02: re-anchoring it
-// made the matrix's "join nested continued field, undo, redo" rebases refuse).
-test.each(["yy", "yyyy"])("Undo, Redo of a split L(AA)%s beside a peer's typing in the moved run: the peer and the save agree", async (moved) => {
+// Round 3 review, finding 1 (rv6-peers): peer A presses Undo and Redo after Enter split a field while peer B edits
+// the moved run, concurrently or first. Both peers and the reopened save end the field at the same place, since the
+// Undo or Redo re-anchors the field's end (decided 2026-10-02); each typed character lands once. Redo re-inserting
+// the moved run can put B's W after it or revive B's deletion (Yjs Undo semantics, as for item 1).
+const fieldEndOf = (session: YrsSession) => {
+  for (const { paraId, properties } of session.paragraphs("body")) {
+    const end = ((properties as { bookmarks?: Array<{ kind: string; offset: number }> }).bookmarks ?? []).find((mark) => mark.kind === "fieldend");
+    if (end) return { story: "body", paraId, offset: end.offset };
+  }
+  throw new Error("no field end");
+};
+const peerSteps: Record<string, (session: YrsSession) => void> = {
+  "W at the field's end": (session) => session.insertText(fieldEndOf(session), "W"),
+  "W between the y's": (session) => session.insertText({ ...startOf(session, 1), offset: 2 }, "W"),
+  "W at the 2nd paragraph's start": (session) => session.insertText(startOf(session, 1), "W"),
+  "deleting the 1st y": (session) => void session.deleteAt({ ...startOf(session, 1), offset: 2 }, "backward"),
+};
+test.each(
+  ["yy", "yyyy"].flatMap((moved) =>
+    [
+      ...Object.keys(peerSteps).map((step) => ["U,R", step] as const),
+      ["U,R,U,R", "W at the field's end"] as const,
+    ].flatMap(([steps, step]) => (["concurrently", "after B"] as const).map((mode) => [moved, steps, step, mode] as const))
+  )
+)("L(AA)%s split, A presses %s beside B %s, %s: the peers and the save end the field alike", async (moved, steps, step, mode) => {
   const bytes = paragraph(field(link(run("AA")) + run(moved), " REF a \\h "));
   const A = await open(bytes);
   const B = await open(bytes);
@@ -2202,15 +2222,23 @@ test.each(["yy", "yyyy"])("Undo, Redo of a split L(AA)%s beside a peer's typing 
     B.applyUpdate(toB);
   };
   sync();
-  A.undo();
-  A.redo();
-  B.insertText({ ...startOf(B, 1), offset: 2 }, "W");
+  const press = () => {
+    for (const key of steps.split(",")) key === "U" ? A.undo() : A.redo();
+  };
+  if (mode === "concurrently") {
+    press();
+    peerSteps[step]!(B);
+  } else {
+    peerSteps[step]!(B);
+    sync();
+    press();
+  }
   sync();
   const saved = await publish(bytes, A.encodeState());
   const reopened = await open(saved);
-  expect(matrixUnits(reopened, "body")).toBe(matrixUnits(B, "body"));
-  // Every character once; Redo re-inserting the moved run can put W after it (Yjs Undo semantics, as for item 1).
-  expect([...bodyText(saved)].sort().join("")).toBe([...`a A¶AW${moved} b`].sort().join(""));
+  expect(matrixUnits(A, "body")).toBe(matrixUnits(B, "body"));
+  expect(matrixUnits(reopened, "body")).toBe(matrixUnits(A, "body"));
+  if (step.startsWith("W")) expect([...bodyText(saved)].sort().join("")).toBe([...`a A¶AW${moved} b`].sort().join(""));
   for (const session of [A, B, reopened]) session.destroy();
 });
 

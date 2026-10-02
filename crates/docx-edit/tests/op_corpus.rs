@@ -173,6 +173,60 @@ fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
 }
 
 #[test]
+fn undo_and_redo_re_anchor_a_continued_fields_end_in_text_they_restore() {
+    // Decided 2026-10-02: a peer that typed in the restored text meanwhile and
+    // the save end the field where the session that pressed Undo shows it.
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>first</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>second</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let ends = |doc: &EditingDoc| {
+        marks(doc)
+            .into_iter()
+            .flat_map(|properties| match properties.get("bookmarks") {
+                Some(Any::Array(markers)) => markers
+                    .iter()
+                    .filter(|marker| {
+                        map_get(marker, "kind") == Some(&Any::String("fieldend".into()))
+                    })
+                    .filter_map(|marker| map_get(marker, "offset").cloned())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    };
+    for steps in ["U", "U,R,U"] {
+        let a = EditingDoc::new(7);
+        seed_from_docx(&a, &bytes).unwrap();
+        let b = EditingDoc::new(8);
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let mut undo = a.undo_manager();
+        // "second" is body 2..8, the field's end after it; b types W before its "d".
+        a.delete_range(&ctx(), StoryRange::new("body", 2, 8))
+            .unwrap();
+        for step in steps.split(',') {
+            assert!(if step == "U" {
+                undo.undo()
+            } else {
+                undo.redo()
+            });
+        }
+        b.insert_text(&ctx(), Position::new("body", 7), "W", FormatPolicy::Plain)
+            .unwrap();
+        let (to_b, to_a) = (a.encode_state_as_update_v1(), b.encode_state_as_update_v1());
+        a.apply_update_v1(&to_a).unwrap();
+        b.apply_update_v1(&to_b).unwrap();
+        assert_eq!(ends(&b), ends(&a), "{steps}");
+        assert_eq!(
+            a.paragraphs("body").unwrap()[1]
+                .text
+                .chars()
+                .filter(|c| *c == 'W')
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn nested_continued_fields_keep_both_owners_boundaries() {
     let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>IF</w:instrText></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>yes</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
     let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();

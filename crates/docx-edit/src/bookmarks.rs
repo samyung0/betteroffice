@@ -89,12 +89,11 @@ pub(crate) fn set(
 /// save would place them elsewhere. A marker in text that stays deleted keeps
 /// its anchor, so the Undo that restores that text brings it back.
 ///
-/// Continued field characters keep theirs: re-anchoring them made a rebase of
-/// Undo and Redo of a join that removed a nested continued field refuse (the
-/// matrix's `join nested continued field, undo, redo`), so a peer's Undo and
-/// Redo of a split field while another types in its moved text shows the
-/// field's end early in that peer's editor until it reloads (accepted
-/// 2026-10-02).
+/// A continued field's end is re-anchored too, so every peer and the save end
+/// the field where the peer that pressed Undo or Redo shows it (decided
+/// 2026-10-02). Its separate keeps its anchor: re-anchoring it made a rebase
+/// of Undo and Redo of a join that removed a nested continued field refuse
+/// (the matrix's `join nested continued field, undo, redo`).
 pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32) {
     let client = doc.client_id();
     let mut txn = doc.transact_mut_with("system");
@@ -106,7 +105,7 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32) {
                 .filter_map(|(_, value)| match value {
                     Out::YMap(entry)
                         if !matches!(entry.get(&txn, "data"), Some(Out::Any(Any::Map(data)))
-                            if matches!(data.get("id"), Some(Any::String(_)))) =>
+                            if matches!(data.get("kind"), Some(Any::String(kind)) if kind.as_ref() == "fieldseparate")) =>
                     {
                         Some(entry)
                     }
