@@ -846,6 +846,7 @@ const iconMap = {
   format_align_justify: IconAlignJustify,
   format_line_spacing: IconLineSpacing,
   format_list_bulleted: IconListBulleted,
+  toc: IconListBulleted,
   format_list_numbered: IconListNumbered,
   format_indent_increase: IconIndentIncrease,
   format_indent_decrease: IconIndentDecrease,

@@ -47,7 +47,11 @@ function EditorToolbarBase({
   return (
     <EditorToolbarContext.Provider value={toolbarProps}>
       <div
-        className={cn('flex flex-col bg-doc-surface shadow-sm flex-shrink-0', className)}
+        className={cn(
+          'flex flex-col bg-doc-surface flex-shrink-0',
+          !toolbarProps.singleRow && 'shadow-sm',
+          className
+        )}
         style={{ position: 'relative', zIndex: Z_INDEX.toolbar, ...style }}
         data-testid="editor-toolbar"
       >

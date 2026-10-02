@@ -203,6 +203,11 @@ export interface DocxEditorProps {
   /** Replaces the built-in Material icons everywhere in the editor chrome. */
   icons?: IconSet;
   /**
+   * One toolbar row: the title bar's menus and the outline toggle move into it,
+   * and the title bar slots (logo, name, right actions) are not shown.
+   */
+  singleRowToolbar?: boolean;
+  /**
    * Custom list of fonts shown in the toolbar's font-family dropdown.
    * Strings render in the "Other" group; pass `FontOption[]` for category
    * grouping and CSS fallback chains. Omit to use the built-in 12-font
@@ -602,6 +607,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showOutline: showOutlineProp = false,
     showOutlineButton = true,
     icons,
+    singleRowToolbar = false,
     fontFamilies,
     fonts,
     watermarkPresets,
@@ -1583,15 +1589,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const sidebarOpen = allSidebarItems.length > 0;
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
+  const floatingOutlineButton = showOutlineButton && !singleRowToolbar;
   const outlineLeftAllowance =
     (showOutline
       ? OUTLINE_RESERVED_SPACE
-      : showOutlineButton
+      : floatingOutlineButton
         ? OUTLINE_BUTTON_RESERVED_SPACE
-        : 20) +
+        : singleRowToolbar
+          ? 0
+          : 20) +
     // The outline toggle/panel inset past the vertical ruler when it's shown,
     // so the page must clear that extra width too.
-    (showRuler && (showOutline || showOutlineButton) ? RULER_WIDTH : 0);
+    (showRuler && (showOutline || floatingOutlineButton) ? RULER_WIDTH : 0);
   // Reserve against the WIDEST page in the doc, not the portrait default: pages
   // center via `alignItems:center`, so a landscape section (wider than
   // DEFAULT_PAGE_WIDTH) gets a smaller side margin and, with the old default,
@@ -1795,7 +1804,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         showRuler={showRuler}
         readOnlyProp={readOnlyProp}
         showOutline={showOutline}
-        showOutlineButton={showOutlineButton}
+        showOutlineButton={floatingOutlineButton}
         sidebarOpen={sidebarOpen}
         minLayoutWidth={minLayoutWidth}
         toolbarHeight={toolbarHeight}
@@ -1851,6 +1860,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               tableContext={toolbarTableContext}
               imageContext={state.pmImageContext}
               readOnly={readOnly}
+              singleRow={singleRowToolbar}
+              showOutline={showOutline}
+              showOutlineButton={showOutlineButton}
+              onToggleOutline={handleToggleOutline}
               setShowCommentsSidebar={setShowCommentsSidebar}
               setExpandedSidebarItem={setExpandedSidebarItem}
               showCommentsSidebar={showCommentsSidebar}

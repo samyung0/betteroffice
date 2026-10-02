@@ -140,6 +140,10 @@ export interface ToolbarProps {
   children?: ReactNode;
   /** When true, renders with display:contents so children flow in the parent flex container */
   inline?: boolean;
+  /** One fixed-height row: `leading` and the groups scroll, zoom and `children` stay pinned. */
+  singleRow?: boolean;
+  /** Rendered before the groups in a single row. */
+  leading?: ReactNode;
   /** Whether to show font family picker (default: true) */
   showFontPicker?: boolean;
   /**
@@ -430,6 +434,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
     tableContext,
     onTableAction,
     inline = false,
+    singleRow = false,
+    leading,
   } = props;
 
   const barRef = useRef<HTMLDivElement>(null);
@@ -668,48 +674,35 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   // ── Render ────────────────────────────────────────────────────────────
 
-  return (
-    <div
-      ref={barRef}
-      className={cn(
-        !inline &&
-          'flex items-center px-2 py-1 bg-muted rounded-full min-h-[36px] overflow-x-auto mx-2 mb-1',
-        className
-      )}
-      style={inline ? { display: 'contents', ...style } : style}
-      role={inline ? undefined : 'toolbar'}
-      aria-label={inline ? undefined : t('toolbar.ariaLabel')}
-      data-testid={inline ? undefined : 'formatting-bar'}
-      onMouseDown={inline ? undefined : handleBarMouseDown}
-      onMouseUp={inline ? undefined : handleBarMouseUp}
-    >
-      {/* Undo/Redo Group */}
-      <ToolbarGroup label={t('formattingBar.groups.history')}>
-        <ToolbarButton
-          onClick={handleUndo}
-          disabled={disabled || !canUndo}
-          title={t('formattingBar.undoShortcut')}
-          ariaLabel={t('formattingBar.undo')}
-        >
-          <MaterialSymbol name="undo" size={ICON_SIZE} />
-        </ToolbarButton>
-        <ToolbarButton
-          onClick={handleRedo}
-          disabled={disabled || !canRedo}
-          title={t('formattingBar.redoShortcut')}
-          ariaLabel={t('formattingBar.redo')}
-        >
-          <MaterialSymbol name="redo" size={ICON_SIZE} />
-        </ToolbarButton>
-      </ToolbarGroup>
+  const history = (
+    <ToolbarGroup label={t('formattingBar.groups.history')}>
+      <ToolbarButton
+        onClick={handleUndo}
+        disabled={disabled || !canUndo}
+        title={t('formattingBar.undoShortcut')}
+        ariaLabel={t('formattingBar.undo')}
+      >
+        <MaterialSymbol name="undo" size={ICON_SIZE} />
+      </ToolbarButton>
+      <ToolbarButton
+        onClick={handleRedo}
+        disabled={disabled || !canRedo}
+        title={t('formattingBar.redoShortcut')}
+        ariaLabel={t('formattingBar.redo')}
+      >
+        <MaterialSymbol name="redo" size={ICON_SIZE} />
+      </ToolbarButton>
+    </ToolbarGroup>
+  );
 
-      {/* Zoom Control */}
-      {showZoomControl && (
-        <ToolbarGroup label={t('formattingBar.groups.zoom')}>
-          <ZoomControl value={zoom} onChange={onZoomChange} disabled={disabled} compact />
-        </ToolbarGroup>
-      )}
+  const zoomGroup = showZoomControl && (
+    <ToolbarGroup label={t('formattingBar.groups.zoom')}>
+      <ZoomControl value={zoom} onChange={onZoomChange} disabled={disabled} compact />
+    </ToolbarGroup>
+  );
 
+  const groups = (
+    <>
       {/* Style Picker */}
       {showStylePicker && (
         <ToolbarGroup label={t('formattingBar.groups.styles')}>
@@ -939,6 +932,53 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         <MaterialSymbol name="format_clear" size={ICON_SIZE} />
       </ToolbarButton>
+    </>
+  );
+
+  if (singleRow && !inline) {
+    return (
+      <div
+        ref={barRef}
+        className={cn('oox-formatting-bar', className)}
+        style={style}
+        role="toolbar"
+        aria-label={t('toolbar.ariaLabel')}
+        data-testid="formatting-bar"
+        data-layout="single-row"
+        onMouseDown={handleBarMouseDown}
+        onMouseUp={handleBarMouseUp}
+      >
+        <div className="oox-formatting-bar__scroll">
+          {leading}
+          {history}
+          {groups}
+        </div>
+        <div className="oox-formatting-bar__end">
+          {zoomGroup}
+          {children}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={barRef}
+      className={cn(
+        !inline &&
+          'flex items-center px-2 py-1 bg-muted rounded-full min-h-[36px] overflow-x-auto mx-2 mb-1',
+        className
+      )}
+      style={inline ? { display: 'contents', ...style } : style}
+      role={inline ? undefined : 'toolbar'}
+      aria-label={inline ? undefined : t('toolbar.ariaLabel')}
+      data-testid={inline ? undefined : 'formatting-bar'}
+      onMouseDown={inline ? undefined : handleBarMouseDown}
+      onMouseUp={inline ? undefined : handleBarMouseUp}
+    >
+      {history}
+      {zoomGroup}
+      {groups}
 
       {/* Custom toolbar items */}
       {children}

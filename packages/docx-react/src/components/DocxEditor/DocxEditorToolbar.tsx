@@ -6,6 +6,7 @@ import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
 import { CommentsSidebarToggle } from './CommentsSidebarToggle';
+import { OutlineToolbarToggle } from './OutlineToggleButton';
 
 interface ImageContext {
   pos: number;
@@ -42,6 +43,10 @@ export function DocxEditorToolbar({
   imageContext,
   // Flags
   readOnly,
+  singleRow,
+  showOutline,
+  showOutlineButton,
+  onToggleOutline,
   setShowCommentsSidebar,
   setExpandedSidebarItem,
   showCommentsSidebar,
@@ -89,6 +94,10 @@ export function DocxEditorToolbar({
   tableContext: TableContextInfo | null;
   imageContext: ImageContext | null;
   readOnly: boolean;
+  singleRow: boolean;
+  showOutline: boolean;
+  showOutlineButton: boolean;
+  onToggleOutline: () => void;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   setExpandedSidebarItem: React.Dispatch<React.SetStateAction<string | null>>;
   showCommentsSidebar: boolean;
@@ -162,23 +171,36 @@ export function DocxEditorToolbar({
         onWatermark={onWatermark}
         tableContext={tableContext}
         onTableAction={onTableAction}
+        singleRow={singleRow}
+        leading={
+          singleRow && (
+            <>
+              {showOutlineButton && (
+                <OutlineToolbarToggle active={showOutline} onClick={onToggleOutline} />
+              )}
+              <EditorToolbar.MenuBar />
+            </>
+          )
+        }
       >
-        <EditorToolbar.TitleBar>
-          {renderLogo && <EditorToolbar.Logo>{renderLogo()}</EditorToolbar.Logo>}
-          {documentName !== undefined && (
-            <EditorToolbar.DocumentName
-              value={documentName}
-              onChange={onDocumentNameChange}
-              editable={documentNameEditable}
-            />
-          )}
-          {renderTitleBarRight && (
-            <EditorToolbar.TitleBarRight>{renderTitleBarRight()}</EditorToolbar.TitleBarRight>
-          )}
-          <EditorToolbar.MenuBar />
-        </EditorToolbar.TitleBar>
+        {!singleRow && (
+          <EditorToolbar.TitleBar>
+            {renderLogo && <EditorToolbar.Logo>{renderLogo()}</EditorToolbar.Logo>}
+            {documentName !== undefined && (
+              <EditorToolbar.DocumentName
+                value={documentName}
+                onChange={onDocumentNameChange}
+                editable={documentNameEditable}
+              />
+            )}
+            {renderTitleBarRight && (
+              <EditorToolbar.TitleBarRight>{renderTitleBarRight()}</EditorToolbar.TitleBarRight>
+            )}
+            <EditorToolbar.MenuBar />
+          </EditorToolbar.TitleBar>
+        )}
         <EditorToolbar.Toolbar>
-          <ToolbarSeparator />
+          {!singleRow && <ToolbarSeparator />}
           <CommentsSidebarToggle
             active={showCommentsSidebar}
             onClick={() => {

@@ -47,14 +47,14 @@ const triggerStyle: CSSProperties = {
   padding: '2px 8px',
   border: 'none',
   background: 'transparent',
-  borderRadius: 4,
+  borderRadius: 'var(--doc-menu-trigger-radius, 4px)',
   cursor: 'pointer',
-  fontSize: 13,
-  fontWeight: 400,
+  fontSize: 'var(--doc-menu-trigger-font-size, 13px)',
+  fontWeight: 'var(--doc-menu-trigger-font-weight, 400)',
   color: 'var(--doc-text)',
   whiteSpace: 'nowrap',
-  height: 28,
-  lineHeight: '28px',
+  height: 'var(--doc-menu-trigger-height, 28px)',
+  lineHeight: 'var(--doc-menu-trigger-height, 28px)',
 };
 
 const triggerOpenStyle: CSSProperties = {

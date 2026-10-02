@@ -747,6 +747,85 @@
   color: var(--doc-toggle-active-fg);
 }
 
+/* Single-row toolbar (DocxEditor `singleRowToolbar`): a flat row whose groups
+ * scroll and whose zoom and trailing buttons stay pinned. Hosts restyle it
+ * through the --doc-toolbar-* variables. */
+.oox-root {
+  --doc-toolbar-height: 40px;
+  --doc-toolbar-bg: var(--doc-surface);
+  --doc-toolbar-border: var(--doc-border-light);
+  --doc-toolbar-button-size: 28px;
+  --doc-toolbar-icon-size: 18px;
+  --doc-toolbar-radius: 6px;
+}
+.oox-root .oox-formatting-bar {
+  display: flex;
+  align-items: center;
+  height: var(--doc-toolbar-height);
+  padding: 0 8px;
+  background: var(--doc-toolbar-bg);
+  border-bottom: 1px solid var(--doc-toolbar-border);
+}
+.oox-root .oox-formatting-bar__scroll {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.oox-root .oox-formatting-bar__scroll::-webkit-scrollbar {
+  display: none;
+}
+.oox-root .oox-formatting-bar__end {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 100%;
+  padding-left: 8px;
+}
+.oox-root .oox-formatting-bar__scroll > [role='group'],
+.oox-root .oox-formatting-bar__scroll > [role='menubar'],
+.oox-root .oox-formatting-bar__end > [role='group'] {
+  flex-shrink: 0;
+  gap: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+}
+.oox-root .oox-formatting-bar__scroll > [role='group']::after,
+.oox-root .oox-formatting-bar__scroll > [role='menubar']::after,
+.oox-root .oox-formatting-bar__end > [role='group']::after {
+  content: '';
+  width: 1px;
+  height: 28px;
+  margin: 0 6px;
+  background: var(--doc-toolbar-border);
+}
+.oox-root .oox-formatting-bar__end > [role='group']:last-child::after {
+  display: none;
+}
+.oox-root .oox-formatting-bar .oox-toolbar-toggle,
+.oox-root .oox-formatting-bar button[role='combobox'] {
+  height: var(--doc-toolbar-button-size);
+  border-radius: var(--doc-toolbar-radius);
+  color: var(--doc-text);
+}
+.oox-root .oox-formatting-bar .oox-toolbar-toggle {
+  width: var(--doc-toolbar-button-size);
+}
+.oox-root .oox-formatting-bar button[role='combobox'] {
+  font-weight: var(--doc-menu-trigger-font-weight, 400);
+}
+.oox-root .oox-formatting-bar svg {
+  width: var(--doc-toolbar-icon-size);
+  height: var(--doc-toolbar-icon-size);
+}
+.oox-root .oox-formatting-bar [role='menubar'] button:hover {
+  background: var(--doc-bg-hover) !important;
+}
+
 /* Outline / navigation toggle button (shown when the panel is collapsed).
  * Google-Docs-style filled circular control: a resting disc + ring so it
  * reads as a button against the gray document gutter (--doc-bg), darkening
