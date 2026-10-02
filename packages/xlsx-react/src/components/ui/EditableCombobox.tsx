@@ -19,6 +19,8 @@ export interface EditableComboboxProps {
   testId?: string;
   /** False draws the value and chevron without a box, as a dropdown trigger. */
   bordered?: boolean;
+  /** False leaves out the chevron; focusing the box still opens the list. */
+  chevron?: boolean;
 }
 
 export function EditableCombobox({
@@ -31,6 +33,7 @@ export function EditableCombobox({
   inputStyle,
   testId,
   bordered = true,
+  chevron = true,
 }: EditableComboboxProps) {
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
@@ -126,7 +129,7 @@ export function EditableCombobox({
         }}
         style={{
           appearance: 'none',
-          width: `calc(100% - 22px)`,
+          width: chevron ? `calc(100% - 22px)` : '100%',
           height: 26,
           padding: '0 2px 0 7px',
           border: 0,
@@ -140,33 +143,35 @@ export function EditableCombobox({
           ...inputStyle,
         }}
       />
-      <button
-        type="button"
-        disabled={disabled}
-        tabIndex={-1}
-        aria-label={label}
-        title={label}
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => {
-          if (disabled) return;
-          setOpen((current) => !current);
-          inputRef.current?.focus();
-        }}
-        style={{
-          appearance: 'none',
-          display: 'grid',
-          placeItems: 'center',
-          width: 21,
-          height: 26,
-          padding: 0,
-          border: 0,
-          background: 'transparent',
-          color: toolbarColors.muted,
-          cursor: disabled ? 'default' : 'pointer',
-        }}
-      >
-        <ToolbarIcon name="chevronDown" size={14} />
-      </button>
+      {chevron && (
+        <button
+          type="button"
+          disabled={disabled}
+          tabIndex={-1}
+          aria-label={label}
+          title={label}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            if (disabled) return;
+            setOpen((current) => !current);
+            inputRef.current?.focus();
+          }}
+          style={{
+            appearance: 'none',
+            display: 'grid',
+            placeItems: 'center',
+            width: 21,
+            height: 26,
+            padding: 0,
+            border: 0,
+            background: 'transparent',
+            color: toolbarColors.muted,
+            cursor: disabled ? 'default' : 'pointer',
+          }}
+        >
+          <ToolbarIcon name="chevronDown" size={14} />
+        </button>
+      )}
       {open && !disabled && (
         <div
           ref={menuRef}

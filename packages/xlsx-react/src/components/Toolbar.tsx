@@ -721,8 +721,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
         if (Number.isFinite(size) && size >= 1 && size <= 400)
           apply({ type: 'fontSize', value: size });
       }}
-      width={50}
-      inputStyle={{ textAlign: 'center' }}
+      width={singleRow ? 40 : 50}
+      chevron={!singleRow}
+      inputStyle={singleRow ? { padding: 0, textAlign: 'center' } : { textAlign: 'center' }}
     />
   );
 
