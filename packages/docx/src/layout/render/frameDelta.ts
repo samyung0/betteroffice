@@ -1223,11 +1223,6 @@ class BinaryReader {
     return this.view.getBigInt64(offset, true);
   }
 
-  f64(offset: number): number {
-    this.bounds(offset, 8);
-    return this.view.getFloat64(offset, true);
-  }
-
   safeU64(offset: number, label: string): number {
     const value = this.u64(offset);
     if (value > MAX_SAFE_BIGINT) invalid(`${label} exceeds JavaScript safe-integer range`);
