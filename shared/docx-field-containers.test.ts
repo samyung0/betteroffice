@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, prime, runRow, units as matrixUnits, sig, type Edit as MatrixEdit } from "./matrix/lib";
+import { STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, partXml, prime, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -1328,10 +1328,13 @@ const textAt = (session: YrsSession, text: string) => {
   const segment = session.storySegments(at.story).find((entry) => entry.kind === "text" && entry.text.includes(text));
   return { ...at, offset: at.offset + (segment as { text: string }).text.indexOf(text) };
 };
-/** Backspace just after the field whose instruction holds `instruction`: its embed goes. */
-const backspaceField = (instruction: string): Edit => (session) => {
+/**
+ * Deletes a selection covering just the embed of the field whose instruction holds `instruction`: its embed goes.
+ * Backspace beside a field that shows nothing steps over it instead (decided 2026-10-02).
+ */
+const deleteField = (instruction: string): Edit => (session) => {
   const { story, paraId, offset } = fieldAt(session, instruction);
-  session.deleteAt({ story, paraId, offset: offset + 1 }, "backward");
+  session.deleteRange({ story, start: { paraId, offset }, end: { paraId, offset: offset + 1 } });
 };
 /** Types Z `after` units into the first text holding `text`. */
 const typeInText = (text: string, after = 1): Edit => (session) => {
@@ -1348,11 +1351,11 @@ const deleteAcrossEnd = (text: string, instruction: string): Edit => (session) =
 const twoFields = `${run("a ")}${refField("20", "a")}${run(" mid ")}${refField("30", "b")}${run(" b")}`;
 const orphaned = "a H(20) mid [«REF b \\h»|H(30)] b";
 test.each([
-  ["Backspace removes its embed", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
+  ["a selection deletes its embed", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, deleteField("REF a"), orphaned],
   ["a delete across its end", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), () => {}, deleteAcrossEnd("20", "REF a"), "a H(2)mid [«REF b \\h»|H(30)] b"],
-  ["text is typed in it, its embed gone before the capture", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), backspaceField("REF a"), typeInText("20"), "a H(2Z0) mid [«REF b \\h»|H(30)] b"],
-  ["the next field follows at once", paragraph(`${refField("20", "a")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), "a H(20)[«REF b \\h»|H(30)] b"],
-  ["the next field has no child at its index", paragraph(`${field(`${run("q")}${link(run("20"))}`, " REF a \\h ")}${run(" mid ")}${refField("30", "b")}`), () => {}, backspaceField("REF a"), orphaned],
+  ["text is typed in it, its embed gone before the capture", paragraph(`${refField("20", "a")}${run(" mid ")}${refField("30", "b")}`), deleteField("REF a"), typeInText("20"), "a H(2Z0) mid [«REF b \\h»|H(30)] b"],
+  ["the next field follows at once", paragraph(`${refField("20", "a")}${refField("30", "b")}`), () => {}, deleteField("REF a"), "a H(20)[«REF b \\h»|H(30)] b"],
+  ["the next field has no child at its index", paragraph(`${field(`${run("q")}${link(run("20"))}`, " REF a \\h ")}${run(" mid ")}${refField("30", "b")}`), () => {}, deleteField("REF a"), orphaned],
   ["Accept All uncovered it", paragraph(`${uncovered}${run(" mid ")}${field(`${run("20")}${ins(link(run("27")))}`, " REF b ")}`), resolveAll("accept"), deleteAcrossEnd("26", "DATE"), "a H(2)mid [«REF b»|20H(27)] b"],
 ] as const)("a field's child stays where it is when %s", async (_, bytes, before, after, expected) => {
   const { next, direct } = await landed(bytes, before, after);
@@ -1365,7 +1368,7 @@ test.each([
   ["a header", withStories(tail, p("44444444", twoFields), p("55555555", run("n"))), "44444444", "word/header1.xml"],
   ["a footnote", withStories(p("22222222", `${run("tail")}${noteRef}`), p("44444444", run("h")), p("55555555", twoFields)), "55555555", "word/footnotes.xml"],
 ])("a field's child in %s stays where it is when its embed goes", async (_, bytes, paraId, path) => {
-  const { next, direct } = await landed(bytes, () => {}, backspaceField("REF a"), (out) => view(out, paraId, path));
+  const { next, direct } = await landed(bytes, () => {}, deleteField("REF a"), (out) => view(out, paraId, path));
   expect(direct).toBe(orphaned);
   expect(next).toBe(direct);
 });
@@ -1378,7 +1381,7 @@ test("a field's child stays where it is when one user types in it while another 
   const exported = await publish(bytes, captured);
   const b = await open(bytes, captured);
   typeInText("20")(a);
-  backspaceField("REF a")(b);
+  deleteField("REF a")(b);
   a.applyUpdate(b.encodeStateAsUpdate(a.encodeStateVector()));
   const latest = a.encodeState();
   a.destroy();
@@ -1461,7 +1464,7 @@ test.each([
   ["one link", field(link(run("BB")), " REF b \\h "), "BB"],
   ["two links", field(`${linkTo("AA")}${linkTo("BB")}`, " REF b \\h "), "AA"],
 ])("text typed at a link's end before the capture lands exactly when a rebase deletes its field (%s)", async (_, xml, text) => {
-  const { next, direct } = await landed(paragraph(xml), typeInText(text, text.length), backspaceField("REF b"));
+  const { next, direct } = await landed(paragraph(xml), typeInText(text, text.length), deleteField("REF b"));
   expect(direct).toContain(`H(${text}Z)`);
   expect(next).toBe(direct);
 });
@@ -1479,7 +1482,7 @@ test.each(["accept", "reject"] as const)(
     const out = await directly(
       twoParagraphs(`${run("x")}${link(run("BB"))}${ins(run("26"))}`),
       joinNext("11111111"),
-      backspaceField("REF a"),
+      deleteField("REF a"),
       resolveAll(mode)
     );
     expect(out).toBe(mode === "accept" ? "H(AA)[«REF b \\h»|xH(BB)26]" : "H(AA)[«REF b \\h»|xH(BB)]");
@@ -1490,16 +1493,16 @@ test.each([
   [
     "Accept All renumbers the next field",
     paragraph(`${refField("AA", "a")}${field(`${link(run("BB"))}${ins(run("26"))}`, " REF b \\h ")}`),
-    [backspaceField("REF a"), resolveAll("accept")],
+    [deleteField("REF a"), resolveAll("accept")],
     "a H(AA)[«REF b \\h»|H(BB)26] b",
   ],
   [
     "Accept All renumbers the next field, its links kept in order",
     paragraph(`${field(`${linkTo("AA")}${linkTo("CC")}`, " REF a \\h ")}${field(`${link(run("BB"))}${ins(run("26"))}`, " REF b \\h ")}`),
-    [backspaceField("REF a"), resolveAll("accept")],
+    [deleteField("REF a"), resolveAll("accept")],
     "a H(AA)H(CC)[«REF b \\h»|H(BB)26] b",
   ],
-  ["a join gives both fields one number", twoParagraphs(link(run("BB"))), [joinNext("11111111"), backspaceField("REF a")], "H(AA)[«REF b \\h»|H(BB)]"],
+  ["a join gives both fields one number", twoParagraphs(link(run("BB"))), [joinNext("11111111"), deleteField("REF a")], "H(AA)[«REF b \\h»|H(BB)]"],
 ] as const)("a deleted field's link joins no other field when %s", async (_, bytes, edits, expected) => {
   expect(await directly(bytes, ...edits)).toBe(expected);
 });
@@ -1552,7 +1555,7 @@ test("undoing a field embed's deletion gives the field its link back", async () 
   const bytes = paragraph(`${refField("AA", "a")}${run(" mid ")}${refField("BB", "b")}`);
   const session = await open(bytes);
   session.beginUndoCapture();
-  backspaceField("REF a")(session);
+  deleteField("REF a")(session);
   session.undo();
   const out = await publish(bytes, session.encodeState());
   session.destroy();
@@ -2195,4 +2198,131 @@ test("Enter then Backspace in a field whose moved run holds a tab restores the f
   backspace(session);
   expect(matrixUnits(session, "body")).toBe(original);
   session.destroy();
+});
+
+// Decision 2026-10-02: Backspace and Delete beside a field marker that shows nothing step over it and delete the
+// visible unit past it; only a selection covering it removes the field. Each file has one such marker: a table of
+// contents' own embed after its first entry, a REF field over links only, a field whose own result text Enter moved
+// to the next paragraph, and a field over a nested simple field and the text after it.
+const tocEntryXml = (anchor: string, text: string, page: string) =>
+  `<w:hyperlink w:anchor="${anchor}">${run(text)}<w:r><w:tab/></w:r>${char("begin")}${instr(` PAGEREF ${anchor} \\h `)}${char("separate")}${run(page)}${char("end")}</w:hyperlink>`;
+const markerFiles: Record<string, { xml: string; code: string; split?: boolean }> = {
+  "TOC entry": {
+    xml:
+      p("44444444", `${char("begin")}${instr(" TOC \\o \\h ")}${char("separate")}${tocEntryXml("_Toc1", "Intro", "1")}`) +
+      p("45454545", `${tocEntryXml("_Toc2", "Body", "2")}${char("end")}`),
+    code: "TOC",
+  },
+  "REF over links": { xml: holder44(field(linkTo("AA") + linkTo("BB"), " REF a \\h ")), code: "REF" },
+  "own text moved by Enter": { xml: holder44(field(link(run("AA")) + run("yz"), " REF a \\h ")), code: "REF", split: true },
+  "nested simple field": { xml: holder44(field(fs(run("20"), " PAGE ") + run("y"))), code: "DATE" },
+};
+/** The story's saved text: characters, tabs as \t, ¶ per paragraph, the fixture's own paragraphs left out. */
+const storyText = (bytes: Uint8Array, where: Where) =>
+  [...partXml(bytes, STORY[where][1]).matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\/>|<\/w:p>/g)]
+    .map(([match, text]) => (text !== undefined ? text : match === "<w:tab/>" ? "\t" : "¶"))
+    .join("")
+    .replace(/(^|¶)(tail|head|foot|note|x)¶/g, "$1")
+    .replace(/(^|¶)(tail|head|foot|note|x)¶/g, "$1");
+/** Field codes and simple fields the story saves. */
+const fieldsSaved = (bytes: Uint8Array, where: Where) => (sig(bytes, STORY[where][1]).match(/«[^»]*»|F\{/g) ?? []).sort().join(" | ");
+/** The story offset of the marker: the embed of the field whose code holds `code`, showing nothing. */
+function markerAt(session: YrsSession, story: string, code: string) {
+  const ids = session.paragraphs(story).map((x) => x.paraId);
+  let index = 0;
+  let offset = 0;
+  for (const g of session.storySegments(story)) {
+    if (g.kind === "pilcrow") {
+      index += 1;
+      offset = 0;
+      continue;
+    }
+    if (g.kind === "embed" && g.embedKind === "field" && String(g.payload.instruction ?? "").includes(code)) {
+      expect(String(g.payload.displayText ?? "")).toBe("");
+      return { story, paraId: ids[index]!, offset };
+    }
+    offset += g.kind === "text" ? g.text.length : 1;
+  }
+  throw new Error(`no ${code} marker in ${story}`);
+}
+type MarkerKey = "Backspace after" | "Delete before" | "Backspace before" | "Delete after";
+/** What each key at the marker leaves: the visible unit past it goes, the field stays. */
+const markerExpect: Record<string, Record<MarkerKey, { text: string; gone?: string }>> = {
+  "TOC entry": {
+    "Backspace after": { text: "Intro\t¶Body\t2¶", gone: "«PAGEREF _Toc1 \\h»" },
+    "Delete before": { text: "Intro\t1Body\t2¶" },
+    "Backspace before": { text: "Intro\t¶Body\t2¶", gone: "«PAGEREF _Toc1 \\h»" },
+    "Delete after": { text: "Intro\t1Body\t2¶" },
+  },
+  "REF over links": {
+    "Backspace after": { text: "a AAB b¶" },
+    "Delete before": { text: "a AABBb¶" },
+    "Backspace before": { text: "a AAB b¶" },
+    "Delete after": { text: "a AABBb¶" },
+  },
+  "own text moved by Enter": {
+    "Backspace after": { text: "a ¶Ayz b¶" },
+    "Delete before": { text: "a AAyz b¶" },
+    "Backspace before": { text: "a ¶Ayz b¶" },
+    "Delete after": { text: "a AAyz b¶" },
+  },
+  "nested simple field": {
+    "Backspace after": { text: "a 20 b¶" },
+    "Delete before": { text: "a 20yb¶" },
+    "Backspace before": { text: "a 20 b¶" },
+    "Delete after": { text: "a 20yb¶" },
+  },
+};
+const pressAtMarker = (session: YrsSession, story: string, file: string, key: MarkerKey) => {
+  if (markerFiles[file]!.split)
+    session.splitParagraph({ story, paraId: "44444444", offset: textAt(session, "AA").offset + 1 });
+  const at = markerAt(session, story, markerFiles[file]!.code);
+  const after = key.endsWith("after");
+  session.deleteAt({ ...at, offset: at.offset + (after ? 1 : 0) }, key.startsWith("Backspace") ? "backward" : "forward");
+};
+test.each(
+  (["body", "cell", "header"] as const).flatMap((where) =>
+    Object.keys(markerFiles).flatMap((file) =>
+      (Object.keys(markerExpect[file]!) as MarkerKey[]).map((key) => [where, file, key] as const)
+    )
+  )
+)("%s | %s: %s an invisible field marker deletes the visible unit past it and keeps the field", async (where, file, key) => {
+  const bytes = matrixDocx(where, markerFiles[file]!.xml);
+  const story = STORY[where][0];
+  const untouched = await open(bytes);
+  const before = fieldsSaved(await publish(bytes, untouched.encodeState()), where);
+  untouched.destroy();
+  const session = await open(bytes);
+  pressAtMarker(session, story, file, key);
+  const editor = matrixUnits(session, story);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  const { text, gone } = markerExpect[file]![key];
+  expect(storyText(saved, where)).toBe(text);
+  expect(fieldsSaved(saved, where)).toBe(before.split(" | ").filter((code) => code !== gone).join(" | "));
+  const reopened = await open(saved);
+  // Joining two table of contents entries leaves the editor's TOC continued where the reopened file holds it in one
+  // paragraph (as Delete at the first entry's end always has); the save is the same.
+  if (!(file === "TOC entry" && key.startsWith("Delete"))) expect(matrixUnits(reopened, story)).toBe(editor);
+  reopened.destroy();
+});
+
+// Two peers: one presses Backspace after the marker while the other types at the end of the link before it; the
+// field stays once, with the typed character and without the deleted one.
+test("Backspace after an invisible field marker beside a peer's typing keeps the field once", async () => {
+  const bytes = matrixDocx("body", markerFiles["REF over links"]!.xml);
+  const A = await open(bytes);
+  const B = await open(bytes);
+  const at = markerAt(A, "body", "REF");
+  A.deleteAt({ ...at, offset: at.offset + 1 }, "backward");
+  B.insertText({ ...at, offset: at.offset - 1 }, "W");
+  const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+  A.applyUpdate(toA);
+  B.applyUpdate(toB);
+  expect(matrixUnits(A, "body")).toBe(matrixUnits(B, "body"));
+  const saved = await publish(bytes, A.encodeState());
+  A.destroy();
+  B.destroy();
+  expect(storyText(saved, "body")).toBe("a AABW b¶");
+  expect(fieldsSaved(saved, "body")).toBe("«REF a \\h»");
 });

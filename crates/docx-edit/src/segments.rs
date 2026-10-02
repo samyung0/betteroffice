@@ -36,6 +36,9 @@ pub(crate) enum SegKind {
         /// A field whose code continues into the next paragraph: everything
         /// after it in its paragraph is that code.
         code_continues: bool,
+        /// A field the render bridge draws as no text (no shown result, a
+        /// comment reference): Backspace and Delete step over it.
+        invisible: bool,
     },
 }
 
@@ -81,17 +84,30 @@ impl SegmentIndex {
                     SegKind::Pilcrow
                 }
                 insert => {
-                    let (kind, continuation) = match insert {
-                        Out::YMap(map) => (
-                            map_string(&map, txn, KIND_KEY).unwrap_or_default(),
-                            map_string(&map, txn, "fieldData")
+                    let (kind, continuation, invisible) = match insert {
+                        Out::YMap(map) => {
+                            let kind = map_string(&map, txn, KIND_KEY).unwrap_or_default();
+                            // As the bridge draws it: PAGE and NUMPAGES show
+                            // their own numbers, a numeric code nothing, any
+                            // other field its shown result.
+                            let invisible = kind == "field"
+                                && !matches!(
+                                    map_string(&map, txn, "fieldType").as_deref(),
+                                    Some("PAGE" | "NUMPAGES")
+                                )
+                                && (map_string(&map, txn, "instruction").is_some_and(|code| {
+                                    crate::seed::numeric_field_instruction(&code)
+                                }) || map_string(&map, txn, "displayText")
+                                    .is_none_or(|text| text.is_empty()));
+                            let continuation = map_string(&map, txn, "fieldData")
                                 .filter(|data| data.contains("\"continuation\""))
                                 .and_then(|data| {
                                     serde_json::from_str::<serde_json::Value>(&data).ok()
                                 })
-                                .map(|field| field["continuation"].clone()),
-                        ),
-                        _ => (String::new(), None),
+                                .map(|field| field["continuation"].clone());
+                            (kind, continuation, invisible)
+                        }
+                        _ => (String::new(), None, false),
                     };
                     let flag = |key: &str| {
                         continuation.as_ref().is_some_and(|continuation| {
@@ -106,6 +122,7 @@ impl SegmentIndex {
                     SegKind::Embed {
                         container: matches!(kind.as_str(), "table" | "blockSdt"),
                         code_continues,
+                        invisible,
                     }
                 }
             };

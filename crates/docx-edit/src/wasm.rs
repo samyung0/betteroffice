@@ -53,7 +53,7 @@ use yrs::{
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
-use crate::segments::SegKind;
+use crate::segments::{Seg, SegKind};
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
@@ -189,51 +189,72 @@ fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, Js
     })
 }
 
+/// The unit Backspace (`Backward`) or Delete (`Forward`) at story index
+/// `index` acts on, past the fields next to it that show nothing (decided
+/// 2026-10-02: only a selection covering such a field removes it), and how
+/// many of those it steps over.
 fn adjacent_story_unit(
     doc: &EditingDoc,
     story: &str,
     index: u32,
     direction: DeleteDirection,
-) -> Result<Option<AdjacentStoryUnit>, JsValue> {
+) -> Result<(u32, Option<AdjacentStoryUnit>), JsValue> {
     let segments = doc.segment_index(story).map_err(js_err)?;
-    let position = match direction {
-        DeleteDirection::Backward => index.checked_sub(1),
-        DeleteDirection::Forward => Some(index),
-    };
-    let Some(segment) = position.and_then(|pos| segments.segment_at(pos)) else {
-        return Ok(None);
-    };
-    Ok(Some(match &segment.kind {
-        SegKind::Text(text) => {
-            let units: Vec<u16> = text.encode_utf16().collect();
-            let relative = (index - segment.start) as usize;
-            let width = match direction {
-                DeleteDirection::Backward
-                    if relative > 1
-                        && (0xdc00..=0xdfff).contains(&units[relative - 1])
-                        && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
-                {
-                    2
-                }
-                DeleteDirection::Forward
-                    if relative + 1 < units.len()
-                        && (0xd800..=0xdbff).contains(&units[relative])
-                        && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
-                {
-                    2
-                }
-                _ => 1,
-            };
-            AdjacentStoryUnit::Content(width)
+    let mut skipped = 0;
+    let segment = loop {
+        let position = match direction {
+            DeleteDirection::Backward => (index - skipped).checked_sub(1),
+            DeleteDirection::Forward => Some(index + skipped),
+        };
+        match position.and_then(|pos| segments.segment_at(pos)) {
+            Some(Seg {
+                kind: SegKind::Embed {
+                    invisible: true, ..
+                },
+                ..
+            }) => skipped += 1,
+            Some(segment) => break segment,
+            None => return Ok((skipped, None)),
         }
-        SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
-        SegKind::Embed {
-            container: true, ..
-        } => AdjacentStoryUnit::Container,
-        SegKind::Embed {
-            container: false, ..
-        } => AdjacentStoryUnit::Content(1),
-    }))
+    };
+    let index = match direction {
+        DeleteDirection::Backward => index - skipped,
+        DeleteDirection::Forward => index + skipped,
+    };
+    Ok((
+        skipped,
+        Some(match &segment.kind {
+            SegKind::Text(text) => {
+                let units: Vec<u16> = text.encode_utf16().collect();
+                let relative = (index - segment.start) as usize;
+                let width = match direction {
+                    DeleteDirection::Backward
+                        if relative > 1
+                            && (0xdc00..=0xdfff).contains(&units[relative - 1])
+                            && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
+                    {
+                        2
+                    }
+                    DeleteDirection::Forward
+                        if relative + 1 < units.len()
+                            && (0xd800..=0xdbff).contains(&units[relative])
+                            && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
+                    {
+                        2
+                    }
+                    _ => 1,
+                };
+                AdjacentStoryUnit::Content(width)
+            }
+            SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+            SegKind::Embed {
+                container: true, ..
+            } => AdjacentStoryUnit::Container,
+            SegKind::Embed {
+                container: false, ..
+            } => AdjacentStoryUnit::Content(1),
+        }),
+    ))
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held
@@ -1138,13 +1159,29 @@ impl EditSession {
         selection: (String, String, u32),
     ) -> Result<String, JsValue> {
         let (story, para_id, head) = selection;
-        self.delete_adjacent(
+        let (caret, _) = self.delete_adjacent(
             &EditCtx::local("", ""),
             &story,
             &para_id,
             head,
             delete_direction(direction)?,
         )?;
+        // Backspace past a field that shows nothing leaves the caret ahead of
+        // it, where the deleted unit was; the selection's anchors would keep it
+        // after the field.
+        let doc = self.engine.doc();
+        let index = loc_index(doc, &story, &caret.para, caret.offset)?;
+        let txn = doc.yrs_doc().transact();
+        let caret = story_ref(&txn, &story)
+            .map_err(js_err)?
+            .sticky_index(&txn, index, Assoc::After)
+            .ok_or_else(|| js_err("caret could not be made sticky"))?;
+        drop(txn);
+        *self.selection.borrow_mut() = Some(LocalSelection {
+            story: story.clone(),
+            anchor: caret.clone(),
+            head: caret,
+        });
         Ok(story)
     }
 
@@ -1167,20 +1204,20 @@ impl EditSession {
             let loc = index_loc(doc, story, index)?;
             Ok(crate::Loc::new(story, loc.para_id, loc.offset))
         };
-        let adjacent = adjacent_story_unit(doc, story, head, direction)?;
+        let (skipped, adjacent) = adjacent_story_unit(doc, story, head, direction)?;
         match (direction, adjacent) {
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
+                // The caret goes where the deleted unit was, ahead of the fields it stepped over.
+                let start = head - skipped - width;
                 let receipt = doc
-                    .delete_range(ctx, StoryRange::new(story, head - width, head))
+                    .delete_range(ctx, StoryRange::new(story, start, start + width))
                     .map_err(js_err)?;
-                Ok((
-                    caret_at(head - width)?,
-                    receipt.revision_ids.into_iter().next(),
-                ))
+                Ok((caret_at(start)?, receipt.revision_ids.into_iter().next()))
             }
             (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
+                let start = head + skipped;
                 let receipt = doc
-                    .delete_range(ctx, StoryRange::new(story, head, head + width))
+                    .delete_range(ctx, StoryRange::new(story, start, start + width))
                     .map_err(js_err)?;
                 Ok((caret_at(head)?, receipt.revision_ids.into_iter().next()))
             }
@@ -1210,6 +1247,8 @@ impl EditSession {
                 };
                 Ok((caret, receipt.revision_ids.into_iter().next()))
             }
+            // Only fields that show nothing lie that way: they stay.
+            (_, None) if skipped > 0 => Ok((caret_at(head)?, None)),
             (_, None) => Err(js_err("there is no character in that direction")),
         }
     }
@@ -3761,6 +3800,94 @@ mod tests {
 
         let paragraphs = session.engine.doc().paragraphs("body").unwrap();
         assert_eq!(paragraphs[1].text, "ABCD");
+    }
+
+    #[test]
+    fn backspace_and_delete_step_over_a_field_that_shows_nothing() {
+        let session = EditSession::new(23.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+            .unwrap();
+        let field = |shown: &str| RawOp::InsertEmbed {
+            index: 0,
+            kind: "field".into(),
+            payload: vec![
+                ("fieldType".into(), Any::from("OTHER")),
+                ("displayText".into(), Any::from(shown)),
+            ],
+            attrs: Default::default(),
+        };
+        let at = |index: u32, op: RawOp| match op {
+            RawOp::InsertEmbed {
+                kind,
+                payload,
+                attrs,
+                ..
+            } => RawOp::InsertEmbed {
+                index,
+                kind,
+                payload,
+                attrs,
+            },
+            op => op,
+        };
+        let text = |index: u32, text: &str| RawOp::Insert {
+            index,
+            text: text.into(),
+            attrs: Default::default(),
+        };
+        // p1: AB [shows nothing] CD [shows x] E
+        let ops = vec![
+            text(6, "AB"),
+            at(8, field("")),
+            text(9, "CD"),
+            at(11, field("x")),
+            text(12, "E"),
+            RawOp::InsertEmbed {
+                index: 13,
+                kind: "pilcrow".into(),
+                payload: vec![("paraId".into(), Any::from("p1"))],
+                attrs: Default::default(),
+            },
+        ];
+        doc.apply_raw_ops("body", ops, &EditCtx::local(String::new(), String::new()))
+            .unwrap();
+        let shown = || {
+            doc.story_segments("body")
+                .unwrap()
+                .into_iter()
+                .skip(2)
+                .map(|segment| match segment.content {
+                    crate::SegmentContent::Text(text) => text,
+                    crate::SegmentContent::Pilcrow(_) => "¶".into(),
+                    crate::SegmentContent::OtherEmbed { payload, .. } => {
+                        format!(
+                            "[{}]",
+                            payload
+                                .get("displayText")
+                                .map(|value| value.to_string())
+                                .unwrap_or_default()
+                        )
+                    }
+                })
+                .collect::<String>()
+        };
+        // Backspace after the empty field takes B, the caret going where B was.
+        let receipt = session
+            .delete_at("body", "p1", 3, "backward", None, None)
+            .unwrap();
+        assert_eq!(shown(), "A[]CD[x]E¶");
+        assert!(receipt.contains(r#""offset":1"#), "{receipt}");
+        // Delete before it takes C, resident or not.
+        session
+            .delete_resident_input("forward", ("body".into(), "p1".into(), 7))
+            .unwrap();
+        assert_eq!(shown(), "A[]D[x]E¶");
+        // A field that shows text goes with Backspace, as any character would.
+        session
+            .delete_at("body", "p1", 4, "backward", None, None)
+            .unwrap();
+        assert_eq!(shown(), "A[]DE¶");
     }
 
     #[test]
