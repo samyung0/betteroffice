@@ -535,12 +535,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
+    // The host re-projects `comments` on every yrs update, so sidebarCommentIds
+    // is a new array per keystroke. An env whose content did not change keeps
+    // its identity: a new one re-runs the whole layout pipeline
+    // (useLayoutTriggers), which also re-syncs the resident worker.
+    const yrsRenderEnvRef = useRef<{ key: string; env: YrsRenderEnv } | null>(null);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
         if (typeof value === 'string') themeColors[name] = value;
       }
-      return {
+      const env: YrsRenderEnv = {
         themeColors,
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: yrsCore.session
@@ -553,6 +558,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           : {},
         showHiddenText,
       };
+      const key = JSON.stringify(env);
+      if (yrsRenderEnvRef.current?.key !== key) yrsRenderEnvRef.current = { key, env };
+      return yrsRenderEnvRef.current.env;
     }, [
       _theme?.colorScheme,
       document?.package.settings?.defaultTabStop,

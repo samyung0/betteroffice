@@ -710,11 +710,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pagedEditorRef,
   });
 
+  // `comments` is re-projected on every yrs update; an unchanged set keeps its
+  // identity so the canvas does not rebuild its display list per keystroke.
+  const resolvedCommentIdsRef = useRef<Set<number>>(new Set());
   const resolvedCommentIds = useMemo(() => {
     const ids = new Set<number>();
     for (const c of comments) {
       if (c.done && c.parentId == null) ids.add(c.id);
     }
+    const previous = resolvedCommentIdsRef.current;
+    if (ids.size === previous.size && [...ids].every((id) => previous.has(id))) return previous;
+    resolvedCommentIdsRef.current = ids;
     return ids;
   }, [comments]);
 
