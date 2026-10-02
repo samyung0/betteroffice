@@ -53,6 +53,7 @@ import type {
   SlideLayoutOption,
 } from './components/Toolbar';
 import { SHAPE_PRESETS } from './components/Toolbar';
+import { toolbarFont } from './components/ui/ToolbarPrimitives';
 import {
   RESIZE_HANDLES,
   canResizeShape,
@@ -167,6 +168,8 @@ export interface PptxEditorProps {
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /** A flat toolbar row of `--pptx-toolbar-height` (40px) instead of the rounded rail. */
+  singleRowToolbar?: boolean;
 }
 
 interface EditorModel {
@@ -304,6 +307,9 @@ const INSERT_IMAGE_TYPES: Record<string, string> = {
 /** Windows/Office caret phase. */
 const CARET_BLINK_MS = 530;
 
+/** Slide strip thumbnails fill this width at their slide's aspect ratio. */
+const THUMBNAIL_WIDTH = 132;
+
 /** Screen-space diameter of a resize grip. */
 const HANDLE_SIZE = 9;
 
@@ -342,6 +348,7 @@ function PptxEditorContent({
   onSave,
   onSaveRequest,
   readOnly = false,
+  singleRowToolbar = false,
 }: Omit<PptxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -2109,7 +2116,7 @@ function PptxEditorContent({
         }
       }}
     >
-      <div style={styles.toolbarShell}>
+      <div style={singleRowToolbar ? styles.singleRowShell : styles.toolbarShell}>
         {!readOnly && (
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
@@ -2146,6 +2153,7 @@ function PptxEditorContent({
             stageRef.current?.focus();
           }}
           disabled={!model || slideCount === 0}
+          singleRow={singleRowToolbar}
           style={styles.toolbar}
         >
           <EditorToolbar.Toolbar />
@@ -2229,6 +2237,7 @@ function PptxEditorContent({
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
           {model?.snapshot.slides.map((slide, index) => {
             const slidePresence = remotePeersBySlide.get(slide.id);
+            const thumbnail = model.thumbnails.get(slide.id);
             return (
               <button
                 type="button"
@@ -2238,10 +2247,17 @@ function PptxEditorContent({
                 onClick={() => selectSlide(index)}
               >
                 <span style={styles.slideNumber}>{index + 1}</span>
-                <span style={styles.slidePreview}>
-                  {model.thumbnails.get(slide.id) ? (
+                <span
+                  style={{
+                    ...styles.slidePreview,
+                    ...(thumbnail
+                      ? { aspectRatio: `${thumbnail.width} / ${thumbnail.height}` }
+                      : { aspectRatio: '16 / 9', padding: 8 }),
+                  }}
+                >
+                  {thumbnail ? (
                     <SlideThumbnail
-                      frame={model.thumbnails.get(slide.id)!}
+                      frame={thumbnail}
                       resolveImage={(assetId) =>
                         resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
                       }
@@ -2640,7 +2656,7 @@ function SlideThumbnail({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const scale = 128 / frame.width;
+    const scale = THUMBNAIL_WIDTH / frame.width;
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
@@ -2928,21 +2944,32 @@ const styles: Record<string, CSSProperties> = {
     height: '100%',
     minHeight: 480,
     overflow: 'hidden',
-    color: '#172033',
-    background: '#f3f5f8',
-    fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+    color: 'var(--pptx-text, #172033)',
+    background: 'var(--pptx-bg, #f3f5f8)',
+    fontFamily: toolbarFont,
   },
   toolbarShell: {
     display: 'flex',
     alignItems: 'center',
     flex: '0 0 auto',
     padding: '4px 0 5px',
-    background: '#ffffff',
-    borderBottom: '1px solid #e2e8f0',
+    background: 'var(--pptx-surface, #ffffff)',
+    borderBottom: '1px solid var(--pptx-divider, #e2e8f0)',
+  },
+  singleRowShell: {
+    display: 'flex',
+    alignItems: 'center',
+    flex: '0 0 auto',
+    height: 'var(--pptx-toolbar-height, 40px)',
+    padding: '0 4px 0 8px',
+    background: 'var(--pptx-surface, #ffffff)',
+    borderBottom: '1px solid var(--pptx-divider, #e2e8f0)',
+    boxSizing: 'border-box',
   },
   toolbar: {
     flex: '1 1 auto',
     minWidth: 0,
+    height: '100%',
   },
   presenceStrip: {
     display: 'flex',
@@ -2958,26 +2985,24 @@ const styles: Record<string, CSSProperties> = {
     width: 184,
     padding: '14px 10px',
     overflowY: 'auto',
-    background: '#eef1f5',
-    borderRight: '1px solid #d8dee9',
+    background: 'var(--pptx-strip-bg, #eef1f5)',
+    borderRight: '1px solid var(--pptx-divider, #d8dee9)',
     boxSizing: 'border-box',
   },
-  slideNumber: { width: 18, flex: '0 0 auto', paddingTop: 3, fontSize: 11, color: '#647087', textAlign: 'right' },
+  slideNumber: { width: 18, flex: '0 0 auto', paddingTop: 3, fontSize: 11, color: 'var(--pptx-text-muted, #647087)', textAlign: 'right' },
   slidePreview: {
     position: 'relative',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    width: 132,
-    aspectRatio: '16 / 9',
-    padding: 8,
+    width: THUMBNAIL_WIDTH,
     overflow: 'hidden',
     background: '#ffffff',
     boxSizing: 'border-box',
     boxShadow: '0 1px 4px rgba(20, 31, 50, 0.16)',
   },
-  slideTitle: { fontSize: 9, lineHeight: 1.25, color: '#39445a', textAlign: 'center' },
-  thumbnailCanvas: { display: 'block', maxWidth: '100%', height: 'auto' },
+  slideTitle: { fontSize: 9, lineHeight: 1.25, color: 'var(--pptx-text-muted, #39445a)', textAlign: 'center' },
+  thumbnailCanvas: { display: 'block' },
   thumbnailPresence: {
     position: 'absolute',
     top: 4,
@@ -3090,13 +3115,13 @@ const styles: Record<string, CSSProperties> = {
     flexDirection: 'column',
     gap: 4,
     padding: '8px 14px 10px',
-    background: '#ffffff',
-    borderTop: '1px solid #e2e8f0',
+    background: 'var(--pptx-surface, #ffffff)',
+    borderTop: '1px solid var(--pptx-divider, #e2e8f0)',
   },
   notesLabel: {
     fontSize: 11,
     fontWeight: 650,
-    color: '#647087',
+    color: 'var(--pptx-text-muted, #647087)',
     textTransform: 'uppercase',
     letterSpacing: '0.02em',
   },
@@ -3104,16 +3129,17 @@ const styles: Record<string, CSSProperties> = {
     width: '100%',
     height: 64,
     resize: 'vertical',
-    border: '1px solid #d8dee9',
+    border: '1px solid var(--pptx-border, #d8dee9)',
     borderRadius: 6,
     padding: '6px 8px',
-    font: '13px ui-sans-serif, system-ui, sans-serif',
-    color: '#172033',
+    font: `13px ${toolbarFont}`,
+    color: 'var(--pptx-text, #172033)',
+    background: 'var(--pptx-surface, #ffffff)',
     boxSizing: 'border-box',
     outline: 'none',
   },
-  empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
-  error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  empty: { margin: 'auto', color: 'var(--pptx-text-muted, #6b7587)', fontSize: 14 },
+  error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: 'var(--pptx-error-text, #8b1e2d)', background: 'var(--pptx-error-bg, #fff0f2)', border: '1px solid var(--pptx-error-border, #efb8c0)', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {
     position: 'absolute',
     width: 1,
@@ -3135,9 +3161,9 @@ const styles: Record<string, CSSProperties> = {
     height: 30,
     border: 0,
     borderRadius: 15,
-    background: '#1a73e8',
-    color: '#ffffff',
-    font: '600 13px ui-sans-serif, system-ui, sans-serif',
+    background: 'var(--pptx-accent, #1a73e8)',
+    color: 'var(--pptx-on-accent, #ffffff)',
+    font: `600 13px ${toolbarFont}`,
     cursor: 'pointer',
   },
 
@@ -3161,7 +3187,7 @@ function presenceChip(color: string, sameSlide: boolean): CSSProperties {
     width: 28,
     height: 28,
     flex: '0 0 auto',
-    border: '2px solid #ffffff',
+    border: '2px solid var(--pptx-surface, #ffffff)',
     borderRadius: 999,
     backgroundColor: color,
     boxShadow: '0 0 0 1px rgba(15, 23, 42, 0.14)',
@@ -3181,7 +3207,7 @@ function slideButton(active: boolean): CSSProperties {
     width: '100%',
     marginBottom: 12,
     padding: 4,
-    border: active ? '2px solid #325ee6' : '2px solid transparent',
+    border: active ? '2px solid var(--pptx-accent, #325ee6)' : '2px solid transparent',
     borderRadius: 5,
     background: 'transparent',
     cursor: 'pointer',

@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 
+/** Hosts restyle the chrome through these `--pptx-*` variables. */
 export const toolbarColors = {
-  text: '#3c4043',
-  muted: '#5f6368',
-  disabled: '#9aa0a6',
-  hover: '#e2e7ef',
-  active: '#d3e3fd',
-  border: '#c7cacf',
-  surface: '#ffffff',
-  rail: '#edf2fa',
+  text: 'var(--pptx-text, #3c4043)',
+  muted: 'var(--pptx-text-muted, #5f6368)',
+  disabled: 'var(--pptx-text-disabled, #9aa0a6)',
+  hover: 'var(--pptx-hover, #e2e7ef)',
+  active: 'var(--pptx-pressed, #d3e3fd)',
+  activeText: 'var(--pptx-pressed-text, #3c4043)',
+  border: 'var(--pptx-border, #c7cacf)',
+  surface: 'var(--pptx-surface, #ffffff)',
+  rail: 'var(--pptx-rail, #edf2fa)',
+  menuShadow: 'var(--pptx-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
 };
+
+export const toolbarFont = 'var(--pptx-font, ui-sans-serif, system-ui, sans-serif)';
 
 const baseButtonStyle: CSSProperties = {
   appearance: 'none',
@@ -24,7 +29,7 @@ const baseButtonStyle: CSSProperties = {
   border: 0,
   borderRadius: 4,
   color: toolbarColors.text,
-  font: '500 13px ui-sans-serif, system-ui, sans-serif',
+  font: `500 13px ${toolbarFont}`,
   lineHeight: 1,
   whiteSpace: 'nowrap',
   boxSizing: 'border-box',
@@ -43,7 +48,11 @@ function interactiveButtonStyle(
       : hovered && !disabled
         ? toolbarColors.hover
         : 'transparent',
-    color: disabled ? toolbarColors.disabled : toolbarColors.text,
+    color: disabled
+      ? toolbarColors.disabled
+      : active
+        ? toolbarColors.activeText
+        : toolbarColors.text,
     cursor: disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.48 : 1,
     ...style,
@@ -225,7 +234,7 @@ export function ToolbarDropdown({
             border: `1px solid ${toolbarColors.border}`,
             borderRadius: 8,
             background: toolbarColors.surface,
-            boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
+            boxShadow: toolbarColors.menuShadow,
             boxSizing: 'border-box',
           }}
         >
@@ -281,7 +290,7 @@ export function ToolbarMenuItem({
         color: disabled ? toolbarColors.disabled : toolbarColors.text,
         cursor: disabled ? 'default' : 'pointer',
         opacity: disabled ? 0.48 : 1,
-        font: '400 13px ui-sans-serif, system-ui, sans-serif',
+        font: `400 13px ${toolbarFont}`,
         textAlign: 'left',
         boxSizing: 'border-box',
       }}

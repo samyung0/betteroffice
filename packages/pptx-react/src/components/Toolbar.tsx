@@ -108,6 +108,8 @@ export interface ToolbarProps {
   fontFamilies?: readonly string[];
   fontSizes?: readonly number[];
   disabled?: boolean;
+  /** A flat full-height row for a host-sized toolbar strip, without the rounded rail. */
+  singleRow?: boolean;
   className?: string;
   style?: CSSProperties;
   children?: ReactNode;
@@ -200,6 +202,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     fontFamilies = DEFAULT_FONT_FAMILIES,
     fontSizes = DEFAULT_FONT_SIZES,
     disabled = false,
+    singleRow = false,
     className,
     style,
     children,
@@ -792,11 +795,15 @@ export function Toolbar(explicitProps: ToolbarProps) {
         display: 'flex',
         alignItems: 'center',
         minWidth: 0,
-        minHeight: 36,
-        margin: '0 8px 5px',
-        padding: '4px 7px',
-        borderRadius: 18,
-        background: toolbarColors.rail,
+        ...(singleRow
+          ? { height: '100%' }
+          : {
+              minHeight: 36,
+              margin: '0 8px 5px',
+              padding: '4px 7px',
+              borderRadius: 18,
+              background: toolbarColors.rail,
+            }),
         color: toolbarColors.text,
         overflow: 'hidden',
         boxSizing: 'border-box',

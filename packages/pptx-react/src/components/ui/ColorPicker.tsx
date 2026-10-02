@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
 import type { ToolbarIconName } from './ToolbarIcon';
-import { toolbarColors } from './ToolbarPrimitives';
+import { toolbarColors, toolbarFont } from './ToolbarPrimitives';
 
 export interface ColorPickerProps {
   value: string;
@@ -118,7 +118,7 @@ export function ColorPicker({
             color: disabled ? toolbarColors.disabled : toolbarColors.muted,
             cursor: disabled ? 'default' : 'pointer',
             opacity: disabled ? 0.48 : 1,
-            font: '500 14px ui-sans-serif, system-ui, sans-serif',
+            font: `500 14px ${toolbarFont}`,
           }}
         >
           ×
