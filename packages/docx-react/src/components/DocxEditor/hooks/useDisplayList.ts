@@ -372,9 +372,15 @@ export function useRustDisplayList(
         frameEpoch: number,
         paintToken: number
       ): Promise<ResidentFrameApplyResult | null> => {
+        let expectedFrameEpoch = frameEpoch;
         if (workerFallbackEngineRef.current !== hostEngine) {
           queryEpochGate.clear();
           workerFallbackEngineRef.current = hostEngine;
+          // The retained frame carries the worker's epochs and the host engine
+          // numbers its own: drop it and ask for a full frame, so the host's
+          // frames are not refused as stale (the effect's fallback does the same).
+          snapshotRef.current = { ...snapshotRef.current, frame: null, queries: null, caret: null };
+          expectedFrameEpoch = 0;
         }
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
@@ -387,8 +393,8 @@ export function useRustDisplayList(
         try {
           encoded =
             pending.kind === 'insert'
-              ? hostEngine.applyInput(pending.text, frameEpoch)
-              : hostEngine.applyDelete(pending.direction, frameEpoch);
+              ? hostEngine.applyInput(pending.text, expectedFrameEpoch)
+              : hostEngine.applyDelete(pending.direction, expectedFrameEpoch);
         } catch (error) {
           suppressWorkerInvalidationRef.current -= 1;
           if (

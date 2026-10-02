@@ -375,3 +375,88 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
     native.free();
   }
 });
+
+test('keeps editing on the main thread when the worker fails before the host engine can replay the input', async () => {
+  const native = createEditSession(9205);
+  native.create_story('body', 'Fallback text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  const paragraphs = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string; text: string }>;
+  const para = paragraphs[0]!;
+  native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+  let worker: InputFakeWorker | null = null;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  let replayReady = false;
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    // the main-thread engine has no resident input state yet when the worker dies
+    applyInput: (text: string, epoch: number) => {
+      if (!replayReady) throw new Error('resident input state is not ready');
+      return native.apply_input(text, epoch);
+    },
+    residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onUpdate: () => () => {},
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => {
+      worker!.replyBootstrap();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(100);
+    });
+    let outcome: ResidentFrameApplyResult | null | undefined;
+    await act(async () => {
+      const pending = result.current.applyInput('QUACK');
+      await flushInputRequest(worker!);
+      worker!.crash();
+      outcome = await pending;
+    });
+    expect(outcome).toBeNull();
+    replayReady = true;
+    // The input path commits the keys as compatibility input, then lays out
+    // again: the host engine's frames (epoch 1, 2, ...) must apply even though
+    // the worker's last frame was epoch 100.
+    for (const text of ['QUACK', 'MOO']) {
+      await act(async () => {
+        native.apply_input(text, 0);
+        rerender({ layout: { ...inputs.layout } });
+      });
+      await waitFor(() => expect(JSON.stringify(result.current.displayList)).toContain(text));
+    }
+    expect(result.current.error).toBeNull();
+    expect(result.current.frame!.frameEpoch).toBeLessThan(100);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('Rust display-list build failed'))
+    ).toBe(false);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
