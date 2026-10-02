@@ -1238,6 +1238,11 @@ impl EditSession {
                     _ => None,
                 };
                 let Some(merge) = merge else {
+                    // Past fields that show nothing lies the story's end:
+                    // nothing to delete, as at the end itself.
+                    if skipped > 0 {
+                        return Ok((caret_at(head)?, None));
+                    }
                     return Err(js_err("there is no character in that direction"));
                 };
                 let receipt = doc.merge_paragraphs(ctx, para_id, merge).map_err(js_err)?;
@@ -3888,6 +3893,22 @@ mod tests {
             .delete_at("body", "p1", 4, "backward", None, None)
             .unwrap();
         assert_eq!(shown(), "A[]DE¶");
+        // Delete before a field that shows nothing at the story's end finds
+        // nothing to delete, resident or not, as at the end itself.
+        doc.apply_raw_ops(
+            "body",
+            vec![at(10, field(""))],
+            &EditCtx::local(String::new(), String::new()),
+        )
+        .unwrap();
+        assert_eq!(shown(), "A[]DE[]¶");
+        session
+            .delete_at("body", "p1", 4, "forward", None, None)
+            .unwrap();
+        session
+            .delete_resident_input("forward", ("body".into(), "p1".into(), 10))
+            .unwrap();
+        assert_eq!(shown(), "A[]DE[]¶");
     }
 
     #[test]

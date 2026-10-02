@@ -44,14 +44,8 @@ async function mount(
   sessions.push(session);
   const { paraId } = session.createStory('body', 'Seed');
   session.setSelection({ story: 'body', paraId, offset: 4 });
-  const map = () =>
-    createYrsInputPositionMap(
-      'body',
-      session.paragraphs('body').map((p) => ({
-        paraId: p.paraId,
-        length: p.text.length,
-      }))
-    );
+  // Story units per paragraph, embeds included, as the editor's core session maps them.
+  const map = () => createYrsInputPositionMap('body', session.paragraphSpans('body'));
   const input = createRef<YrsInputRef>();
   const component = (readOnly = false) => (
     <YrsInput
@@ -253,4 +247,25 @@ test("Enter before a table leaves the table paragraph's style alone", async () =
   await enter(seed.paraId, 4);
   expect(styled).toHaveLength(1);
   expect(styled[0]).not.toBe(seed.paraId);
+});
+
+test('Delete before a field that shows nothing at the story end leaves input working', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  // Seed[TC]¶: a field that draws nothing ends the story, and the caret sits before it.
+  session.applyRawOps('body', [
+    { op: 'insertEmbed', index: 4, kind: 'field', payload: { fieldType: 'TC', instruction: ' TC x ', displayText: '' } },
+  ]);
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 4 }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.keyDown(textarea, { key: 'Delete' });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  act(() => input.current!.insertText('!'));
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(session.paragraphs('body')[0].text.replace(/￼/g, '')).toBe('Seed!');
+  expect(session.storySegments('body').filter((segment) => segment.kind === 'embed')).toHaveLength(1);
 });

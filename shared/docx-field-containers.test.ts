@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, partXml, prime, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
+import { E as commentEnd, S as commentStart, STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, partXml, prime, ref as commentRef, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -2599,4 +2599,30 @@ test.each(
   expect(sig(saved, part)).toBe(original);
   session.destroy();
   replica.destroy();
+});
+
+// Round 4 review, finding 3: Delete in front of an invisible marker that ends a story's last paragraph steps over it
+// and finds nothing to delete, as Delete at a story's end does: nothing changes and nothing throws (a throw left the
+// editor's input queue failed). Backspace after one that opens a story's first paragraph likewise.
+const tcField = `${char("begin")}${instr(" TC x ")}${char("end")}`;
+test.each([
+  ["body", "a comment's reference ending the document", `${commentStart(5)}${run("last word")}${commentEnd(5)}${commentRef(5)}`],
+  ["cell", "a TC field ending a cell", `${tcField}${run("ab")}${tcField}`],
+  ["header", "a TC field ending a header", `${tcField}${run("ab")}${tcField}`],
+  ["footnote", "a TC field ending a footnote", `${tcField}${run("ab")}${tcField}`],
+] as const)("%s | %s: Delete before it and Backspace at the start change nothing", async (where, _, xml) => {
+  const story = STORY[where][0];
+  // In the body the marker ends the document, so the content replaces its last paragraph.
+  const bytes = where === "body" ? docx(p("22222222", xml)) : matrixDocx(where, p("44444444", xml));
+  const paraId = where === "body" ? "22222222" : "44444444";
+  const session = await open(bytes);
+  const before = matrixUnits(session, story);
+  const length = session.paragraphSpans(story).find((span) => span.paraId === paraId)!.length;
+  expect(() => session.deleteAt({ story, paraId, offset: length - 1 }, "forward")).not.toThrow();
+  if (where === "cell" || where === "header") expect(() => session.deleteAt({ story, paraId, offset: 1 }, "backward")).not.toThrow();
+  expect(matrixUnits(session, story)).toBe(before);
+  // The session takes the next key as usual.
+  session.insertText({ story, paraId, offset: length - 1 }, "Z");
+  expect(matrixUnits(session, story)).toBe(before.replace(where === "body" ? "word" : "ab", where === "body" ? "wordZ" : "abZ"));
+  session.destroy();
 });
