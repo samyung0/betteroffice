@@ -46,6 +46,8 @@ async function open(readOnly = false) {
     />
   );
   await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+  // The state reaches the host after the render that shows the deck.
+  await waitFor(() => expect(states[states.length - 1]?.enabled['view.zoom']).toBe(true));
   const api = opened[0];
   const slideIds = () => api.handle.snapshot().slides.map((slide) => slide.id);
   const run = (id: Parameters<PptxEditorApi['runCommand']>[0], value?: string) => {
