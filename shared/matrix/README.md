@@ -80,9 +80,9 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   after a capture land with that marker order instead of refusing.
 - `unstable` rows with two editor comments ending at one point: their markers reorder on the second publication.
 - `moved` rows in `docx-fields` (accepted, round 2): Enter between a projected link and its field when the field's
-  result holds a kept tracked insertion stays as it was, saving the link outside the field. Text typed at the end of
-  a paragraph whose field result continues into the next saves inside that result, as Word does, while the editor
-  shows it after the field (round 2 review D reverted V; it is on the follow-up list).
+  result holds a kept tracked insertion stays as it was, saving the link outside the field. (Text typed at the end of
+  a paragraph whose field result continues into the next lands exactly since follow-up item 4: the seed reads that
+  paragraph's result tail as text after the field.)
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
     simple field before a capture, which shares that field's result slot the export's seed splits (accepted like

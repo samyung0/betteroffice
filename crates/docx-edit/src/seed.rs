@@ -1586,6 +1586,39 @@ fn inline_to_units(
     units
 }
 
+/// A field whose result continues into a later paragraph, and the runs that
+/// end its result in this one, after its projected children. They seed as
+/// ordinary text after the field's embed, as the result in the later
+/// paragraphs does and as typing at this paragraph's end adds to it, so the
+/// field no longer shows or stores them itself (decided 2026-10-02).
+fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
+    let continuation = field(Some(value), "continuation");
+    let continued = string(field(Some(value), "type")) == Some("complexField")
+        && boolean(field(continuation, "end")) == Some(true)
+        && boolean(field(continuation, "separate")) != Some(true);
+    let inline = array(field(field(Some(value), "structuredResult"), "inline"));
+    let tail = if continued {
+        inline
+            .iter()
+            .rev()
+            .take_while(|node| string(field(Some(node), "type")) == Some("run"))
+            .count()
+    } else {
+        0
+    };
+    if tail == 0 {
+        return (value.clone(), Vec::new());
+    }
+    let (kept, moved) = inline.split_at(inline.len() - tail);
+    let mut field = value.clone();
+    field["structuredResult"]["inline"] = Value::Array(kept.to_vec());
+    field["fieldResult"] = Value::Array(shown_runs(kept));
+    if field["fieldTree"]["result"]["inline"].is_array() {
+        field["fieldTree"]["result"]["inline"] = Value::Array(kept.to_vec());
+    }
+    (field, moved.to_vec())
+}
+
 fn field_to_units(
     value: &Value,
     style_formatting: Option<&Value>,
@@ -2462,13 +2495,23 @@ fn paragraph_units(
             }
             "simpleField" | "complexField" => {
                 boundaries = None;
+                let (content, tail) = continued_result_tail(content);
                 units.extend(field_to_units(
-                    content,
+                    &content,
                     style_formatting.as_ref(),
                     styles,
                     source,
                     unit_counts.len(),
                 ));
+                for run in &tail {
+                    units.extend(run_to_units(
+                        run,
+                        style_formatting.as_ref(),
+                        styles,
+                        &[],
+                        source,
+                    ));
+                }
             }
             "inlineSdt" => {
                 boundaries = None;

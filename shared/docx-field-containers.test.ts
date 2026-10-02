@@ -2409,3 +2409,98 @@ test("Backspace after an invisible field marker beside a peer's typing keeps the
   expect(storyText(saved, "body")).toBe("a AABW b¶");
   expect(fieldsSaved(saved, "body")).toBe("«REF a \\h»");
 });
+
+// Follow-up item 4 (decided 2026-10-02): a field whose result continues into the next paragraph seeds the runs that
+// end its result in its first paragraph as text after its embed, so text typed at that paragraph's end is result text
+// in the editor, where the save puts it, and the reopened file reads the same. Two shapes: a DATE result split over
+// two paragraphs, and a table of contents without links (entries as plain runs).
+const continuedResults = [
+  ["a DATE result over two paragraphs", p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`)],
+  [
+    "a table of contents without links",
+    p("11111111", `${char("begin")}${instr(" TOC \\o ")}${char("separate")}${run("Intro")}<w:r><w:tab/></w:r>${run("1")}`) + p("33333333", `${run("Body")}<w:r><w:tab/></w:r>${run("2")}${char("end")}`),
+  ],
+] as const;
+/** The saved document's text runs, joined. */
+const savedText = (bytes: Uint8Array) => [...documentXml(bytes).matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(([, text]) => text).join("");
+test.each(continuedResults)("Backspace at the end of %s's first paragraph deletes one character and keeps the field", async (_, body) => {
+  const bytes = docx(body + tail);
+  const session = await open(bytes);
+  const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
+  session.deleteAt({ story: "body", paraId: "11111111", offset: length }, "backward");
+  const editor = matrixUnits(session, "body");
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  const reopened = await open(saved);
+  expect(matrixUnits(reopened, "body")).toBe(editor);
+  reopened.destroy();
+  const xml = documentXml(saved);
+  expect(xml).toContain(body.includes("TOC") ? " TOC \\o " : " DATE ");
+  expect(xml).toContain('w:fldCharType="end"');
+  expect(savedText(saved)).toBe(body.includes("TOC") ? "IntroBody2tail" : "a0ztail");
+});
+test.each(continuedResults)("text typed at the end of %s's first paragraph shows where the save puts it", async (_, body) => {
+  const bytes = docx(body + tail);
+  const untouched = await open(bytes);
+  const original = documentXml(await publish(bytes, untouched.encodeState()));
+  untouched.destroy();
+  // Untouched, the save is the source's.
+  expect(original).toContain(body.includes("TOC") ? ">Intro</w:t>" : ">2</w:t>");
+  const session = await open(bytes);
+  const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
+  session.insertText({ story: "body", paraId: "11111111", offset: length }, "Q");
+  const editor = matrixUnits(session, "body");
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  const reopened = await open(saved);
+  expect(matrixUnits(reopened, "body")).toBe(editor);
+  reopened.destroy();
+  // Inside the result: after the separate, before the end in the next paragraph.
+  const xml = documentXml(saved);
+  expect(xml.indexOf("Q</w:t>")).toBeGreaterThan(xml.indexOf('w:fldCharType="separate"'));
+  expect(xml.indexOf("Q</w:t>")).toBeLessThan(xml.indexOf('w:fldCharType="end"'));
+});
+
+// Follow-up item 4: Enter inside the link of a field whose result continues into the next paragraph, then the
+// rewriting join, restores the field with its tail text after the embed (the join stops at the tail instead of
+// leaving the link split).
+test.each(["Backspace", "Delete"] as const)("Enter in the link of a field whose result continues, then %s, restores it", async (key) => {
+  const bytes = docx(
+    p("11111111", `${run("a ")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${link(run("AA"))}${run("yy")}`) +
+      p("33333333", `${run("zz")}${char("end")}${run(" b")}`) +
+      tail
+  );
+  const before = await open(bytes);
+  const original = matrixUnits(before, "body");
+  const untouched = await publish(bytes, before.encodeState());
+  before.destroy();
+  const session = await open(bytes);
+  const { firstParaId, secondParaId } = session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, "AA") + 1 });
+  if (key === "Backspace") session.deleteAt({ story: "body", paraId: secondParaId, offset: 0 }, "backward");
+  else session.deleteAt({ story: "body", paraId: firstParaId, offset: session.paragraphSpans("body").find((span) => span.paraId === firstParaId)!.length }, "forward");
+  expect(matrixUnits(session, "body")).toBe(original);
+  const saved = await publish(bytes, session.encodeState());
+  session.destroy();
+  expect(view(saved)).toBe("a [«REF a \\h»|H(AA)yy");
+  expect(documentXml(saved)).toBe(documentXml(untouched));
+});
+
+// Follow-up item 4, two peers: both type at the end of the first paragraph of a field whose result continues; both
+// texts stay, in the editors and in the reopened save, as ordinary typing.
+test("two peers typing at the end of a continued field result's first paragraph both keep their text", async () => {
+  const bytes = docx(p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`) + tail);
+  const A = await open(bytes);
+  const B = await open(bytes);
+  const end = (session: YrsSession) => ({ story: "body", paraId: "11111111", offset: session.paragraphSpans("body").find((span) => span.paraId === "11111111")!.length });
+  A.insertText(end(A), "Q");
+  B.insertText(end(B), "R");
+  const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+  A.applyUpdate(toA);
+  B.applyUpdate(toB);
+  expect(matrixUnits(A, "body")).toBe(matrixUnits(B, "body"));
+  const saved = await publish(bytes, A.encodeState());
+  const reopened = await open(saved);
+  expect(matrixUnits(reopened, "body")).toBe(matrixUnits(A, "body"));
+  expect(view(saved)).toMatch(/^a\[«DATE»\|2(QR|RQ)$/);
+  for (const session of [A, B, reopened]) session.destroy();
+});

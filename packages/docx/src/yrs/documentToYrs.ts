@@ -557,6 +557,27 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
   };
 }
 
+/**
+ * A field whose result continues into a later paragraph, and the runs that end its result in this one, after its
+ * projected children: ordinary text after the field's embed (`continued_result_tail` in crates/docx-edit/src/seed.rs).
+ */
+function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | ComplexField, Run[]] {
+  const inline = value.type === 'complexField' && value.continuation?.end && !value.continuation.separate
+    ? value.structuredResult?.inline ?? []
+    : [];
+  let tail = 0;
+  while (tail < inline.length && inline[inline.length - 1 - tail]!.type === 'run') tail += 1;
+  if (value.type !== 'complexField' || tail === 0) return [value, []];
+  const kept = inline.slice(0, inline.length - tail);
+  const field: ComplexField = {
+    ...value,
+    structuredResult: { ...value.structuredResult, inline: kept },
+    fieldResult: shownRuns(kept),
+    ...(value.fieldTree?.result?.inline ? { fieldTree: { ...value.fieldTree, result: { ...value.fieldTree.result, inline: kept } } } : {}),
+  };
+  return [field, inline.slice(inline.length - tail) as Run[]];
+}
+
 function fieldToUnits(
   value: SimpleField | ComplexField,
   styleFormatting: TextFormatting | undefined,
@@ -1195,7 +1216,9 @@ function paragraphUnits(
       units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
+      const [field, tail] = continuedResultTail(content);
+      units.push(...fieldToUnits(field, styleFormatting, styleResolver, contentIndex));
+      for (const run of tail) units.push(...runToUnits(run, styleFormatting, styleResolver));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(embedUnit('sdt', sdtPayload(content, styleFormatting, styleResolver), [], 2));

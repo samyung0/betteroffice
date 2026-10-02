@@ -1,7 +1,5 @@
 # docx-fields: 1085 rows, ids 32e143f8ef53252a; rows not listed are exact
 body | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
-body | field result continued | type at its paragraph's end | cap<edit	exact+moved
-body | field result continued | type at its paragraph's end | edit<cap<tail	exact+moved
 body | join nested continued field, undo | setup<cap<edit	refused
 body | pj:cf>fs | type after field | edit<cap<tail	refused
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
@@ -11,12 +9,8 @@ body | toc | retype 1st entry's last letter | cap<edit	refused
 body | toc | type at 1st entry end | cap<edit	refused
 body | toc | type in 1st entry | cap<edit	refused
 cell | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
-cell | field result continued | type at its paragraph's end | cap<edit	exact+moved
-cell | field result continued | type at its paragraph's end | edit<cap<tail	exact+moved
 cell | join nested continued field, undo | setup<cap<edit	refused
 header | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
-header | field result continued | type at its paragraph's end | cap<edit	exact+moved
-header | field result continued | type at its paragraph's end | edit<cap<tail	exact+moved
 header | join nested continued field, undo | setup<cap<edit	refused
 header | pj:cf>fs | type after field | edit<cap<tail	refused
 header | pj:cf>link+ins | Enter before field | cap<edit	exact+moved

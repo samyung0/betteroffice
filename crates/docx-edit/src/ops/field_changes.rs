@@ -703,7 +703,9 @@ fn runs_text(runs: &[Value]) -> String {
 /// children again, up to its end when that is now in the same paragraph (the
 /// field then ends there again), or to the paragraph's end. Children take
 /// their link's slot: the one before them, else the next one the field
-/// records. Anything else after the embed leaves the field as it is.
+/// records. Text after them that the split did not move out stays as the
+/// result's tail when the field continues past the paragraph; anything else
+/// after the embed leaves the field as it is.
 pub(crate) fn rejoin_fields(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -804,7 +806,11 @@ pub(crate) fn rejoin_fields(
     let mut folded: Vec<(&Chunk, u32)> = Vec::new();
     let mut runs: Vec<(u32, i64, u32)> = Vec::new();
     let mut dropped: Vec<i64> = Vec::new();
-    for chunk in chunks[position + 1..]
+    // Where a field that continues past this paragraph has its result's tail
+    // here: text after its embed the split did not move out, which the seed
+    // reads as text after the embed (`continued_result_tail`).
+    let mut tail = None;
+    'scan: for chunk in chunks[position + 1..]
         .iter()
         .take_while(|chunk| chunk.start < target)
     {
@@ -826,14 +832,20 @@ pub(crate) fn rejoin_fields(
             let mut taken = Vec::new();
             let mut lengths = Vec::new();
             while !left.is_empty() {
-                let Some(next) = recorded.iter().copied().find(|next| *next > last) else {
+                let next = recorded.iter().copied().find(|next| *next > last);
+                let node = next
+                    .and_then(|next| inline.get(next as usize).cloned())
+                    .unwrap_or(Value::Null);
+                let own = runs_text(std::slice::from_ref(&node));
+                let Some(next) = next
+                    .filter(|_| node["type"] == "run" && !own.is_empty() && left.starts_with(&own))
+                else {
+                    if ends_here.is_none() && taken.is_empty() {
+                        tail = Some(chunk.start);
+                        break 'scan;
+                    }
                     return Ok(());
                 };
-                let node = inline.get(next as usize).cloned().unwrap_or(Value::Null);
-                let own = runs_text(std::slice::from_ref(&node));
-                if node["type"] != "run" || own.is_empty() || !left.starts_with(&own) {
-                    return Ok(());
-                }
                 left = left[own.len()..].to_owned();
                 taken.push(next);
                 lengths.push(own.encode_utf16().count() as u32);
@@ -873,6 +885,14 @@ pub(crate) fn rejoin_fields(
         };
         slot = Some((index, link));
         units.push((chunk, index, len));
+    }
+    let target = tail.unwrap_or(target);
+    if tail.is_some()
+        && folded.is_empty()
+        && runs.is_empty()
+        && !units.iter().any(|(chunk, _, _)| chunk.start > owner.start)
+    {
+        return Ok(());
     }
     if ends_here.is_some() {
         if data["continuation"]["separate"] == Value::Bool(true) {

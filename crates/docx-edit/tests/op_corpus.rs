@@ -160,11 +160,13 @@ fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
             })
             .collect::<Vec<_>>()
     };
+    // The first paragraph's result is text after the field (decided 2026-10-02).
+    assert_eq!(slot_units(&doc), "[field]first¶secondafter¶");
     assert_eq!(ends(&doc), vec![Any::Number(6.0)]);
-    doc.insert_text(&ctx(), Position::new("body", 2), "x", FormatPolicy::Inherit)
+    doc.insert_text(&ctx(), Position::new("body", 7), "x", FormatPolicy::Inherit)
         .unwrap();
     assert_eq!(ends(&doc), vec![Any::Number(7.0)]);
-    doc.split_paragraph(&ctx(), Position::new("body", 5), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 10), None)
         .unwrap();
     assert_eq!(ends(&doc), vec![Any::Number(4.0)]);
     doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
@@ -176,7 +178,7 @@ fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
 fn undo_and_redo_re_anchor_a_continued_fields_end_in_text_they_restore() {
     // Decided 2026-10-02: a peer that typed in the restored text meanwhile and
     // the save end the field where the session that pressed Undo shows it.
-    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>first</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>second</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#;
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>second</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#;
     let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
     let ends = |doc: &EditingDoc| {
         marks(doc)
@@ -223,6 +225,38 @@ fn undo_and_redo_re_anchor_a_continued_fields_end_in_text_they_restore() {
                 .count(),
             1
         );
+    }
+}
+
+#[test]
+fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
+    // Decided 2026-10-02: the result text ending the first paragraph of a
+    // field that continues is text after its embed; the join after Enter in
+    // the field's link stops there and restores the link whole.
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t xml:space="preserve">a </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="a"><w:r><w:t>AA</w:t></w:r></w:hyperlink><w:r><w:t>yy</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>zz</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> b</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    for forward in [false, true] {
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let original = slot_units(&doc);
+        assert_eq!(original, "a AA[field]yy¶zz b¶");
+        let split = doc
+            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        let para = if forward {
+            split.first_para_id
+        } else {
+            split.second_para_id
+        };
+        merge(&doc, &ctx(), &para, forward);
+        assert_eq!(slot_units(&doc), original, "forward {forward}");
+        let link = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .filter(|segment| matches!(&segment.content, SegmentContent::Text(text) if text.contains('A')))
+            .count();
+        assert_eq!(link, 1, "the link is one run again (forward {forward})");
     }
 }
 
