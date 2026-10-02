@@ -6,6 +6,7 @@ import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
 import { CommentsSidebarToggle } from './CommentsSidebarToggle';
+import { HostMenus, type DocxMenuModel, type HostMenuActions } from './hostMenus';
 
 interface ImageContext {
   pos: number;
@@ -43,6 +44,8 @@ export function DocxEditorToolbar({
   // Flags
   readOnly,
   singleRow,
+  hostMenus,
+  hostMenuActions,
   showOutline,
   showOutlineButton,
   onToggleOutline,
@@ -96,6 +99,9 @@ export function DocxEditorToolbar({
   imageContext: ImageContext | null;
   readOnly: boolean;
   singleRow: boolean;
+  /** The host draws the menu bar from this model; the row drops its ☰. */
+  hostMenus?: (model: DocxMenuModel | null) => void;
+  hostMenuActions: HostMenuActions;
   showOutline: boolean;
   showOutlineButton: boolean;
   onToggleOutline: () => void;
@@ -177,10 +183,13 @@ export function DocxEditorToolbar({
         tableContext={tableContext}
         onTableAction={onTableAction}
         singleRow={singleRow}
-        leading={singleRow && <EditorToolbar.MenuBar folded />}
+        leading={singleRow && !hostMenus && <EditorToolbar.MenuBar folded />}
+        hostMenus={!!hostMenus}
+        onAddComment={hostMenus ? hostMenuActions.onAddComment : undefined}
         outlineOpen={showOutline}
         onToggleOutline={singleRow && showOutlineButton ? onToggleOutline : undefined}
       >
+        {hostMenus && <HostMenus onMenus={hostMenus} actions={hostMenuActions} />}
         {!singleRow && (
           <EditorToolbar.TitleBar>
             {renderLogo && <EditorToolbar.Logo>{renderLogo()}</EditorToolbar.Logo>}

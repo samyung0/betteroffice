@@ -115,6 +115,17 @@ const DEFAULT_STYLES: StyleOption[] = [
   },
 ];
 
+/** The paragraph styles the picker offers, also listed by the host menus. */
+export function paragraphStyleOptions(styles: Style[] | undefined): StyleOption[] {
+  const resolved = resolveParagraphStyleOptions(styles);
+  if (resolved.length === 0) return DEFAULT_STYLES;
+  return resolved.map((o) => ({
+    ...o,
+    type: 'paragraph' as StyleType,
+    nameKey: DEFAULT_STYLES.find((d) => d.styleId === o.styleId)?.nameKey,
+  }));
+}
+
 // ============================================================================
 // COMPONENT
 // ============================================================================
@@ -131,15 +142,7 @@ export function StylePicker({
   // Convert document styles to options. Filter/sort + preview CSS come from the
   // shared core helper (resolveParagraphStyleOptions / getStylePreviewProps) so
   // React and Vue stay in lockstep; only the i18n nameKey lookup is React-side.
-  const styleOptions: StyleOption[] = React.useMemo(() => {
-    const resolved = resolveParagraphStyleOptions(styles);
-    if (resolved.length === 0) return DEFAULT_STYLES;
-    return resolved.map((o) => ({
-      ...o,
-      type: 'paragraph' as StyleType,
-      nameKey: DEFAULT_STYLES.find((d) => d.styleId === o.styleId)?.nameKey,
-    }));
-  }, [styles]);
+  const styleOptions = React.useMemo(() => paragraphStyleOptions(styles), [styles]);
 
   const handleValueChange = React.useCallback(
     (newValue: string) => {

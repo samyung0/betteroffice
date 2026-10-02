@@ -49,13 +49,6 @@ const separatorStyles: CSSProperties = {
   margin: '4px 0',
 };
 
-const sectionLabelStyles: CSSProperties = {
-  padding: '6px 14px 2px',
-  fontSize: 11,
-  color: 'var(--doc-text-muted)',
-  fontWeight: 500,
-};
-
 export function TableMoreDropdown({
   onAction,
   disabled = false,
@@ -70,9 +63,6 @@ export function TableMoreDropdown({
     onClose: close,
     align: 'right',
   });
-  const currentJustification =
-    (tableContext?.table?.attrs?.justification as 'left' | 'center' | 'right' | null | undefined) ??
-    'left';
 
   const handleAction = useCallback(
     (action: TableAction) => {
@@ -197,117 +187,6 @@ export function TableMoreDropdown({
           })}
           {menuItem('deleteTable', 'delete', t('table.deleteTable'), 'deleteTable', {
             danger: true,
-          })}
-
-          <div style={separatorStyles} role="separator" />
-
-          {/* Vertical alignment */}
-          <div style={sectionLabelStyles}>{t('tableAdvanced.verticalAlignment')}</div>
-          <div style={{ display: 'flex', gap: 4, padding: '4px 14px' }}>
-            {(['top', 'center', 'bottom'] as const).map((align) => {
-              const icons = {
-                top: 'vertical_align_top',
-                center: 'vertical_align_center',
-                bottom: 'vertical_align_bottom',
-              };
-              const labelKeys = {
-                top: 'tableAdvanced.top' as const,
-                center: 'tableAdvanced.middle' as const,
-                bottom: 'tableAdvanced.bottom' as const,
-              };
-              return (
-                <button
-                  key={align}
-                  type="button"
-                  title={t(labelKeys[align])}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    width: 32,
-                    height: 28,
-                    border: '1px solid var(--doc-border)',
-                    borderRadius: 4,
-                    backgroundColor: 'transparent',
-                    cursor: 'pointer',
-                  }}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.backgroundColor =
-                      'var(--doc-bg-hover)';
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
-                  }}
-                  onClick={() => handleAction({ type: 'cellVerticalAlign', align })}
-                >
-                  <MaterialSymbol name={icons[align]} size={16} />
-                </button>
-              );
-            })}
-          </div>
-
-          <div style={separatorStyles} role="separator" />
-
-          {/* Table alignment */}
-          <div style={sectionLabelStyles}>{t('tableAdvanced.tableAlignment')}</div>
-          <div style={{ display: 'flex', gap: 4, padding: '4px 14px' }}>
-            {(['left', 'center', 'right'] as const).map((align) => {
-              const icons = {
-                left: 'format_align_left',
-                center: 'format_align_center',
-                right: 'format_align_right',
-              };
-              const isActive = currentJustification === align;
-              return (
-                <button
-                  key={align}
-                  type="button"
-                  title={t(
-                    {
-                      left: 'tableAdvanced.alignTableLeft' as const,
-                      center: 'tableAdvanced.alignTableCenter' as const,
-                      right: 'tableAdvanced.alignTableRight' as const,
-                    }[align]
-                  )}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    width: 32,
-                    height: 28,
-                    border: '1px solid var(--doc-border)',
-                    borderRadius: 4,
-                    backgroundColor: isActive ? 'var(--doc-primary-light)' : 'transparent',
-                    borderColor: isActive ? 'var(--doc-primary)' : 'var(--doc-border)',
-                    color: isActive ? 'var(--doc-primary)' : 'var(--doc-text)',
-                    cursor: 'pointer',
-                  }}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() =>
-                    handleAction({ type: 'tableProperties', props: { justification: align } })
-                  }
-                >
-                  <MaterialSymbol name={icons[align]} size={16} />
-                </button>
-              );
-            })}
-          </div>
-
-          <div style={separatorStyles} role="separator" />
-
-          {/* Other options */}
-          {menuItem('headerRow', 'table_rows', t('tableAdvanced.toggleHeaderRow'), {
-            type: 'toggleHeaderRow',
-          })}
-          {menuItem('distribute', 'view_column', t('tableAdvanced.distributeColumns'), {
-            type: 'distributeColumns',
-          })}
-          {menuItem('autoFit', 'fit_width', t('tableAdvanced.autoFit'), {
-            type: 'autoFitContents',
-          })}
-          {menuItem('noWrap', 'wrap_text', t('tableAdvanced.toggleNoWrap'), {
-            type: 'toggleNoWrap',
           })}
 
           <div style={separatorStyles} role="separator" />

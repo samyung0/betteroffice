@@ -137,6 +137,7 @@ export function useDocxEditorRefApi({
   pagedEditorRef,
   handleSave,
   handleDirectPrint,
+  renderPages,
   zoom,
   setZoom,
   scrollPageInfo,
@@ -157,6 +158,7 @@ export function useDocxEditorRefApi({
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   handleSave: () => Promise<ArrayBuffer | null>;
   handleDirectPrint: () => void;
+  renderPages: DocxEditorRef['renderPages'];
   zoom: number;
   setZoom: (zoom: number) => void;
   scrollPageInfo: { currentPage: number; totalPages: number; visible: boolean };
@@ -198,6 +200,7 @@ export function useDocxEditorRefApi({
         pagedEditorRef.current?.scrollToPosition(displayPosition),
       openPrintPreview: handleDirectPrint,
       print: handleDirectPrint,
+      renderPages,
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
@@ -425,6 +428,7 @@ export function useDocxEditorRefApi({
       scrollPageInfo,
       handleSave,
       handleDirectPrint,
+      renderPages,
       loadParsedDocument,
       loadBuffer,
       comments,

@@ -287,7 +287,13 @@ export function applyYrsToolbarFormatting(
   if (!selection) return false;
   const { context, range } = selection;
 
-  if (action === 'bold' || action === 'italic' || action === 'underline') {
+  if (
+    action === 'bold' ||
+    action === 'italic' ||
+    action === 'underline' ||
+    action === 'superscript' ||
+    action === 'subscript'
+  ) {
     if (isCollapsed(range)) return false;
     session.toggleMark(range, { type: action });
     return true;

@@ -22,6 +22,7 @@ import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
+  rasterizeDisplayListPages,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
@@ -53,7 +54,8 @@ import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolean';
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
-import { pageBreakOffered } from './DocxEditor/yrsCommands';
+import { pageBreakOffered, yrsSelectedText } from './DocxEditor/yrsCommands';
+import type { DocxMenuModel, HostMenuActions } from './DocxEditor/hostMenus';
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
@@ -212,6 +214,12 @@ export interface DocxEditorProps {
    * are not shown.
    */
   singleRowToolbar?: boolean;
+  /**
+   * The host draws the menu bar: called with the menus (labels in the editor's
+   * locale, state, shortcuts) whenever they change, and with `run` for clicks.
+   * The single-row toolbar then has no ☰ menu button.
+   */
+  onMenus?: (model: DocxMenuModel | null) => void;
   /**
    * Custom list of fonts shown in the toolbar's font-family dropdown.
    * Strings render in the "Other" group; pass `FontOption[]` for category
@@ -408,6 +416,11 @@ export interface DocxEditorRef {
   openPrintPreview: () => void;
   /** Print the document directly */
   print: () => void;
+  /**
+   * Every page drawn to a canvas, with its size in CSS px, for a host that
+   * prints itself (a sandboxed frame cannot open the print dialog).
+   */
+  renderPages: () => Promise<{ canvas: HTMLCanvasElement; width: number; height: number }[]>;
   /** Load a pre-parsed document programmatically */
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
@@ -615,6 +628,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showOutlineButton = true,
     icons,
     singleRowToolbar = false,
+    onMenus,
     fontFamilies,
     fonts,
     watermarkPresets,
@@ -1284,6 +1298,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     findReplace,
   });
 
+  const { openReplace } = findReplace;
+  const hostMenuActions = useMemo<HostMenuActions>(
+    () => ({
+      onEditAction: (action) => void handleContextMenuAction(action),
+      onFindReplace: () => {
+        const session = pagedEditorRef.current?.getYrsSession();
+        openReplace(session ? yrsSelectedText(session) : '');
+      },
+      onAddComment: () => void handleContextMenuAction('addComment'),
+      showComments: showCommentsSidebar,
+      onToggleComments: () => {
+        setShowCommentsSidebar((visible) => !visible);
+        setExpandedSidebarItem(null);
+      },
+    }),
+    [handleContextMenuAction, openReplace, showCommentsSidebar, setShowCommentsSidebar]
+  );
+
   // Canvas-mode find highlights. The bridge stores the live display range on every
   // match (`YrsFindMatch`), so the matches held in `findReplace.state` carry the
   // display positions the display-list `range_rects` query needs. Memoized off the
@@ -1340,6 +1372,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return null;
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
+  const { displayList: printList, resolveImage: printImages } = canvasRenderer;
+  const renderPages = useCallback(async () => {
+    if (!printList) return [];
+    const canvases = await rasterizeDisplayListPages(printList, { resolveImage: printImages });
+    return canvases.map((canvas, index) => ({
+      canvas,
+      width: printList.pages[index].width,
+      height: printList.pages[index].height,
+    }));
+  }, [printList, printImages]);
+
   // Expose ref methods
   useDocxEditorRefApi({
     ref,
@@ -1349,6 +1392,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pagedEditorRef,
     handleSave,
     handleDirectPrint,
+    renderPages,
     zoom: state.zoom,
     setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom })),
     scrollPageInfo,
@@ -1874,6 +1918,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               imageContext={state.pmImageContext}
               readOnly={readOnly}
               singleRow={singleRowToolbar}
+              hostMenus={onMenus}
+              hostMenuActions={hostMenuActions}
               showOutline={showOutline}
               showOutlineButton={showOutlineButton}
               onToggleOutline={handleToggleOutline}

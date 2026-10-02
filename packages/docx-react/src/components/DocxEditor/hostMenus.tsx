@@ -1,0 +1,357 @@
+/**
+ * The editor's menus as data, for a host that draws its own menu bar
+ * (`DocxEditor`'s `onMenus`): ids, labels in the editor's locale, shortcuts and
+ * state. The host calls `run(id, value)` for a click; nothing here renders.
+ */
+
+import { useEffect, useMemo, useRef } from 'react';
+import { useTranslation } from '../../i18n';
+import { useEditorToolbar } from '../EditorToolbarContext';
+import { paragraphStyleOptions } from '../ui/StylePicker';
+import type { TextContextAction } from '../TextContextMenu';
+
+export type HostMenuEntry =
+  | {
+      kind: 'item';
+      id: string;
+      label: string;
+      shortcut?: string;
+      checked?: boolean;
+      disabled?: boolean;
+    }
+  | { kind: 'separator' }
+  | { kind: 'submenu'; id: string; label: string; items: HostMenuEntry[] }
+  /** A table size picker; `run` gets the size as "<rows>x<cols>". */
+  | { kind: 'grid'; id: string };
+
+export interface HostMenu {
+  id: string;
+  label: string;
+  items: HostMenuEntry[];
+}
+
+export interface DocxMenuModel {
+  menus: HostMenu[];
+  run: (id: string, value?: string) => void;
+}
+
+/** Commands that live outside the toolbar context. */
+export interface HostMenuActions {
+  onEditAction: (action: TextContextAction) => void;
+  onFindReplace?: () => void;
+  onAddComment: () => void;
+  showComments: boolean;
+  onToggleComments: () => void;
+}
+
+const ZOOMS = [50, 75, 90, 100, 125, 150, 200];
+const LINE_SPACINGS = [
+  { twips: 240, key: 'lineSpacing.single' as const },
+  { twips: 276, label: '1.15' },
+  { twips: 360, label: '1.5' },
+  { twips: 480, key: 'lineSpacing.double' as const },
+];
+
+function shortcutFormatter() {
+  const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  return (keys: string) => {
+    const parts = keys.split('+');
+    const key = parts.pop() ?? '';
+    if (mac)
+      return parts.map((part) => ({ Mod: '⌘', Shift: '⇧', Alt: '⌥' }[part] ?? part)).join('') + key;
+    return [...parts.map((part) => (part === 'Mod' ? 'Ctrl' : part)), key].join('+');
+  };
+}
+
+/** Reports the menus while mounted inside `EditorToolbar`; renders nothing. */
+export function HostMenus({
+  onMenus,
+  actions,
+}: {
+  onMenus: (model: DocxMenuModel | null) => void;
+  actions: HostMenuActions;
+}) {
+  const { t } = useTranslation();
+  const ctx = useEditorToolbar();
+  const latest = useRef({ actions, ctx });
+  latest.current = { actions, ctx };
+  const formatting = ctx.currentFormatting ?? {};
+  const disabled = ctx.disabled ?? false;
+
+  const menus = useMemo((): HostMenu[] => {
+    const key = shortcutFormatter();
+    const item = (
+      id: string,
+      label: string,
+      extra: Omit<Extract<HostMenuEntry, { kind: 'item' }>, 'kind' | 'id' | 'label'> = {}
+    ): HostMenuEntry => ({
+      kind: 'item',
+      id,
+      label,
+      ...extra,
+      disabled: disabled || extra.disabled,
+    });
+    const separator: HostMenuEntry = { kind: 'separator' };
+    const submenu = (id: string, label: string, items: HostMenuEntry[]): HostMenuEntry => ({
+      kind: 'submenu',
+      id,
+      label,
+      items,
+    });
+
+    const file: HostMenuEntry[] = [
+      ...(ctx.onSave ? [item('save', t('toolbar.save'), { shortcut: key('Mod+S') })] : []),
+      ...(ctx.onPageSetup ? [item('page-setup', t('toolbar.pageSetup'))] : []),
+    ];
+    const edit: HostMenuEntry[] = [
+      item('undo', t('formattingBar.undo'), { shortcut: key('Mod+Z'), disabled: !ctx.canUndo }),
+      item('redo', t('formattingBar.redo'), { shortcut: key('Mod+Y'), disabled: !ctx.canRedo }),
+      separator,
+      item('select-all', t('hostMenus.selectAll'), { shortcut: key('Mod+A') }),
+      item('delete', t('hostMenus.delete')),
+      ...(actions.onFindReplace
+        ? [separator, item('find-replace', t('hostMenus.findReplace'), { shortcut: key('Mod+H') })]
+        : []),
+    ];
+    const zoom = Math.round((ctx.zoom ?? 1) * 100);
+    const view: HostMenuEntry[] = [
+      ...(ctx.onToggleOutline
+        ? [item('show-outline', t('hostMenus.showOutline'), { checked: !!ctx.outlineOpen })]
+        : []),
+      item('show-comments', t('hostMenus.showComments'), { checked: actions.showComments }),
+      ...(ctx.onZoomChange
+        ? [
+            separator,
+            submenu(
+              'zoom',
+              t('hostMenus.zoom'),
+              ZOOMS.map((value) => item(`zoom:${value}`, `${value}%`, { checked: value === zoom }))
+            ),
+          ]
+        : []),
+    ];
+    const breaks = [
+      ...(ctx.onInsertPageBreak ? [item('insert-page-break', t('toolbar.pageBreak'))] : []),
+      ...(ctx.onInsertSectionBreakNextPage
+        ? [item('insert-section-next', t('toolbar.sectionBreakNextPage'))]
+        : []),
+      ...(ctx.onInsertSectionBreakContinuous
+        ? [item('insert-section-continuous', t('toolbar.sectionBreakContinuous'))]
+        : []),
+    ];
+    const insert: HostMenuEntry[] = [
+      ...(ctx.onInsertImage ? [item('insert-image', t('toolbar.image'))] : []),
+      ...(ctx.onInsertTable
+        ? [submenu('insert-table', t('toolbar.table'), [{ kind: 'grid', id: 'insert-table' }])]
+        : []),
+      item('insert-link', t('hostMenus.link'), { shortcut: key('Mod+K') }),
+      item('insert-comment', t('hostMenus.comment')),
+      ...(ctx.onWatermark ? [item('insert-watermark', t('toolbar.watermark'))] : []),
+      ...(breaks.length ? [separator, submenu('insert-break', t('toolbar.break'), breaks)] : []),
+    ];
+    const spacing = formatting.lineSpacing ?? 240;
+    const format: HostMenuEntry[] = [
+      submenu('format-text', t('hostMenus.text'), [
+        item('bold', t('formattingBar.bold'), { shortcut: key('Mod+B') }),
+        item('italic', t('formattingBar.italic'), { shortcut: key('Mod+I') }),
+        item('underline', t('formattingBar.underline'), { shortcut: key('Mod+U') }),
+        item('strikethrough', t('formattingBar.strikethrough')),
+        item('superscript', t('formattingBar.superscript'), { shortcut: key('Mod+Shift+=') }),
+        item('subscript', t('formattingBar.subscript'), { shortcut: key('Mod+=') }),
+      ]),
+      submenu(
+        'format-styles',
+        t('hostMenus.paragraphStyles'),
+        paragraphStyleOptions(ctx.documentStyles).map((style) =>
+          item(`style:${style.styleId}`, style.nameKey ? t(style.nameKey) : style.name, {
+            checked: (formatting.styleId || 'Normal') === style.styleId,
+          })
+        )
+      ),
+      submenu('format-align', t('hostMenus.alignIndent'), [
+        item('align:left', t('hostMenus.left'), { shortcut: key('Mod+L') }),
+        item('align:center', t('hostMenus.center'), { shortcut: key('Mod+E') }),
+        item('align:right', t('hostMenus.right'), { shortcut: key('Mod+R') }),
+        item('align:both', t('hostMenus.justify'), { shortcut: key('Mod+J') }),
+        separator,
+        item('indent', t('hostMenus.increaseIndent')),
+        item('outdent', t('hostMenus.decreaseIndent')),
+      ]),
+      submenu(
+        'format-spacing',
+        t('lineSpacing.label'),
+        LINE_SPACINGS.map((option) =>
+          item(`spacing:${option.twips}`, option.key ? t(option.key) : option.label, {
+            checked: option.twips === spacing,
+          })
+        )
+      ),
+      submenu('format-lists', t('hostMenus.bulletsNumbering'), [
+        item('bulletList', t('hostMenus.bulletedList')),
+        item('numberedList', t('hostMenus.numberedList')),
+      ]),
+      submenu('format-direction', t('hostMenus.textDirection'), [
+        item('ltr', t('hostMenus.leftToRight'), { checked: !formatting.bidi }),
+        item('rtl', t('hostMenus.rightToLeft'), { checked: !!formatting.bidi }),
+      ]),
+      ...(ctx.tableContext?.isInTable && ctx.onTableAction
+        ? [separator, item('table-properties', t('hostMenus.tableProperties'))]
+        : []),
+      ...(ctx.imageContext && ctx.onOpenImageProperties
+        ? [separator, item('image-options', t('hostMenus.imageOptions'))]
+        : []),
+      separator,
+      item('clearFormatting', t('formattingBar.clearFormatting')),
+    ];
+    return [
+      { id: 'file', label: t('toolbar.file'), items: file },
+      { id: 'edit', label: t('hostMenus.edit'), items: edit },
+      { id: 'view', label: t('hostMenus.view'), items: view },
+      { id: 'insert', label: t('toolbar.insert'), items: insert },
+      { id: 'format', label: t('toolbar.format'), items: format },
+    ];
+  }, [
+    t,
+    ctx.onSave,
+    ctx.onPageSetup,
+    ctx.canUndo,
+    ctx.canRedo,
+    ctx.zoom,
+    ctx.onZoomChange,
+    ctx.outlineOpen,
+    ctx.onToggleOutline,
+    ctx.onInsertImage,
+    ctx.onInsertTable,
+    ctx.onWatermark,
+    ctx.onInsertPageBreak,
+    ctx.onInsertSectionBreakNextPage,
+    ctx.onInsertSectionBreakContinuous,
+    ctx.documentStyles,
+    ctx.tableContext?.isInTable,
+    ctx.onTableAction,
+    ctx.imageContext,
+    ctx.onOpenImageProperties,
+    actions.onFindReplace,
+    actions.showComments,
+    formatting.lineSpacing,
+    formatting.styleId,
+    formatting.bidi,
+    disabled,
+  ]);
+
+  const run = useMemo(
+    () => (id: string, value?: string) => {
+      const { actions: act, ctx: c } = latest.current;
+      const [command, argument] = id.split(':');
+      // Formatting returns focus to the page; dialogs and pickers keep theirs.
+      const format: NonNullable<typeof c.onFormat> = (action) => {
+        c.onFormat?.(action);
+        requestAnimationFrame(() => c.onRefocusEditor?.());
+      };
+      switch (command) {
+        case 'save':
+          void c.onSave?.();
+          return;
+        case 'page-setup':
+          c.onPageSetup?.();
+          return;
+        case 'undo':
+          c.onUndo?.();
+          requestAnimationFrame(() => c.onRefocusEditor?.());
+          return;
+        case 'redo':
+          c.onRedo?.();
+          requestAnimationFrame(() => c.onRefocusEditor?.());
+          return;
+        case 'select-all':
+          act.onEditAction('selectAll');
+          return;
+        case 'delete':
+          act.onEditAction('delete');
+          return;
+        case 'find-replace':
+          act.onFindReplace?.();
+          return;
+        case 'show-outline':
+          c.onToggleOutline?.();
+          return;
+        case 'show-comments':
+          act.onToggleComments();
+          return;
+        case 'zoom':
+          c.onZoomChange?.(Number(argument) / 100);
+          return;
+        case 'insert-image':
+          c.onInsertImage?.();
+          return;
+        case 'insert-table': {
+          const [rows, cols] = (value ?? '').split('x').map(Number);
+          if (rows > 0 && cols > 0) c.onInsertTable?.(rows, cols);
+          return;
+        }
+        case 'insert-link':
+          format('insertLink');
+          return;
+        case 'insert-comment':
+          act.onAddComment();
+          return;
+        case 'insert-watermark':
+          c.onWatermark?.();
+          return;
+        case 'insert-page-break':
+          c.onInsertPageBreak?.();
+          return;
+        case 'insert-section-next':
+          c.onInsertSectionBreakNextPage?.();
+          return;
+        case 'insert-section-continuous':
+          c.onInsertSectionBreakContinuous?.();
+          return;
+        case 'style':
+          format({ type: 'applyStyle', value: argument });
+          return;
+        case 'align':
+          format({
+            type: 'alignment',
+            value: argument as 'left' | 'center' | 'right' | 'both',
+          });
+          return;
+        case 'spacing':
+          format({ type: 'lineSpacing', value: Number(argument) });
+          return;
+        case 'ltr':
+          format('setLtr');
+          return;
+        case 'rtl':
+          format('setRtl');
+          return;
+        case 'table-properties':
+          c.onTableAction?.({ type: 'openTableProperties' });
+          return;
+        case 'image-options':
+          c.onOpenImageProperties?.();
+          return;
+        case 'bold':
+        case 'italic':
+        case 'underline':
+        case 'strikethrough':
+        case 'superscript':
+        case 'subscript':
+        case 'clearFormatting':
+        case 'bulletList':
+        case 'numberedList':
+        case 'indent':
+        case 'outdent':
+          format(command);
+          return;
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    onMenus({ menus, run });
+  }, [menus, onMenus, run]);
+  useEffect(() => () => onMenus(null), [onMenus]);
+  return null;
+}

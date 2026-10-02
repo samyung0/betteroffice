@@ -6,15 +6,7 @@
  */
 
 import * as React from 'react';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-} from './Select';
+import { Select, SelectContent, SelectItem, SelectTrigger } from './Select';
 import { cn } from '../../lib/utils';
 import { MaterialSymbol } from './Icons';
 import { useTranslation } from '../../i18n';
@@ -107,10 +99,6 @@ export function LineSpacingPicker({
             {getOptionLabel(option)}
           </SelectItem>
         ))}
-        <SelectSeparator />
-        <SelectGroup>
-          <SelectLabel>{t('lineSpacing.paragraphSpacing')}</SelectLabel>
-        </SelectGroup>
       </SelectContent>
     </Select>
   );

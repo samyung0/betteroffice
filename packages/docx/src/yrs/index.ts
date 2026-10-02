@@ -101,6 +101,8 @@ export type YrsRunMark =
   | { type: 'bold' }
   | { type: 'italic' }
   | { type: 'underline' }
+  | { type: 'superscript' }
+  | { type: 'subscript' }
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
   | { type: 'color'; value: string };
