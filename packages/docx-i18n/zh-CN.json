@@ -43,9 +43,9 @@
     "help": "帮助",
     "reportIssue": "反馈问题",
     "watermark": "水印",
-    "break": null,
-    "sectionBreakContinuous": null,
-    "sectionBreakNextPage": null
+    "break": "分隔符",
+    "sectionBreakContinuous": "分节符（连续）",
+    "sectionBreakNextPage": "分节符（下一页）"
   },
   "formattingBar": {
     "groups": {
@@ -109,7 +109,7 @@
     "double": "双倍行距",
     "lineSpacingTitle": "行距: {label}",
     "paragraphSpacing": "段间距",
-    "label": null
+    "label": "行距"
   },
   "styles": {
     "selectAriaLabel": "选择段落样式",
@@ -122,24 +122,24 @@
   },
   "font": {
     "selectAriaLabel": "选择字体",
-    "sansSerif": "Sans Serif",
-    "serif": "Serif",
-    "monospace": "Monospace",
+    "sansSerif": "无衬线",
+    "serif": "衬线",
+    "monospace": "等宽",
     "other": null,
-    "documentFonts": null
+    "documentFonts": "文档字体"
   },
   "fontSize": {
     "decrease": "减小字号",
     "increase": "增大字号",
     "label": "字号",
     "listLabel": "字号列表",
-    "selectAriaLabel": null
+    "selectAriaLabel": "选择字号"
   },
   "zoom": {
     "ariaLabel": "缩放: {label}",
-    "zoomIn": null,
+    "zoomIn": "放大",
     "zoomLevel": null,
-    "zoomOut": null
+    "zoomOut": "缩小"
   },
   "colorPicker": {
     "ariaLabel": "{type} 颜色选择器",
@@ -694,7 +694,7 @@
       "gridTable4Accent5": "网格表 4 强调色 5",
       "gridTable4Accent6": "网格表 4 强调色 6"
     },
-    "selectTable": null
+    "selectTable": "选择整个表格"
   },
   "tableAdvanced": {
     "verticalAlignment": "垂直对齐",
