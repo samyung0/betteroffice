@@ -667,6 +667,21 @@ mod test {
     }
 
     #[test]
+    fn sticky_index_inside_a_redone_item_keeps_its_offset() {
+        let doc = Doc::with_client_id(1);
+        let txt = doc.get_or_insert_text("test");
+        txt.insert(&mut doc.transact_mut(), 0, "ab");
+        let mut undo = crate::UndoManager::new();
+        undo.expand_scope(&doc, &txt);
+        txt.insert(&mut doc.transact_mut(), 2, "yy");
+        let end = txt.sticky_index(&mut doc.transact_mut(), 4, Assoc::Before).unwrap();
+        undo.undo_blocking();
+        undo.redo_blocking();
+        assert_eq!(crate::GetString::get_string(&txt, &doc.transact()), "abyy");
+        assert_eq!(end.get_offset(&doc.transact()).unwrap().index, 4);
+    }
+
+    #[test]
     fn sticky_index_case_1() {
         let doc = Doc::with_client_id(1);
         let txt = doc.get_or_insert_text("test");

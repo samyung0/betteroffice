@@ -242,6 +242,12 @@ const AFTER_SIMPLE: Record<string, string> = {
   "[DATE|F{20}L(AA)x]": holder(field(`${fs(run("20"), " PAGE ")}${link(run("AA"))}${run("x")}`)),
   "[DATE|F{20}+{y}x]": holder(field(`${fs(run("20"), " PAGE ")}${ins(run("y"))}${run("x")}`)),
   "[DATE|F{20}-{w}y]": holder(field(`${fs(run("20"), " PAGE ")}${del(deleted("w"))}${run("y")}`)),
+  // Round 2 review D: a tracked move after the split point refuses a rebase of Enter after a capture (accepted).
+  "[DATE|F{20}M-{w}y]": holder(
+    field(
+      `${fs(run("20"), " PAGE ")}<w:moveFromRangeStart w:id="94" w:name="mv1" w:author="A" w:date="2026-09-01T00:00:00Z"/>${moveFrom(run("w"))}<w:moveFromRangeEnd w:id="94"/>${run("y")}`
+    )
+  ),
   "[DATE|F{20}<bm>y]": holder(field(`${fs(run("20"), " PAGE ")}<w:bookmarkStart w:id="7" w:name="m7"/>${run("y")}<w:bookmarkEnd w:id="7"/>`)),
 };
 const enterAfterPage: Edit = (s, st) => {

@@ -508,7 +508,7 @@ pub(crate) fn split_field(
                 .map(|(_, node)| node.clone())
                 .collect::<Vec<_>>(),
         );
-        map.insert(txn, "displayText", runs_text(&shown));
+        map.insert(txn, "displayText", display_text(&shown));
         if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
             let mut projection = (*projection).clone();
             if let Some(Any::Array(entries)) = projection.get("children") {
@@ -572,7 +572,7 @@ pub(crate) fn split_field(
                 .map(|(_, node)| node.clone())
                 .collect::<Vec<_>>(),
         );
-        overrides.push(("displayText".to_owned(), Any::from(runs_text(&shown))));
+        overrides.push(("displayText".to_owned(), Any::from(display_text(&shown))));
         if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
             let mut projection = (*projection).clone();
             let mut children = match projection.get("children") {
@@ -674,6 +674,16 @@ pub(crate) fn split_field(
         )?;
     }
     Ok(())
+}
+
+/// What a field shows of `runs`, as the seed's `displayText` reads them: their
+/// text, without tabs.
+fn display_text(runs: &[Value]) -> String {
+    runs.iter()
+        .flat_map(|run| run["content"].as_array().cloned().unwrap_or_default())
+        .filter(|content| content["type"] == "text")
+        .filter_map(|content| content["text"].as_str().map(str::to_owned))
+        .collect()
 }
 
 /// The text runs show, tabs as tab characters.
@@ -885,7 +895,7 @@ pub(crate) fn rejoin_fields(
                 .map(|(_, node)| node.clone())
                 .collect::<Vec<_>>(),
         );
-        overrides.push(("displayText".to_owned(), Any::from(runs_text(&shown))));
+        overrides.push(("displayText".to_owned(), Any::from(display_text(&shown))));
         if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
             let mut projection = (*projection).clone();
             if let Some(Any::Array(children)) = projection.get("children") {

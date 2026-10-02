@@ -365,13 +365,18 @@ impl Store {
         SubdocGuids(self.subdocs.values())
     }
 
+    /// The item slice `id` resolves to once redone, at the same offset into
+    /// each redone item (as Yjs's `followRedone` keeps its `diff`).
     pub(crate) fn follow_redone(&self, id: &ID) -> Option<ItemSlice> {
         let mut next_id = Some(*id);
         let mut slice = None;
         while let Some(next) = next_id.as_mut() {
             slice = self.blocks.get_item_clean_start(next);
             if let Some(slice) = &slice {
-                next_id = slice.ptr.redone;
+                next_id = slice
+                    .ptr
+                    .redone
+                    .map(|redone| ID::new(redone.client, redone.clock + slice.start));
             } else {
                 break;
             }

@@ -2153,3 +2153,46 @@ test("Enter after a projected simple field followed by two runs, then Backspace,
   session.destroy();
   expect(bodyText(saved)).toBe("a 20yz b");
 });
+
+// Follow-up 3: the paragraphs Enter makes of the first one, and Backspace at the second's start.
+const paraIds = (session: YrsSession) => session.paragraphSpans("body").map((span) => span.paraId);
+const nthParagraph = (session: YrsSession, k: number) => paraIds(session)[paraIds(session).indexOf("11111111") + k]!;
+const startOf = (session: YrsSession, k: number) => ({ story: "body", paraId: nthParagraph(session, k), offset: 0 });
+const backspace = (session: YrsSession) => void session.deleteAt(startOf(session, 1), "backward");
+
+// Follow-up 3 (rv5-ur2): Enter, Undo, Redo in a field whose result after the link is one multi-character run puts the
+// field's end where Enter put it.
+test("Enter, Undo, Redo keeps a split field's end after its moved run", async () => {
+  const bytes = paragraph(field(link(run("AA")) + run("yy"), " REF a \\h "));
+  const enter = async (redo: boolean) => {
+    const session = await open(bytes);
+    session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, "AA") + 1 });
+    if (redo) {
+      session.undo();
+      session.redo();
+    }
+    const editor = matrixUnits(session, "body");
+    const saved = await publish(bytes, session.encodeState());
+    session.destroy();
+    const reopened = await open(saved);
+    const units = matrixUnits(reopened, "body");
+    reopened.destroy();
+    return { editor, saved: sig(saved, "word/document.xml"), reopened: units };
+  };
+  const [plain, redone] = [await enter(false), await enter(true)];
+  expect(redone).toEqual(plain);
+  expect(plain.saved).toContain("yy]");
+});
+
+// Follow-up 3 (rv5-tab): a join gives the field the text its seed shows, without the tab of its moved run.
+test("Enter then Backspace in a field whose moved run holds a tab restores the field's shown text", async () => {
+  const bytes = paragraph(field(link(run("AA")) + `<w:r><w:t>y</w:t><w:tab/><w:t>z</w:t></w:r>`, " REF a \\h "));
+  const before = await open(bytes);
+  const original = matrixUnits(before, "body");
+  before.destroy();
+  const session = await open(bytes);
+  session.splitParagraph({ story: "body", paraId: "11111111", offset: childAt(session, "AA") + 1 });
+  backspace(session);
+  expect(matrixUnits(session, "body")).toBe(original);
+  session.destroy();
+});
