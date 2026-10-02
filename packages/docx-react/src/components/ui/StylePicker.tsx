@@ -166,7 +166,10 @@ export function StylePicker({
       <SelectContent className="min-w-[260px] max-h-[400px]">
         {styleOptions.map((style) => (
           <SelectItem key={style.styleId} value={style.styleId} className="py-2.5 px-3">
-            <span style={getStylePreviewProps(style)}>{getStyleName(style)}</span>
+            {/* The menu's own text colour, so every preview reads in any theme. */}
+            <span style={{ ...getStylePreviewProps(style), color: undefined }}>
+              {getStyleName(style)}
+            </span>
           </SelectItem>
         ))}
       </SelectContent>
