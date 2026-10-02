@@ -196,6 +196,8 @@ export function MenuBar({ folded = false }: { folded?: boolean }) {
     onInsertTOC,
     onWatermark,
     onRefocusEditor,
+    outlineOpen = false,
+    onToggleOutline,
   } = ctx;
 
   const handleFormat = useCallback(
@@ -357,6 +359,17 @@ export function MenuBar({ folded = false }: { folded?: boolean }) {
       hasFileMenu && [t('toolbar.file'), fileItems],
       [t('toolbar.format'), formatItems],
       [t('toolbar.insert'), insertItems],
+      onToggleOutline && [
+        t('dialogs.keyboardShortcuts.categories.view'),
+        [
+          {
+            icon: 'toc',
+            label: t('editor.showDocumentOutline'),
+            checked: outlineOpen,
+            onClick: onToggleOutline,
+          },
+        ],
+      ],
       showHelpMenu && [t('toolbar.help'), helpItems],
     ].filter((section): section is [string, MenuEntry[]] => !!section);
     return (

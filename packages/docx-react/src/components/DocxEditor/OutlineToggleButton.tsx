@@ -2,7 +2,6 @@ import { useTranslation } from '../../i18n';
 import { Z_INDEX } from '../../styles/zIndex';
 import { OUTLINE_BUTTON_LEFT_OFFSET } from '../DocumentOutline';
 import { MaterialSymbol } from '../ui/Icons';
-import { ToolbarButton } from '../Toolbar';
 
 /**
  * Outline toggle — same reason as `CommentsSidebarToggle`: needs to render
@@ -44,18 +43,7 @@ export function OutlineToggleButton({
       }}
     >
       {/* Icon inherits the button's `color` (fill: currentColor). */}
-      <MaterialSymbol name="toc" size={20} />
+      <MaterialSymbol name="format_list_bulleted" size={20} />
     </button>
-  );
-}
-
-/** The outline toggle as a toolbar button, for the single-row toolbar. */
-export function OutlineToolbarToggle({ active, onClick }: { active: boolean; onClick: () => void }) {
-  const { t } = useTranslation();
-  const title = t('editor.showDocumentOutline');
-  return (
-    <ToolbarButton onClick={onClick} active={active} title={title} ariaLabel={title}>
-      <MaterialSymbol name="toc" size={20} />
-    </ToolbarButton>
   );
 }

@@ -167,6 +167,8 @@ export interface DocxEditorProps {
   showHelpMenu?: boolean;
   /** Whether to show zoom control (default: true) */
   showZoomControl?: boolean;
+  /** Whether to show the toolbar's font family picker (default: true) */
+  showFontPicker?: boolean;
   /** Whether to show page margin guides/boundaries (default: false) */
   showMarginGuides?: boolean;
   /** Color for margin guides (default: '#c0c0c0') */
@@ -203,8 +205,9 @@ export interface DocxEditorProps {
   /** Replaces the built-in Material icons everywhere in the editor chrome. */
   icons?: IconSet;
   /**
-   * One toolbar row: the title bar's menus and the outline toggle move into it,
-   * and the title bar slots (logo, name, right actions) are not shown.
+   * One toolbar row: the title bar's menus fold into one menu button, which also
+   * toggles the outline, and the title bar slots (logo, name, right actions)
+   * are not shown.
    */
   singleRowToolbar?: boolean;
   /**
@@ -591,6 +594,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showFileOpen = true,
     showHelpMenu = true,
     showZoomControl = true,
+    showFontPicker = true,
     showMarginGuides: _showMarginGuides = false,
     marginGuideColor: _marginGuideColor,
     showRuler = false,
@@ -1877,6 +1881,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               documentFonts={documentFonts}
               zoom={state.zoom}
               showZoomControl={showZoomControl}
+              showFontPicker={showFontPicker}
               onFormat={handleFormat}
               onUndo={undoActiveEditor}
               onRedo={redoActiveEditor}

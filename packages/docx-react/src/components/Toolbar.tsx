@@ -144,6 +144,10 @@ export interface ToolbarProps {
   singleRow?: boolean;
   /** Rendered before the groups in a single row. */
   leading?: ReactNode;
+  /** Whether the document outline is open; the folded menu's View section toggles it. */
+  outlineOpen?: boolean;
+  /** Toggles the document outline from the folded menu. */
+  onToggleOutline?: () => void;
   /** Whether to show font family picker (default: true) */
   showFontPicker?: boolean;
   /**
@@ -822,28 +826,6 @@ export function Toolbar(explicitProps: ToolbarProps) {
         </ToolbarButton>
       </ToolbarGroup>
 
-      {/* Superscript/Subscript Group */}
-      <ToolbarGroup label={t('formattingBar.groups.script')}>
-        <ToolbarButton
-          onClick={() => handleFormat('superscript')}
-          active={currentFormatting.superscript}
-          disabled={disabled}
-          title={t('formattingBar.superscriptShortcut')}
-          ariaLabel={t('formattingBar.superscript')}
-        >
-          <MaterialSymbol name="superscript" size={ICON_SIZE} />
-        </ToolbarButton>
-        <ToolbarButton
-          onClick={() => handleFormat('subscript')}
-          active={currentFormatting.subscript}
-          disabled={disabled}
-          title={t('formattingBar.subscriptShortcut')}
-          ariaLabel={t('formattingBar.subscript')}
-        >
-          <MaterialSymbol name="subscript" size={ICON_SIZE} />
-        </ToolbarButton>
-      </ToolbarGroup>
-
       {/* Alignment Dropdown */}
       {showAlignmentButtons && (
         <ToolbarGroup label={t('formattingBar.groups.alignment')}>
@@ -929,6 +911,28 @@ export function Toolbar(explicitProps: ToolbarProps) {
           />
         </ToolbarGroup>
       )}
+
+      {/* Superscript/Subscript Group */}
+      <ToolbarGroup label={t('formattingBar.groups.script')}>
+        <ToolbarButton
+          onClick={() => handleFormat('superscript')}
+          active={currentFormatting.superscript}
+          disabled={disabled}
+          title={t('formattingBar.superscriptShortcut')}
+          ariaLabel={t('formattingBar.superscript')}
+        >
+          <MaterialSymbol name="superscript" size={ICON_SIZE} />
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => handleFormat('subscript')}
+          active={currentFormatting.subscript}
+          disabled={disabled}
+          title={t('formattingBar.subscriptShortcut')}
+          ariaLabel={t('formattingBar.subscript')}
+        >
+          <MaterialSymbol name="subscript" size={ICON_SIZE} />
+        </ToolbarButton>
+      </ToolbarGroup>
 
       {/* Clear Formatting */}
       <ToolbarButton

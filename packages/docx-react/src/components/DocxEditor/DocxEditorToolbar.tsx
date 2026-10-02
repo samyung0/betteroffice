@@ -1,17 +1,11 @@
 import type { ReactNode } from 'react';
 import type { Theme, Document } from '@betteroffice/docx/types/document';
 import { EditorToolbar } from '../EditorToolbar';
-import {
-  ToolbarGroup,
-  ToolbarSeparator,
-  type SelectionFormatting,
-  type FormattingAction,
-} from '../Toolbar';
+import { ToolbarSeparator, type SelectionFormatting, type FormattingAction } from '../Toolbar';
 import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
 import { CommentsSidebarToggle } from './CommentsSidebarToggle';
-import { OutlineToolbarToggle } from './OutlineToggleButton';
 
 interface ImageContext {
   pos: number;
@@ -66,6 +60,7 @@ export function DocxEditorToolbar({
   documentFonts,
   zoom,
   showZoomControl,
+  showFontPicker,
   // Handlers
   onFormat,
   onUndo,
@@ -116,6 +111,7 @@ export function DocxEditorToolbar({
   documentFonts?: readonly FontOption[];
   zoom: number;
   showZoomControl: boolean;
+  showFontPicker: boolean;
   onFormat: (action: FormattingAction) => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -157,6 +153,7 @@ export function DocxEditorToolbar({
         onOpen={showFileOpen ? onOpen : undefined}
         onSave={onSave}
         showZoomControl={showZoomControl}
+        showFontPicker={showFontPicker}
         zoom={zoom}
         onZoomChange={onZoomChange}
         onRefocusEditor={onRefocusEditor}
@@ -177,18 +174,9 @@ export function DocxEditorToolbar({
         tableContext={tableContext}
         onTableAction={onTableAction}
         singleRow={singleRow}
-        leading={
-          singleRow && (
-            <>
-              {showOutlineButton && (
-                <ToolbarGroup>
-                  <OutlineToolbarToggle active={showOutline} onClick={onToggleOutline} />
-                </ToolbarGroup>
-              )}
-              <EditorToolbar.MenuBar folded />
-            </>
-          )
-        }
+        leading={singleRow && <EditorToolbar.MenuBar folded />}
+        outlineOpen={showOutline}
+        onToggleOutline={singleRow && showOutlineButton ? onToggleOutline : undefined}
       >
         {!singleRow && (
           <EditorToolbar.TitleBar>

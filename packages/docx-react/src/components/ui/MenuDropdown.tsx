@@ -15,6 +15,8 @@ export interface MenuItem {
   shortcut?: string;
   onClick?: () => void;
   disabled?: boolean;
+  /** A toggle item, ticked while on. */
+  checked?: boolean;
   /** Custom content to render instead of a simple menu item */
   customContent?: ReactNode;
   /** Submenu content that appears to the right on hover */
@@ -251,10 +253,17 @@ export function MenuDropdown({
                     (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
                   }}
                   disabled={item.disabled}
+                  role={item.checked === undefined ? undefined : 'menuitemcheckbox'}
+                  aria-checked={item.checked}
                 >
                   {item.icon && <MaterialSymbol name={item.icon} size={18} />}
                   <span>{item.label}</span>
                   {item.shortcut && <span style={shortcutStyle}>{item.shortcut}</span>}
+                  {item.checked && (
+                    <span style={{ marginLeft: 'auto' }}>
+                      <MaterialSymbol name="check" size={16} />
+                    </span>
+                  )}
                   {hasSubmenu && (
                     <span style={{ marginLeft: 'auto' }}>
                       <MaterialSymbol name="keyboard_arrow_right" size={16} />
