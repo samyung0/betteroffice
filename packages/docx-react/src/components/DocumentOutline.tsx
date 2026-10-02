@@ -82,7 +82,6 @@ export const DocumentOutline = React.memo(function DocumentOutline({
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        fontFamily: "'Google Sans', Roboto, Arial, sans-serif",
         zIndex: 40,
         // Slide-in animation — translate fully off-screen left of its anchor.
         // Only `transform` transitions; horizontal-scroll tracking via `left`
