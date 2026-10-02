@@ -1022,15 +1022,21 @@ function patchPrimitivePositions(
   return next;
 }
 
+// Hot path: a page payload holds tens of thousands of values per keystroke.
+// Reads go straight to the DataView after one bounds check against `end`,
+// which the caller validated against the frame length; integers are composed
+// from two u32 halves instead of a BigInt.
 class ValueCursor {
   offset: number;
+  private readonly view: DataView;
 
   constructor(
-    private readonly reader: BinaryReader,
+    reader: BinaryReader,
     private readonly strings: readonly string[],
     offset: number,
     private readonly end: number
   ) {
+    this.view = reader.view;
     this.offset = offset;
   }
 
@@ -1045,9 +1051,9 @@ class ValueCursor {
       case VALUE_TRUE:
         return true;
       case VALUE_I64:
-        return this.safeInteger(this.readI64('i64 value'), 'signed value');
+        return this.readI64('i64 value', 'signed value');
       case VALUE_U64:
-        return this.safeInteger(this.readU64('u64 value'), 'unsigned value');
+        return this.readU64('u64 value', 'unsigned value');
       case VALUE_F64: {
         const value = this.readF64('f64 value');
         if (!Number.isFinite(value)) invalid('non-finite f64 value');
@@ -1059,7 +1065,7 @@ class ValueCursor {
         const length = this.readU32('array byte length');
         const count = this.readU32('array item count');
         if (count > MAX_CONTAINER_ITEMS) invalid('array item count exceeds decoder limit');
-        const containerEnd = checkedAdd(this.offset, length, 'array payload');
+        const containerEnd = this.offset + length;
         if (containerEnd > this.end) invalid('array payload exceeds parent bounds');
         const values: unknown[] = [];
         for (let index = 0; index < count; index++) values.push(this.value(depth + 1));
@@ -1070,19 +1076,27 @@ class ValueCursor {
         const length = this.readU32('object byte length');
         const count = this.readU32('object field count');
         if (count > MAX_CONTAINER_ITEMS) invalid('object field count exceeds decoder limit');
-        const containerEnd = checkedAdd(this.offset, length, 'object payload');
+        const containerEnd = this.offset + length;
         if (containerEnd > this.end) invalid('object payload exceeds parent bounds');
         const value: Record<string, unknown> = {};
         for (let index = 0; index < count; index++) {
           const key = this.string(this.readU32('object key id'));
-          if (Object.prototype.hasOwnProperty.call(value, key))
+          // Decoded values are never undefined, so a defined own value is a
+          // repeated key; inherited names (constructor, toString) are not own.
+          if (value[key] !== undefined && Object.prototype.hasOwnProperty.call(value, key))
             invalid(`duplicate object key ${key}`);
-          Object.defineProperty(value, key, {
-            value: this.value(depth + 1),
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
+          const item = this.value(depth + 1);
+          if (key === '__proto__') {
+            // An assignment would replace the prototype; keep it an own field.
+            Object.defineProperty(value, key, {
+              value: item,
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+          } else {
+            value[key] = item;
+          }
         }
         if (this.offset !== containerEnd) invalid('object byte length/count mismatch');
         return value;
@@ -1091,7 +1105,7 @@ class ValueCursor {
         const length = this.readU32('glyph array byte length');
         const count = this.readU32('glyph array item count');
         if (count > MAX_CONTAINER_ITEMS) invalid('glyph array item count exceeds decoder limit');
-        const containerEnd = checkedAdd(this.offset, length, 'glyph array payload');
+        const containerEnd = this.offset + length;
         if (containerEnd > this.end) invalid('glyph array payload exceeds parent bounds');
         const glyphs: Array<Record<string, number>> = [];
         for (let index = 0; index < count; index++) {
@@ -1106,10 +1120,7 @@ class ValueCursor {
           }
           const glyph: Record<string, number> = { id, x, y, cluster, advance };
           if ((flags & GLYPH_LOGICAL_ORDER) !== 0) {
-            glyph.logicalOrder = this.safeInteger(
-              this.readU64('glyph logical order'),
-              'glyph logical order'
-            );
+            glyph.logicalOrder = this.readU64('glyph logical order', 'glyph logical order');
           }
           if ((flags & GLYPH_BIDI_LEVEL) !== 0) {
             glyph.bidiLevel = this.readU8('glyph bidi level');
@@ -1130,39 +1141,43 @@ class ValueCursor {
     return value;
   }
 
-  private safeInteger(value: bigint, label: string): number {
-    if (value < MIN_SAFE_BIGINT || value > MAX_SAFE_BIGINT) {
-      invalid(`${label} exceeds JavaScript safe-integer range`);
-    }
-    return Number(value);
-  }
-
   private require(size: number, label: string): number {
-    const next = checkedAdd(this.offset, size, label);
-    if (next > this.end) invalid(`truncated ${label}`);
     const current = this.offset;
+    const next = current + size;
+    if (next > this.end) invalid(`truncated ${label}`);
     this.offset = next;
     return current;
   }
 
   private readU8(label: string): number {
-    return this.reader.u8(this.require(1, label));
+    return this.view.getUint8(this.require(1, label));
   }
 
   private readU32(label: string): number {
-    return this.reader.u32(this.require(4, label));
+    return this.view.getUint32(this.require(4, label), true);
   }
 
-  private readU64(label: string): bigint {
-    return this.reader.u64(this.require(8, label));
+  /** u64 as a safe integer; `range` names the value in the range error. */
+  private readU64(label: string, range: string): number {
+    const offset = this.require(8, label);
+    const value =
+      this.view.getUint32(offset + 4, true) * 4294967296 + this.view.getUint32(offset, true);
+    // Exact below 2^53; any rounded sum stays at or above it, so this check is exact.
+    if (!Number.isSafeInteger(value)) invalid(`${range} exceeds JavaScript safe-integer range`);
+    return value;
   }
 
-  private readI64(label: string): bigint {
-    return this.reader.i64(this.require(8, label));
+  /** i64 as a safe integer; `range` names the value in the range error. */
+  private readI64(label: string, range: string): number {
+    const offset = this.require(8, label);
+    const value =
+      this.view.getInt32(offset + 4, true) * 4294967296 + this.view.getUint32(offset, true);
+    if (!Number.isSafeInteger(value)) invalid(`${range} exceeds JavaScript safe-integer range`);
+    return value;
   }
 
   private readF64(label: string): number {
-    return this.reader.f64(this.require(8, label));
+    return this.view.getFloat64(this.require(8, label), true);
   }
 
   private finiteF64(label: string): number {

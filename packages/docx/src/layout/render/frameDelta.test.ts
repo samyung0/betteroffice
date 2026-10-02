@@ -244,3 +244,105 @@ describe('FrameDelta wire round-trip', () => {
     expect(displayPageShiftsSince(page, 0)).toEqual([]);
   });
 });
+
+describe('FrameDelta typed value decoding', () => {
+  // One full frame whose single page payload is an object with `extra` fields
+  // appended after the required page fields.
+  const frameWith = (extra: Array<[string, Uint8Array]>): Uint8Array => {
+    const keys = ['pageIndex', 'width', 'height', 'primitives', ...extra.map(([key]) => key)];
+    const strings = [...new Set(keys)];
+    const u32 = (value: number) => new Uint8Array(new Uint32Array([value]).buffer);
+    const f64 = (value: number) => new Uint8Array(new Float64Array([value]).buffer);
+    const join = (parts: Uint8Array[]) => {
+      const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+      let at = 0;
+      for (const part of parts) (out.set(part, at), (at += part.length));
+      return out;
+    };
+    const fields: Array<[string, Uint8Array]> = [
+      ['pageIndex', join([Uint8Array.of(4), new Uint8Array(8)])],
+      ['width', join([Uint8Array.of(5), f64(10)])],
+      ['height', join([Uint8Array.of(5), f64(10)])],
+      ['primitives', join([Uint8Array.of(7), u32(0), u32(0)])],
+      ...extra,
+    ];
+    const body = join(fields.map(([key, value]) => join([u32(strings.indexOf(key)), value])));
+    const payload = join([Uint8Array.of(8), u32(body.length), u32(fields.length), body]);
+    const encoder = new TextEncoder();
+    const table = join([
+      u32(strings.length),
+      ...strings.map((value) => join([u32(encoder.encode(value).length), encoder.encode(value)])),
+    ]);
+    const dataOffset = Math.ceil((128 + table.length) / 8) * 8;
+    const total = dataOffset + payload.length;
+    const frame = new Uint8Array(total);
+    const view = new DataView(frame.buffer);
+    frame.set([0x46, 0x44, 0x56, 0x31]);
+    view.setUint16(4, FRAME_DELTA_VERSION, true);
+    view.setUint16(6, 80, true);
+    view.setUint32(8, total, true);
+    view.setUint32(12, 1, true);
+    view.setBigUint64(32, 1n, true);
+    view.setUint32(48, 1, true);
+    view.setUint32(52, 1, true);
+    view.setUint32(56, 80, true);
+    view.setUint32(60, 128, true);
+    view.setUint32(64, table.length, true);
+    view.setUint32(68, dataOffset, true);
+    frame[80] = 1;
+    view.setBigUint64(88, 1n, true);
+    view.setUint32(108, dataOffset, true);
+    view.setUint32(112, dataOffset, true);
+    view.setUint32(116, payload.length, true);
+    frame.set(table, 128);
+    frame.set(payload, dataOffset);
+    return frame;
+  };
+  const i64 = (value: bigint) => {
+    const out = new Uint8Array(9);
+    out[0] = 3;
+    new DataView(out.buffer).setBigInt64(1, value, true);
+    return out;
+  };
+  const u64 = (value: bigint) => {
+    const out = new Uint8Array(9);
+    out[0] = 4;
+    new DataView(out.buffer).setBigUint64(1, value, true);
+    return out;
+  };
+  const page = (frame: Uint8Array) => {
+    const operation = decodeFrameDelta(frame).operations[0];
+    if (operation.kind !== 'upsert') throw new Error('expected an upsert');
+    return operation.page as unknown as Record<string, unknown>;
+  };
+
+  it('keeps a __proto__ key an own field and the prototype untouched', () => {
+    const decoded = page(frameWith([['__proto__', i64(7n)]]));
+    expect(Object.getPrototypeOf(decoded)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(decoded, '__proto__')?.value).toBe(7);
+    expect(Object.keys(decoded)).toContain('__proto__');
+  });
+
+  it('decodes inherited names as fields and rejects repeated keys', () => {
+    expect(page(frameWith([['constructor', i64(1n)]])).constructor).toBe(1);
+    expect(() => page(frameWith([['note', i64(1n)], ['note', i64(2n)]]))).toThrow(
+      'duplicate object key note'
+    );
+  });
+
+  it('decodes integers up to the safe range and rejects beyond it', () => {
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    const decoded = page(frameWith([['low', i64(-max)], ['high', u64(max)], ['neg', i64(-5n)]]));
+    expect([decoded.low, decoded.high, decoded.neg]).toEqual([
+      Number.MIN_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+      -5,
+    ]);
+    expect(() => page(frameWith([['x', i64(-max - 1n)]]))).toThrow(
+      'signed value exceeds JavaScript safe-integer range'
+    );
+    expect(() => page(frameWith([['x', u64(max + 1n)]]))).toThrow(
+      'unsigned value exceeds JavaScript safe-integer range'
+    );
+  });
+});
