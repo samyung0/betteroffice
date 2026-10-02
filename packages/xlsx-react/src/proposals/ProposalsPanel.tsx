@@ -8,6 +8,7 @@
 import type { Proposal } from '@betteroffice/xlsx';
 import type { CSSProperties } from 'react';
 import { useTranslation } from '../i18n';
+import { chromeFont } from '../components/ui/ToolbarPrimitives';
 import { proposalColor } from './palette';
 
 /**
@@ -46,19 +47,20 @@ export function ProposalsPanel({
         width: 320,
         maxHeight: 420,
         overflowY: 'auto',
-        background: '#ffffff',
-        border: '1px solid #d0d0d0',
+        background: 'var(--xlsx-menu-bg, #ffffff)',
+        border: '1px solid var(--xlsx-border, #d0d0d0)',
         borderRadius: 10,
-        boxShadow: '0 6px 24px rgba(0, 0, 0, 0.16)',
+        boxShadow: 'var(--xlsx-menu-shadow, 0 6px 24px rgba(0, 0, 0, 0.16))',
         padding: 8,
         zIndex: 10,
-        font: '13px system-ui, sans-serif',
+        color: 'var(--xlsx-text, inherit)',
+        font: `13px ${chromeFont}`,
         textAlign: 'left',
         ...style,
       }}
     >
       {proposals.length === 0 ? (
-        <div style={{ padding: 12, color: '#707070', textAlign: 'center' }}>
+        <div style={{ padding: 12, color: 'var(--xlsx-text-muted, #707070)', textAlign: 'center' }}>
           {t('proposals.empty')}
         </div>
       ) : (
@@ -74,7 +76,7 @@ export function ProposalsPanel({
                 borderLeft: `3px solid ${color}`,
                 padding: '8px 10px',
                 marginBottom: 8,
-                background: '#fafafa',
+                background: 'var(--xlsx-hover-bg, #fafafa)',
                 borderRadius: 4,
               }}
             >
@@ -82,12 +84,12 @@ export function ProposalsPanel({
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}
               >
                 <strong style={{ color }}>{proposal.agentId}</strong>
-                <span style={{ color: '#707070', fontSize: 12 }}>
+                <span style={{ color: 'var(--xlsx-text-muted, #707070)', fontSize: 12 }}>
                   {t('proposals.cellCount', { count: proposal.cells.length })}
                 </span>
               </div>
               {proposal.note && (
-                <div style={{ color: '#404040', margin: '4px 0' }}>{proposal.note}</div>
+                <div style={{ color: 'var(--xlsx-text, #404040)', margin: '4px 0' }}>{proposal.note}</div>
               )}
               <ul style={{ listStyle: 'none', margin: '6px 0', padding: 0 }}>
                 {proposal.cells.map((cell) => (
@@ -97,7 +99,7 @@ export function ProposalsPanel({
                     style={{ fontVariantNumeric: 'tabular-nums', lineHeight: 1.5 }}
                   >
                     <strong data-testid="xlsx-proposal-cell-a1">{cell.a1}</strong>:{' '}
-                    <span style={{ color: '#909090' }}>{cell.oldText || '∅'}</span>{' '}
+                    <span style={{ color: 'var(--xlsx-text-muted, #909090)' }}>{cell.oldText || '∅'}</span>{' '}
                     {t('proposals.changeArrow')}{' '}
                     <span data-testid="xlsx-proposal-cell-new" style={{ color }}>
                       {cell.newText}

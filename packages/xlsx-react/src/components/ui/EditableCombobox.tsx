@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
-import { toolbarColors } from './ToolbarPrimitives';
+import { chromeFont, toolbarColors } from './ToolbarPrimitives';
 
 export interface ComboboxOption {
   value: string;
@@ -85,7 +85,7 @@ export function EditableCombobox({
         height: 28,
         border: `1px solid ${toolbarColors.border}`,
         borderRadius: 4,
-        background: disabled ? 'rgba(255,255,255,0.5)' : toolbarColors.surface,
+        background: toolbarColors.surface,
         opacity: disabled ? 0.48 : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
@@ -130,7 +130,7 @@ export function EditableCombobox({
           outline: 0,
           background: 'transparent',
           color: toolbarColors.text,
-          font: '500 13px ui-sans-serif, system-ui, sans-serif',
+          font: `500 13px ${chromeFont}`,
           boxSizing: 'border-box',
           ...inputStyle,
         }}
@@ -179,7 +179,7 @@ export function EditableCombobox({
             border: `1px solid ${toolbarColors.border}`,
             borderRadius: 6,
             background: toolbarColors.surface,
-            boxShadow: '0 4px 16px rgba(60, 64, 67, 0.24)',
+            boxShadow: toolbarColors.shadow,
             boxSizing: 'border-box',
           }}
         >
@@ -206,7 +206,7 @@ export function EditableCombobox({
                 background: option.value === value ? toolbarColors.active : 'transparent',
                 color: toolbarColors.text,
                 cursor: 'pointer',
-                font: '400 13px ui-sans-serif, system-ui, sans-serif',
+                font: `400 13px ${chromeFont}`,
                 textAlign: 'left',
               }}
             >

@@ -61,7 +61,12 @@ import type {
   MergeAction,
   SelectionFormatting,
 } from './components/Toolbar';
-import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
+import {
+  ToolbarButton,
+  ToolbarGroup,
+  chromeFont,
+  toolbarColors,
+} from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import {
   expandRangeToMergedCells,
@@ -125,6 +130,11 @@ export interface XlsxEditorProps {
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /**
+   * Flat chrome for hosts with their own toolbars: the formatting toolbar and
+   * the formula bar as plain 40px rows, without the rounded toolbar rail.
+   */
+  singleRowToolbar?: boolean;
 }
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -271,9 +281,9 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     flex: '0 0 auto',
     minHeight: DEFAULT_XLSX_TOOLBAR_HEIGHT,
     padding: '4px 0 5px',
-    borderBottom: '1px solid #e2e8f0',
-    background: '#ffffff',
-    color: '#0f172a',
+    borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
+    background: 'var(--xlsx-chrome-bg, #ffffff)',
+    color: 'var(--xlsx-text, #0f172a)',
     boxSizing: 'border-box',
   },
   rail: {
@@ -283,7 +293,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     margin: '0 8px',
     padding: '2px 8px',
     borderRadius: 4,
-    background: '#ffffff',
+    background: 'var(--xlsx-chrome-bg, #ffffff)',
     boxSizing: 'border-box',
     overflowX: 'auto',
     overflowY: 'hidden',
@@ -293,7 +303,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 1,
     padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+    borderRight: '1px solid var(--xlsx-divider, rgba(226, 232, 240, 0.9))',
     flex: '0 0 auto',
   },
   formulaGroup: {
@@ -303,7 +313,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     flex: '1 1 320px',
     minWidth: 240,
     padding: '0 6px',
-    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+    borderRight: '1px solid var(--xlsx-divider, rgba(226, 232, 240, 0.9))',
   },
   nameBox: {
     appearance: 'none',
@@ -311,13 +321,13 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     height: 28,
     flex: '0 0 auto',
     boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
+    border: '1px solid var(--xlsx-border, #e2e8f0)',
     borderRadius: 6,
-    background: '#f8fafc',
-    color: '#0f172a',
+    background: 'var(--xlsx-input-bg, #f8fafc)',
+    color: 'var(--xlsx-text, #0f172a)',
     font: '600 12px ui-monospace, SFMono-Regular, Menlo, monospace',
     textAlign: 'center',
-    outlineColor: '#2563eb',
+    outlineColor: 'var(--xlsx-focus, #2563eb)',
   },
   formulaMark: {
     display: 'grid',
@@ -325,7 +335,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     width: 20,
     height: 28,
     flex: '0 0 auto',
-    color: '#64748b',
+    color: 'var(--xlsx-text-muted, #64748b)',
     font: 'italic 700 12px Georgia, serif',
     userSelect: 'none',
   },
@@ -335,13 +345,36 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     minWidth: 140,
     height: 28,
     boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
+    border: '1px solid var(--xlsx-border, #e2e8f0)',
     borderRadius: 6,
     padding: '0 8px',
-    background: '#ffffff',
-    color: '#0f172a',
-    font: '13px ui-sans-serif, system-ui, sans-serif',
-    outlineColor: '#2563eb',
+    background: 'var(--xlsx-input-bg, #ffffff)',
+    color: 'var(--xlsx-text, #0f172a)',
+    font: `13px ${chromeFont}`,
+    outlineColor: 'var(--xlsx-focus, #2563eb)',
+  },
+  flatShell: {
+    flex: '0 0 auto',
+    borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
+    background: 'var(--xlsx-chrome-bg, #ffffff)',
+    color: 'var(--xlsx-text, #0f172a)',
+  },
+  flatToolbar: {
+    height: 40,
+    margin: 0,
+    padding: '0 8px',
+    borderRadius: 0,
+    borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
+    background: 'var(--xlsx-chrome-bg, #ffffff)',
+  },
+  flatRail: {
+    display: 'flex',
+    alignItems: 'center',
+    height: 39,
+    padding: '0 8px',
+    boxSizing: 'border-box',
+    overflowX: 'auto',
+    overflowY: 'hidden',
   },
   proposals: {
     marginLeft: 'auto',
@@ -356,8 +389,8 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
     marginLeft: -3,
     padding: '0 4px',
     borderRadius: 8,
-    background: '#0f172a',
-    color: '#ffffff',
+    background: 'var(--xlsx-text, #0f172a)',
+    color: 'var(--xlsx-chrome-bg, #ffffff)',
     fontSize: 10,
     fontWeight: 700,
     lineHeight: 1,
@@ -389,6 +422,7 @@ function XlsxEditorContent({
   onPendingChange,
   className,
   readOnly = false,
+  singleRowToolbar = false,
 }: Omit<XlsxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
@@ -1927,13 +1961,17 @@ function XlsxEditorContent({
         width: '100%',
         height: '100%',
         minWidth: 0,
-        color: '#202124',
-        background: '#ffffff',
-        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+        color: 'var(--xlsx-text, #202124)',
+        background: 'var(--xlsx-chrome-bg, #ffffff)',
+        fontFamily: chromeFont,
       }}
     >
       {!readOnly && (
-        <div ref={toolbarRef} data-testid="xlsx-toolbar" style={xlsxToolbarStyles.shell}>
+        <div
+          ref={toolbarRef}
+          data-testid="xlsx-toolbar"
+          style={singleRowToolbar ? xlsxToolbarStyles.flatShell : xlsxToolbarStyles.shell}
+        >
         <EditorToolbar
           currentFormatting={{
             ...selectionFormatting,
@@ -1957,9 +1995,11 @@ function XlsxEditorContent({
           onFormat={formatSelection}
           onMerge={mergeSelection}
         >
-          <EditorToolbar.Toolbar />
+          <EditorToolbar.Toolbar
+            style={singleRowToolbar ? xlsxToolbarStyles.flatToolbar : undefined}
+          />
           <div
-            style={xlsxToolbarStyles.rail}
+            style={singleRowToolbar ? xlsxToolbarStyles.flatRail : xlsxToolbarStyles.rail}
             role="group"
             aria-label={t('toolbar.formulaBarLabel')}
           >
@@ -2072,6 +2112,7 @@ function XlsxEditorContent({
 
       <div
         ref={scrollRef}
+        className="xlsx-editor__scroll"
         data-testid="xlsx-scroll"
         tabIndex={0}
         onKeyDown={onKeyDown}
@@ -2256,8 +2297,8 @@ function XlsxEditorContent({
             placeItems: 'center',
             padding: 16,
             textAlign: 'center',
-            color: '#b00020',
-            background: '#ffffff',
+            color: 'var(--xlsx-error, #b00020)',
+            background: 'var(--xlsx-chrome-bg, #ffffff)',
           }}
         >
           {renderError}
@@ -2275,7 +2316,7 @@ function XlsxEditorContent({
             placeItems: 'center',
             padding: 16,
             textAlign: 'center',
-            color: '#b00020',
+            color: 'var(--xlsx-error, #b00020)',
           }}
         >
           {t('editor.openError')}: {error}
@@ -2289,10 +2330,11 @@ function XlsxEditorContent({
           aria-label={t('editor.sheetTabsLabel')}
           style={{
             display: 'flex',
+            flex: '0 0 auto',
             gap: 2,
-            padding: '4px 6px',
-            borderTop: '1px solid #e0e0e0',
-            background: '#fafafa',
+            padding: 'var(--xlsx-tabs-padding, 4px 6px)',
+            borderTop: '1px solid var(--xlsx-divider, #e0e0e0)',
+            background: 'var(--xlsx-tabs-bg, #fafafa)',
             overflowX: 'auto',
           }}
         >
@@ -2305,12 +2347,18 @@ function XlsxEditorContent({
                 aria-selected={active}
                 onClick={() => switchSheet(i)}
                 style={{
+                  flex: '0 0 auto',
                   border: 'none',
-                  padding: '4px 12px',
+                  padding: 'var(--xlsx-tab-padding, 4px 12px)',
+                  fontSize: 'var(--xlsx-tab-font-size, inherit)',
+                  whiteSpace: 'nowrap',
                   cursor: 'pointer',
-                  borderBottom: active ? `2px solid ${BRAND}` : '2px solid transparent',
+                  borderBottom: active
+                    ? `2px solid var(--xlsx-accent, ${BRAND})`
+                    : '2px solid transparent',
                   fontWeight: active ? 600 : 400,
-                  background: active ? '#ffffff' : 'transparent',
+                  color: active ? toolbarColors.text : toolbarColors.muted,
+                  background: active ? 'var(--xlsx-active-tab-bg, #ffffff)' : 'transparent',
                 }}
               >
                 {name}

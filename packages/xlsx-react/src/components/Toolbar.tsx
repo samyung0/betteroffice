@@ -12,6 +12,7 @@ import {
   ToolbarMenuItem,
   ToolbarMenuSeparator,
   ToolbarSeparator,
+  chromeFont,
   toolbarColors,
 } from './ui/ToolbarPrimitives';
 
@@ -384,7 +385,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
           minHeight: 32,
           padding: '5px 9px',
           color: toolbarColors.text,
-          font: '400 13px ui-sans-serif, system-ui, sans-serif',
+          font: `400 13px ${chromeFont}`,
           cursor: formattingEnabled ? 'pointer' : 'default',
         }}
       >
