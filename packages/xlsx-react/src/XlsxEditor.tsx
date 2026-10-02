@@ -2010,9 +2010,6 @@ function XlsxEditorContent({
     const sheet = activeSheet;
     if (command === 'undo') return undo();
     if (command === 'redo') return redo();
-    if (command === 'cut') return void cutSelection();
-    if (command === 'copy') return void copySelection();
-    if (command === 'paste') return void pasteSelection();
     if (command === 'deleteValues') return clearCells();
     if (command === 'bold' || command === 'italic' || command === 'strikethrough')
       return formatSelection(command);

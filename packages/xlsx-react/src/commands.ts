@@ -38,9 +38,6 @@ export const ZOOM_PERCENTS = [50, 75, 90, 100, 125, 150, 200] as const;
 export const XLSX_COMMANDS = [
   'undo',
   'redo',
-  'cut',
-  'copy',
-  'paste',
   'selectAll',
   'deleteValues',
   'deleteRows',
