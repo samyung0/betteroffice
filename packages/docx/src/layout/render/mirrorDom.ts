@@ -138,6 +138,11 @@ export function buildMirrorPage(
   pageEl.style.position = 'relative';
   pageEl.style.width = `${page.width}px`;
   pageEl.style.height = `${page.height}px`;
+  // Off-screen mirror pages skip style, layout and paint until they near the
+  // viewport, and stay in the accessibility tree, find-in-page and layout
+  // queries. Without it every scroll frame re-rendered every page's mirror
+  // (one element per glyph run: 100k+ on a 60-page document).
+  pageEl.style.setProperty('content-visibility', 'auto');
   pageEl.style.opacity = '0';
   pageEl.style.pointerEvents = 'none';
 
