@@ -56,12 +56,16 @@ const LINE_SPACINGS = [
 
 function shortcutFormatter() {
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+  // Mac lists modifiers as ⌃⌥⇧⌘; elsewhere Ctrl+Alt+Shift+key.
+  const order = ['Ctrl', 'Alt', 'Shift', 'Mod'];
+  const mark: Record<string, string> = { Ctrl: '⌃', Alt: '⌥', Shift: '⇧', Mod: '⌘' };
   return (keys: string) => {
     const parts = keys.split('+');
     const key = parts.pop() ?? '';
-    if (mac)
-      return parts.map((part) => ({ Mod: '⌘', Shift: '⇧', Alt: '⌥' }[part] ?? part)).join('') + key;
-    return [...parts.map((part) => (part === 'Mod' ? 'Ctrl' : part)), key].join('+');
+    const named = mac ? parts : parts.map((part) => (part === 'Mod' ? 'Ctrl' : part));
+    named.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    if (mac) return named.map((part) => mark[part]).join('') + key;
+    return [...named, key].join('+');
   };
 }
 

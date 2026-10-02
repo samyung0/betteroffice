@@ -7,6 +7,7 @@ if (ownsDom) GlobalRegistrator.register();
 import { en } from '@betteroffice/docx-i18n';
 import type { ComponentProps } from 'react';
 import { EditorToolbar } from './EditorToolbar';
+import { HostMenus, type DocxMenuModel, type HostMenuEntry } from './DocxEditor/hostMenus';
 import {
   DrawnIcon,
   ICON_NAMES,
@@ -67,18 +68,19 @@ test('a host icon set replaces the built-in icons, drawn ones included', () => {
   expect(own.container.querySelectorAll('svg')).toHaveLength(2);
 });
 
-test('the single row scrolls the menu, history and groups and pins zoom and trailing items', () => {
+test('the single row scrolls the menu, history, zoom and groups and pins the trailing items', () => {
   const { getByTestId } = render(<SingleRow />);
   const bar = getByTestId('formatting-bar');
   expect(bar.dataset.layout).toBe('single-row');
   const scroll = within(bar.querySelector('.oox-formatting-bar__scroll') as HTMLElement);
   scroll.getByRole('menubar');
   scroll.getByRole('button', { name: en.formattingBar.undo });
+  scroll.getByRole('combobox', { name: zoomLabel });
   scroll.getByRole('button', { name: en.formattingBar.bold });
   scroll.getByRole('combobox', { name: en.font.selectAriaLabel });
   const end = within(bar.querySelector('.oox-formatting-bar__end') as HTMLElement);
-  end.getByRole('combobox', { name: zoomLabel });
   end.getByTestId('trailing');
+  expect(end.queryByRole('combobox', { name: zoomLabel })).toBeNull();
   // One size box and one zoom dropdown: no step buttons in a single row.
   expect(bar.querySelector('[data-testid="font-size-decrease"]')).toBeNull();
   expect(bar.querySelector('[data-testid="font-size-increase"]')).toBeNull();
@@ -162,4 +164,100 @@ test('a wheel over a dropdown open inside the row leaves the row and the dropdow
   expect(event.defaultPrevented).toBe(false);
   expect(row.scrollLeft).toBe(0);
   getByRole('menuitemcheckbox', { name: en.editor.showDocumentOutline });
+});
+
+test('with the menus in the host the row drops the ☰, strikethrough and super/subscript and offers comment and image', () => {
+  const onAddComment = mock(() => {});
+  const { getByTestId } = render(
+    <EditorToolbar
+      singleRow
+      hostMenus
+      onAddComment={onAddComment}
+      onInsertImage={() => {}}
+      zoom={1}
+    >
+      <EditorToolbar.Toolbar />
+    </EditorToolbar>
+  );
+  const bar = within(getByTestId('formatting-bar'));
+  expect(bar.queryByRole('menubar')).toBeNull();
+  for (const name of [
+    en.formattingBar.strikethrough,
+    en.formattingBar.superscript,
+    en.formattingBar.subscript,
+  ])
+    expect(bar.queryByRole('button', { name })).toBeNull();
+  bar.getByRole('button', { name: en.toolbar.image });
+  fireEvent.click(bar.getByRole('button', { name: en.common.comment }));
+  expect(onAddComment).toHaveBeenCalledTimes(1);
+});
+
+test('host menus describe the editor and run their commands', () => {
+  const onFormat = mock(() => {});
+  const onZoomChange = mock(() => {});
+  const onInsertTable = mock(() => {});
+  const onInsertImage = mock(() => {});
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onFindReplace: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    showComments: false,
+  };
+  let model: DocxMenuModel | null = null;
+  render(
+    <EditorToolbar
+      singleRow
+      hostMenus
+      zoom={1}
+      outlineOpen
+      onToggleOutline={() => {}}
+      onFormat={onFormat}
+      onSave={() => {}}
+      onPageSetup={() => {}}
+      onZoomChange={onZoomChange}
+      onInsertTable={onInsertTable}
+      onInsertImage={onInsertImage}
+    >
+      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+    </EditorToolbar>
+  );
+  const reported = model as DocxMenuModel | null;
+  if (!reported) throw new Error('no menus');
+  expect(reported.menus.map((menu) => menu.id)).toEqual([
+    'file',
+    'edit',
+    'view',
+    'insert',
+    'format',
+  ]);
+  const flat = (entries: HostMenuEntry[]): HostMenuEntry[] =>
+    entries.flatMap((entry) =>
+      entry.kind === 'submenu' ? [entry, ...flat(entry.items)] : [entry]
+    );
+  const items = new Map(
+    flat(reported.menus.flatMap((menu) => menu.items)).flatMap((entry) =>
+      entry.kind === 'item' || entry.kind === 'submenu' ? [[entry.id, entry] as const] : []
+    )
+  );
+  // Placeholders that do nothing, and the clipboard, stay out.
+  for (const id of ['insert-toc', 'cut', 'copy', 'paste']) expect(items.has(id)).toBe(false);
+  expect(items.get('zoom:100')).toMatchObject({ checked: true });
+  expect(items.get('show-outline')).toMatchObject({ checked: true });
+  expect(items.get('show-comments')).toMatchObject({ checked: false });
+
+  reported.run('superscript');
+  expect(onFormat).toHaveBeenCalledWith('superscript');
+  reported.run('insert-table', '3x4');
+  expect(onInsertTable).toHaveBeenCalledWith(3, 4);
+  reported.run('zoom:150');
+  expect(onZoomChange).toHaveBeenCalledWith(1.5);
+  const file = new File(['png'], 'cell.png', { type: 'image/png' });
+  reported.run('insert-image', undefined, file);
+  expect(actions.onInsertImageFile).toHaveBeenCalledWith(file);
+  reported.run('insert-image');
+  expect(onInsertImage).toHaveBeenCalledTimes(1);
+  reported.run('find-replace');
+  expect(actions.onFindReplace).toHaveBeenCalledTimes(1);
 });
