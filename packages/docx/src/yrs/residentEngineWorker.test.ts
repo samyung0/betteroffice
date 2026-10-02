@@ -4,6 +4,7 @@ import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/fra
 import type { DisplayPage } from '../layout/render/displayList';
 import type { YrsResidentCaretRect } from './index';
 import type {
+  ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
@@ -69,12 +70,17 @@ function worker() {
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest }) => {},
-    postMessage(reply: ResidentEngineWorkerResponse) {
+    postMessage(reply: ResidentEngineWorkerMessage) {
+      if ('started' in reply) {
+        harness.started.push(reply.id);
+        return;
+      }
       replies.get(reply.id)!(reply);
       replies.delete(reply.id);
     },
   };
   const harness = {
+    started: [] as number[],
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
     rasterized: [] as number[],
@@ -244,6 +250,16 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe('resident worker request timing', () => {
+  test('reports each request as started, in order, before answering it', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([1]);
+    expect(w.harness.started).toHaveLength(2);
+    expect(w.harness.started[0]).toBeLessThan(w.harness.started[1]);
+  });
+});
 
 describe('resident worker page damage', () => {
   test('paints each page once while a three-page window crosses twelve pages', async () => {

@@ -17,8 +17,8 @@ import {
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
 import type {
+  ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -60,6 +60,9 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
     .then(() => {
       if (trap) throw trap;
+      // Requests queue behind each other here; the client's timeout for this
+      // one starts with this notice, not when it was posted.
+      reply({ id: event.data.id, started: true });
       return handle(event.data);
     })
     .catch((error) => {
@@ -472,6 +475,6 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
 }
 
-function reply(response: ResidentEngineWorkerResponse, transfer: Transferable[] = []): void {
+function reply(response: ResidentEngineWorkerMessage, transfer: Transferable[] = []): void {
   scope.postMessage(response, transfer);
 }

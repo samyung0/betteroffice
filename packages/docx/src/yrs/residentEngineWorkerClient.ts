@@ -6,6 +6,7 @@ import type {
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
+  ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
@@ -36,9 +37,13 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
 }
 
 type PendingRequest = {
+  type: AwaitedRequest['type'];
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
-  timeout: ReturnType<typeof setTimeout>;
+  /** Armed when the worker reports it began the request. */
+  timeout?: ReturnType<typeof setTimeout>;
+  /** Until then, the longer wait for the worker to begin it at all. */
+  queued: ReturnType<typeof setTimeout>;
 };
 
 type AwaitedRequest = Exclude<
@@ -46,7 +51,11 @@ type AwaitedRequest = Exclude<
   { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
 >;
 
-/** attachCanvases queues behind a sync, so it shares that budget. */
+/**
+ * How long the worker may take once it begins a request (it reports
+ * `started`); time queued behind earlier requests does not count, so a long
+ * sync or bootstrap cannot time out the input waiting behind it.
+ */
 const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   bootstrap: 15_000,
   sync: 15_000,
@@ -56,8 +65,15 @@ const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   applyDelete: 5_000,
 };
 
+/**
+ * A request the worker has not begun within this long means it is wedged
+ * somewhere no budget covers: inside a fire-and-forget request (applyUpdate,
+ * eraseCaret), or the message never arrived.
+ */
+const QUEUE_TIMEOUT_MS = 60_000;
+
 export interface ResidentEngineWorkerPort {
-  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
+  onmessage: ((event: MessageEvent<ResidentEngineWorkerMessage>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
   onmessageerror: ((event: MessageEvent) => void) | null;
   postMessage(message: ResidentEngineWorkerRequest, transfer?: Transferable[]): void;
@@ -84,6 +100,10 @@ export class ResidentEngineWorkerClient {
   constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
     this.worker.onmessage = (event) => {
       const response = event.data;
+      if ('started' in response) {
+        this.armTimeout(response.id);
+        return;
+      }
       if (response.ok && response.stateVector) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
@@ -94,6 +114,7 @@ export class ResidentEngineWorkerClient {
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
+      clearTimeout(pending.queued);
       clearTimeout(pending.timeout);
       if (response.ok) pending.resolve(response);
       else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
@@ -272,18 +293,31 @@ export class ResidentEngineWorkerClient {
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
-    const timeoutMs = REQUEST_TIMEOUT_MS[request.type];
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const queued = setTimeout(() => {
         this.fail(
           new ResidentWorkerFailureError(
-            `Resident engine worker did not answer ${request.type} within ${timeoutMs}ms`
+            `Resident engine worker did not begin ${request.type} within ${QUEUE_TIMEOUT_MS}ms`
           )
         );
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout });
+      }, QUEUE_TIMEOUT_MS);
+      this.pending.set(id, { type: request.type, resolve, reject, queued });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
+  }
+
+  private armTimeout(id: number): void {
+    const pending = this.pending.get(id);
+    if (!pending || pending.timeout !== undefined) return;
+    clearTimeout(pending.queued);
+    const timeoutMs = REQUEST_TIMEOUT_MS[pending.type];
+    pending.timeout = setTimeout(() => {
+      this.fail(
+        new ResidentWorkerFailureError(
+          `Resident engine worker did not answer ${pending.type} within ${timeoutMs}ms`
+        )
+      );
+    }, timeoutMs);
   }
 
   /** Record a successfully applied bootstrap/sync payload's fonts revision.
@@ -300,6 +334,7 @@ export class ResidentEngineWorkerClient {
     this.ready = false;
     this.worker.terminate();
     for (const pending of this.pending.values()) {
+      clearTimeout(pending.queued);
       clearTimeout(pending.timeout);
       pending.reject(error);
     }

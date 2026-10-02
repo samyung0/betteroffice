@@ -99,3 +99,9 @@ export type ResidentEngineWorkerResponse =
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
     };
+
+/** The worker began request `id`; the client's timeout for it runs from here. */
+export type ResidentEngineWorkerStarted = { id: number; started: true };
+
+/** Everything the worker posts: answers and start notices. */
+export type ResidentEngineWorkerMessage = ResidentEngineWorkerResponse | ResidentEngineWorkerStarted;

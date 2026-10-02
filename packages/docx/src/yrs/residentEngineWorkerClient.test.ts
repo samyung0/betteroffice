@@ -6,6 +6,7 @@ import {
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
 import type {
+  ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
@@ -25,8 +26,8 @@ class FakeWorker implements ResidentEngineWorkerPort {
     this.terminated = true;
   }
 
-  reply(response: ResidentEngineWorkerResponse): void {
-    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
+  reply(response: ResidentEngineWorkerMessage): void {
+    this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerMessage>);
   }
 
   lastId(): number {
@@ -108,16 +109,47 @@ function setup() {
 
 describe('watchdog', () => {
   test('gives bootstrap a larger budget than buildFrame', () => {
-    const { client } = setup();
+    const { worker, client } = setup();
     void client.bootstrap(snapshot, '').catch(() => {});
     void client.buildFrame('', 0).catch(() => {});
+    for (const { id } of worker.posted) worker.reply({ id, started: true });
     const [bootstrapMs, buildFrameMs] = armedBudgets();
     expect(bootstrapMs).toBeGreaterThan(buildFrameMs);
+  });
+
+  test('starts the budget when the worker begins the request, not while it queues', async () => {
+    const { worker, client } = setup();
+    const boot = client.bootstrap(snapshot, '');
+    const frame = client.buildFrame('', 0);
+    const [bootId, frameId] = worker.posted.map(({ id }) => id);
+    // queued: only the wait-to-begin bound
+    expect(armedBudgets()).toEqual([60_000, 60_000]);
+    worker.reply({ id: bootId, started: true });
+    expect(armedBudgets()).toEqual([60_000, 15_000]);
+    // a long bootstrap: the buildFrame behind it keeps waiting untimed
+    worker.reply(frameReply(bootId));
+    await boot;
+    expect(armedBudgets()).toEqual([60_000]);
+    worker.reply({ id: frameId, started: true });
+    expect(armedBudgets()).toEqual([5_000]);
+    worker.reply(frameReply(frameId));
+    await frame;
+    expect(armedBudgets()).toEqual([]);
+    expect(worker.terminated).toBe(false);
+  });
+
+  test('fails a request the worker never begins', async () => {
+    const { worker, client } = setup();
+    const frame = client.buildFrame('', 0);
+    expireTimers();
+    await expect(frame).rejects.toThrow('did not begin buildFrame within 60000ms');
+    expect(worker.terminated).toBe(true);
   });
 
   test('rejects an unanswered request, terminates the worker, refuses later ones', async () => {
     const { worker, client } = setup();
     const frame = client.buildFrame('', 0);
+    worker.reply({ id: worker.lastId(), started: true });
     expireTimers();
     const failure = await frame.then(
       () => { throw new Error('unanswered request resolved'); },
