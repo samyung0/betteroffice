@@ -145,3 +145,21 @@ test('a vertical wheel scrolls the clipped row sideways and marks the edges left
   // At the end the wheel is left to the page.
   expect(wheel(100).defaultPrevented).toBe(false);
 });
+
+test('a wheel over a dropdown open inside the row leaves the row and the dropdown alone', () => {
+  const { getByRole, getByTestId } = render(<SingleRow onToggleOutline={() => {}} />);
+  const row = getByTestId('formatting-bar').querySelector(
+    '.oox-formatting-bar__scroll'
+  ) as HTMLElement;
+  Object.defineProperty(row, 'scrollWidth', { configurable: true, value: 500 });
+  Object.defineProperty(row, 'clientWidth', { configurable: true, value: 200 });
+  fireEvent.click(getByRole('button', { name: en.titleBar.menuBarAriaLabel }));
+  const item = getByRole('menuitemcheckbox', { name: en.editor.showDocumentOutline });
+  expect(row.contains(item)).toBe(true);
+
+  const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120 });
+  item.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);
+  expect(row.scrollLeft).toBe(0);
+  getByRole('menuitemcheckbox', { name: en.editor.showDocumentOutline });
+});

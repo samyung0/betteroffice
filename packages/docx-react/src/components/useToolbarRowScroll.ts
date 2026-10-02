@@ -1,5 +1,8 @@
 import { type RefObject, useEffect } from 'react';
 
+/** Open dropdowns, palettes and menus, some of which render inside the row. */
+const POPUP = '[role="dialog"], [role="menu"], [role="listbox"], [data-docx-escape-layer]';
+
 /**
  * The single-row toolbar's scrolling part. A vertical wheel scrolls it sideways,
  * so a mouse without a horizontal wheel reaches the clipped groups, and
@@ -26,6 +29,15 @@ export function useToolbarRowScroll(ref: RefObject<HTMLElement | null>, enabled:
         event.shiftKey ||
         event.deltaX !== 0 ||
         !event.deltaY
+      )
+        return;
+      // Only the row's own strip: a wheel over one of its open popups is the
+      // popup's (and scrolling the row would close or move it).
+      const rect = row.getBoundingClientRect();
+      if (
+        (event.target instanceof Element && event.target.closest(POPUP)) ||
+        event.clientY < rect.top ||
+        event.clientY > rect.bottom
       )
         return;
       const max = row.scrollWidth - row.clientWidth;
