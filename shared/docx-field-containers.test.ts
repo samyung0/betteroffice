@@ -2504,3 +2504,99 @@ test("two peers typing at the end of a continued field result's first paragraph 
   expect(view(saved)).toMatch(/^a\[«DATE»\|2(QR|RQ)$/);
   for (const session of [A, B, reopened]) session.destroy();
 });
+
+// Round 4 review, finding 1: keys pressed slowly (each its own Undo step) that delete a continued field's end, then
+// as many Undos, put the end back where it was. The editor, a fresh replica and the save equal the untouched file: an
+// Undo re-anchors only a marker whose own text it restored, not one next to text it restored.
+const slowEndShapes: Record<string, [string, string, number | "end"]> = {
+  "a table of contents with links, its end after the last entry": [
+    p("11111111", `${char("begin")}${instr(' TOC \\o "1-3" \\h ')}${char("separate")}${tocEntryXml("_Toc1", "Intro", "1")}`) +
+      p("33333333", `${tocEntryXml("_Toc2", "Body", "2")}${char("end")}`),
+    "33333333",
+    "end",
+  ],
+  "an IF result, its end after text": [
+    p("11111111", `${run("Dear ")}${char("begin")}${instr(" IF 1 = 1 ")}${char("separate")}${run("Sir,")}`) + p("33333333", `${run("Thanks")}${char("end")}${run(" ok")}`),
+    "33333333",
+    6,
+  ],
+  "a DATE result, its end after text": [
+    p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("lo wo")}${char("end")}${run("zz")}`),
+    "33333333",
+    5,
+  ],
+};
+test.each(
+  (["body", "cell"] as const).flatMap((where) =>
+    Object.keys(slowEndShapes).flatMap((shape) =>
+      (["Backspace", "Delete"] as const).flatMap((key) => [2, 3].map((times) => [where, shape, key, times] as const))
+    )
+  )
+)("%s | %s: %s ×%i slowly, then as many Undos, restores the field's end", async (where, shape, key, times) => {
+  const [xml, paraId, at] = slowEndShapes[shape]!;
+  const [story, part] = STORY[where];
+  const bytes = matrixDocx(where, xml);
+  const untouched = await open(bytes);
+  const seeded = matrixUnits(untouched, story);
+  const original = sig(await publish(bytes, untouched.encodeState()), part);
+  untouched.destroy();
+  const session = await open(bytes);
+  session.beginUndoCapture();
+  const end = () => session.paragraphSpans(story).find((span) => span.paraId === paraId)!.length;
+  let caret = at === "end" ? end() : at;
+  for (let i = 0; i < times; i += 1) {
+    if (i > 0) session.addUndoBoundary();
+    if (key === "Backspace") caret = session.deleteAt({ story, paraId, offset: caret }, "backward").caret.offset;
+    else session.deleteAt({ story, paraId, offset: (at === "end" ? end() : at) - 1 }, "forward");
+  }
+  for (let i = 0; i < times; i += 1) session.undo();
+  const replica = await open(bytes, session.encodeState());
+  const saved = await publish(bytes, session.encodeState());
+  expect(matrixUnits(session, story)).toBe(seeded);
+  expect(matrixUnits(replica, story)).toBe(seeded);
+  expect(sig(saved, part)).toBe(original);
+  session.destroy();
+  replica.destroy();
+});
+
+// Each delete step its own Undo step or one, then all undone: the end stays put (round 4 review, fe4's flows; the
+// single-step ones are what re-anchoring the end fixed in this round).
+const fe4Flows: Record<string, (session: YrsSession, story: string) => void> = {
+  "del [1,2), del [0,1), Undo ×2": (s, st) => (cut(s, st, 1, 2), s.addUndoBoundary(), cut(s, st, 0, 1), s.undo(), s.undo()),
+  "del [0,2), del [0,1), Undo ×2": (s, st) => (cut(s, st, 0, 2), s.addUndoBoundary(), cut(s, st, 0, 1), s.undo(), s.undo()),
+  "del [1,2) twice, Undo ×2": (s, st) => (cut(s, st, 1, 2), s.addUndoBoundary(), cut(s, st, 1, 2), s.undo(), s.undo()),
+  "del [0,3), Undo": (s, st) => (cut(s, st, 0, 3), s.undo()),
+  "del [0,3), Undo, Redo, Undo": (s, st) => (cut(s, st, 0, 3), s.undo(), s.redo(), s.undo()),
+  "del [1,3), del [0,1), Undo ×2": (s, st) => (cut(s, st, 1, 3), s.addUndoBoundary(), cut(s, st, 0, 1), s.undo(), s.undo()),
+  "del [0,1), del [0,2), Undo ×2": (s, st) => (cut(s, st, 0, 1), s.addUndoBoundary(), cut(s, st, 0, 2), s.undo(), s.undo()),
+};
+/** Deletes `start..end` of the second paragraph. */
+function cut(session: YrsSession, story: string, start: number, end: number) {
+  session.deleteRange({ story, start: { paraId: "33333333", offset: start }, end: { paraId: "33333333", offset: end } });
+}
+test.each(
+  (["body", "cell"] as const).flatMap((where) =>
+    ["date", "link"].flatMap((shape) => Object.keys(fe4Flows).map((flow) => [where, shape, flow] as const))
+  )
+)("%s | a continued %s field: %s keeps its end", async (where, shape, flow) => {
+  const xml =
+    shape === "date"
+      ? p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("10")}${char("end")}${run("zz")}`)
+      : p("11111111", `${run("a ")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${link(run("AA"))}`) + p("33333333", `${run("yy")}${char("end")}${run(" b")}`);
+  const [story, part] = STORY[where];
+  const bytes = matrixDocx(where, xml);
+  const untouched = await open(bytes);
+  const seeded = matrixUnits(untouched, story);
+  const original = sig(await publish(bytes, untouched.encodeState()), part);
+  untouched.destroy();
+  const session = await open(bytes);
+  session.beginUndoCapture();
+  fe4Flows[flow]!(session, story);
+  const replica = await open(bytes, session.encodeState());
+  const saved = await publish(bytes, session.encodeState());
+  expect(matrixUnits(session, story)).toBe(seeded);
+  expect(matrixUnits(replica, story)).toBe(seeded);
+  expect(sig(saved, part)).toBe(original);
+  session.destroy();
+  replica.destroy();
+});

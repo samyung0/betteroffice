@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use yrs::{
-    Any, Assoc, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, Transact, TransactionMut,
+    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, Transact,
+    TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -82,19 +83,20 @@ pub(crate) fn set(
     Ok(())
 }
 
-/// Re-anchors the bookmarks and comment ranges an Undo or Redo moved onto the
-/// text it restored (items of this client from clock `restored_from` on). It
-/// restores text as new items, which markers anchored to the old ones follow
-/// only in this session, through yrs's redone links: another replica and the
-/// save would place them elsewhere. A marker in text that stays deleted keeps
-/// its anchor, so the Undo that restores that text brings it back.
+/// Re-anchors the bookmarks and comment ranges whose own text an Undo or Redo
+/// restored (`restored`, the step's deletions) onto that text (items of this
+/// client from clock `restored_from` on). It restores text as new items, which
+/// markers anchored to the old ones follow only in this session, through yrs's
+/// redone links: another replica and the save would place them elsewhere. A
+/// marker in text that stays deleted keeps its anchor, even beside text the
+/// step restored, so the Undo that restores its own text brings it back.
 ///
 /// A continued field's end is re-anchored too, so every peer and the save end
 /// the field where the peer that pressed Undo or Redo shows it (decided
 /// 2026-10-02). Its separate keeps its anchor: re-anchoring it made a rebase
 /// of Undo and Redo of a join that removed a nested continued field refuse
 /// (the matrix's `join nested continued field, undo, redo`).
-pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32) {
+pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
     let client = doc.client_id();
     let mut txn = doc.transact_mut_with("system");
     let entries: Vec<_> = [ROOT, crate::COMMENTS]
@@ -124,6 +126,9 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32) {
             let fresh = decode_anchor(encoded).ok().and_then(|anchor| {
                 let story = crate::story_ref(&txn, &anchor.story).ok()?;
                 let restore = |sticky: &yrs::StickyIndex| {
+                    if !sticky.id().is_some_and(|id| restored.contains(id)) {
+                        return None;
+                    }
                     let index = sticky.get_offset(&txn)?.index;
                     let fresh = story.sticky_index(&txn, index, sticky.assoc)?;
                     let restored = fresh

@@ -229,6 +229,51 @@ fn undo_and_redo_re_anchor_a_continued_fields_end_in_text_they_restore() {
 }
 
 #[test]
+fn undo_re_anchors_a_continued_fields_end_only_with_its_own_text() {
+    // Round 4 review: two deletes at the field's end as separate steps, then
+    // two Undos. The first Undo restores the text before the end's own unit,
+    // which must not pull the end onto it; the second restores the end's unit.
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>second</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>after</w:t></w:r></w:p></w:body></w:document>"#;
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+    let ends = |doc: &EditingDoc| {
+        marks(doc)
+            .into_iter()
+            .flat_map(|properties| match properties.get("bookmarks") {
+                Some(Any::Array(markers)) => markers
+                    .iter()
+                    .filter(|marker| {
+                        map_get(marker, "kind") == Some(&Any::String("fieldend".into()))
+                    })
+                    .filter_map(|marker| map_get(marker, "offset").cloned())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    };
+    for times in [2, 3] {
+        let doc = EditingDoc::new(7);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let mut undo = doc.undo_manager();
+        // "second" is body 2..8, the field's end after its "d".
+        for step in 0..times {
+            undo.add_undo_barrier();
+            doc.delete_range(&ctx(), StoryRange::new("body", 7 - step, 8 - step))
+                .unwrap();
+        }
+        for _ in 0..times {
+            assert!(undo.undo());
+        }
+        let replica = EditingDoc::new(8);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert_eq!(slot_units(&doc), "[field]¶secondafter¶", "×{times}");
+        assert_eq!(ends(&doc), vec![Any::Number(6.0)], "×{times}");
+        assert_eq!(ends(&replica), ends(&doc), "×{times}");
+    }
+}
+
+#[test]
 fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
     // Decided 2026-10-02: the result text ending the first paragraph of a
     // field that continues is text after its embed; the join after Enter in

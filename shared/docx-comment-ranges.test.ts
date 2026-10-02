@@ -1134,7 +1134,31 @@ const undoFlows: Record<string, [(session: YrsSession) => void, string]> = {
     },
     "lo wo",
   ],
+  // Round 4 review, finding 2: keys pressed slowly (each its own Undo step) at the marker's end or start, then as
+  // many Undos; an Undo re-anchors only a marker whose own text it restored, not one next to text it restored.
+  "Backspace ×2 slowly at its end, Undo ×2": [(session) => slowly(session, 2, "backward", 8), "lo wo"],
+  "Backspace ×3 slowly at its end, Undo ×3": [(session) => slowly(session, 3, "backward", 8), "lo wo"],
+  "Delete ×2 slowly at its start, Undo ×2": [(session) => slowly(session, 2, "forward", 3), "lo wo"],
+  "delete it, then the text before it, Undo ×2": [
+    (session) => {
+      session.deleteRange(undoRange(3, 8));
+      session.addUndoBoundary();
+      session.deleteRange(undoRange(0, 3));
+      session.undo();
+      session.undo();
+    },
+    "lo wo",
+  ],
 };
+/** `times` Backspaces or Deletes at `offset`, each its own Undo step, then as many Undos. */
+function slowly(session: YrsSession, times: number, direction: "backward" | "forward", offset: number) {
+  let at = offset;
+  for (let i = 0; i < times; i += 1) {
+    if (i > 0) session.addUndoBoundary();
+    at = session.deleteAt({ story: "body", paraId: undoP, offset: at }, direction).caret.offset;
+  }
+  for (let i = 0; i < times; i += 1) session.undo();
+}
 test.each(Object.keys(undoFlows).flatMap((flow) => (["comment", "bookmark"] as const).map((shape) => [shape, flow] as const)))(
   "a %s over text survives %s in the editor, a peer and the save",
   async (shape, flow) => {

@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use yrs::sync::time::Clock;
-use yrs::{Map, Origin, Out, ReadTxn, Subscription, Transact};
+use yrs::{IdSet, Map, Origin, Out, ReadTxn, Subscription, Transact};
 
 use crate::{COMMENTS, EditingDoc, STORIES};
 
@@ -177,21 +177,46 @@ impl DocUndoManager {
     }
 
     pub fn undo(&mut self) -> bool {
-        lock(&self.changed_stories).clear();
-        let restored_from = self.next_clock();
-        let applied = self.inner.undo_blocking();
-        if applied {
-            crate::bookmarks::rebind(&self.doc, restored_from);
-        }
-        applied
+        self.step(true)
     }
 
     pub fn redo(&mut self) -> bool {
+        self.step(false)
+    }
+
+    /// Undoes or redoes one step, then re-anchors the markers in the text it
+    /// restored as new items: the deletions of the steps yrs popped (it pops
+    /// from the top until one applies).
+    fn step(&mut self, undoing: bool) -> bool {
         lock(&self.changed_stories).clear();
         let restored_from = self.next_clock();
-        let applied = self.inner.redo_blocking();
+        let stack = |inner: &yrs::undo::UndoManager<()>| {
+            if undoing {
+                inner.undo_stack()
+            } else {
+                inner.redo_stack()
+            }
+            .len()
+        };
+        let deletions: Vec<IdSet> = if undoing {
+            self.inner.undo_stack()
+        } else {
+            self.inner.redo_stack()
+        }
+        .iter()
+        .map(|item| item.deletions().clone())
+        .collect();
+        let applied = if undoing {
+            self.inner.undo_blocking()
+        } else {
+            self.inner.redo_blocking()
+        };
         if applied {
-            crate::bookmarks::rebind(&self.doc, restored_from);
+            let mut restored = IdSet::default();
+            for popped in deletions.into_iter().skip(stack(&self.inner)) {
+                restored.merge_with(popped);
+            }
+            crate::bookmarks::rebind(&self.doc, restored_from, &restored);
         }
         applied
     }
