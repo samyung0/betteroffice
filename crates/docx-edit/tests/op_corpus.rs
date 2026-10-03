@@ -496,6 +496,88 @@ fn a_split_field_left_without_its_link_shows_its_whole_result() {
 }
 
 #[test]
+fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
+    // Accepting a suggested deletion of the link left in the first paragraph,
+    // typing over it, and deleting it when an own run precedes it: each time
+    // the editor shows what the seed of the save shows, and a plain run left
+    // ending the continued result becomes text after the field, as the seed
+    // reads it.
+    let begin = |code: &str| {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{code}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#
+        )
+    };
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let link = |text: &str| format!(r#"<w:hyperlink w:anchor="a">{}</w:hyperlink>"#, run(text));
+    let page = format!("{}{}{end}", begin(" PAGE "), run("7"));
+    let field = |result: &str| {
+        format!(
+            "{}{}{result}{end}{}",
+            run("a "),
+            begin(" REF a \\h "),
+            run(" b")
+        )
+    };
+    let first = |result: &str| format!("{}{}{result}", run("a "), begin(" REF a \\h "));
+    let second = |result: &str| format!("{result}{end}{}", run(" b"));
+    type Edit = fn(&EditingDoc);
+    let cases: [(String, Edit, EditingDoc); 3] = [
+        (
+            field(&format!("{page}{}{}", link("AA"), run("yy"))),
+            |doc| {
+                doc.delete_range(&sug("Bo"), StoryRange::new("body", 2, 3))
+                    .unwrap();
+                doc.accept_change(&ctx(), &ChangeTarget::All).unwrap();
+            },
+            seeded(&[
+                ("11111111", &first(&page)),
+                ("33333333", &second(&format!("{}{}", link("A"), run("yy")))),
+            ]),
+        ),
+        (
+            field(&format!("{page}{}{}", link("AA"), link("BB"))),
+            |doc| {
+                doc.replace_range(&ctx(), StoryRange::new("body", 2, 3), "Q")
+                    .unwrap();
+            },
+            seeded(&[
+                ("11111111", &first(&format!("{page}{}", link("Q")))),
+                ("33333333", &second(&format!("{}{}", link("A"), link("BB")))),
+            ]),
+        ),
+        (
+            field(&format!("{}{}{}", run("x"), link("AA"), run("yy"))),
+            |doc| {
+                doc.delete_range(&ctx(), StoryRange::new("body", 2, 3))
+                    .unwrap();
+            },
+            seeded(&[
+                ("11111111", &first(&run("x"))),
+                ("33333333", &second(&format!("{}{}", link("A"), run("yy")))),
+            ]),
+        ),
+    ];
+    for (paragraph, edit, saved) in cases {
+        let doc = seeded(&[("11111111", &paragraph)]);
+        let mut undo = doc.undo_manager();
+        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap();
+        let split = (slot_units(&doc), shown(&doc));
+        undo.add_undo_barrier();
+        edit(&doc);
+        assert_eq!(shown(&doc), shown(&saved), "{paragraph}");
+        assert_eq!(
+            slot_units(&doc).replace('Q', "A"),
+            slot_units(&saved).replace('Q', "A"),
+            "{paragraph}"
+        );
+        undo.undo();
+        assert_eq!((slot_units(&doc), shown(&doc)), split, "{paragraph}");
+    }
+}
+
+#[test]
 fn a_moved_run_holding_a_break_or_nothing_rejoins_in_place() {
     // A moved run holding only a line break rejoins as that run, and an empty
     // run after a projected simple field takes no slot, so the join leaves

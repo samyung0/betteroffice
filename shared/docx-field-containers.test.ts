@@ -2377,6 +2377,49 @@ test.each(
   reopened.destroy();
 });
 
+// Recheck of e7bf01fc, finding 3: the shown text follows the seed after every edit that drops the link left in the
+// first paragraph: Accept All of its suggested deletion, typing over it (the typed text takes its slot), and a delete
+// leaving an own run to end the continued result (which becomes text after the field, as the seed reads it).
+const dropLink: Record<string, [string, (session: YrsSession, story: string, paraId: string, offset: number) => void]> = {
+  "Accept All of its suggested deletion": [
+    field(field(run("7"), " PAGE ") + link(run("AA")) + run("yy"), " REF a \\h "),
+    (session, story, paraId, offset) => {
+      session.deleteRange({ story, start: { paraId, offset: offset - 1 }, end: { paraId, offset } }, { name: "Bo", date: "2026-10-04T00:00:00Z" });
+      session.acceptChange({ all: true });
+    },
+  ],
+  "typing over it": [
+    field(field(run("7"), " PAGE ") + link(run("AA")) + linkTo("BB"), " REF a \\h "),
+    (session, story, paraId, offset) => void session.replaceRange({ story, start: { paraId, offset: offset - 1 }, end: { paraId, offset } }, "Q"),
+  ],
+  "deleting it after an own run": [
+    field(run("x") + link(run("AA")) + run("yy"), " REF a \\h "),
+    (session, story, paraId, offset) => void session.deleteAt({ story, paraId, offset }, "backward"),
+  ],
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(dropLink).map((how) => [where, how] as const)))(
+  "%s | Enter in a field's link, then %s, shows what the seed of the save shows",
+  async (where, how) => {
+    const [xml, edit] = dropLink[how]!;
+    const [story] = STORY[where];
+    const bytes = matrixDocx(where, holder44(xml));
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { firstParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    const split = matrixUnits(session, story);
+    session.addUndoBoundary();
+    edit(session, story, firstParaId, at.offset + 1);
+    const saved = await publish(bytes, session.encodeState());
+    const reopened = await open(saved);
+    expect(fieldsShown(session, story)).toBe(fieldsShown(reopened, story));
+    expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    session.undo();
+    if (how !== "Accept All of its suggested deletion") expect(matrixUnits(session, story)).toBe(split);
+    session.destroy();
+    reopened.destroy();
+  }
+);
+
 // Review of ee62d514, finding 3: an empty run moved out by Enter goes back only with its neighbours, so a join that
 // leaves the run after it in a later paragraph does not save it ahead of that run; joining all the paragraphs back
 // restores the untouched save.

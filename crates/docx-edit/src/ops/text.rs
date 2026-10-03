@@ -8,7 +8,7 @@ use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
 
 use crate::format::{FIELD_RESULT, FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::field_changes::{release_children, removes_owner};
+use crate::ops::field_changes::{child_owners, refresh_shown, release_children, removes_owner};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
     capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
@@ -179,18 +179,6 @@ pub(crate) fn plain_delete(
     chunks: &[Chunk],
 ) -> DeleteOutcome {
     release_children(txn, story, chunks, start, end);
-    // Fields losing projected children here may show another text after.
-    let owners: Vec<i64> = chunks
-        .iter()
-        .filter(|chunk| chunk.start < end && chunk.end() > start)
-        .filter_map(|chunk| match chunk.attrs.get(FIELD_RESULT) {
-            Some(Any::Map(marker)) => match marker.get("id") {
-                Some(Any::Number(id)) => Some(*id as i64),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
         .filter_map(|chunk| match &chunk.kind {
@@ -233,9 +221,6 @@ pub(crate) fn plain_delete(
         if survivor_id.as_deref() != Some(donor_id.as_str()) {
             adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
         }
-    }
-    if !owners.is_empty() {
-        crate::ops::field_changes::refresh_shown(txn, story, &owners);
     }
     DeleteOutcome { removed }
 }
@@ -367,6 +352,15 @@ impl EditingDoc {
         {
             crate::ops::field_changes::rejoin_fields(&mut txn, &story, &range.story, range.start)?;
         }
+        if revision.is_none() {
+            refresh_shown(
+                &mut txn,
+                &story,
+                &range.story,
+                &child_owners(&chunks, range.start, range.end),
+                self.package().as_deref(),
+            )?;
+        }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
@@ -461,6 +455,7 @@ impl EditingDoc {
             kept,
             &chunks,
         );
+        let plain = revision.is_none();
         if !text.is_empty() {
             story.insert_with_attributes(
                 &mut txn,
@@ -468,6 +463,16 @@ impl EditingDoc {
                 text,
                 stamped_attrs(formatting, revision),
             );
+        }
+        // After the text takes the slot a removed child left.
+        if plain {
+            refresh_shown(
+                &mut txn,
+                &story,
+                &range.story,
+                &child_owners(&chunks, range.start, range.end),
+                self.package().as_deref(),
+            )?;
         }
         let end = landing + utf16_len(text);
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, end)?;
@@ -554,6 +559,15 @@ impl EditingDoc {
                 stamped_attrs(formatting, revision.clone()),
             );
             cursor += utf16_len(&run.text);
+        }
+        if revision.is_none() {
+            refresh_shown(
+                &mut txn,
+                &story,
+                &range.story,
+                &child_owners(&chunks, range.start, range.end),
+                self.package().as_deref(),
+            )?;
         }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, cursor)?;
         Ok(Receipt {
