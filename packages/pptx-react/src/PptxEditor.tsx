@@ -54,8 +54,8 @@ import type {
   SlideLayoutOption,
 } from './components/Toolbar';
 import { SHAPE_PRESETS } from './components/Toolbar';
-import { toolbarFont } from './components/ui/ToolbarPrimitives';
-import { IconSetContext, type IconSet } from './components/ui/ToolbarIcon';
+import { ToolbarButton, toolbarFont } from './components/ui/ToolbarPrimitives';
+import { IconSetContext, type IconSet, ToolbarIcon } from './components/ui/ToolbarIcon';
 import { PPTX_COMMAND_IDS, type PptxCommandId, type PptxCommandState } from './commands';
 import {
   RESIZE_HANDLES,
@@ -192,6 +192,10 @@ export interface PptxEditorProps {
   showZoomControl?: boolean;
   /** Called whenever what `runCommand` can do changes, for host menus. */
   onCommandState?: (state: PptxCommandState) => void;
+  /** Whether the speaker notes panel starts open; it starts hidden. */
+  defaultSpeakerNotes?: boolean;
+  /** Called when the Notes button or `view.speakerNotes` shows or hides the notes. */
+  onSpeakerNotesChange?: (visible: boolean) => void;
 }
 
 interface EditorModel {
@@ -383,6 +387,8 @@ function PptxEditorContent({
   showFontSizePicker = true,
   showZoomControl = true,
   onCommandState,
+  defaultSpeakerNotes = false,
+  onSpeakerNotesChange,
 }: Omit<PptxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -480,6 +486,7 @@ function PptxEditorContent({
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
+  const [speakerNotes, setSpeakerNotes] = useState(defaultSpeakerNotes);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen] = useState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
@@ -2225,6 +2232,12 @@ function PptxEditorContent({
     }
   };
 
+  const toggleSpeakerNotes = () => {
+    const next = !speakerNotes;
+    setSpeakerNotes(next);
+    onSpeakerNotesChange?.(next);
+  };
+
   const lastSlide = slideCount - 1;
   const alignCommands = {
     'format.alignLeft': 'l',
@@ -2246,6 +2259,7 @@ function PptxEditorContent({
     'edit.delete': editable && objectActive && selection === null,
     'view.present': slideCount > 0,
     'view.zoom': Boolean(model),
+    'view.speakerNotes': Boolean(model),
     'insert.textBox': editable && slideCount > 0,
     'insert.image': editable && slideCount > 0,
     'insert.shape': editable && slideCount > 0,
@@ -2283,6 +2297,7 @@ function PptxEditorContent({
     else if (id === 'edit.redo') history('redo');
     else if (id === 'edit.delete') deleteShape();
     else if (id === 'view.present') startPresenting();
+    else if (id === 'view.speakerNotes') toggleSpeakerNotes();
     else if (id === 'view.zoom') {
       const scale = Number(value);
       if (value === 'fit') setZoom('fit');
@@ -2320,12 +2335,13 @@ function PptxEditorContent({
     enabled: commandEnabled,
     checked: PPTX_COMMAND_IDS.filter(
       (id) =>
-        textActive &&
+        (id === 'view.speakerNotes' && speakerNotes) ||
+        (textActive &&
         ((id === 'format.bold' && selectionFormatting.bold) ||
           (id === 'format.italic' && selectionFormatting.italic) ||
           (id === 'format.underline' && selectionFormatting.underline) ||
           (id in alignCommands &&
-            alignCommands[id as keyof typeof alignCommands] === selectionAlignment))
+            alignCommands[id as keyof typeof alignCommands] === selectionAlignment)))
     ),
     zoom: zoom === 'fit' ? 'fit' : String(zoom),
     borderWeight: shapeActive
@@ -2744,6 +2760,21 @@ function PptxEditorContent({
             )}
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
+          {model ? (
+            // As PowerPoint's status-bar Notes button, over the slide area's corner.
+            <span style={styles.notesToggle}>
+              <ToolbarButton
+                title={t('notes.toggle')}
+                active={speakerNotes}
+                onClick={toggleSpeakerNotes}
+                testId="pptx-notes-toggle"
+                style={narrowLayout ? undefined : { gap: 6, padding: '0 10px' }}
+              >
+                <ToolbarIcon name="notes" size={16} />
+                {narrowLayout ? null : <span>{t('notes.toggle')}</span>}
+              </ToolbarButton>
+            </span>
+          ) : null}
         </div>
         {!readOnly && showProposals && proposalsOpen && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
@@ -2755,7 +2786,7 @@ function PptxEditorContent({
       </div>
       {activeSlide && canvasReview.diff?.proposal.changes.some((change) => change.slideId === activeSlide.id && !change.shapeId && change.oldText !== change.newText) ? (
         <ProposalNotesDiff diff={canvasReview.diff} slideId={activeSlide.id} />
-      ) : activeSlide ? (
+      ) : activeSlide && speakerNotes ? (
         <NotesPanel
           key={activeSlide.id}
           value={activeSlide.notes ?? ''}
@@ -3381,6 +3412,8 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
+  // Hosts lift it with --pptx-notes-toggle-bottom when their own chrome covers the corner.
+  notesToggle: { position: 'absolute', right: 8, bottom: 'var(--pptx-notes-toggle-bottom, 8px)', zIndex: 5 },
   notesPanel: {
     flex: '0 0 auto',
     display: 'flex',

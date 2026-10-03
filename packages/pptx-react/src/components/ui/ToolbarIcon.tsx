@@ -32,6 +32,7 @@ export const TOOLBAR_ICON_NAMES = [
   'remove',
   'add',
   'check',
+  'notes',
 ] as const;
 
 export type ToolbarIconName = (typeof TOOLBAR_ICON_NAMES)[number];
@@ -179,6 +180,12 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       {name === 'remove' && <path d="M5 12h14" />}
       {name === 'add' && <path d="M12 5v14M5 12h14" />}
       {name === 'check' && <path d="m5 12 5 5 9-10" />}
+      {name === 'notes' && (
+        <>
+          <rect x="4" y="4" width="16" height="16" rx="2" />
+          <path d="M8 9h8M8 13h8M8 17h5" />
+        </>
+      )}
     </svg>
   );
 }

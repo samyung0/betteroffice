@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Konuşmacı notları",
-    "placeholder": "Konuşmacı notu ekle…"
+    "placeholder": "Konuşmacı notu ekle…",
+    "toggle": "Notlar",
+    "showSpeakerNotes": "Konuşmacı notlarını göster"
   },
   "errors": {
     "decodeSlideImage": null

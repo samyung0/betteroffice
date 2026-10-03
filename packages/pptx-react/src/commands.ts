@@ -12,6 +12,7 @@ export const PPTX_COMMAND_IDS = [
   'edit.delete',
   'view.present',
   'view.zoom',
+  'view.speakerNotes',
   'insert.textBox',
   'insert.image',
   'insert.shape',
@@ -41,7 +42,7 @@ export type PptxCommandId = (typeof PPTX_COMMAND_IDS)[number];
 /** What a host menu needs to draw the commands, reported on every change. */
 export interface PptxCommandState {
   enabled: Record<PptxCommandId, boolean>;
-  /** Toggles that are on: bold, italic, underline and the current alignment. */
+  /** Toggles that are on: bold, italic, underline, the current alignment and speaker notes. */
   checked: PptxCommandId[];
   /** `view.zoom`'s current value. */
   zoom: string;

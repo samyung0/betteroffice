@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import type { PptxCommandState } from './commands';
-import type { PptxEditorApi } from './PptxEditor';
+import type { PptxEditorApi, PptxEditorProps } from './PptxEditor';
 import { PptxEditor } from './PptxEditor';
 
 const root = resolve(import.meta.dir, '../../..');
@@ -48,7 +48,7 @@ function useFakeImage() {
   return originalImage;
 }
 
-async function open(readOnly = false) {
+async function open(readOnly = false, props: Partial<PptxEditorProps> = {}) {
   const opened: PptxEditorApi[] = [];
   const states: PptxCommandState[] = [];
   const errors: Error[] = [];
@@ -60,6 +60,7 @@ async function open(readOnly = false) {
       onReady={(api) => opened.push(api)}
       onCommandState={(state) => states.push(state)}
       onError={(error) => errors.push(error)}
+      {...props}
     />
   );
   await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
@@ -190,5 +191,31 @@ describe('PptxEditor host commands', () => {
     expect(run('insert.shape', 'ellipse')).toBe(false);
     expect(slideIds()).toEqual(ids);
     await expect(api.insertImage(PNG, 'logo.png')).rejects.toThrow('unavailable');
+  }, 60_000);
+
+  it('hides speaker notes until the Notes button or view.speakerNotes shows them', async () => {
+    const changes: boolean[] = [];
+    const { run, state, view } = await open(false, { onSpeakerNotesChange: (visible) => changes.push(visible) });
+    const notes = () => view.queryByTestId('pptx-notes-textarea');
+    const button = view.getByTestId('pptx-notes-toggle');
+    expect(notes()).toBeNull();
+    expect(state().checked).not.toContain('view.speakerNotes');
+
+    act(() => fireEvent.click(button));
+    expect(notes()).not.toBeNull();
+    expect(button.getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(state().checked).toContain('view.speakerNotes'));
+
+    expect(run('view.speakerNotes')).toBe(true);
+    expect(notes()).toBeNull();
+    expect(button.getAttribute('aria-pressed')).toBeNull();
+    await waitFor(() => expect(state().checked).not.toContain('view.speakerNotes'));
+    expect(changes).toEqual([true, false]);
+  }, 60_000);
+
+  it('opens with the notes shown when the host remembered that', async () => {
+    const { state, view } = await open(false, { defaultSpeakerNotes: true });
+    expect(view.queryByTestId('pptx-notes-textarea')).not.toBeNull();
+    await waitFor(() => expect(state().checked).toContain('view.speakerNotes'));
   }, 60_000);
 });

@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "הערות דובר",
-    "placeholder": "הוסף הערות דובר…"
+    "placeholder": "הוסף הערות דובר…",
+    "toggle": "הערות",
+    "showSpeakerNotes": "הצג הערות דובר"
   },
   "errors": {
     "decodeSlideImage": null

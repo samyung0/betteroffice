@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "वक्ता नोट्स",
-    "placeholder": "वक्ता नोट्स जोड़ें…"
+    "placeholder": "वक्ता नोट्स जोड़ें…",
+    "toggle": "नोट्स",
+    "showSpeakerNotes": "वक्ता नोट्स दिखाएँ"
   },
   "errors": {
     "decodeSlideImage": null

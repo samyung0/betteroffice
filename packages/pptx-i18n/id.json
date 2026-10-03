@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Catatan pembicara",
-    "placeholder": "Tambahkan catatan pembicara…"
+    "placeholder": "Tambahkan catatan pembicara…",
+    "toggle": "Catatan",
+    "showSpeakerNotes": "Tampilkan catatan pembicara"
   },
   "errors": {
     "decodeSlideImage": null

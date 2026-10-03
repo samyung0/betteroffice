@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Notas do apresentador",
-    "placeholder": "Adicionar notas do apresentador…"
+    "placeholder": "Adicionar notas do apresentador…",
+    "toggle": "Notas",
+    "showSpeakerNotes": "Mostrar notas do apresentador"
   },
   "errors": {
     "decodeSlideImage": null

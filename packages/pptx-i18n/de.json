@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Sprechernotizen",
-    "placeholder": "Sprechernotizen hinzufügen…"
+    "placeholder": "Sprechernotizen hinzufügen…",
+    "toggle": "Notizen",
+    "showSpeakerNotes": "Sprechernotizen anzeigen"
   },
   "errors": {
     "decodeSlideImage": null

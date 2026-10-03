@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Notatki prelegenta",
-    "placeholder": "Dodaj notatki prelegenta…"
+    "placeholder": "Dodaj notatki prelegenta…",
+    "toggle": "Notatki",
+    "showSpeakerNotes": "Pokaż notatki prelegenta"
   },
   "errors": {
     "decodeSlideImage": null

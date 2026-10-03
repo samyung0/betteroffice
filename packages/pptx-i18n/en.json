@@ -115,7 +115,9 @@
   },
   "notes": {
     "panelLabel": "Speaker notes",
-    "placeholder": "Add speaker notes…"
+    "placeholder": "Add speaker notes…",
+    "toggle": "Notes",
+    "showSpeakerNotes": "Show speaker notes"
   },
   "errors": {
     "decodeSlideImage": "could not decode slide image"

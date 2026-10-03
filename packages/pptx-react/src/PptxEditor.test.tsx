@@ -431,6 +431,7 @@ describe('PptxEditor host integration', () => {
           api = ready;
         }}
         readOnly
+        defaultSpeakerNotes
       />
     );
     await act(async () => {
@@ -855,6 +856,7 @@ describe('PptxEditor speaker notes', () => {
         file={fixture}
         fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
         clientId={9110}
+        defaultSpeakerNotes
         onReady={(ready) => {
           api = ready;
         }}
