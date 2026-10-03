@@ -642,6 +642,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
       title={t('toolbar.groups.alignment')}
       disabled={!formattingEnabled}
       menuWidth={42}
+      // A button column's panel is tighter than a list's, as the note toolbar's
+      // (p-1) and XLSX's; no shared variable covers it.
+      menuStyle={{ padding: 4 }}
       testId="pptx-align"
       trigger={
         <>

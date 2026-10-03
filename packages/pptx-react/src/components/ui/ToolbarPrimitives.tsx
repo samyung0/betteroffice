@@ -215,6 +215,8 @@ export interface ToolbarDropdownProps {
   active?: boolean;
   menuWidth?: number;
   style?: CSSProperties;
+  /** Overrides on the open panel, e.g. a button popover's tighter padding. */
+  menuStyle?: CSSProperties;
   testId?: string;
 }
 
@@ -226,6 +228,7 @@ export function ToolbarDropdown({
   active = false,
   menuWidth = 220,
   style,
+  menuStyle,
   testId,
 }: ToolbarDropdownProps) {
   const [open, setOpen] = useState(false);
@@ -296,6 +299,7 @@ export function ToolbarDropdown({
             maxHeight: 'min(440px, calc(100vh - 16px))',
             overflowY: 'auto',
             ...popoverStyle,
+            ...menuStyle,
           }}
         >
           {children(close)}
