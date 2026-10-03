@@ -105,7 +105,7 @@
     "palette": {
       "documentColors": "Document colors",
       "default": "Default",
-      "custom": "Custom",
+      "custom": "Custom color",
       "chooseCustom": "Choose a custom color"
     },
     "lineStyle": "Line style"

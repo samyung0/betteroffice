@@ -28,6 +28,7 @@ export const TOOLBAR_ICON_NAMES = [
   'save',
   'image',
   'proposals',
+  'refresh',
 ] as const;
 
 /** The border and alignment glyphs the toolbar otherwise draws itself. */
@@ -187,6 +188,7 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
         </>
       )}
       {name === 'chevronDown' && <path d="m7 10 5 5 5-5" />}
+      {name === 'refresh' && <path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" />}
       {name === 'remove' && <path d="M5 12h14" />}
       {name === 'add' && <path d="M12 5v14M5 12h14" />}
       {name === 'check' && <path d="m5 12 4 4L19 6" />}

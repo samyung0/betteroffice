@@ -105,7 +105,7 @@
     "palette": {
       "documentColors": "文档颜色",
       "default": "默认",
-      "custom": "自定义",
+      "custom": "自定义颜色",
       "chooseCustom": "选择自定义颜色"
     },
     "lineStyle": "线条样式"

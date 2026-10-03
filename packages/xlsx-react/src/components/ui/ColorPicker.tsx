@@ -132,10 +132,13 @@ export function ColorPalette({
   value,
   onPick,
   onClear,
+  heading = true,
 }: {
   value: string;
   onPick: (color: string) => void;
   onClear?: () => void;
+  /** False leaves out the "Document colors" heading, for a menu that names its section. */
+  heading?: boolean;
 }) {
   const { t } = useTranslation();
   const current = value.toLowerCase();
@@ -167,28 +170,34 @@ export function ColorPalette({
         padding: 'var(--xlsx-palette-padding, 4px)',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={captionStyle}>{t('toolbar.palette.documentColors')}</span>
-        {onClear && (
-          <button
-            type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={onClear}
-            style={{
-              appearance: 'none',
-              height: 28,
-              padding: '0 8px',
-              border: 0,
-              borderRadius: 'var(--xlsx-button-radius, 4px)',
-              background: 'transparent',
-              cursor: 'pointer',
-              ...captionStyle,
-            }}
-          >
-            {t('toolbar.palette.default')}
-          </button>
-        )}
-      </div>
+      {heading && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={captionStyle}>{t('toolbar.palette.documentColors')}</span>
+          {onClear && (
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onClear}
+              style={{
+                appearance: 'none',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                height: 28,
+                padding: '0 8px',
+                border: 0,
+                borderRadius: 'var(--xlsx-button-radius, 4px)',
+                background: 'transparent',
+                cursor: 'pointer',
+                ...captionStyle,
+              }}
+            >
+              <ToolbarIcon name="refresh" size={14} />
+              {t('toolbar.palette.default')}
+            </button>
+          )}
+        </div>
+      )}
       <div
         role="grid"
         aria-label={t('toolbar.palette.documentColors')}

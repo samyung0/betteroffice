@@ -467,6 +467,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       ))}
       <ToolbarMenuLabel>{t('toolbar.borderColor')}</ToolbarMenuLabel>
       <ColorPalette
+        heading={false}
         value={currentFormatting.borderColor ?? '#000000'}
         onPick={(value) => {
           apply({ type: 'borderColor', value });
