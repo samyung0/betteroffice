@@ -27,6 +27,10 @@ export type {
 } from './components/DocxEditor/hostMenus';
 export type { ColorPaletteColor } from './components/ui/ColorPicker';
 export {
+  DOCX_PAGES_PRESENTED_EVENT,
+  type DocxPagesPresentedDetail,
+} from './components/DocxEditor/CanvasPagesView';
+export {
   DocxDisplayListViewer,
   DocxViewer,
   type DocxDisplayListViewerProps,

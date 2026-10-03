@@ -85,6 +85,28 @@ export function CanvasPagedArea({
   );
 }
 
+/**
+ * Dispatched (bubbling) from the pages host once a frame's pages are on
+ * screen: after the DOM canvases present (or their raster failed and was
+ * logged), or, on the worker surface, when the frame arrives (the worker
+ * paints before it replies) or its first attach resolves. Hosts time first
+ * paint and input to frame with it.
+ */
+export const DOCX_PAGES_PRESENTED_EVENT = 'docx-pages-presented';
+
+export interface DocxPagesPresentedDetail {
+  pageCount: number;
+}
+
+function announcePresented(host: HTMLElement | null, pageCount: number): void {
+  host?.dispatchEvent(
+    new CustomEvent<DocxPagesPresentedDetail>(DOCX_PAGES_PRESENTED_EVENT, {
+      bubbles: true,
+      detail: { pageCount },
+    })
+  );
+}
+
 // Pages within this many pages of the viewport keep live bitmaps and the
 // positioned a11y mirror; everything farther keeps its canvas ELEMENT (stable
 // identity, exact geometry for pointer routing/overlays/scroll math) but
@@ -437,6 +459,7 @@ export function CanvasPagesView({
           // permanently unpublished while the worker was in fact presenting.
           offscreenAttachedRef.current = attached;
           if (!offscreenFailedRef.current) publishWorkerPresentation(attached);
+          if (attached) announcePresented(innerHostRef.current, displayList.pages.length);
           if (!attached) {
             // transient (no worker client yet) — clear the signature so the
             // next pass retries instead of permanently flipping surfaces
@@ -451,6 +474,7 @@ export function CanvasPagesView({
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.
         publishWorkerPresentation(true);
+        announcePresented(innerHostRef.current, displayList.pages.length);
       }
       return;
     }
@@ -500,9 +524,15 @@ export function CanvasPagesView({
     void presentCanvasReplay(
       preparations,
       () => replayGeneration === replayGenerationRef.current
-    ).catch((error) => {
+    ).then((presented) => {
+      if (presented && preparations.length > 0) {
+        announcePresented(innerHostRef.current, displayList.pages.length);
+      }
+    }, (error) => {
       if (replayGeneration === replayGenerationRef.current) {
         console.error('[CanvasRenderer] Canvas replay failed', error);
+        // As painted as this frame gets: a host waiting on first paint goes on.
+        announcePresented(innerHostRef.current, displayList.pages.length);
       }
     });
     return () => {
