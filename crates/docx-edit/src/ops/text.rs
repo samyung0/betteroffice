@@ -179,6 +179,18 @@ pub(crate) fn plain_delete(
     chunks: &[Chunk],
 ) -> DeleteOutcome {
     release_children(txn, story, chunks, start, end);
+    // Fields losing projected children here may show another text after.
+    let owners: Vec<i64> = chunks
+        .iter()
+        .filter(|chunk| chunk.start < end && chunk.end() > start)
+        .filter_map(|chunk| match chunk.attrs.get(FIELD_RESULT) {
+            Some(Any::Map(marker)) => match marker.get("id") {
+                Some(Any::Number(id)) => Some(*id as i64),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
         .filter_map(|chunk| match &chunk.kind {
@@ -221,6 +233,9 @@ pub(crate) fn plain_delete(
         if survivor_id.as_deref() != Some(donor_id.as_str()) {
             adopt_pilcrow(txn, &survivor, &donor_id, &donor_props);
         }
+    }
+    if !owners.is_empty() {
+        crate::ops::field_changes::refresh_shown(txn, story, &owners);
     }
     DeleteOutcome { removed }
 }

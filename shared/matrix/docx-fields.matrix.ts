@@ -219,6 +219,9 @@ const SPLITS: Record<string, string> = {
   "[REF|L(AA)y<ptab>z]": holder(
     field(`${link(run("AA"))}${run("y")}<w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>${run("z")}`, " REF a \\h ")
   ),
+  // Review of ee62d514: a moved run holding only a line break, and an empty run after a projected simple field.
+  "[REF|L(AA)y<br>z]": holder(field(`${link(run("AA"))}${run("y")}<w:r><w:br/></w:r>${run("z")}`, " REF a \\h ")),
+  "[REF|L(AA)F{7}<b/>y]": holder(field(`${link(run("AA"))}${fs(run("7"), " PAGE ")}<w:r><w:rPr><w:b/></w:rPr></w:r>${run("y")}`, " REF a \\h ")),
 };
 const firstLink = (s: YrsSession, st: string) => {
   const at = locate(s, st, s.storySegments(st).some((g) => g.kind === "text" && g.text.includes("AA")) ? "AA" : "Intro");
@@ -265,6 +268,12 @@ const CODE_CONTINUES =
 const RESULT_CONTINUES =
   p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DATE ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("2")}`) +
   p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+// Review of ee62d514, finding 1: the link left in the first paragraph deleted after Enter.
+const deleteLeftLink: Edit = (s, st) => {
+  const at = locate(s, st, "AA");
+  const { firstParaId } = s.splitParagraph({ story: st, paraId: at.paraId, offset: at.offset + 1 });
+  s.deleteAt({ story: st, paraId: firstParaId, offset: at.offset + 1 }, "backward");
+};
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
 
@@ -304,6 +313,7 @@ function rows(): Row[] {
       void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
     push(where, RESULT_CONTINUES, "field result continued | type at its paragraph's end", null, (s, st) =>
       void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+    push(where, SPLITS["[REF|[PAGE|7]L(AA)yy]"]!, "[REF|[PAGE|7]L(AA)yy] | Enter in 1st, Backspace the link left", null, deleteLeftLink);
   }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {

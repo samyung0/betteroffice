@@ -2292,6 +2292,9 @@ const splitShapes: Record<string, [string, string]> = {
   "[REF|[PAGE|7]L(AA)yy]": [field(field(run("7"), " PAGE ") + link(run("AA")) + run("yy"), " REF a \\h "), "a 7AAyy b"],
   "[REF|L(AA)y<ptab>z]": [field(link(run("AA")) + run("y") + ptabRun + run("z"), " REF a \\h "), "a AAyz b"],
   "[REF|L(AA)<ptab>yz]": [field(link(run("AA")) + ptabRun + run("yz"), " REF a \\h "), "a AAyz b"],
+  // Review of ee62d514: a moved run holding only a line break, and an empty run after a projected simple field.
+  "[REF|L(AA)y<br>z]": [field(link(run("AA")) + run("y") + "<w:r><w:br/></w:r>" + run("z"), " REF a \\h "), "a AAyz b"],
+  "[REF|L(AA)F{7}<b/>y]": [field(link(run("AA")) + fs(run("7"), " PAGE ") + "<w:r><w:rPr><w:b/></w:rPr></w:r>" + run("y"), " REF a \\h "), "a AA7y b"],
 };
 const splitFlows: Record<string, { joined: boolean; act: (session: YrsSession, story: string, first: string, second: string) => void }> = {
   Enter: { joined: false, act: () => {} },
@@ -2344,6 +2347,63 @@ test.each(
   } else expect(matrixUnits(reopened, story)).toBe(matrixUnits(session, story));
   session.destroy();
   reopened.destroy();
+});
+
+// Review of ee62d514, finding 1: once a split field's first paragraph loses its last projected link, the seed of the
+// save no longer projects the field and shows its whole result, a nested field's included; the editor shows the same,
+// and Undo brings back what it showed before.
+test.each(
+  (["body", "cell", "header"] as const).flatMap((where) => (["Backspace", "range delete"] as const).map((how) => [where, how] as const))
+)("%s | [REF|[PAGE|7]L(AA)yy]: Enter, then a %s of the link left in the first paragraph, shows the whole result", async (where, how) => {
+  const [story] = STORY[where];
+  const bytes = matrixDocx(where, holder44(splitShapes["[REF|[PAGE|7]L(AA)yy]"]![0]));
+  const session = await open(bytes);
+  const at = matrixLocate(session, story, "AA");
+  const { firstParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+  const split = fieldsShown(session, story);
+  session.addUndoBoundary();
+  if (how === "Backspace") session.deleteAt({ story, paraId: firstParaId, offset: at.offset + 1 }, "backward");
+  else session.deleteRange({ story, start: { paraId: firstParaId, offset: at.offset }, end: { paraId: firstParaId, offset: at.offset + 1 } });
+  const saved = await publish(bytes, session.encodeState());
+  const reopened = await open(saved);
+  expect(fieldsShown(session, story)).toBe("REF a \\h=7");
+  expect(fieldsShown(reopened, story)).toBe(fieldsShown(session, story));
+  expect(storyText(saved, where)).toBe("a 7¶Ayy b¶");
+  session.undo();
+  expect(fieldsShown(session, story)).toBe(split);
+  session.destroy();
+  reopened.destroy();
+});
+
+// Review of ee62d514, finding 3: an empty run moved out by Enter goes back only with its neighbours, so a join that
+// leaves the run after it in a later paragraph does not save it ahead of that run; joining all the paragraphs back
+// restores the untouched save.
+test.each(["body", "cell", "header"] as const)("%s | [REF|L(AA)y,z,<b/>]: Enter twice, then joins, keep the runs in order", async (where) => {
+  const [story, part] = STORY[where];
+  const bold = "<w:r><w:rPr><w:b/></w:rPr></w:r>";
+  const bytes = matrixDocx(where, holder44(field(link(run("AA")) + run("y") + run("z") + bold, " REF a \\h ")));
+  const untouched = await open(bytes);
+  const original = await publish(bytes, untouched.encodeState());
+  untouched.destroy();
+  const order = (file: Uint8Array) => {
+    const xml = partXml(file, part);
+    return [xml.indexOf(">y</w:t>"), xml.indexOf(">z</w:t>"), xml.indexOf("<w:b/></w:rPr></w:r>")];
+  };
+  const session = await open(bytes);
+  const at = matrixLocate(session, story, "AA");
+  const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+  session.splitParagraph({ story, paraId: secondParaId, offset: 2 });
+  session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+  const [y, z, b] = order(await publish(bytes, session.encodeState()));
+  expect(y).toBeLessThan(z);
+  if (b >= 0) expect(b).toBeGreaterThan(z);
+  const third = session.paragraphSpans(story).map((span) => span.paraId)[session.paragraphSpans(story).findIndex((span) => span.paraId === at.paraId) + 1]!;
+  session.deleteAt({ story, paraId: third, offset: 0 }, "backward");
+  const joined = await publish(bytes, session.encodeState());
+  expect(sig(joined, part)).toBe(sig(original, part));
+  const [, joinedZ, joinedB] = order(joined);
+  expect(joinedB).toBeGreaterThan(joinedZ!);
+  session.destroy();
 });
 
 // Decision 2026-10-02: Backspace and Delete beside a field marker that shows nothing step over it and delete the

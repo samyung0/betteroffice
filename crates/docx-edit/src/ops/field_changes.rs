@@ -676,6 +676,77 @@ pub(crate) fn split_field(
     Ok(())
 }
 
+/// What the seed shows of a projecting field once its export keeps, of the
+/// children it `recorded`, only those in `live`
+/// (`restoreProjectedFieldResults` drops the rest): its own result runs while
+/// a link or simple field is still projected, else its whole result, as
+/// `field_payload` reads an unprojected field.
+pub(crate) fn seeded_display(data: &Value, recorded: &[i64], live: &[i64]) -> String {
+    let kept = |index: i64| !recorded.contains(&index) || live.contains(&index);
+    let nodes = |key: &str, index: fn(usize) -> i64| -> Vec<(i64, Value)> {
+        data[key]["inline"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(at, node)| (index(at), node.clone()))
+            .filter(|(index, _)| kept(*index))
+            .collect()
+    };
+    let result = nodes("structuredResult", |at| at as i64);
+    let code = nodes("structuredCode", |at| -(at as i64) - 1);
+    let projects = data["type"] == "complexField"
+        && !crate::seed::numeric_field_instruction(
+            data["instruction"].as_str().unwrap_or_default(),
+        )
+        && result
+            .iter()
+            .chain(&code)
+            .any(|(_, node)| matches!(node["type"].as_str(), Some("hyperlink" | "simpleField")));
+    let result: Vec<Value> = result
+        .into_iter()
+        .filter(|(index, _)| !projects || !recorded.contains(index))
+        .map(|(_, node)| node)
+        .collect();
+    display_text(&if projects {
+        own_shown_runs(&result)
+    } else {
+        shown_runs(&result)
+    })
+}
+
+/// Re-reads what the projecting fields numbered `ids` show after a delete
+/// removed some of their children (`seeded_display`).
+pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: &[i64]) {
+    let chunks = snapshot(story, txn);
+    for (position, chunk) in chunks.iter().enumerate() {
+        let Some((id, recorded)) = projection(txn, chunk).filter(|(id, _)| ids.contains(id)) else {
+            continue;
+        };
+        let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+            continue;
+        };
+        let Some(Ok(data)) =
+            map_string(map, txn, "fieldData").map(|data| serde_json::from_str::<Value>(&data))
+        else {
+            continue;
+        };
+        let live: Vec<i64> = chunks[..position]
+            .iter()
+            .rev()
+            .map_while(|chunk| {
+                field_result_attr(chunk)
+                    .filter(|(child, index)| *child == id && recorded.contains(index))
+            })
+            .map(|(_, index)| index)
+            .collect();
+        let shown = seeded_display(&data, &recorded, &live);
+        if map_string(map, txn, "displayText").as_deref() != Some(shown.as_str()) {
+            map.insert(txn, "displayText", shown);
+        }
+    }
+}
+
 /// What a field shows of `runs`, as the seed's `displayText` reads them: their
 /// text, without tabs.
 fn display_text(runs: &[Value]) -> String {
@@ -798,14 +869,13 @@ pub(crate) fn rejoin_fields(
             })
             .unwrap_or(false)
     };
-    // A moved run that seeds nothing (one holding only markup the parser
-    // drops, such as w:ptab) has no place in the editor: it takes no slot and
-    // goes back with the others.
+    // A run that seeds nothing (an empty or formatting-only run) has no
+    // place in the editor: it takes no slot. A projected one stays the
+    // child it was; a moved one goes back in order (`back` below).
     let silent = |index: &i64| {
-        !projected_run(*index)
-            && inline
-                .get(*index as usize)
-                .is_some_and(|node| node["type"] == "run" && run_units(node, None, None).is_empty())
+        inline
+            .get(*index as usize)
+            .is_some_and(|node| node["type"] == "run" && run_units(node, None, None).is_empty())
     };
     let next_slot = |from: i64| {
         recorded
@@ -884,24 +954,78 @@ pub(crate) fn rejoin_fields(
             slot = Some((last, None));
             continue;
         }
+        // A moved run holding one embed (a line break, a positional tab)
+        // goes back as that run; the seed never projects it.
+        if let (None, ChunkKind::Embed(Some(map))) = (&link, &chunk.kind) {
+            let next = next_slot(slot.as_ref().map_or(0, |(index, _)| index + 1));
+            let kind = map_string(map, txn, KIND_KEY);
+            let Some(next) = next.filter(|next| {
+                let node = &inline[*next as usize];
+                let units = run_units(node, None, None);
+                node["type"] == "run"
+                    && matches!(units.as_slice(), [(Err((own, _)), _)] if Some(own) == kind.as_ref())
+            }) else {
+                if ends_here.is_none() {
+                    tail = Some(chunk.start);
+                    break 'scan;
+                }
+                return Ok(());
+            };
+            folded.push((chunk, 1));
+            dropped.push(next);
+            slot = Some((next, None));
+            continue;
+        }
         if link.is_none() || !matches!(chunk.kind, ChunkKind::Text(_) | ChunkKind::Embed(Some(_))) {
             return Ok(());
         }
-        let index = match &slot {
-            Some((index, previous)) if *previous == link => *index,
-            Some((index, _)) => match next_slot(index + 1) {
-                Some(next) => next,
-                None => return Ok(()),
-            },
-            None => match next_slot(0) {
-                Some(next) => next,
-                None => return Ok(()),
-            },
+        let next = match &slot {
+            Some((index, previous)) if *previous == link => Some(*index),
+            Some((index, _)) => next_slot(index + 1),
+            None => next_slot(0),
+        };
+        let Some(index) = next else {
+            // A comment's reference or other content the split did not move
+            // out begins the tail of a field that continues.
+            if ends_here.is_none() {
+                tail = Some(chunk.start);
+                break 'scan;
+            }
+            return Ok(());
         };
         slot = Some((index, link));
         units.push((chunk, index, len));
     }
-    dropped.extend(recorded.iter().filter(|index| silent(index)));
+    // A moved silent run goes back with the moved run after it, or, last,
+    // with the one before it, so the result keeps its order.
+    let back: Vec<i64> = units
+        .iter()
+        .map(|(_, index, _)| *index)
+        .chain(runs.iter().map(|(_, index, _)| *index))
+        .chain(dropped.iter().copied())
+        .collect();
+    let quiet: Vec<i64> = recorded
+        .iter()
+        .copied()
+        .filter(|index| silent(index) && !projected_run(*index))
+        .filter(|index| {
+            let after = recorded
+                .iter()
+                .copied()
+                .find(|next| next > index && !silent(next));
+            let before = recorded
+                .iter()
+                .copied()
+                .rev()
+                .find(|next| next < index && !silent(next));
+            match (after, before) {
+                (Some(after), _) => back.contains(&after),
+                (None, Some(before)) => back.contains(&before),
+                (None, None) => true,
+            }
+        })
+        .collect();
+    dropped.extend(quiet);
     let target = tail.unwrap_or(target);
     if tail.is_some()
         && folded.is_empty()

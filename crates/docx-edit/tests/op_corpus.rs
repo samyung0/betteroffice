@@ -427,6 +427,94 @@ fn enter_in_a_projected_link_shows_what_the_seed_of_its_save_shows() {
 }
 
 #[test]
+fn a_split_field_left_without_its_link_shows_its_whole_result() {
+    // The seed of the save projects a field only while a link or simple field
+    // is left in its result; without one it shows the whole result, a nested
+    // field's included.
+    let begin = |code: &str| {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{code}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#
+        )
+    };
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let link = |text: &str| format!(r#"<w:hyperlink w:anchor="a">{}</w:hyperlink>"#, run(text));
+    let page = format!("{}{}{end}", begin(" PAGE "), run("7"));
+    let paragraph = format!(
+        "{}{}{page}{}{}{end}{}",
+        run("a "),
+        begin(" REF a \\h "),
+        link("AA"),
+        run("yy"),
+        run(" b")
+    );
+    let saved = seeded(&[
+        (
+            "11111111",
+            &format!("{}{}{page}", run("a "), begin(" REF a \\h ")),
+        ),
+        (
+            "33333333",
+            &format!("{}{}{end}{}", link("A"), run("yy"), run(" b")),
+        ),
+    ]);
+    let doc = seeded(&[("11111111", &paragraph)]);
+    let mut undo = doc.undo_manager();
+    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+        .unwrap();
+    let split = shown(&doc);
+    undo.add_undo_barrier();
+    doc.delete_range(&ctx(), StoryRange::new("body", 2, 3))
+        .unwrap();
+    assert_eq!(shown(&doc), shown(&saved));
+    assert_eq!(shown(&doc), vec!["7".to_owned()]);
+    assert!(undo.undo());
+    assert_eq!(shown(&doc), split);
+}
+
+#[test]
+fn a_moved_run_holding_a_break_or_nothing_rejoins_in_place() {
+    // A moved run holding only a line break rejoins as that run, and an empty
+    // run after a projected simple field takes no slot, so the join leaves
+    // the field as the seed made it.
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let link = |text: &str| format!(r#"<w:hyperlink w:anchor="a">{}</w:hyperlink>"#, run(text));
+    let simple = format!(
+        r#"<w:fldSimple w:instr=" PAGE ">{}</w:fldSimple>"#,
+        run("7")
+    );
+    for result in [
+        format!("{}{}<w:r><w:br/></w:r>{}", link("AA"), run("y"), run("z")),
+        format!(
+            "{}{simple}<w:r><w:rPr><w:b/></w:rPr></w:r>{}",
+            link("AA"),
+            run("y")
+        ),
+    ] {
+        let paragraph = format!(
+            r#"{}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r>{}"#,
+            run("a "),
+            run(" b")
+        );
+        for forward in [false, true] {
+            let doc = seeded(&[("11111111", &paragraph)]);
+            let (units, text) = (slot_units(&doc), shown(&doc));
+            let split = doc
+                .split_paragraph(&ctx(), Position::new("body", 3), None)
+                .unwrap();
+            let para = if forward {
+                split.first_para_id
+            } else {
+                split.second_para_id
+            };
+            merge(&doc, &ctx(), &para, forward);
+            assert_eq!(slot_units(&doc), units, "{result} forward {forward}");
+            assert_eq!(shown(&doc), text, "{result} forward {forward}");
+        }
+    }
+}
+
+#[test]
 fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
     // Decided 2026-10-02: the result text ending the first paragraph of a
     // field that continues is text after its embed; the join after Enter in
