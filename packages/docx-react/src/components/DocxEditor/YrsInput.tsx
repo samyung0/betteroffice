@@ -1119,6 +1119,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const selected = yrsSelectionText(session);
     return selected.text ? selected : null;
   }, [session]);
+  const clipboardSelectionRef = useRef(clipboardSelection);
+  clipboardSelectionRef.current = clipboardSelection;
 
   // The textarea is empty outside composition, so the browser's own copy finds
   // nothing; put the document selection's plain text on the clipboard instead.
@@ -1195,6 +1197,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     for (const resolve of compositionWaitersRef.current) resolve();
     compositionWaitersRef.current.clear();
   }, [session, enabled]);
+
+  // WebKit enables Copy and Cut on a caret-only textarea only when beforecopy or
+  // beforecut is cancelled. React has no props for these events.
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!enabled || !textarea) return;
+    const enableClipboard = (event: Event) => {
+      if (clipboardSelectionRef.current()) event.preventDefault();
+    };
+    textarea.addEventListener('beforecopy', enableClipboard);
+    textarea.addEventListener('beforecut', enableClipboard);
+    return () => {
+      textarea.removeEventListener('beforecopy', enableClipboard);
+      textarea.removeEventListener('beforecut', enableClipboard);
+    };
+  }, [enabled]);
 
   useEffect(() => {
     if (!readOnly || (!composingRef.current && !compositionPendingRef.current)) return;
