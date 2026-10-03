@@ -302,6 +302,13 @@ fn serialize_run_content(
                         writer.attribute("w:clear", clear);
                     }
                 }
+                // A line break without a type keeps its w:clear.
+                None => {
+                    if let Some(clear) = nonempty(clear.as_deref()).filter(|value| *value != "none")
+                    {
+                        writer.attribute("w:clear", clear);
+                    }
+                }
                 _ => {}
             }
             writer.end_element();

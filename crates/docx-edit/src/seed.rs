@@ -1600,56 +1600,93 @@ fn inline_to_units(
 }
 
 /// A field whose result continues into a later paragraph, and the plain runs
-/// (text, line breaks, comment references, and tabs or positional tabs without
-/// formatting of their own) that end its result in this one, after its projected children.
-/// They seed as ordinary text after the field's embed, as the result in the
-/// later paragraphs does and as typing at this paragraph's end adds to it, so
-/// the field no longer shows or stores them itself (decided 2026-10-02, line
+/// (text, plain line breaks, comment references, and tabs or positional tabs
+/// without formatting of their own, [`tail_run`]) that end its result in this
+/// one, after its projected children. They seed as ordinary text after the
+/// field's embed, as the result in the later paragraphs does and as typing at
+/// this paragraph's end adds to it, so the field no longer shows or stores
+/// them itself (decided 2026-10-02, line
 /// breaks and references 2026-10-04). A run holding more, such as a page or
-/// column break or a formatted tab, stays in the field with those before it,
-/// so an untouched file saves as before.
+/// column break or a formatted tab or line break, stays in the field with
+/// those before it, so an untouched file saves as before.
 fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
-    let continuation = field(Some(value), "continuation");
-    let continued = string(field(Some(value), "type")) == Some("complexField")
-        && boolean(field(continuation, "end")) == Some(true)
-        && boolean(field(continuation, "separate")) != Some(true);
     let inline = array(field(field(Some(value), "structuredResult"), "inline"));
-    // The save drops a tab's own formatting (decided 2026-10-03).
-    let plain = |node: &&Value| {
-        let contents = array(field(Some(node), "content"));
-        let formatted = field(Some(node), "formatting").is_some_and(|formatting| {
-            !formatting.is_null()
-                && formatting
-                    .as_object()
-                    .is_none_or(|entries| !entries.is_empty())
-        });
-        let tab =
-            |content: &Value| matches!(string(field(Some(content), "type")), Some("tab" | "ptab"));
-        string(field(Some(node), "type")) == Some("run")
-            && contents
-                .iter()
-                .all(|content| match string(field(Some(content), "type")) {
-                    Some("text" | "tab" | "ptab" | "commentReference") => true,
-                    Some("break") => flow_break_type(content).is_none(),
-                    _ => false,
-                })
-            && !(formatted && contents.iter().any(tab))
-    };
-    let tail = if continued {
-        inline.iter().rev().take_while(plain).count()
+    let tail = if result_continues(value) {
+        inline
+            .iter()
+            .rev()
+            .take_while(|node| tail_run(node))
+            .count()
     } else {
         0
     };
     if tail == 0 {
         return (value.clone(), Vec::new());
     }
-    let (kept, moved) = inline.split_at(inline.len() - tail);
+    let drop: Vec<usize> = (inline.len() - tail..inline.len()).collect();
+    (
+        without_result_nodes(value, &drop),
+        inline[inline.len() - tail..].to_vec(),
+    )
+}
+
+/// Whether a complex field's result continues from this paragraph into a
+/// later one (its code does not).
+pub(crate) fn result_continues(value: &Value) -> bool {
+    let continuation = field(Some(value), "continuation");
+    string(field(Some(value), "type")) == Some("complexField")
+        && boolean(field(continuation, "end")) == Some(true)
+        && boolean(field(continuation, "separate")) != Some(true)
+}
+
+/// Whether a result node may end a continued result's tail
+/// ([`continued_result_tail`]): a run of text, plain line breaks, comment
+/// references and tabs. The save drops the own formatting of a tab or break
+/// and a break's `w:clear` (decided 2026-10-03 for tabs, 2026-10-04 for
+/// breaks), so a run holding one with either stays in the field.
+pub(crate) fn tail_run(node: &Value) -> bool {
+    let contents = array(field(Some(node), "content"));
+    let formatted = field(Some(node), "formatting").is_some_and(|formatting| {
+        !formatting.is_null()
+            && formatting
+                .as_object()
+                .is_none_or(|entries| !entries.is_empty())
+    });
+    let bare = |content: &Value| {
+        matches!(
+            string(field(Some(content), "type")),
+            Some("tab" | "ptab" | "break")
+        )
+    };
+    string(field(Some(node), "type")) == Some("run")
+        && contents
+            .iter()
+            .all(|content| match string(field(Some(content), "type")) {
+                Some("text" | "tab" | "ptab" | "commentReference") => true,
+                Some("break") => {
+                    flow_break_type(content).is_none()
+                        && string(field(Some(content), "clear")).is_none_or(|clear| clear == "none")
+                }
+                _ => false,
+            })
+        && !(formatted && contents.iter().any(bare))
+}
+
+/// `value` without the result nodes at `drop` (indices into its structured
+/// result), its shown runs re-read from the rest.
+pub(crate) fn without_result_nodes(value: &Value, drop: &[usize]) -> Value {
+    let kept: Vec<Value> = array(field(field(Some(value), "structuredResult"), "inline"))
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !drop.contains(index))
+        .map(|(_, node)| node.clone())
+        .collect();
     let mut trimmed = value.clone();
-    trimmed["structuredResult"]["inline"] = Value::Array(kept.to_vec());
-    trimmed["fieldResult"] = Value::Array(shown_runs(kept));
+    trimmed["fieldResult"] = Value::Array(shown_runs(&kept));
     if trimmed["fieldTree"]["result"]["inline"].is_array() {
-        trimmed["fieldTree"]["result"]["inline"] = Value::Array(kept.to_vec());
+        trimmed["fieldTree"]["result"]["inline"] = Value::Array(kept.clone());
     }
+    trimmed["structuredResult"]["inline"] = Value::Array(kept);
     // The save formats the field's characters as its result's first run, else
     // as the field (docx-parse's serializer): with no result run left, the
     // field takes that run's formatting, so they save as before.
@@ -1662,7 +1699,7 @@ fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
             None => entries.remove("formatting"),
         };
     }
-    (trimmed, moved.to_vec())
+    trimmed
 }
 
 fn field_to_units(

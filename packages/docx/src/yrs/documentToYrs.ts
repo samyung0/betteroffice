@@ -571,26 +571,29 @@ function fieldJson(field: SimpleField | ComplexField): string {
 }
 
 /**
- * A field whose result continues into a later paragraph, and the plain runs (text, line breaks, comment references, and
- * tabs or positional tabs without formatting) that end its result in this one, after its projected children: ordinary
+ * A field whose result continues into a later paragraph, and the plain runs (text, plain line breaks, comment references,
+ * and tabs or positional tabs without formatting) that end its result in this one, after its projected children: ordinary
  * text after the field's embed (`continued_result_tail` in crates/docx-edit/src/seed.rs).
  */
 function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | ComplexField, Run[]] {
   const inline = value.type === 'complexField' && value.continuation?.end && !value.continuation.separate
     ? value.structuredResult?.inline ?? []
     : [];
-  // The save drops a tab's own formatting (seed.rs).
-  const tab = (content: RunContent) => content.type === 'tab' || content.type === 'ptab';
+  // The save drops a tab's or break's own formatting and a break's w:clear (`tail_run` in seed.rs).
+  const bare = (content: RunContent) => content.type === 'tab' || content.type === 'ptab' || content.type === 'break';
   const plain = (node: FieldInlineContent) =>
     node.type === 'run' &&
     node.content.every(
       (content) =>
         content.type === 'text' ||
-        tab(content) ||
+        content.type === 'tab' ||
+        content.type === 'ptab' ||
         content.type === 'commentReference' ||
-        (content.type === 'break' && (content.breakType === undefined || content.breakType === 'textWrapping'))
+        (content.type === 'break' &&
+          (content.breakType === undefined || content.breakType === 'textWrapping') &&
+          (content.clear === undefined || content.clear === 'none'))
     ) &&
-    !(Object.keys(node.formatting ?? {}).length && node.content.some(tab));
+    !(Object.keys(node.formatting ?? {}).length && node.content.some(bare));
   let tail = 0;
   while (tail < inline.length && plain(inline[inline.length - 1 - tail]!)) tail += 1;
   if (value.type !== 'complexField' || tail === 0) return [value, []];

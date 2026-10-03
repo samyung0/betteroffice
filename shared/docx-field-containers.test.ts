@@ -2809,6 +2809,20 @@ const untouchedTails: Record<string, [string, string]> = {
     '<w:p w14:paraId="11111111"><w:commentRangeStart w:id="1"/><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DOCVARIABLE v </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>AB</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>CD</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
   ],
 };
+// Recheck of e7bf01fc, finding 2: a line break with its own formatting or w:clear ending the tail stays in the field, as
+// a formatted tab does, so its run keeps them.
+untouchedTails["a sized line break ending the tail"] = [
+  p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:br/></w:r>`) + p("33333333", `${run("C")}${char("end")}`),
+  '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:br/></w:r></w:p>',
+];
+untouchedTails["a bold run of text and a line break ending the tail"] = [
+  p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:rPr><w:b/></w:rPr><w:t>B</w:t><w:br/></w:r>`) + p("33333333", `${run("C")}${char("end")}`),
+  '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>B</w:t><w:br/></w:r></w:p>',
+];
+untouchedTails["a clearing line break ending the tail"] = [
+  p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:br w:clear="all"/></w:r>`) + p("33333333", `${run("C")}${char("end")}`),
+  '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:br w:clear="all"/></w:r></w:p>',
+];
 test.each(Object.keys(untouchedTails))("an untouched file with %s saves as before", async (shape) => {
   const [xml, expected] = untouchedTails[shape]!;
   const bytes = matrixDocx("body", xml);

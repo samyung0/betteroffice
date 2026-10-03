@@ -317,6 +317,16 @@ fn a_continued_fields_tail_stays_in_it_when_it_holds_more_than_text() {
             r#"<w:r><w:br w:type="column"/><w:t>B</w:t></w:r>"#,
             "[field]¶[columnBreak]C¶",
         ),
+        // A line break with its own formatting or w:clear stays (2026-10-04).
+        (
+            r#"<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:br/></w:r>"#,
+            "[field]¶C¶",
+        ),
+        (r#"<w:r><w:br w:clear="all"/></w:r>"#, "[field]¶C¶"),
+        (
+            r#"<w:r><w:rPr><w:b/></w:rPr><w:t>B</w:t><w:br/></w:r>"#,
+            "[field]¶C¶",
+        ),
     ] {
         let xml = field(tail);
         let bytes =
