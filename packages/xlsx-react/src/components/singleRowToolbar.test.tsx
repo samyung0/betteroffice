@@ -109,8 +109,12 @@ test('a vertical wheel scrolls the clipped row sideways', () => {
 
 test('the colour buttons open a palette that applies, resets and takes a custom colour', () => {
   const onFormat = mock((_action: FormattingAction) => {});
-  const { getByRole } = render(<SingleRow onFormat={onFormat} />);
+  const { getByLabelText, getByRole } = render(<SingleRow onFormat={onFormat} />);
   fireEvent.click(getByRole('button', { name: en.toolbar.textColor }));
+  // The custom row is its label and the picker, with no hex readout.
+  expect(getByLabelText(en.toolbar.palette.chooseCustom).closest('label')?.textContent).toBe(
+    en.toolbar.palette.custom
+  );
   fireEvent.click(getByRole('gridcell', { name: 'Dark blue' }));
   fireEvent.click(getByRole('button', { name: en.toolbar.fillColor }));
   fireEvent.click(getByRole('button', { name: en.toolbar.palette.default }));

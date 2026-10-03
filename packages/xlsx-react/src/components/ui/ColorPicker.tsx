@@ -143,7 +143,6 @@ export function ColorPalette({
   const { t } = useTranslation();
   const current = value.toLowerCase();
   const customRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(HEX.test(value) ? current : '');
   const [clearHovered, setClearHovered] = useState(false);
   const pickRef = useRef(onPick);
   pickRef.current = onPick;
@@ -152,14 +151,9 @@ export function ColorPalette({
   useEffect(() => {
     const input = customRef.current;
     if (!input) return;
-    const update = () => setDraft(input.value);
     const commit = () => pickRef.current(input.value);
-    input.addEventListener('input', update);
     input.addEventListener('change', commit);
-    return () => {
-      input.removeEventListener('input', update);
-      input.removeEventListener('change', commit);
-    };
+    return () => input.removeEventListener('change', commit);
   }, []);
 
   return (
@@ -259,32 +253,21 @@ export function ColorPalette({
         }}
       >
         {t('toolbar.palette.custom')}
-        <span
+        <input
+          ref={customRef}
+          type="color"
+          defaultValue={HEX.test(value) ? current : '#000000'}
+          aria-label={t('toolbar.palette.chooseCustom')}
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            color: menuColors.text,
-            font: '400 12px ui-monospace, SFMono-Regular, Menlo, monospace',
+            width: 36,
+            height: 28,
+            padding: 2,
+            border: `1px solid ${menuColors.border}`,
+            borderRadius: 'var(--office-menu-button-radius, var(--xlsx-button-radius, 4px))',
+            background: 'transparent',
+            cursor: 'pointer',
           }}
-        >
-          {draft}
-          <input
-            ref={customRef}
-            type="color"
-            defaultValue={HEX.test(value) ? current : '#000000'}
-            aria-label={t('toolbar.palette.chooseCustom')}
-            style={{
-              width: 36,
-              height: 28,
-              padding: 2,
-              border: `1px solid ${menuColors.border}`,
-              borderRadius: 'var(--office-menu-button-radius, var(--xlsx-button-radius, 4px))',
-              background: 'transparent',
-              cursor: 'pointer',
-            }}
-          />
-        </span>
+        />
       </label>
     </div>
   );
