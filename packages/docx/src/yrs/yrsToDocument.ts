@@ -973,7 +973,10 @@ function rawContentForItem(item: InlineItem): ParagraphContent | null {
       return breakRun(item.embedKind === 'pageBreak' ? 'page' : 'column');
     case 'tab': {
       const ptab = asObject(item.payload.ptab);
-      return { type: 'run', content: [ptab ? { ...ptab, type: 'ptab' } : { type: 'tab' }] };
+      // A positional tab keeps its run's formatting, as text does.
+      return ptab
+        ? { ...createTextRun('', item.attributes), content: [{ ...ptab, type: 'ptab' } as RunContent] }
+        : { type: 'run', content: [{ type: 'tab' }] };
     }
     case 'image':
       return imageRunFromPayload(item.payload);

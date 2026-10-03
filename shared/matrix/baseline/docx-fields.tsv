@@ -1,4 +1,4 @@
-# docx-fields: 1211 rows, ids 85a98edf02a04dc6; rows not listed are exact
+# docx-fields: 1295 rows, ids 3f88ceb0240f7c20; rows not listed are exact
 body | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
 body | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 body | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable

@@ -283,6 +283,20 @@ const deleteLeftLink: Edit = (s, st) => {
   const { firstParaId } = s.splitParagraph({ story: st, paraId: at.paraId, offset: at.offset + 1 });
   s.deleteAt({ story: st, paraId: firstParaId, offset: at.offset + 1 }, "backward");
 };
+// Recheck of e7bf01fc: a story holding a w:ptab (seeded as a tab embed) renders, untouched and edited, and after
+// Enter leaves one in the second paragraph.
+const PTAB = `<w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>`;
+const PTABS: Record<string, string> = {
+  "a<ptab>b": p(P, `${run("a")}${PTAB}${run("b")}`),
+  "a<b ptab>b": p(P, `${run("a")}<w:r><w:rPr><w:b/></w:rPr><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>${run("b")}`),
+  "L(A<ptab>B)": holder(link(`${run("A")}${PTAB}${run("B")}`)),
+  "[REF|L(A<ptab>B)]": holder(field(link(`${run("A")}${PTAB}${run("B")}`), " REF a \\h ")),
+};
+const PTAB_SPLITS: Record<string, string> = {
+  "[REF|L(AA)<ptab>yz]": holder(field(`${link(run("AA"))}${PTAB}${run("yz")}`, " REF a \\h ")),
+  "[REF|L(AA)yz<ptab>]": holder(field(`${link(run("AA"))}${run("yz")}${PTAB}`, " REF a \\h ")),
+  "[REF|L(AA)<ptab>L(BB)]": holder(field(`${link(run("AA"))}${PTAB}${link(run("BB"), "other")}`, " REF a \\h ")),
+};
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
 
@@ -330,6 +344,16 @@ function rows(): Row[] {
     }
     push(where, SPLITS["[REF|[PAGE|7]L(AA)yy]"]!, "[REF|[PAGE|7]L(AA)yy] | Enter in 1st, Backspace the link left", null, deleteLeftLink);
   }
+  for (const where of ["body", "cell", "header", "footnote"] as Where[])
+    for (const [name, xml] of Object.entries(PTABS)) {
+      untouched(where, name, xml);
+      push(where, xml, `${name} | type at its paragraph's start`, null, (s, st) => void s.insertText({ story: st, paraId: P, offset: 0 }, "Q"));
+    }
+  for (const where of ["body", "cell", "header"] as Where[])
+    for (const [name, xml] of Object.entries(PTAB_SPLITS)) {
+      push(where, xml, `${name} | Enter in 1st`, null, (s, st) => void s.splitParagraph(firstLink(s, st)));
+      push(where, xml, `${name} | Enter in 1st, join back`, null, SPLIT_OPS["Enter in 1st, join back"]!);
+    }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {
       push(where, xml, `join ${name}`, null, join);

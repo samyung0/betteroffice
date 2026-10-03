@@ -4,7 +4,7 @@ import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 import { exportOffice, rebaseOffice, seedOffice } from "./office-checkpoint";
 import { RebaseError } from "./office-rebase";
-import { E as commentEnd, S as commentStart, STORY, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, parity, partXml, prime, ref as commentRef, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
+import { E as commentEnd, S as commentStart, STORY, blocks as matrixBlocks, docx as matrixDocx, fieldAt as matrixFieldAt, len as matrixLen, locate as matrixLocate, orders, parity, partXml, prime, ref as commentRef, runRow, units as matrixUnits, sig, type Edit as MatrixEdit, type Where } from "./matrix/lib";
 
 const fixed = { seed: "0".repeat(64), now: "2026-09-29T00:00:00.000Z" };
 const W =
@@ -2449,6 +2449,43 @@ test.each(["body", "cell", "header"] as const)("%s | [REF|L(AA)y,z,<b/>]: Enter 
   const [, joinedZ, joinedB] = order(joined);
   expect(joinedB).toBeGreaterThan(joinedZ!);
   session.destroy();
+});
+
+// Recheck of e7bf01fc, finding 1: a story holding a positional tab renders (as a tab), untouched, edited and after
+// Enter leaves one in a split field's second paragraph, and the tab keeps its run's own formatting on save.
+test.each(["body", "cell", "header", "footnote"] as const)("%s | a story holding a positional tab renders and keeps its formatting", async (where) => {
+  const [story, part] = STORY[where];
+  const bold = `<w:r><w:rPr><w:b/></w:rPr><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>`;
+  for (const xml of [
+    p("44444444", `${run("a")}${bold}${run("b")}`),
+    holder44(link(run("A") + ptabRun + run("B"))),
+    holder44(field(link(run("A") + ptabRun + run("B")), " REF a \\h ")),
+  ]) {
+    const bytes = matrixDocx(where, xml);
+    const session = await open(bytes);
+    expect(() => matrixBlocks(session, story)).not.toThrow();
+    session.insertText({ story, paraId: "44444444", offset: 0 }, "Q");
+    expect(() => matrixBlocks(session, story)).not.toThrow();
+    const saved = partXml(await publish(bytes, session.encodeState()), part);
+    session.destroy();
+    expect(saved.split("<w:ptab ").length).toBe(2);
+    // Bold as the save writes bold text (w:bCs alongside).
+    if (xml.includes("<w:b/>")) expect(saved).toMatch(/<w:r><w:rPr><w:b\/>(<w:bCs\/>)?<\/w:rPr><w:ptab [^>]*\/><\/w:r>/);
+  }
+  if (where === "footnote") return;
+  for (const result of [link(run("AA")) + ptabRun + run("yz"), link(run("AA")) + run("yz") + ptabRun, link(run("AA")) + ptabRun + linkTo("BB")]) {
+    const bytes = matrixDocx(where, holder44(field(result, " REF a \\h ")));
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    expect(() => matrixBlocks(session, story)).not.toThrow();
+    const saved = await publish(bytes, session.encodeState());
+    const reopened = await open(saved);
+    expect(matrixUnits(reopened, story)).toBe(matrixUnits(session, story));
+    expect(partXml(saved, part).split("<w:ptab ").length).toBe(2);
+    session.destroy();
+    reopened.destroy();
+  }
 });
 
 // Decided 2026-10-04: w:ptab round-trips, in ordinary text and in a field's result, drawn as a tab.

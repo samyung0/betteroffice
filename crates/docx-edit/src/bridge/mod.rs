@@ -616,6 +616,24 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
                 }
+                // A positional tab (w:ptab), drawn as a tab.
+                Out::YMap(tab)
+                    if shared_map_string(&tab, txn, "_kind").as_deref() == Some("tab") =>
+                {
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::Tab,
+                        formatting: lower_run_formatting(attributes, env),
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: paragraph_pm_units,
+                        pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
+                        inline_sdt_widget: None,
+                    });
+                    story_index += 1;
+                    paragraph_pm_units += 1;
+                    at_block_boundary = false;
+                }
                 Out::YMap(image)
                     if shared_map_string(&image, txn, "_kind").as_deref() == Some("image") =>
                 {
