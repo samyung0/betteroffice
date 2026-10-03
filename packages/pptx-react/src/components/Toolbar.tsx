@@ -470,11 +470,12 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         {(close) => (
           <>
-            <ToolbarMenuLabel>{t('toolbar.shapeTool')}</ToolbarMenuLabel>
+            <ToolbarMenuLabel first>{t('toolbar.shapeTool')}</ToolbarMenuLabel>
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(6, var(--pptx-button-size, 28px))',
+                gridTemplateColumns:
+                  'repeat(6, var(--office-menu-button-size, var(--pptx-button-size, 28px)))',
                 gap: 4,
                 padding: '0 4px 2px',
               }}
@@ -489,6 +490,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
                     close();
                   }}
                   testId={`pptx-shape-${preset.geometry}`}
+                  inMenu
                 >
                   <ShapePresetIcon geometry={preset.geometry} />
                 </ToolbarButton>
@@ -660,6 +662,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
                 close();
               }}
               testId={`pptx-align-${alignment.testId}`}
+              inMenu
             >
               <ToolbarIcon name={alignment.icon} />
             </ToolbarButton>

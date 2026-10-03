@@ -60,7 +60,8 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
-    "customColor": "מותאם אישית",
+    "documentColors": "צבעי המסמך",
+    "customColor": "צבע מותאם אישית",
     "cornerRadius": null,
     "shapeAdjustment": "התאמת צורה",
     "shapes": {

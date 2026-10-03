@@ -60,7 +60,8 @@
     "borderWidth": "边框粗细",
     "borderWidthValue": "{width} 磅",
     "noBorder": "无边框",
-    "customColor": "自定义",
+    "documentColors": "文档颜色",
+    "customColor": "自定义颜色",
     "cornerRadius": "圆角半径",
     "shapeAdjustment": "形状调整",
     "shapes": {

@@ -60,7 +60,8 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
-    "customColor": "कस्टम",
+    "documentColors": "दस्तावेज़ के रंग",
+    "customColor": "कस्टम रंग",
     "cornerRadius": null,
     "shapeAdjustment": "आकृति समायोजन",
     "shapes": {

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useTranslation } from '../../i18n';
 import { ToolbarIcon } from './ToolbarIcon';
 import type { ToolbarIconName } from './ToolbarIcon';
-import { ToolbarDropdown, toolbarColors, toolbarFont } from './ToolbarPrimitives';
+import { menuColors, menuFontFamily, ToolbarDropdown } from './ToolbarPrimitives';
 
 /** Eight hues by five shades, as Capy's document colours. */
 const PALETTE = [
@@ -57,7 +57,7 @@ export function ColorPicker({
               height: 4,
               borderRadius: 999,
               background: none ? 'transparent' : value,
-              border: `1px solid var(--pptx-swatch-border, ${toolbarColors.border})`,
+              border: `1px solid ${menuColors.swatchBorder}`,
               boxSizing: 'border-box',
             }}
           />
@@ -116,7 +116,9 @@ function ColorPalette({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '2px 6px 4px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ color: toolbarColors.muted, font: `600 12px ${toolbarFont}` }}>{label}</span>
+        <span style={{ color: menuColors.secondary, font: `600 12px ${menuFontFamily}` }}>
+          {t('toolbar.documentColors')}
+        </span>
         {onClear && clearLabel ? (
           <button
             type="button"
@@ -128,11 +130,11 @@ function ColorPalette({
               height: 28,
               padding: '0 8px',
               border: 0,
-              borderRadius: 'var(--pptx-button-radius, 4px)',
+              borderRadius: 'var(--office-menu-button-radius, var(--pptx-button-radius, 4px))',
               background: 'transparent',
-              color: toolbarColors.muted,
+              color: menuColors.secondary,
               cursor: 'pointer',
-              font: `500 12px ${toolbarFont}`,
+              font: `500 12px ${menuFontFamily}`,
             }}
           >
             {clearLabel}
@@ -159,11 +161,11 @@ function ColorPalette({
                 width: 24,
                 height: 24,
                 padding: 0,
-                border: `1px solid var(--pptx-swatch-border, ${toolbarColors.border})`,
+                border: `1px solid ${menuColors.swatchBorder}`,
                 borderRadius: 999,
                 background: color,
                 boxShadow: selected
-                  ? `0 0 0 1px ${toolbarColors.surface}, 0 0 0 3px var(--pptx-accent, #1a73e8)`
+                  ? `0 0 0 1px ${menuColors.bg}, 0 0 0 3px ${menuColors.ring}`
                   : 'none',
                 color: brightness(color) > 150 ? '#000000' : '#ffffff',
                 cursor: 'pointer',
@@ -181,13 +183,13 @@ function ColorPalette({
           justifyContent: 'space-between',
           gap: 12,
           paddingTop: 8,
-          borderTop: `1px solid ${toolbarColors.divider}`,
-          color: toolbarColors.muted,
-          font: `600 12px ${toolbarFont}`,
+          borderTop: `1px solid ${menuColors.separator}`,
+          color: menuColors.secondary,
+          font: `600 12px ${menuFontFamily}`,
         }}
       >
         {t('toolbar.customColor')}
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: toolbarColors.text, font: '400 12px ui-monospace, monospace' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: menuColors.text, font: '400 12px ui-monospace, monospace' }}>
           {current ?? ''}
           <input
             ref={custom}
@@ -199,8 +201,8 @@ function ColorPalette({
               width: 36,
               height: 28,
               padding: 2,
-              border: `1px solid ${toolbarColors.border}`,
-              borderRadius: 'var(--pptx-button-radius, 4px)',
+              border: `1px solid ${menuColors.border}`,
+              borderRadius: 'var(--office-menu-button-radius, var(--pptx-button-radius, 4px))',
               background: 'transparent',
               cursor: 'pointer',
             }}

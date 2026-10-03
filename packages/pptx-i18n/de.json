@@ -60,7 +60,8 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
-    "customColor": "Benutzerdefiniert",
+    "documentColors": "Dokumentfarben",
+    "customColor": "Benutzerdefinierte Farbe",
     "cornerRadius": null,
     "shapeAdjustment": "Formanpassung",
     "shapes": {

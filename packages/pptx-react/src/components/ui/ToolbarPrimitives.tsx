@@ -14,18 +14,41 @@ export const toolbarColors = {
   divider: 'var(--pptx-divider, #c7cacf)',
   surface: 'var(--pptx-surface, #ffffff)',
   rail: 'var(--pptx-rail, #edf2fa)',
-  menuShadow: 'var(--pptx-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
 };
 
 export const toolbarFont = 'var(--pptx-font, ui-sans-serif, system-ui, sans-serif)';
 
-/** Every dropdown's panel; hosts match their own popovers through `--pptx-menu-*`. */
+/**
+ * The popover look a host shares across its editors (`--office-menu-*`, as
+ * Capy's note toolbar draws its popovers); the fallbacks are this editor's own.
+ */
+export const menuColors = {
+  bg: `var(--office-menu-bg, ${toolbarColors.surface})`,
+  text: `var(--office-menu-text, ${toolbarColors.text})`,
+  muted: `var(--office-menu-muted, ${toolbarColors.muted})`,
+  secondary: `var(--office-menu-secondary, ${toolbarColors.muted})`,
+  border: `var(--office-menu-border, ${toolbarColors.border})`,
+  separator: `var(--office-menu-separator, ${toolbarColors.divider})`,
+  hover: `var(--office-menu-hover, ${toolbarColors.hover})`,
+  selectedBg: `var(--office-menu-selected-bg, ${toolbarColors.active})`,
+  selectedText: `var(--office-menu-selected-text, ${toolbarColors.activeText})`,
+  buttonHover: `var(--office-menu-button-hover, ${toolbarColors.hover})`,
+  pressedBg: `var(--office-menu-pressed-bg, ${toolbarColors.active})`,
+  pressedText: `var(--office-menu-pressed-text, ${toolbarColors.activeText})`,
+  swatchBorder: `var(--office-menu-swatch-border, ${toolbarColors.border})`,
+  ring: 'var(--office-menu-ring, var(--pptx-accent, #1a73e8))',
+};
+
+export const menuFontFamily = `var(--office-menu-font-family, ${toolbarFont})`;
+
+/** Every dropdown's panel. */
 export const popoverStyle: CSSProperties = {
-  padding: 'var(--pptx-menu-padding, 6px)',
-  border: `1px solid ${toolbarColors.border}`,
-  borderRadius: 'var(--pptx-menu-radius, 8px)',
-  background: toolbarColors.surface,
-  boxShadow: toolbarColors.menuShadow,
+  padding: 'var(--office-menu-padding, 6px)',
+  border: `1px solid ${menuColors.border}`,
+  borderRadius: 'var(--office-menu-radius, 8px)',
+  background: menuColors.bg,
+  color: menuColors.text,
+  boxShadow: 'var(--office-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
   boxSizing: 'border-box',
 };
 
@@ -35,25 +58,17 @@ export function menuRowStyle(hovered: boolean, disabled = false, selected = fals
     appearance: 'none',
     display: 'flex',
     alignItems: 'center',
-    gap: 'var(--pptx-menu-item-gap, 10px)',
+    gap: 'var(--office-menu-item-gap, 10px)',
     width: '100%',
-    minHeight: 'var(--pptx-menu-item-height, 32px)',
-    padding: '0 var(--pptx-menu-item-padding-x, 9px)',
+    minHeight: 'var(--office-menu-item-height, 32px)',
+    padding: '0 var(--office-menu-item-padding-x, 9px)',
     border: 0,
-    borderRadius: 'var(--pptx-menu-item-radius, 4px)',
-    background: selected
-      ? 'var(--pptx-selected-bg, #d3e3fd)'
-      : hovered && !disabled
-        ? `var(--pptx-menu-hover, ${toolbarColors.hover})`
-        : 'transparent',
-    color: disabled
-      ? toolbarColors.disabled
-      : selected
-        ? 'var(--pptx-selected-text, #3c4043)'
-        : toolbarColors.text,
+    borderRadius: 'var(--office-menu-item-radius, 4px)',
+    background: selected ? menuColors.selectedBg : hovered && !disabled ? menuColors.hover : 'transparent',
+    color: disabled ? toolbarColors.disabled : selected ? menuColors.selectedText : menuColors.text,
     cursor: disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.48 : 1,
-    font: `var(--pptx-menu-font-weight, 400) var(--pptx-menu-font-size, 13px) ${toolbarFont}`,
+    font: `var(--office-menu-font-weight, 400) var(--office-menu-font-size, 13px) / var(--office-menu-line-height, normal) ${menuFontFamily}`,
     textAlign: 'left',
     boxSizing: 'border-box',
   };
@@ -77,24 +92,28 @@ const baseButtonStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
+/** A button in a popover (shapes, alignment), as the host's popover buttons. */
+const menuButtonStyle: CSSProperties = {
+  minWidth: 'var(--office-menu-button-size, var(--pptx-button-size, 28px))',
+  height: 'var(--office-menu-button-size, var(--pptx-button-size, 28px))',
+  borderRadius: 'var(--office-menu-button-radius, var(--pptx-button-radius, 4px))',
+};
+
 function interactiveButtonStyle(
   disabled: boolean,
   active: boolean,
   hovered: boolean,
-  style?: CSSProperties
+  style?: CSSProperties,
+  inMenu = false
 ): CSSProperties {
+  const colors = inMenu
+    ? { active: menuColors.pressedBg, activeText: menuColors.pressedText, hover: menuColors.buttonHover }
+    : toolbarColors;
   return {
     ...baseButtonStyle,
-    background: active
-      ? toolbarColors.active
-      : hovered && !disabled
-        ? toolbarColors.hover
-        : 'transparent',
-    color: disabled
-      ? toolbarColors.disabled
-      : active
-        ? toolbarColors.activeText
-        : toolbarColors.text,
+    ...(inMenu ? menuButtonStyle : {}),
+    background: active ? colors.active : hovered && !disabled ? colors.hover : 'transparent',
+    color: disabled ? toolbarColors.disabled : active ? colors.activeText : toolbarColors.text,
     cursor: disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.48 : 1,
     ...style,
@@ -110,6 +129,8 @@ export interface ToolbarButtonProps {
   style?: CSSProperties;
   testId?: string;
   ariaExpanded?: boolean;
+  /** Inside a popover: the host's popover button size and colours. */
+  inMenu?: boolean;
 }
 
 export function ToolbarButton({
@@ -121,6 +142,7 @@ export function ToolbarButton({
   style,
   testId,
   ariaExpanded,
+  inMenu = false,
 }: ToolbarButtonProps) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -136,7 +158,7 @@ export function ToolbarButton({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={disabled ? undefined : onClick}
-      style={interactiveButtonStyle(disabled, active, hovered, style)}
+      style={interactiveButtonStyle(disabled, active, hovered, style, inMenu)}
     >
       {children}
     </button>
@@ -335,13 +357,15 @@ export function ToolbarMenuItem({
 }
 
 /** A dropdown section's heading, as a host's popover groups. */
-export function ToolbarMenuLabel({ children }: { children: ReactNode }) {
+/** A dropdown section's heading; the panel's first one sits closer to the top. */
+export function ToolbarMenuLabel({ children, first = false }: { children: ReactNode; first?: boolean }) {
   return (
     <div
       style={{
-        padding: 'var(--pptx-menu-label-padding, 4px 8px 6px)',
-        color: toolbarColors.muted,
-        font: `var(--pptx-menu-label-font-weight, 500) var(--pptx-menu-label-font-size, 12px) / 16px ${toolbarFont}`,
+        padding: 'var(--office-menu-label-padding, 12px 8px 6px)',
+        ...(first ? { paddingTop: 4 } : {}),
+        color: menuColors.muted,
+        font: `var(--office-menu-label-font-weight, 500) var(--office-menu-label-font-size, 12px) / var(--office-menu-label-line-height, 16px) ${menuFontFamily}`,
       }}
     >
       {children}
@@ -353,7 +377,11 @@ export function ToolbarMenuSeparator() {
   return (
     <div
       role="separator"
-      style={{ height: 1, margin: '5px 2px', background: toolbarColors.border }}
+      style={{
+        height: 1,
+        margin: '4px var(--office-menu-item-padding-x, 8px)',
+        background: menuColors.separator,
+      }}
     />
   );
 }

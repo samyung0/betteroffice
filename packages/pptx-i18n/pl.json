@@ -60,7 +60,8 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
-    "customColor": "Niestandardowy",
+    "documentColors": "Kolory dokumentu",
+    "customColor": "Kolor niestandardowy",
     "cornerRadius": null,
     "shapeAdjustment": "Dopasowanie kształtu",
     "shapes": {
