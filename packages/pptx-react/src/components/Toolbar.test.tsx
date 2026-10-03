@@ -128,9 +128,15 @@ describe('Toolbar shape controls', () => {
       </LocaleProvider>
     );
 
-    fireEvent.change(getByTestId('pptx-shape-fill'), { target: { value: '#3367d6' } });
+    // Each colour opens a popover: a palette swatch, the clear item, a custom colour.
+    fireEvent.click(getByTestId('pptx-shape-fill'));
+    fireEvent.click(getByLabelText('#2563eb'));
+    fireEvent.click(getByTestId('pptx-shape-fill'));
+    fireEvent.change(getByTestId('pptx-shape-fill-custom'), { target: { value: '#3367d6' } });
+    fireEvent.click(getByTestId('pptx-shape-fill'));
     fireEvent.click(getByLabelText('No fill'));
-    fireEvent.change(getByTestId('pptx-shape-border-color'), {
+    fireEvent.click(getByTestId('pptx-shape-border-color'));
+    fireEvent.change(getByTestId('pptx-shape-border-color-custom'), {
       target: { value: '#ea4335' },
     });
     fireEvent.click(getByTestId('pptx-shape-border-width'));
@@ -140,6 +146,7 @@ describe('Toolbar shape controls', () => {
     fireEvent.input(radius, { target: { value: '40%' } });
     fireEvent.keyDown(radius, { key: 'Enter' });
 
+    expect(actions).toContainEqual({ type: 'fillColor', value: '#2563eb' });
     expect(actions).toContainEqual({ type: 'fillColor', value: '#3367d6' });
     expect(actions).toContainEqual({ type: 'fillColor', value: null });
     expect(actions).toContainEqual({ type: 'strokeColor', value: '#ea4335' });

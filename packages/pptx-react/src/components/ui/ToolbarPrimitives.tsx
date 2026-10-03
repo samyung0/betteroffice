@@ -19,6 +19,46 @@ export const toolbarColors = {
 
 export const toolbarFont = 'var(--pptx-font, ui-sans-serif, system-ui, sans-serif)';
 
+/** Every dropdown's panel; hosts match their own popovers through `--pptx-menu-*`. */
+export const popoverStyle: CSSProperties = {
+  padding: 'var(--pptx-menu-padding, 6px)',
+  border: `1px solid ${toolbarColors.border}`,
+  borderRadius: 'var(--pptx-menu-radius, 8px)',
+  background: toolbarColors.surface,
+  boxShadow: toolbarColors.menuShadow,
+  boxSizing: 'border-box',
+};
+
+/** A row in a dropdown: an item, a font, a size or a zoom level. */
+export function menuRowStyle(hovered: boolean, disabled = false, selected = false): CSSProperties {
+  return {
+    appearance: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--pptx-menu-item-gap, 10px)',
+    width: '100%',
+    minHeight: 'var(--pptx-menu-item-height, 32px)',
+    padding: '0 var(--pptx-menu-item-padding-x, 9px)',
+    border: 0,
+    borderRadius: 'var(--pptx-menu-item-radius, 4px)',
+    background: selected
+      ? 'var(--pptx-selected-bg, #d3e3fd)'
+      : hovered && !disabled
+        ? `var(--pptx-menu-hover, ${toolbarColors.hover})`
+        : 'transparent',
+    color: disabled
+      ? toolbarColors.disabled
+      : selected
+        ? 'var(--pptx-selected-text, #3c4043)'
+        : toolbarColors.text,
+    cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.48 : 1,
+    font: `var(--pptx-menu-font-weight, 400) var(--pptx-menu-font-size, 13px) ${toolbarFont}`,
+    textAlign: 'left',
+    boxSizing: 'border-box',
+  };
+}
+
 const baseButtonStyle: CSSProperties = {
   appearance: 'none',
   display: 'inline-flex',
@@ -233,12 +273,7 @@ export function ToolbarDropdown({
             width: menuWidth,
             maxHeight: 'min(440px, calc(100vh - 16px))',
             overflowY: 'auto',
-            padding: 6,
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 8,
-            background: toolbarColors.surface,
-            boxShadow: toolbarColors.menuShadow,
-            boxSizing: 'border-box',
+            ...popoverStyle,
           }}
         >
           {children(close)}
@@ -279,38 +314,38 @@ export function ToolbarMenuItem({
         onClick?.();
         close?.();
       }}
-      style={{
-        appearance: 'none',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        width: '100%',
-        minHeight: 32,
-        padding: '5px 9px',
-        border: 0,
-        borderRadius: 4,
-        background: hovered && !disabled ? toolbarColors.hover : 'transparent',
-        color: disabled ? toolbarColors.disabled : toolbarColors.text,
-        cursor: disabled ? 'default' : 'pointer',
-        opacity: disabled ? 0.48 : 1,
-        font: `400 13px ${toolbarFont}`,
-        textAlign: 'left',
-        boxSizing: 'border-box',
-      }}
+      style={menuRowStyle(hovered, disabled)}
     >
-      <span
-        style={{
-          display: 'inline-grid',
-          placeItems: 'center',
-          width: 20,
-          flex: '0 0 auto',
-        }}
-      >
-        {icon}
-      </span>
+      {icon !== undefined && (
+        <span
+          style={{
+            display: 'inline-grid',
+            placeItems: 'center',
+            width: 16,
+            flex: '0 0 auto',
+          }}
+        >
+          {icon}
+        </span>
+      )}
       <span style={{ flex: 1 }}>{label}</span>
       {selected && <ToolbarIcon name="check" size={16} />}
     </button>
+  );
+}
+
+/** A dropdown section's heading, as a host's popover groups. */
+export function ToolbarMenuLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        padding: 'var(--pptx-menu-label-padding, 4px 8px 6px)',
+        color: toolbarColors.muted,
+        font: `var(--pptx-menu-label-font-weight, 500) var(--pptx-menu-label-font-size, 12px) / 16px ${toolbarFont}`,
+      }}
+    >
+      {children}
+    </div>
   );
 }
 

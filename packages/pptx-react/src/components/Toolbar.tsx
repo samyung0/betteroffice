@@ -14,6 +14,7 @@ import {
   ToolbarDropdown,
   ToolbarGroup,
   ToolbarMenuItem,
+  ToolbarMenuLabel,
   ToolbarSeparator,
   toolbarColors,
 } from './ui/ToolbarPrimitives';
@@ -457,7 +458,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
         title={t('toolbar.shapeTool')}
         active={activeTool.startsWith('shape:')}
         disabled={!toolEnabled}
-        menuWidth={264}
+        menuWidth={228}
         testId="pptx-tool-shape"
         style={{ minWidth: 46, padding: '0 4px' }}
         trigger={
@@ -468,47 +469,32 @@ export function Toolbar(explicitProps: ToolbarProps) {
         }
       >
         {(close) => (
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(5, 44px)',
-              gap: 4,
-              padding: 2,
-            }}
-          >
-            {SHAPE_PRESETS.map((preset) => (
-              <button
-                key={preset.geometry}
-                type="button"
-                role="menuitem"
-                data-testid={`pptx-shape-${preset.geometry}`}
-                aria-label={t(preset.labelKey)}
-                title={t(preset.labelKey)}
-                onClick={() => {
-                  onToolChange?.(`shape:${preset.geometry}`);
-                  close();
-                }}
-                style={{
-                  appearance: 'none',
-                  display: 'grid',
-                  placeItems: 'center',
-                  width: 44,
-                  height: 38,
-                  padding: 5,
-                  border: `1px solid ${toolbarColors.border}`,
-                  borderRadius: 4,
-                  background:
-                    activeTool === `shape:${preset.geometry}`
-                      ? toolbarColors.active
-                      : toolbarColors.surface,
-                  color: toolbarColors.text,
-                  cursor: 'pointer',
-                }}
-              >
-                <ShapePresetIcon geometry={preset.geometry} />
-              </button>
-            ))}
-          </div>
+          <>
+            <ToolbarMenuLabel>{t('toolbar.shapeTool')}</ToolbarMenuLabel>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(6, var(--pptx-button-size, 28px))',
+                gap: 4,
+                padding: '0 4px 2px',
+              }}
+            >
+              {SHAPE_PRESETS.map((preset) => (
+                <ToolbarButton
+                  key={preset.geometry}
+                  title={t(preset.labelKey)}
+                  active={activeTool === `shape:${preset.geometry}`}
+                  onClick={() => {
+                    onToolChange?.(`shape:${preset.geometry}`);
+                    close();
+                  }}
+                  testId={`pptx-shape-${preset.geometry}`}
+                >
+                  <ShapePresetIcon geometry={preset.geometry} />
+                </ToolbarButton>
+              ))}
+            </div>
+          </>
         )}
       </ToolbarDropdown>
     </>
@@ -653,7 +639,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     <ToolbarDropdown
       title={t('toolbar.groups.alignment')}
       disabled={!formattingEnabled}
-      menuWidth={180}
+      menuWidth={152}
       testId="pptx-align"
       trigger={
         <>
@@ -663,18 +649,22 @@ export function Toolbar(explicitProps: ToolbarProps) {
       }
     >
       {(close) => (
-        <>
+        <div style={{ display: 'flex', gap: 4 }}>
           {ALIGNMENTS.map((alignment) => (
-            <ToolbarMenuItem
+            <ToolbarButton
               key={alignment.value}
-              label={t(alignment.labelKey)}
-              icon={<ToolbarIcon name={alignment.icon} size={16} />}
-              selected={currentFormatting.align === alignment.value}
-              onClick={() => apply({ type: 'align', value: alignment.value })}
-              close={close}
-            />
+              title={t(alignment.labelKey)}
+              active={currentFormatting.align === alignment.value}
+              onClick={() => {
+                apply({ type: 'align', value: alignment.value });
+                close();
+              }}
+              testId={`pptx-align-${alignment.testId}`}
+            >
+              <ToolbarIcon name={alignment.icon} />
+            </ToolbarButton>
           ))}
-        </>
+        </div>
       )}
     </ToolbarDropdown>
   );
@@ -714,6 +704,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
           <>
             <ToolbarMenuItem
               label={t('toolbar.noBorder')}
+              icon={<span aria-hidden="true" style={{ width: 18 }} />}
               selected={currentShapeFormatting.strokeWidthPt === null}
               onClick={() => applyShape({ type: 'strokeWidth', value: null })}
               close={close}

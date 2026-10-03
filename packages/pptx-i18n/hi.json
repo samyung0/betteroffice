@@ -60,6 +60,7 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
+    "customColor": "कस्टम",
     "cornerRadius": null,
     "shapeAdjustment": "आकृति समायोजन",
     "shapes": {

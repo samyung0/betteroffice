@@ -61,6 +61,7 @@
     "borderWidth": "Border width",
     "borderWidthValue": "{width} pt",
     "noBorder": "No border",
+    "customColor": "Custom",
     "cornerRadius": "Corner radius",
     "shapeAdjustment": "Shape adjustment",
     "arrange": "Arrange",

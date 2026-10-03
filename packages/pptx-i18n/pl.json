@@ -60,6 +60,7 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
+    "customColor": "Niestandardowy",
     "cornerRadius": null,
     "shapeAdjustment": "Dopasowanie kształtu",
     "shapes": {

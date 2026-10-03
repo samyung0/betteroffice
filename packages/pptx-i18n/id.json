@@ -60,6 +60,7 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
+    "customColor": "Kustom",
     "cornerRadius": null,
     "shapeAdjustment": "Penyesuaian bentuk",
     "shapes": {

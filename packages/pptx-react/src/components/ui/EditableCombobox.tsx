@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
-import { toolbarColors, toolbarFont } from './ToolbarPrimitives';
+import { menuRowStyle, popoverStyle, toolbarColors, toolbarFont } from './ToolbarPrimitives';
 
 export interface ComboboxOption {
   value: string;
@@ -180,46 +180,52 @@ export function EditableCombobox({
             width: position.width,
             maxHeight: 260,
             overflowY: 'auto',
-            padding: 4,
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 6,
-            background: toolbarColors.surface,
-            boxShadow: toolbarColors.menuShadow,
-            boxSizing: 'border-box',
+            ...popoverStyle,
           }}
         >
           {options.map((option) => (
-            <button
+            <ComboboxOption
               key={option.value}
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
+              label={option.label}
+              selected={option.value === value}
+              centered={inputStyle?.textAlign === 'center'}
+              onPick={() => {
                 setDraft(option.label);
                 onCommit?.(option.value);
                 close();
               }}
-              style={{
-                appearance: 'none',
-                display: 'block',
-                width: '100%',
-                minHeight: 28,
-                padding: '4px 7px',
-                border: 0,
-                borderRadius: 3,
-                background: option.value === value ? toolbarColors.active : 'transparent',
-                color: option.value === value ? toolbarColors.activeText : toolbarColors.text,
-                cursor: 'pointer',
-                font: `400 13px ${toolbarFont}`,
-                textAlign: 'left',
-              }}
-            >
-              {option.label}
-            </button>
+            />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function ComboboxOption({
+  label,
+  selected,
+  centered,
+  onPick,
+}: {
+  label: string;
+  selected: boolean;
+  centered: boolean;
+  onPick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onMouseDown={(event) => event.preventDefault()}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={onPick}
+      style={{ ...menuRowStyle(hovered, false, selected), justifyContent: centered ? 'center' : 'flex-start' }}
+    >
+      {label}
+    </button>
   );
 }

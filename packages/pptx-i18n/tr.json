@@ -60,6 +60,7 @@
     "borderWidth": null,
     "borderWidthValue": null,
     "noBorder": null,
+    "customColor": "Özel",
     "cornerRadius": null,
     "shapeAdjustment": "Şekil ayarı",
     "shapes": {
