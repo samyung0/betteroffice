@@ -119,3 +119,34 @@ test('the colour buttons open a palette that applies, resets and takes a custom 
     [{ type: 'clearColor', value: 'fillColor' }],
   ]);
 });
+
+test('the alignment popovers stack one pressed button per alignment and apply the pick', () => {
+  const onFormat = mock((_action: FormattingAction) => {});
+  const { getByRole } = render(
+    <SingleRow
+      onFormat={onFormat}
+      currentFormatting={{ horizontalAlignment: 'center', verticalAlignment: 'bottom' }}
+    />
+  );
+  fireEvent.click(getByRole('button', { name: en.toolbar.horizontalAlignment }));
+  const menu = getByRole('menu', { name: en.toolbar.horizontalAlignment });
+  const buttons = within(menu).getAllByRole('button');
+  expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual([
+    en.toolbar.horizontalAlign.left,
+    en.toolbar.horizontalAlign.center,
+    en.toolbar.horizontalAlign.right,
+  ]);
+  expect(buttons.map((button) => button.getAttribute('aria-pressed'))).toEqual([
+    null,
+    'true',
+    null,
+  ]);
+  expect((buttons[0].parentElement as HTMLElement).style.flexDirection).toBe('column');
+  fireEvent.click(buttons[2]);
+  fireEvent.click(getByRole('button', { name: en.toolbar.verticalAlignment }));
+  fireEvent.click(getByRole('button', { name: en.toolbar.verticalAlign.top }));
+  expect(onFormat.mock.calls).toEqual([
+    [{ type: 'horizontalAlignment', value: 'right' }],
+    [{ type: 'verticalAlignment', value: 'top' }],
+  ]);
+});

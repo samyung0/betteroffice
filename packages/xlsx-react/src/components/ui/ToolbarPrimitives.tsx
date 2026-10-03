@@ -15,20 +15,41 @@ export const toolbarColors = {
   activeText: 'var(--xlsx-active-text, #3c4043)',
   border: 'var(--xlsx-border, #c7cacf)',
   divider: 'var(--xlsx-divider, #c7cacf)',
-  surface: 'var(--xlsx-menu-bg, #ffffff)',
-  shadow: 'var(--xlsx-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
   rail: 'var(--xlsx-toolbar-rail-bg, #edf2fa)',
 };
 export const chromeFont = 'var(--xlsx-font-family, ui-sans-serif, system-ui, sans-serif)';
 
-/** A dropdown's surface; hosts restyle it through the `--xlsx-menu-*` variables. */
+/**
+ * The popover look a host shares across its editors (`--office-menu-*`, as
+ * Capy's note toolbar draws its popovers); the fallbacks are this editor's own.
+ */
+export const menuColors = {
+  bg: 'var(--office-menu-bg, #ffffff)',
+  text: `var(--office-menu-text, ${toolbarColors.text})`,
+  muted: `var(--office-menu-muted, ${toolbarColors.muted})`,
+  secondary: `var(--office-menu-secondary, ${toolbarColors.muted})`,
+  border: `var(--office-menu-border, ${toolbarColors.border})`,
+  separator: `var(--office-menu-separator, ${toolbarColors.divider})`,
+  shadow: 'var(--office-menu-shadow, 0 4px 16px rgba(60, 64, 67, 0.24))',
+  hover: `var(--office-menu-hover, ${toolbarColors.hover})`,
+  selectedBg: `var(--office-menu-selected-bg, ${toolbarColors.active})`,
+  selectedText: `var(--office-menu-selected-text, ${toolbarColors.text})`,
+  buttonHover: `var(--office-menu-button-hover, ${toolbarColors.hover})`,
+  pressedBg: `var(--office-menu-pressed-bg, ${toolbarColors.active})`,
+  pressedText: `var(--office-menu-pressed-text, ${toolbarColors.activeText})`,
+  swatchBorder: 'var(--office-menu-swatch-border, rgba(0, 0, 0, 0.2))',
+  ring: 'var(--office-menu-ring, #2563eb)',
+};
+export const menuFontFamily = `var(--office-menu-font-family, ${chromeFont})`;
+
+/** A dropdown's panel. */
 export const menuSurfaceStyle: CSSProperties = {
-  padding: 'var(--xlsx-menu-padding, 6px)',
-  border: `1px solid var(--xlsx-menu-border, ${toolbarColors.border})`,
-  borderRadius: 'var(--xlsx-menu-radius, 8px)',
-  background: toolbarColors.surface,
-  boxShadow: toolbarColors.shadow,
-  color: toolbarColors.text,
+  padding: 'var(--office-menu-padding, 6px)',
+  border: `1px solid ${menuColors.border}`,
+  borderRadius: 'var(--office-menu-radius, 8px)',
+  background: menuColors.bg,
+  boxShadow: menuColors.shadow,
+  color: menuColors.text,
   boxSizing: 'border-box',
 };
 
@@ -38,18 +59,17 @@ export function menuItemStyle(hovered: boolean, disabled = false): CSSProperties
     appearance: 'none',
     display: 'flex',
     alignItems: 'center',
-    gap: 'var(--xlsx-menu-item-gap, 10px)',
+    gap: 'var(--office-menu-item-gap, 10px)',
     width: '100%',
-    minHeight: 'var(--xlsx-menu-item-height, 32px)',
-    padding: 'var(--xlsx-menu-item-padding, 5px 9px)',
+    minHeight: 'var(--office-menu-item-height, 32px)',
+    padding: '0 var(--office-menu-item-padding-x, 9px)',
     border: 0,
-    borderRadius: 'var(--xlsx-menu-item-radius, 4px)',
-    background:
-      hovered && !disabled ? `var(--xlsx-menu-hover-bg, ${toolbarColors.hover})` : 'transparent',
-    color: disabled ? toolbarColors.disabled : toolbarColors.text,
+    borderRadius: 'var(--office-menu-item-radius, 4px)',
+    background: hovered && !disabled ? menuColors.hover : 'transparent',
+    color: disabled ? toolbarColors.disabled : menuColors.text,
     cursor: disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.48 : 1,
-    font: `var(--xlsx-menu-font-weight, 400) var(--xlsx-menu-font-size, 13px) ${chromeFont}`,
+    font: `var(--office-menu-font-weight, 400) var(--office-menu-font-size, 13px) / var(--office-menu-line-height, normal) ${menuFontFamily}`,
     textAlign: 'left',
     boxSizing: 'border-box',
   };
@@ -73,24 +93,32 @@ const baseButtonStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
+/** A button in a popover (border presets, alignment), as the host's popover buttons. */
+const menuButtonStyle: CSSProperties = {
+  minWidth: 'var(--office-menu-button-size, var(--xlsx-button-size, 28px))',
+  height: 'var(--office-menu-button-size, var(--xlsx-button-size, 28px))',
+  borderRadius: 'var(--office-menu-button-radius, var(--xlsx-button-radius, 4px))',
+};
+
 function interactiveButtonStyle(
   disabled: boolean,
   active: boolean,
   hovered: boolean,
-  style?: CSSProperties
+  style?: CSSProperties,
+  inMenu = false
 ): CSSProperties {
+  const colors = inMenu
+    ? {
+        active: menuColors.pressedBg,
+        activeText: menuColors.pressedText,
+        hover: menuColors.buttonHover,
+      }
+    : toolbarColors;
   return {
     ...baseButtonStyle,
-    background: active
-      ? toolbarColors.active
-      : hovered && !disabled
-      ? toolbarColors.hover
-      : 'transparent',
-    color: disabled
-      ? toolbarColors.disabled
-      : active
-      ? toolbarColors.activeText
-      : toolbarColors.text,
+    ...(inMenu && menuButtonStyle),
+    background: active ? colors.active : hovered && !disabled ? colors.hover : 'transparent',
+    color: disabled ? toolbarColors.disabled : active ? colors.activeText : toolbarColors.text,
     cursor: disabled ? 'default' : 'pointer',
     opacity: disabled ? 0.48 : 1,
     ...style,
@@ -106,6 +134,8 @@ export interface ToolbarButtonProps {
   style?: CSSProperties;
   testId?: string;
   ariaExpanded?: boolean;
+  /** Inside a popover: the host's popover button size and colours. */
+  inMenu?: boolean;
 }
 
 export function ToolbarButton({
@@ -117,6 +147,7 @@ export function ToolbarButton({
   style,
   testId,
   ariaExpanded,
+  inMenu = false,
 }: ToolbarButtonProps) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -132,7 +163,7 @@ export function ToolbarButton({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={disabled ? undefined : onClick}
-      style={interactiveButtonStyle(disabled, active, hovered, style)}
+      style={interactiveButtonStyle(disabled, active, hovered, style, inMenu)}
     >
       {children}
     </button>
@@ -188,6 +219,8 @@ export interface ToolbarDropdownProps {
   disabled?: boolean;
   active?: boolean;
   menuWidth?: number;
+  /** Overrides on the panel, e.g. a tighter padding around a stack of buttons. */
+  menuStyle?: CSSProperties;
   style?: CSSProperties;
   testId?: string;
 }
@@ -199,6 +232,7 @@ export function ToolbarDropdown({
   disabled = false,
   active = false,
   menuWidth = 220,
+  menuStyle,
   style,
   testId,
 }: ToolbarDropdownProps) {
@@ -268,9 +302,11 @@ export function ToolbarDropdown({
             left: position.left,
             zIndex: 10000,
             width: menuWidth,
-            maxHeight: 'min(440px, calc(100vh - 16px))',
+            // The note toolbar's tallest popover (38rem), kept inside the window.
+            maxHeight: `min(38rem, calc(100vh - ${position.top + 8}px))`,
             overflowY: 'auto',
             ...menuSurfaceStyle,
+            ...menuStyle,
           }}
         >
           {children(close)}
@@ -318,7 +354,7 @@ export function ToolbarMenuItem({
           style={{
             display: 'inline-grid',
             placeItems: 'center',
-            minWidth: 'var(--xlsx-menu-icon-size, 20px)',
+            minWidth: 'var(--office-menu-icon-size, 20px)',
             flex: '0 0 auto',
           }}
         >
@@ -331,16 +367,22 @@ export function ToolbarMenuItem({
   );
 }
 
-/** A section heading inside a dropdown. */
-export function ToolbarMenuLabel({ children }: { children: ReactNode }) {
+/** A section heading inside a dropdown; the panel's first one sits closer to the top. */
+export function ToolbarMenuLabel({
+  children,
+  first = false,
+}: {
+  children: ReactNode;
+  first?: boolean;
+}) {
   return (
     <div
       role="presentation"
       style={{
-        padding: 'var(--xlsx-menu-label-padding, 8px 9px 4px)',
-        color: toolbarColors.muted,
-        font: `var(--xlsx-menu-label-font, 500 12px) ${chromeFont}`,
-        lineHeight: '16px',
+        padding: 'var(--office-menu-label-padding, 12px 9px 4px)',
+        ...(first && { paddingTop: 4 }),
+        color: menuColors.muted,
+        font: `var(--office-menu-label-font-weight, 500) var(--office-menu-label-font-size, 12px) / var(--office-menu-label-line-height, 16px) ${menuFontFamily}`,
       }}
     >
       {children}
@@ -352,7 +394,11 @@ export function ToolbarMenuSeparator() {
   return (
     <div
       role="separator"
-      style={{ height: 1, margin: '5px 2px', background: toolbarColors.divider }}
+      style={{
+        height: 1,
+        margin: '4px var(--office-menu-item-padding-x, 8px)',
+        background: menuColors.separator,
+      }}
     />
   );
 }

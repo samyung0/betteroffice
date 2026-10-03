@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '../../i18n';
 import { ToolbarIcon } from './ToolbarIcon';
-import { ToolbarDropdown, chromeFont, toolbarColors } from './ToolbarPrimitives';
+import { ToolbarDropdown, menuColors, menuFontFamily } from './ToolbarPrimitives';
 
 export interface PaletteColor {
   name: string;
@@ -122,10 +122,10 @@ function isBright(hex: string) {
   return r * 0.299 + g * 0.587 + b * 0.114 > 160;
 }
 
+/** The palette's captions: its heading, Default and Custom color. */
 const captionStyle = {
-  color: toolbarColors.muted,
-  font: `var(--xlsx-menu-label-font, 500 12px) ${chromeFont}`,
-  lineHeight: '16px',
+  color: menuColors.secondary,
+  font: `600 var(--office-menu-label-font-size, 12px) / 16px ${menuFontFamily}`,
 } as const;
 
 export function ColorPalette({
@@ -144,6 +144,7 @@ export function ColorPalette({
   const current = value.toLowerCase();
   const customRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(HEX.test(value) ? current : '');
+  const [clearHovered, setClearHovered] = useState(false);
   const pickRef = useRef(onPick);
   pickRef.current = onPick;
 
@@ -167,7 +168,7 @@ export function ColorPalette({
         display: 'flex',
         flexDirection: 'column',
         gap: 8,
-        padding: 'var(--xlsx-palette-padding, 4px)',
+        padding: '0 6px',
       }}
     >
       {heading && (
@@ -177,6 +178,8 @@ export function ColorPalette({
             <button
               type="button"
               onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setClearHovered(true)}
+              onMouseLeave={() => setClearHovered(false)}
               onClick={onClear}
               style={{
                 appearance: 'none',
@@ -186,10 +189,12 @@ export function ColorPalette({
                 height: 28,
                 padding: '0 8px',
                 border: 0,
-                borderRadius: 'var(--xlsx-button-radius, 4px)',
-                background: 'transparent',
+                borderRadius: 'var(--office-menu-button-radius, var(--xlsx-button-radius, 4px))',
                 cursor: 'pointer',
                 ...captionStyle,
+                fontWeight: 500,
+                background: clearHovered ? menuColors.buttonHover : 'transparent',
+                color: clearHovered ? menuColors.text : menuColors.secondary,
               }}
             >
               <ToolbarIcon name="refresh" size={14} />
@@ -204,8 +209,7 @@ export function ColorPalette({
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(8, 24px)',
-          justifyContent: 'space-between',
-          rowGap: 6,
+          gap: 6,
         }}
       >
         {PALETTE.map((color) => {
@@ -227,13 +231,13 @@ export function ColorPalette({
                 width: 24,
                 height: 24,
                 padding: 0,
-                border: '1px solid var(--xlsx-swatch-border, rgba(0, 0, 0, 0.2))',
+                border: `1px solid ${menuColors.swatchBorder}`,
                 borderRadius: '50%',
                 background: color.value,
                 color: isBright(color.value) ? '#000000' : '#ffffff',
                 cursor: 'pointer',
                 boxShadow: selected
-                  ? `0 0 0 1px ${toolbarColors.surface}, 0 0 0 3px var(--xlsx-swatch-ring, #2563eb)`
+                  ? `0 0 0 1px ${menuColors.bg}, 0 0 0 3px ${menuColors.ring}`
                   : undefined,
               }}
             >
@@ -248,8 +252,9 @@ export function ColorPalette({
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: 12,
+          marginTop: 8,
           paddingTop: 8,
-          borderTop: `1px solid ${toolbarColors.divider}`,
+          borderTop: `1px solid ${menuColors.separator}`,
           ...captionStyle,
         }}
       >
@@ -259,7 +264,7 @@ export function ColorPalette({
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            color: toolbarColors.text,
+            color: menuColors.text,
             font: '400 12px ui-monospace, SFMono-Regular, Menlo, monospace',
           }}
         >
@@ -273,8 +278,8 @@ export function ColorPalette({
               width: 36,
               height: 28,
               padding: 2,
-              border: `1px solid ${toolbarColors.border}`,
-              borderRadius: 'var(--xlsx-button-radius, 4px)',
+              border: `1px solid ${menuColors.border}`,
+              borderRadius: 'var(--office-menu-button-radius, var(--xlsx-button-radius, 4px))',
               background: 'transparent',
               cursor: 'pointer',
             }}

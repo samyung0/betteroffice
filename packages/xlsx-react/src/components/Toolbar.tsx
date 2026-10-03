@@ -171,6 +171,9 @@ const BORDER_STYLES: readonly BorderStyle[] = ['solid', 'dashed', 'dotted', 'dou
 const HORIZONTAL_ALIGNMENTS: readonly HorizontalAlignment[] = ['left', 'center', 'right'];
 const VERTICAL_ALIGNMENTS: readonly VerticalAlignment[] = ['top', 'middle', 'bottom'];
 const WRAPPING_OPTIONS: readonly TextWrapping[] = ['overflow', 'wrap', 'clip'];
+/** One popover button wide: the button, 4px padding each side and the border. */
+const ALIGNMENT_MENU_WIDTH = 42;
+const alignmentStackStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4 };
 
 function stripUndefined<T extends object>(value: T): Partial<T> {
   const result: Partial<T> = {};
@@ -427,15 +430,16 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const renderBorders = (close: () => void) => (
     <>
-      <ToolbarMenuLabel>{t('toolbar.borders')}</ToolbarMenuLabel>
+      <ToolbarMenuLabel first>{t('toolbar.borders')}</ToolbarMenuLabel>
       <div
         role="group"
         aria-label={t('toolbar.borders')}
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, var(--xlsx-button-size, 28px))',
-          gap: 2,
-          padding: '0 var(--xlsx-palette-padding, 4px)',
+          gridTemplateColumns:
+            'repeat(5, var(--office-menu-button-size, var(--xlsx-button-size, 28px)))',
+          gap: 4,
+          padding: '0 4px',
         }}
       >
         {BORDER_PRESETS.map((preset) => (
@@ -448,6 +452,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
               apply({ type: 'borderPreset', value: preset });
               close();
             }}
+            inMenu
           >
             <BorderGlyph preset={preset} />
           </ToolbarButton>
@@ -507,36 +512,45 @@ export function Toolbar(explicitProps: ToolbarProps) {
     </>
   );
 
+  // The alignments stack as icon buttons, as the note toolbar's alignment popover.
   const renderHorizontalAlignment = (close: () => void) => (
-    <>
+    <div style={alignmentStackStyle}>
       {HORIZONTAL_ALIGNMENTS.map((alignment) => (
-        <ToolbarMenuItem
+        <ToolbarButton
           key={alignment}
-          icon={<HorizontalAlignmentGlyph value={alignment} />}
-          label={t(`toolbar.horizontalAlign.${alignment}`)}
-          selected={currentFormatting.horizontalAlignment === alignment}
+          title={t(`toolbar.horizontalAlign.${alignment}`)}
+          active={currentFormatting.horizontalAlignment === alignment}
           disabled={!formattingEnabled}
-          onClick={() => apply({ type: 'horizontalAlignment', value: alignment })}
-          close={close}
-        />
+          onClick={() => {
+            apply({ type: 'horizontalAlignment', value: alignment });
+            close();
+          }}
+          inMenu
+        >
+          <HorizontalAlignmentGlyph value={alignment} />
+        </ToolbarButton>
       ))}
-    </>
+    </div>
   );
 
   const renderVerticalAlignment = (close: () => void) => (
-    <>
+    <div style={alignmentStackStyle}>
       {VERTICAL_ALIGNMENTS.map((alignment) => (
-        <ToolbarMenuItem
+        <ToolbarButton
           key={alignment}
-          icon={<VerticalAlignmentGlyph value={alignment} />}
-          label={t(`toolbar.verticalAlign.${alignment}`)}
-          selected={currentFormatting.verticalAlignment === alignment}
+          title={t(`toolbar.verticalAlign.${alignment}`)}
+          active={currentFormatting.verticalAlignment === alignment}
           disabled={!formattingEnabled}
-          onClick={() => apply({ type: 'verticalAlignment', value: alignment })}
-          close={close}
-        />
+          onClick={() => {
+            apply({ type: 'verticalAlignment', value: alignment });
+            close();
+          }}
+          inMenu
+        >
+          <VerticalAlignmentGlyph value={alignment} />
+        </ToolbarButton>
       ))}
-    </>
+    </div>
   );
 
   const renderWrapping = (close: () => void) => (
@@ -712,6 +726,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
       width={singleRow ? 40 : 50}
       chevron={!singleRow}
       optionAlign={singleRow ? 'center' : 'left'}
+      // The single row's list as the note toolbar's: 56px wide, 4px padding.
+      menuWidth={singleRow ? 56 : 0}
+      menuStyle={singleRow ? { padding: 4, maxHeight: 256 } : undefined}
       inputStyle={singleRow ? { padding: 0, textAlign: 'center' } : { textAlign: 'center' }}
     />
   );
@@ -815,7 +832,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       <ToolbarDropdown
         title={t('toolbar.horizontalAlignment')}
         disabled={!formattingEnabled}
-        menuWidth={180}
+        menuWidth={ALIGNMENT_MENU_WIDTH}
+        menuStyle={{ padding: 4 }}
         trigger={
           <>
             <HorizontalAlignmentGlyph value={currentFormatting.horizontalAlignment ?? 'left'} />
@@ -828,7 +846,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       <ToolbarDropdown
         title={t('toolbar.verticalAlignment')}
         disabled={!formattingEnabled}
-        menuWidth={180}
+        menuWidth={ALIGNMENT_MENU_WIDTH}
+        menuStyle={{ padding: 4 }}
         trigger={
           <>
             <VerticalAlignmentGlyph value={currentFormatting.verticalAlignment ?? 'middle'} />

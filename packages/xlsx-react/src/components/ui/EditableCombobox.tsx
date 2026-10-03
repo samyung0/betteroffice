@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
-import { chromeFont, menuItemStyle, menuSurfaceStyle, toolbarColors } from './ToolbarPrimitives';
+import {
+  chromeFont,
+  menuColors,
+  menuItemStyle,
+  menuSurfaceStyle,
+  toolbarColors,
+} from './ToolbarPrimitives';
 
 export interface ComboboxOption {
   value: string;
@@ -21,7 +27,12 @@ export interface EditableComboboxProps {
   bordered?: boolean;
   /** False leaves out the chevron; focusing the box still opens the list. */
   chevron?: boolean;
+  /** Centred options also centre the list under the box. */
   optionAlign?: 'left' | 'center';
+  /** The list's width when wider than the box. */
+  menuWidth?: number;
+  /** Overrides on the list's panel, e.g. a tighter padding. */
+  menuStyle?: CSSProperties;
 }
 
 export function EditableCombobox({
@@ -36,6 +47,8 @@ export function EditableCombobox({
   bordered = true,
   chevron = true,
   optionAlign = 'left',
+  menuWidth = 0,
+  menuStyle,
 }: EditableComboboxProps) {
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
@@ -51,12 +64,13 @@ export function EditableCombobox({
   useEffect(() => {
     if (!open || !rootRef.current) return;
     const rect = rootRef.current.getBoundingClientRect();
+    const listWidth = Math.max(rect.width, width, menuWidth);
     setPosition({
       top: rect.bottom + 4,
-      left: rect.left,
-      width: Math.max(rect.width, width),
+      left: optionAlign === 'center' ? rect.left + (rect.width - listWidth) / 2 : rect.left,
+      width: listWidth,
     });
-  }, [open, width]);
+  }, [open, width, menuWidth, optionAlign]);
 
   useEffect(() => {
     if (!open) return;
@@ -93,7 +107,7 @@ export function EditableCombobox({
         height: 28,
         border: bordered ? `1px solid ${toolbarColors.border}` : 0,
         borderRadius: 4,
-        background: bordered ? toolbarColors.surface : 'transparent',
+        background: bordered ? 'var(--xlsx-input-bg, #ffffff)' : 'transparent',
         opacity: disabled ? 0.48 : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
@@ -188,6 +202,7 @@ export function EditableCombobox({
             maxHeight: 260,
             overflowY: 'auto',
             ...menuSurfaceStyle,
+            ...menuStyle,
           }}
         >
           {options.map((option) => (
@@ -234,8 +249,8 @@ function ComboboxOption({
         ...menuItemStyle(hovered),
         justifyContent: center ? 'center' : 'flex-start',
         ...(selected && {
-          background: `var(--xlsx-option-selected-bg, ${toolbarColors.active})`,
-          color: `var(--xlsx-option-selected-text, ${toolbarColors.text})`,
+          background: menuColors.selectedBg,
+          color: menuColors.selectedText,
         }),
       }}
     >
