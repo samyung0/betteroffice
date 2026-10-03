@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from '../PagedEditor';
 import { useContextMenus } from './useContextMenus';
 
@@ -80,5 +81,52 @@ describe('selection context menu', () => {
     });
 
     expect(added).toBe(0);
+  });
+});
+
+describe('context menu cut', () => {
+  test('deletes only after the clipboard accepts the text', async () => {
+    // [Seed]¶ selected
+    const session = {
+      selection: () => ({
+        anchor: { story: 'body', paraId: 'p', offset: 0 },
+        head: { story: 'body', paraId: 'p', offset: 4 },
+      }),
+      locateParagraph: () => ({ start: 0, end: 4 }),
+      storySegments: () => [{ kind: 'text', text: 'Seed', attributes: {} }],
+    } as unknown as YrsSession;
+    let deleted = 0;
+    const base = options(false);
+    const pagedEditorRef = {
+      current: {
+        ...base.pagedEditorRef.current,
+        getYrsSession: () => session,
+        deleteSelection: () => {
+          deleted += 1;
+        },
+      } as PagedEditorRef,
+    };
+    const { result } = renderHook(() => useContextMenus({ ...base, pagedEditorRef }));
+    const clipboard = navigator.clipboard;
+    const writeText = clipboard.writeText;
+    const written: string[] = [];
+    try {
+      clipboard.writeText = () => Promise.reject(new Error('refused'));
+      await act(async () => {
+        await result.current.handleContextMenuAction('cut');
+      });
+      expect(deleted).toBe(0);
+
+      clipboard.writeText = async (text) => {
+        written.push(text);
+      };
+      await act(async () => {
+        await result.current.handleContextMenuAction('cut');
+      });
+      expect(written).toEqual(['Seed']);
+      expect(deleted).toBe(1);
+    } finally {
+      clipboard.writeText = writeText;
+    }
   });
 });

@@ -227,9 +227,9 @@ export interface YrsSelectionText {
 
 /**
  * The current Yrs selection as plain text: paragraph ends and soft line breaks
- * become newlines, and a field its shown text. A selection holding anything
- * plain text cannot carry (a table, image, field, note reference, content
- * control, bookmark, page break…) is not `plain`.
+ * become newlines, a field its shown text, and an invisible bookmark nothing.
+ * A selection holding anything else plain text cannot carry (a table, image,
+ * field, note reference, content control, page break…) is not `plain`.
  */
 export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   const range = currentYrsSelectionRange(session);
@@ -253,6 +253,12 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
       if (segment.attributes.fieldResult) plain = false;
     } else if (segment.kind === 'pilcrow' || segment.embedKind === 'break') {
       text += '\n';
+    } else if (
+      segment.embedKind === 'bookmark' &&
+      (segment.payload.kind === 'start' || segment.payload.kind === 'end')
+    ) {
+      // An invisible bookmark goes with its text, as Backspace takes it. (A
+      // continued field's markers are bookmarks too, but of the field.)
     } else {
       plain = false;
       if (segment.embedKind === 'field' && typeof segment.payload.displayText === 'string') {

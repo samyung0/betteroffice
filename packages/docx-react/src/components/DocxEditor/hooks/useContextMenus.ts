@@ -322,9 +322,14 @@ export function useContextMenus({
         case 'cut': {
           const session = paged.getYrsSession();
           const selected = session ? yrsSelectionText(session) : null;
-          if (selected?.text) await navigator.clipboard.writeText(selected.text).catch(() => undefined);
-          // A selection plain text cannot carry only copies, as keyboard cut does.
-          if (selected?.plain) paged.deleteSelection();
+          if (!selected?.text) break;
+          // Delete only what reached the clipboard. A selection plain text
+          // cannot carry only copies, as keyboard cut does.
+          const copied = await navigator.clipboard.writeText(selected.text).then(
+            () => true,
+            () => false
+          );
+          if (copied && selected.plain) paged.deleteSelection();
           break;
         }
         case 'copy': {

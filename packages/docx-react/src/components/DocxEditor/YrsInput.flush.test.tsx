@@ -393,3 +393,21 @@ test('cut over a table only copies', async () => {
   expect(written).toEqual({ 'text/plain': 'ed\n' });
   expect(session.storySegments('body')).toEqual(before);
 });
+
+test('cut over a heading holding a bookmark deletes its text', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  const whole = { story: 'body', start: { paraId: seed.paraId, offset: 0 }, end: { paraId: seed.paraId, offset: 4 } };
+  session.applyParagraphStyle(whole, 'Heading1');
+  // [_Toc1 start]Seed[_Toc1 end], as Word marks a heading a table of contents links to.
+  session.applyRawOps('body', [
+    { op: 'insertEmbed', index: 4, kind: 'bookmark', payload: { kind: 'end', id: 0 } },
+    { op: 'insertEmbed', index: 0, kind: 'bookmark', payload: { kind: 'start', id: 0, name: '_Toc1' } },
+  ]);
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 0 }, { story: 'body', paraId: seed.paraId, offset: 6 }));
+  const { written, clipboardData } = clipboardSpy();
+  fireEvent.cut(view.getByTestId('yrs-input'), { clipboardData });
+  await flush(input);
+  expect(written).toEqual({ 'text/plain': 'Seed' });
+  expect(session.paragraphs('body')[0].text.replace(/￼/g, '')).toBe('');
+});
