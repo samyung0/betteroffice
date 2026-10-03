@@ -412,21 +412,15 @@ function ColorPalette({
 }) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(value ?? '');
 
   // The native picker reports every drag as `input`; only its `change`
   // (the pick) reaches the document.
   useEffect(() => {
     const input = inputRef.current;
     if (!input) return;
-    const update = () => setDraft(input.value);
     const commit = () => onPick(input.value.slice(1).toUpperCase());
-    input.addEventListener('input', update);
     input.addEventListener('change', commit);
-    return () => {
-      input.removeEventListener('input', update);
-      input.removeEventListener('change', commit);
-    };
+    return () => input.removeEventListener('change', commit);
   }, [onPick]);
 
   return (
@@ -467,12 +461,10 @@ function ColorPalette({
           );
         })}
       </div>
+      {/* Only the label and the swatch, as the note editor's: no hex. */}
       <label className="docx-color-palette__custom">
         {t('colorPicker.customColor')}
-        <span>
-          {draft}
-          <input ref={inputRef} type="color" defaultValue={value ?? '#000000'} />
-        </span>
+        <input ref={inputRef} type="color" defaultValue={value ?? '#000000'} />
       </label>
     </div>
   );

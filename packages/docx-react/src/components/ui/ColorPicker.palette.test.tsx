@@ -39,6 +39,8 @@ test('a host palette replaces the theme colours and picks as the standard colour
   expect(container.querySelectorAll('.docx-color-palette [role=gridcell]')).toHaveLength(3);
   expect(queryByText('Theme Colors')).toBeNull();
   expect(getByRole('gridcell', { name: 'Red' }).getAttribute('aria-selected')).toBe('true');
+  // The custom row is the label and the swatch, without the hex code.
+  expect(container.querySelector('.docx-color-palette__custom')?.textContent).not.toContain('#');
 
   fireEvent.click(getByRole('gridcell', { name: 'Blue' }));
   expect(onChange).toHaveBeenCalledWith({ rgb: '2563EB' });

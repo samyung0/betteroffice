@@ -1478,14 +1478,6 @@
   color: var(--office-menu-secondary, inherit);
   border-top: 1px solid var(--office-menu-separator, currentColor);
 }
-.docx-color-palette__custom span {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
-  font-family: monospace;
-  font-weight: 400;
-  color: var(--office-menu-text, inherit);
-}
 .docx-color-palette__custom input {
   box-sizing: border-box;
   width: 36px;
