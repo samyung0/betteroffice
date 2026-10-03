@@ -85,14 +85,11 @@ export interface DocxEditorProps {
     onCommentResolve?: (comment: Comment_2) => void;
     onCommentsChange?: (comments: Comment_2[]) => void;
     onCommentsSidebarOpenChange?: (open: boolean) => void;
-    onCopy?: () => void;
-    onCut?: () => void;
     onDocumentNameChange?: (name: string) => void;
     onEditorViewReady?: (view: prosemirror_view.EditorView) => void;
     onError?: (error: Error) => void;
     onFontsLoaded?: () => void;
     onOpen?: (file: File) => void | Promise<void>;
-    onPaste?: () => void;
     onPrint?: () => void;
     onRenderedDomContextReady?: (context: RenderedDomContext) => void;
     onSave?: (buffer: ArrayBuffer) => void;

@@ -273,12 +273,6 @@ export interface DocxEditorProps {
    * invokes this callback.
    */
   onPrint?: () => void;
-  /** Callback when content is copied */
-  onCopy?: () => void;
-  /** Callback when content is cut */
-  onCut?: () => void;
-  /** Callback when content is pasted */
-  onPaste?: () => void;
   /** Editor mode: 'editing' (direct edits), 'suggesting' (track changes), or 'viewing' (read-only). Default: 'editing' */
   mode?: EditorMode;
   /** Callback when a comment is added via the UI */
@@ -641,9 +635,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     watermarkPresets,
     printOptions: _printOptions,
     onPrint,
-    onCopy: _onCopy,
-    onCut: _onCut,
-    onPaste: _onPaste,
     mode: modeProp,
     onCommentAdd,
     onCommentResolve,
