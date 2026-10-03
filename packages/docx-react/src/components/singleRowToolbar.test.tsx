@@ -261,3 +261,42 @@ test('host menus describe the editor and run their commands', () => {
   reported.run('find-replace');
   expect(actions.onFindReplace).toHaveBeenCalledTimes(1);
 });
+
+test('host menus list the first 40 paragraph styles and refuse a disabled item', () => {
+  const onFormat = mock(() => {});
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    showComments: false,
+  };
+  const documentStyles = Array.from({ length: 50 }, (_, index) => ({
+    styleId: `Style${index}`,
+    name: `Style ${index}`,
+    type: 'paragraph' as const,
+  }));
+  let model: DocxMenuModel | null = null;
+  render(
+    <EditorToolbar
+      singleRow
+      hostMenus
+      zoom={1}
+      disabled
+      onFormat={onFormat}
+      documentStyles={documentStyles}
+    >
+      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+    </EditorToolbar>
+  );
+  const reported = model as DocxMenuModel | null;
+  if (!reported) throw new Error('no menus');
+  const styles = reported.menus
+    .flatMap((menu) => menu.items)
+    .find((entry) => entry.kind === 'submenu' && entry.id === 'format-styles');
+  expect(styles?.kind === 'submenu' && styles.items.length).toBe(40);
+
+  reported.run('bold');
+  reported.run('style:Style1');
+  expect(onFormat).not.toHaveBeenCalled();
+});

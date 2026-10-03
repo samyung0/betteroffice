@@ -47,6 +47,8 @@ export interface HostMenuActions {
 }
 
 const ZOOMS = [50, 75, 90, 100, 125, 150, 200];
+/** Format › Paragraph styles lists this many; the toolbar's style picker has all. */
+export const MAX_MENU_STYLES = 40;
 const LINE_SPACINGS = [
   { twips: 240, key: 'lineSpacing.single' as const },
   { twips: 276, label: '1.15' },
@@ -67,6 +69,21 @@ function shortcutFormatter() {
     if (mac) return named.map((part) => mark[part]).join('') + key;
     return [...named, key].join('+');
   };
+}
+
+function findItem(
+  menus: { items: HostMenuEntry[] }[],
+  id: string
+): Extract<HostMenuEntry, { kind: 'item' }> | undefined {
+  for (const menu of menus)
+    for (const entry of menu.items) {
+      if (entry.kind === 'item' && entry.id === id) return entry;
+      if (entry.kind === 'submenu') {
+        const found = findItem([entry], id);
+        if (found) return found;
+      }
+    }
+  return undefined;
 }
 
 /** Reports the menus while mounted inside `EditorToolbar`; renders nothing. */
@@ -168,11 +185,13 @@ export function HostMenus({
       submenu(
         'format-styles',
         t('hostMenus.paragraphStyles'),
-        paragraphStyleOptions(ctx.documentStyles).map((style) =>
-          item(`style:${style.styleId}`, style.nameKey ? t(style.nameKey) : style.name, {
-            checked: (formatting.styleId || 'Normal') === style.styleId,
-          })
-        )
+        paragraphStyleOptions(ctx.documentStyles)
+          .slice(0, MAX_MENU_STYLES)
+          .map((style) =>
+            item(`style:${style.styleId}`, style.nameKey ? t(style.nameKey) : style.name, {
+              checked: (formatting.styleId || 'Normal') === style.styleId,
+            })
+          )
       ),
       submenu('format-align', t('hostMenus.alignIndent'), [
         item('align:left', t('hostMenus.left'), { shortcut: key('Mod+L') }),
@@ -245,8 +264,12 @@ export function HostMenus({
     disabled,
   ]);
 
+  const latestMenus = useRef(menus);
+  latestMenus.current = menus;
   const run = useMemo(
     () => (id: string, value?: string, file?: File) => {
+      // A disabled item does nothing, whoever sends its id.
+      if (findItem(latestMenus.current, id)?.disabled) return;
       const { actions: act, ctx: c } = latest.current;
       const [command, argument] = id.split(':');
       // Formatting returns focus to the page; dialogs and pickers keep theirs.
