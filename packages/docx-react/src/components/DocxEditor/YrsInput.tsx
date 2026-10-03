@@ -35,6 +35,7 @@ import {
   performYrsHistoryAction,
   yrsCellLocFromStory,
   yrsCellStory,
+  yrsSelectedText,
   yrsSelectionNearTable,
   yrsTableSelectionRange,
 } from './yrsCommands';
@@ -1100,6 +1101,44 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  // The textarea is empty outside composition, so the browser's own copy finds
+  // nothing; put the document selection's plain text on the clipboard instead.
+  // Returns whether it did.
+  const writeSelectionToClipboard = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>): boolean => {
+      if (!session || composingRef.current || compositionPendingRef.current) return false;
+      const text = yrsSelectedText(session);
+      if (!text) return false;
+      event.preventDefault();
+      event.clipboardData.setData('text/plain', text);
+      return true;
+    },
+    [session]
+  );
+
+  const handleCut = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      // Queued input would move the selection after the text was copied.
+      if (inputOperationQueueRef.current?.hasPending()) return;
+      if (!writeSelectionToClipboard(event)) return;
+      // Read-only cut copies, as the context menu's does.
+      if (readOnly || pointerSelectionBlockedRef.current) return;
+      verticalCaretGoalRef.current.reset();
+      dispatchCaretInput();
+      enqueueInputOperation(() => {
+        if (deleteSelected()) finishMutation();
+      });
+    },
+    [
+      deleteSelected,
+      dispatchCaretInput,
+      enqueueInputOperation,
+      finishMutation,
+      readOnly,
+      writeSelectionToClipboard,
+    ]
+  );
+
   const flushPendingInput = useCallback(async (): Promise<void> => {
     const queue = inputOperationQueueRef.current;
     const assertCurrent = () => {
@@ -1366,6 +1405,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onCompositionUpdate={handleCompositionUpdate}
       onCompositionEnd={handleCompositionEnd}
       onPaste={handlePaste}
+      onCopy={writeSelectionToClipboard}
+      onCut={handleCut}
       onFocus={(event) => {
         event.currentTarget.classList.add('ProseMirror-focused');
         onFocusChange?.(true);

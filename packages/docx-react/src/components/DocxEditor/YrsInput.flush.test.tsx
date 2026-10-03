@@ -269,3 +269,47 @@ test('Delete before a field that shows nothing at the story end leaves input wor
   expect(session.paragraphs('body')[0].text.replace(/￼/g, '')).toBe('Seed!');
   expect(session.storySegments('body').filter((segment) => segment.kind === 'embed')).toHaveLength(1);
 });
+
+async function mountAcrossParagraphs() {
+  const mounted = await mount();
+  const { session } = mounted;
+  const [seed] = session.paragraphs('body');
+  const { secondParaId } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
+  session.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Next');
+  session.addUndoBoundary();
+  // Se[ed¶Ne]xt
+  act(() =>
+    session.setSelection(
+      { story: 'body', paraId: seed.paraId, offset: 2 },
+      { story: 'body', paraId: secondParaId, offset: 2 }
+    )
+  );
+  const written: Record<string, string> = {};
+  const clipboardData = { setData: (type: string, value: string) => { written[type] = value; } };
+  const texts = () => session.paragraphs('body').map((p) => p.text);
+  return { ...mounted, textarea: mounted.view.getByTestId('yrs-input'), clipboardData, written, texts };
+}
+
+test('copy writes the selection as plain text with paragraph newlines; read-only cut only copies', async () => {
+  const { textarea, clipboardData, written, texts, setReadOnly } = await mountAcrossParagraphs();
+  expect(fireEvent.copy(textarea, { clipboardData })).toBe(false);
+  expect(written).toEqual({ 'text/plain': 'ed\nNe' });
+
+  setReadOnly();
+  delete written['text/plain'];
+  expect(fireEvent.cut(textarea, { clipboardData })).toBe(false);
+  expect(written).toEqual({ 'text/plain': 'ed\nNe' });
+  expect(texts()).toEqual(['Seed', 'Next']);
+});
+
+test('cut copies and deletes the selection as one undo step', async () => {
+  const { input, textarea, clipboardData, written, texts } = await mountAcrossParagraphs();
+  fireEvent.cut(textarea, { clipboardData });
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(written).toEqual({ 'text/plain': 'ed\nNe' });
+  expect(texts()).toEqual(['Sext']);
+
+  fireEvent.keyDown(textarea, { key: 'z', metaKey: true });
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(texts()).toEqual(['Seed', 'Next']);
+});
