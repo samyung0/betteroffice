@@ -3,7 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { useTranslation } from '../i18n';
 import { EditorToolbarContext } from './EditorToolbarContext';
 import { useToolbarRowScroll } from './useToolbarRowScroll';
-import { ColorPicker } from './ui/ColorPicker';
+import { ColorPalette, ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
 import { DrawnIcon, type DrawnIconName, ToolbarIcon } from './ui/ToolbarIcon';
 import {
@@ -11,9 +11,9 @@ import {
   ToolbarDropdown,
   ToolbarGroup,
   ToolbarMenuItem,
+  ToolbarMenuLabel,
   ToolbarMenuSeparator,
   ToolbarSeparator,
-  chromeFont,
   toolbarColors,
 } from './ui/ToolbarPrimitives';
 
@@ -79,6 +79,8 @@ export type FormattingAction =
   | { type: 'fontSize'; value: number }
   | { type: 'textColor'; value: string }
   | { type: 'fillColor'; value: string }
+  /** Removes the colour, so the cells take the default again. */
+  | { type: 'clearColor'; value: 'textColor' | 'fillColor' }
   | { type: 'borderPreset'; value: BorderPreset }
   | { type: 'borderStyle'; value: BorderStyle }
   | { type: 'borderColor'; value: string }
@@ -425,18 +427,33 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const renderBorders = (close: () => void) => (
     <>
-      {BORDER_PRESETS.map((preset) => (
-        <ToolbarMenuItem
-          key={preset}
-          icon={<BorderGlyph preset={preset} />}
-          label={t(`toolbar.borderPresets.${preset}`)}
-          selected={currentFormatting.borderPreset === preset}
-          disabled={!formattingEnabled}
-          onClick={() => apply({ type: 'borderPreset', value: preset })}
-          close={close}
-        />
-      ))}
-      <ToolbarMenuSeparator />
+      <ToolbarMenuLabel>{t('toolbar.borders')}</ToolbarMenuLabel>
+      <div
+        role="group"
+        aria-label={t('toolbar.borders')}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(5, var(--xlsx-button-size, 28px))',
+          gap: 2,
+          padding: '0 var(--xlsx-palette-padding, 4px)',
+        }}
+      >
+        {BORDER_PRESETS.map((preset) => (
+          <ToolbarButton
+            key={preset}
+            title={t(`toolbar.borderPresets.${preset}`)}
+            active={currentFormatting.borderPreset === preset}
+            disabled={!formattingEnabled}
+            onClick={() => {
+              apply({ type: 'borderPreset', value: preset });
+              close();
+            }}
+          >
+            <BorderGlyph preset={preset} />
+          </ToolbarButton>
+        ))}
+      </div>
+      <ToolbarMenuLabel>{t('toolbar.lineStyle')}</ToolbarMenuLabel>
       {BORDER_STYLES.map((borderStyle) => (
         <ToolbarMenuItem
           key={borderStyle}
@@ -448,44 +465,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
           close={close}
         />
       ))}
-      <ToolbarMenuSeparator />
-      <label
-        style={{
-          position: 'relative',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          minHeight: 32,
-          padding: '5px 9px',
-          color: toolbarColors.text,
-          font: `400 13px ${chromeFont}`,
-          cursor: formattingEnabled ? 'pointer' : 'default',
+      <ToolbarMenuLabel>{t('toolbar.borderColor')}</ToolbarMenuLabel>
+      <ColorPalette
+        value={currentFormatting.borderColor ?? '#000000'}
+        onPick={(value) => {
+          apply({ type: 'borderColor', value });
+          close();
         }}
-      >
-        <span
-          style={{
-            width: 20,
-            height: 5,
-            borderRadius: 2,
-            background: currentFormatting.borderColor ?? '#000000',
-          }}
-        />
-        <span>{t('toolbar.borderColor')}</span>
-        <input
-          type="color"
-          value={currentFormatting.borderColor ?? '#000000'}
-          disabled={!formattingEnabled}
-          aria-label={t('toolbar.borderColor')}
-          onChange={(event) => apply({ type: 'borderColor', value: event.target.value })}
-          style={{
-            position: 'absolute',
-            inset: 0,
-            width: '100%',
-            height: '100%',
-            opacity: 0,
-          }}
-        />
-      </label>
+      />
     </>
   );
 
@@ -723,6 +710,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       }}
       width={singleRow ? 40 : 50}
       chevron={!singleRow}
+      optionAlign={singleRow ? 'center' : 'left'}
       inputStyle={singleRow ? { padding: 0, textAlign: 'center' } : { textAlign: 'center' }}
     />
   );
@@ -763,6 +751,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       label={t('toolbar.textColor')}
       disabled={!formattingEnabled}
       onChange={(value) => apply({ type: 'textColor', value })}
+      onClear={() => apply({ type: 'clearColor', value: 'textColor' })}
     />
   );
   const fillColorPicker = (
@@ -772,6 +761,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       label={t('toolbar.fillColor')}
       disabled={!formattingEnabled}
       onChange={(value) => apply({ type: 'fillColor', value })}
+      onClear={() => apply({ type: 'clearColor', value: 'fillColor' })}
     />
   );
 
@@ -779,7 +769,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     <ToolbarDropdown
       title={t('toolbar.borders')}
       disabled={!formattingEnabled}
-      menuWidth={240}
+      menuWidth={256}
       trigger={
         <>
           <BorderGlyph preset={currentFormatting.borderPreset ?? 'all'} />

@@ -101,7 +101,14 @@
     "save": "Save",
     "exportPng": "Export PNG",
     "undo": "Undo",
-    "redo": "Redo"
+    "redo": "Redo",
+    "palette": {
+      "documentColors": "Document colors",
+      "default": "Default",
+      "custom": "Custom",
+      "chooseCustom": "Choose a custom color"
+    },
+    "lineStyle": "Line style"
   },
   "editor": {
     "appLabel": "Spreadsheet editor",

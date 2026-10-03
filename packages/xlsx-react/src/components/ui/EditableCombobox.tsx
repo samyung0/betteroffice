@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { ToolbarIcon } from './ToolbarIcon';
-import { chromeFont, toolbarColors } from './ToolbarPrimitives';
+import { chromeFont, menuItemStyle, menuSurfaceStyle, toolbarColors } from './ToolbarPrimitives';
 
 export interface ComboboxOption {
   value: string;
@@ -21,6 +21,7 @@ export interface EditableComboboxProps {
   bordered?: boolean;
   /** False leaves out the chevron; focusing the box still opens the list. */
   chevron?: boolean;
+  optionAlign?: 'left' | 'center';
 }
 
 export function EditableCombobox({
@@ -34,6 +35,7 @@ export function EditableCombobox({
   testId,
   bordered = true,
   chevron = true,
+  optionAlign = 'left',
 }: EditableComboboxProps) {
   const [draft, setDraft] = useState(value);
   const [open, setOpen] = useState(false);
@@ -185,46 +187,59 @@ export function EditableCombobox({
             width: position.width,
             maxHeight: 260,
             overflowY: 'auto',
-            padding: 4,
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 6,
-            background: toolbarColors.surface,
-            boxShadow: toolbarColors.shadow,
-            boxSizing: 'border-box',
+            ...menuSurfaceStyle,
           }}
         >
           {options.map((option) => (
-            <button
+            <ComboboxOption
               key={option.value}
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
+              label={option.label}
+              selected={option.value === value}
+              center={optionAlign === 'center'}
+              onPick={() => {
                 setDraft(option.label);
                 onCommit?.(option.value);
                 close();
               }}
-              style={{
-                appearance: 'none',
-                display: 'block',
-                width: '100%',
-                minHeight: 28,
-                padding: '4px 7px',
-                border: 0,
-                borderRadius: 3,
-                background: option.value === value ? toolbarColors.active : 'transparent',
-                color: toolbarColors.text,
-                cursor: 'pointer',
-                font: `400 13px ${chromeFont}`,
-                textAlign: 'left',
-              }}
-            >
-              {option.label}
-            </button>
+            />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function ComboboxOption({
+  label,
+  selected,
+  center,
+  onPick,
+}: {
+  label: string;
+  selected: boolean;
+  center: boolean;
+  onPick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onMouseDown={(event) => event.preventDefault()}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onClick={onPick}
+      style={{
+        ...menuItemStyle(hovered),
+        justifyContent: center ? 'center' : 'flex-start',
+        ...(selected && {
+          background: `var(--xlsx-option-selected-bg, ${toolbarColors.active})`,
+          color: `var(--xlsx-option-selected-text, ${toolbarColors.text})`,
+        }),
+      }}
+    >
+      {label}
+    </button>
   );
 }

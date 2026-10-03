@@ -1375,6 +1375,8 @@ function XlsxEditorContent({
           result = handle.patchRangeStyle(activeSheet, range, { textColor: action.value });
         } else if (action.type === 'fillColor') {
           result = handle.patchRangeStyle(activeSheet, range, { fillColor: action.value });
+        } else if (action.type === 'clearColor') {
+          result = handle.patchRangeStyle(activeSheet, range, { clear: [action.value] });
         } else if (action.type === 'borderPreset') {
           result = handle.patchRangeStyle(activeSheet, range, {
             border: {

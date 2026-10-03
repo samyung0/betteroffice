@@ -1,8 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { en } from '@betteroffice/xlsx-i18n';
 import type { ComponentProps } from 'react';
-import { Toolbar } from './Toolbar';
+import { type FormattingAction, Toolbar } from './Toolbar';
 import {
   DRAWN_ICON_NAMES,
   IconSetContext,
@@ -105,4 +105,17 @@ test('a vertical wheel scrolls the clipped row sideways', () => {
   expect(row.scrollLeft).toBe(300);
   // At the end the wheel is left to the page.
   expect(wheel(50).defaultPrevented).toBe(false);
+});
+
+test('the colour buttons open a palette that applies, resets and takes a custom colour', () => {
+  const onFormat = mock((_action: FormattingAction) => {});
+  const { getByRole } = render(<SingleRow onFormat={onFormat} />);
+  fireEvent.click(getByRole('button', { name: en.toolbar.textColor }));
+  fireEvent.click(getByRole('gridcell', { name: 'Dark blue' }));
+  fireEvent.click(getByRole('button', { name: en.toolbar.fillColor }));
+  fireEvent.click(getByRole('button', { name: en.toolbar.palette.default }));
+  expect(onFormat.mock.calls).toEqual([
+    [{ type: 'textColor', value: '#1d4ed8' }],
+    [{ type: 'clearColor', value: 'fillColor' }],
+  ]);
 });

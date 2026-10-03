@@ -21,6 +21,40 @@ export const toolbarColors = {
 };
 export const chromeFont = 'var(--xlsx-font-family, ui-sans-serif, system-ui, sans-serif)';
 
+/** A dropdown's surface; hosts restyle it through the `--xlsx-menu-*` variables. */
+export const menuSurfaceStyle: CSSProperties = {
+  padding: 'var(--xlsx-menu-padding, 6px)',
+  border: `1px solid var(--xlsx-menu-border, ${toolbarColors.border})`,
+  borderRadius: 'var(--xlsx-menu-radius, 8px)',
+  background: toolbarColors.surface,
+  boxShadow: toolbarColors.shadow,
+  color: toolbarColors.text,
+  boxSizing: 'border-box',
+};
+
+/** One row of a dropdown, hovered or not. */
+export function menuItemStyle(hovered: boolean, disabled = false): CSSProperties {
+  return {
+    appearance: 'none',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--xlsx-menu-item-gap, 10px)',
+    width: '100%',
+    minHeight: 'var(--xlsx-menu-item-height, 32px)',
+    padding: 'var(--xlsx-menu-item-padding, 5px 9px)',
+    border: 0,
+    borderRadius: 'var(--xlsx-menu-item-radius, 4px)',
+    background:
+      hovered && !disabled ? `var(--xlsx-menu-hover-bg, ${toolbarColors.hover})` : 'transparent',
+    color: disabled ? toolbarColors.disabled : toolbarColors.text,
+    cursor: disabled ? 'default' : 'pointer',
+    opacity: disabled ? 0.48 : 1,
+    font: `var(--xlsx-menu-font-weight, 400) var(--xlsx-menu-font-size, 13px) ${chromeFont}`,
+    textAlign: 'left',
+    boxSizing: 'border-box',
+  };
+}
+
 const baseButtonStyle: CSSProperties = {
   appearance: 'none',
   display: 'inline-flex',
@@ -236,12 +270,7 @@ export function ToolbarDropdown({
             width: menuWidth,
             maxHeight: 'min(440px, calc(100vh - 16px))',
             overflowY: 'auto',
-            padding: 6,
-            border: `1px solid ${toolbarColors.border}`,
-            borderRadius: 8,
-            background: toolbarColors.surface,
-            boxShadow: toolbarColors.shadow,
-            boxSizing: 'border-box',
+            ...menuSurfaceStyle,
           }}
         >
           {children(close)}
@@ -282,38 +311,40 @@ export function ToolbarMenuItem({
         onClick?.();
         close?.();
       }}
-      style={{
-        appearance: 'none',
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        width: '100%',
-        minHeight: 32,
-        padding: '5px 9px',
-        border: 0,
-        borderRadius: 4,
-        background: hovered && !disabled ? toolbarColors.hover : 'transparent',
-        color: disabled ? toolbarColors.disabled : toolbarColors.text,
-        cursor: disabled ? 'default' : 'pointer',
-        opacity: disabled ? 0.48 : 1,
-        font: `400 13px ${chromeFont}`,
-        textAlign: 'left',
-        boxSizing: 'border-box',
-      }}
+      style={menuItemStyle(hovered, disabled)}
     >
-      <span
-        style={{
-          display: 'inline-grid',
-          placeItems: 'center',
-          width: 20,
-          flex: '0 0 auto',
-        }}
-      >
-        {icon}
-      </span>
+      {icon && (
+        <span
+          style={{
+            display: 'inline-grid',
+            placeItems: 'center',
+            minWidth: 'var(--xlsx-menu-icon-size, 20px)',
+            flex: '0 0 auto',
+          }}
+        >
+          {icon}
+        </span>
+      )}
       <span style={{ flex: 1 }}>{label}</span>
       {selected && <ToolbarIcon name="check" size={16} />}
     </button>
+  );
+}
+
+/** A section heading inside a dropdown. */
+export function ToolbarMenuLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      role="presentation"
+      style={{
+        padding: 'var(--xlsx-menu-label-padding, 8px 9px 4px)',
+        color: toolbarColors.muted,
+        font: `var(--xlsx-menu-label-font, 500 12px) ${chromeFont}`,
+        lineHeight: '16px',
+      }}
+    >
+      {children}
+    </div>
   );
 }
 

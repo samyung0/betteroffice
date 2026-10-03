@@ -101,7 +101,14 @@
       "dashed": "虚线边框",
       "dotted": "点线边框",
       "double": "双线边框"
-    }
+    },
+    "palette": {
+      "documentColors": "文档颜色",
+      "default": "默认",
+      "custom": "自定义",
+      "chooseCustom": "选择自定义颜色"
+    },
+    "lineStyle": "线条样式"
   },
   "editor": {
     "appLabel": "电子表格编辑器",

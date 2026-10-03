@@ -42,6 +42,7 @@ export {
   ToolbarDropdown,
   ToolbarGroup,
   ToolbarMenuItem,
+  ToolbarMenuLabel,
   ToolbarMenuSeparator,
   ToolbarSeparator,
 } from './components/ui/ToolbarPrimitives';
