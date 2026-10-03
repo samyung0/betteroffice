@@ -4,6 +4,7 @@ import type { YrsSession } from "../../packages/docx/src/yrs";
 import {
   addComment,
   bm,
+  both,
   cf,
   del,
   deleted,
@@ -21,6 +22,7 @@ import {
   none,
   orders,
   p,
+  peers,
   ref,
   run,
   S,
@@ -297,14 +299,51 @@ const PTAB_SPLITS: Record<string, string> = {
   "[REF|L(AA)yz<ptab>]": holder(field(`${link(run("AA"))}${run("yz")}${PTAB}`, " REF a \\h ")),
   "[REF|L(AA)<ptab>L(BB)]": holder(field(`${link(run("AA"))}${PTAB}${link(run("BB"), "other")}`, " REF a \\h ")),
 };
+// Recheck of 7d3ef664: d959a718's formatted and clearing line breaks ending a continued result's tail (they stay in
+// the field), and 14fa634d's refresh paths after Enter in a field's link: Backspace or a range delete of the link
+// left in the first paragraph, Accept All of its suggested deletion, typing over it, and a plain run left ending the
+// continued result (tail text, the recorded children after it renumbered); also a native continued field losing its
+// last link. Two-peer rows: both peers drop the same link, and each drops half of it.
+const continuedWith = (tail: string) =>
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" INCLUDETEXT x ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("2")}${tail}`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+const BREAK_TAILS: Record<string, string> = {
+  "sized line break": continuedWith(`<w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:br/></w:r>`),
+  "clearing line break": continuedWith(`<w:r><w:br w:clear="all"/></w:r>`),
+  "bold text and line break": continuedWith(`<w:r><w:rPr><w:b/></w:rPr><w:t>B</w:t><w:br/></w:r>`),
+};
+const REFRESHED: Record<string, string> = {
+  "[REF|[PAGE|7]L(AA)yy]": SPLITS["[REF|[PAGE|7]L(AA)yy]"]!,
+  "[REF|[PAGE|7]L(AA)L(BB)]": holder(field(`${field(run("7"), " PAGE ")}${link(run("AA"))}${link(run("BB"), "other")}`, " REF a \\h ")),
+  "[REF|xL(AA)yy]": holder(field(`${run("x")}${link(run("AA"))}${run("yy")}`, " REF a \\h ")),
+};
+// After Enter in "AA", the link left in the first paragraph is its unit 2 ("a " before it).
+const enterInAA: Edit = (s, st) => void s.splitParagraph(firstLink(s, st));
+const LEFT_LINK_OPS: Record<string, Edit> = {
+  "Backspace the link left": (s, st) => void s.deleteAt({ story: st, paraId: P, offset: 3 }, "backward"),
+  "range delete the link left": (s, st) => void s.deleteRange({ story: st, start: { paraId: P, offset: 2 }, end: { paraId: P, offset: 3 } }),
+  "Accept All of its suggested deletion": (s, st) => {
+    s.deleteRange({ story: st, start: { paraId: P, offset: 2 }, end: { paraId: P, offset: 3 } }, { name: "Bo", date: "2026-10-04T00:00:00Z" });
+    s.acceptChange({ all: true });
+  },
+  "type over the link left": (s, st) => void s.replaceRange({ story: st, start: { paraId: P, offset: 2 }, end: { paraId: P, offset: 3 } }, "Q"),
+};
+const NATIVE_TAIL =
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" REF a \\h ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("x")}${link(run("AA"))}`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+// The native field's link is units 1..3 of its paragraph ("a" before it).
+const dropUnits = (from: number, to: number): Edit => (s, st) =>
+  void s.deleteRange({ story: st, start: { paraId: P, offset: from }, end: { paraId: P, offset: to } });
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
 
 function rows(): Row[] {
   const out: Row[] = [];
-  const push = (where: Where, xml: string, id: string, setup: Edit | null, edit: Edit) => {
+  const push = (where: Where, xml: string, id: string, setup: Edit | null, edit: Edit, same?: Edit) => {
     const bytes = docx(where, xml);
-    for (const o of orders(`${where} | ${id}`, setup, edit)) out.push({ id: o.id, bytes, where, before: o.before, after: o.after });
+    const oracles = same && orders(id, setup, same);
+    for (const [index, o] of orders(`${where} | ${id}`, setup, edit).entries())
+      out.push({ id: o.id, bytes, where, before: o.before, after: o.after, ...(oracles ? { same: oracles[index]! } : {}) });
   };
   const untouched = (where: Where, name: string, xml: string) =>
     out.push({ id: `${where} | ${name} | untouched`, bytes: docx(where, xml), where, before: none, after: none, parity: true });
@@ -354,6 +393,32 @@ function rows(): Row[] {
       push(where, xml, `${name} | Enter in 1st`, null, (s, st) => void s.splitParagraph(firstLink(s, st)));
       push(where, xml, `${name} | Enter in 1st, join back`, null, SPLIT_OPS["Enter in 1st, join back"]!);
     }
+  for (const where of ["body", "cell", "header"] as Where[]) {
+    for (const [name, xml] of Object.entries(BREAK_TAILS)) {
+      untouched(where, `field result continued, ${name} in its tail`, xml);
+      push(where, xml, `field result continued, ${name} in its tail | type at its paragraph's end`, null, (s, st) =>
+        void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+      push(where, xml, `field result continued, ${name} in its tail | Backspace at its paragraph's end`, null, (s, st) =>
+        void s.deleteAt({ story: st, paraId: P, offset: len(s, st, P) }, "backward"));
+    }
+    for (const [name, xml] of Object.entries(REFRESHED))
+      for (const [op, edit] of Object.entries(LEFT_LINK_OPS))
+        // The nested field's Backspace row is deleteLeftLink's.
+        if (!(name === "[REF|[PAGE|7]L(AA)yy]" && op === "Backspace the link left"))
+          push(where, xml, `${name} | Enter in 1st, ${op}`, null, both(enterInAA, edit));
+    push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | delete the link", null, dropUnits(1, 3));
+    push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | type over the link", null, (s, st) =>
+      void s.replaceRange({ story: st, start: { paraId: P, offset: 1 }, end: { paraId: P, offset: 3 } }, "Q"));
+    // Two peers.
+    push(where, REFRESHED["[REF|xL(AA)yy]"]!, "[REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left", null,
+      both(enterInAA, peers(LEFT_LINK_OPS["Backspace the link left"]!, LEFT_LINK_OPS["Backspace the link left"]!)),
+      both(enterInAA, LEFT_LINK_OPS["Backspace the link left"]!));
+    push(where, REFRESHED["[REF|[PAGE|7]L(AA)yy]"]!, "[REF|[PAGE|7]L(AA)yy] | Enter in 1st, both peers Backspace the link left", null,
+      both(enterInAA, peers(LEFT_LINK_OPS["Backspace the link left"]!, LEFT_LINK_OPS["Backspace the link left"]!)),
+      both(enterInAA, LEFT_LINK_OPS["Backspace the link left"]!));
+    push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | both peers delete the link", null, peers(dropUnits(1, 3), dropUnits(1, 3)), dropUnits(1, 3));
+    push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
+  }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {
       push(where, xml, `join ${name}`, null, join);

@@ -293,9 +293,26 @@ export async function parity(bytes: Uint8Array, story: string): Promise<boolean>
 
 // ---------------------------------------------------------------- rows
 
-export type Edit = (s: YrsSession, story: string) => void;
+/** An edit to a session of the story under test; `base` is the file the session was opened from (`peers` needs it). */
+export type Edit = (s: YrsSession, story: string, base?: Uint8Array) => void | Promise<void>;
 export const none: Edit = () => {};
-export const both = (...edits: Edit[]): Edit => (s, story) => edits.forEach((edit) => edit(s, story));
+/** The edits in order; synchronous unless one of them is not. */
+export const both = (...edits: Edit[]): Edit => (s, story, base) => {
+  let chain: void | Promise<void> = undefined;
+  for (const edit of edits) chain = chain instanceof Promise ? chain.then(() => edit(s, story, base)) : edit(s, story, base);
+  return chain;
+};
+/** Two peers at once: `a` on the session and `b` on a replica of it, then each receives the other's update. */
+export const peers = (a: Edit, b: Edit): Edit => async (s, story, base) => {
+  if (!base) throw new Error("peers needs the session's base file");
+  const peer = await open(base, s.encodeState());
+  await a(s, story, base);
+  await b(peer, story, base);
+  const [toPeer, toSession] = [s.encodeStateAsUpdate(peer.encodeStateVector()), peer.encodeStateAsUpdate(s.encodeStateVector())];
+  s.applyUpdate(toSession);
+  peer.applyUpdate(toPeer);
+  peer.destroy();
+};
 /** Typing in the body's tail paragraph: an edit away from the story under test. */
 export const typeTail: Edit = (s) => void s.insertText({ story: "body", paraId: TAIL, offset: 0 }, "z");
 
@@ -390,6 +407,11 @@ export interface Row {
   after: Edit;
   /** Also compare projector and engine on the direct save. */
   parity?: boolean;
+  /**
+   * Edits whose story text the row's must equal (`text` flag otherwise), e.g. one peer doing what two peers did at
+   * once: an oracle for content the editor and the save agree on.
+   */
+  same?: { before: Edit; after: Edit };
 }
 
 /**
@@ -456,10 +478,10 @@ export async function runRow(row: Row): Promise<Result> {
   const s = await open(row.bytes);
   let captured: Uint8Array, exported: Uint8Array, latest: Uint8Array, editor: string, bridge: string;
   try {
-    row.before(s, story);
+    await row.before(s, story, row.bytes);
     captured = s.encodeState();
     exported = await publish(row.bytes, captured);
-    row.after(s, story);
+    await row.after(s, story, row.bytes);
     latest = s.encodeState();
     editor = units(s, story);
     bridge = blocks(s, story);
@@ -474,7 +496,7 @@ export async function runRow(row: Row): Promise<Result> {
   let seq: string;
   try {
     const s2 = await open(exported);
-    row.after(s2, story);
+    await row.after(s2, story, exported);
     seq = sig(await publish(exported, s2.encodeState()), part);
     s2.destroy();
   } catch (e) {
@@ -510,6 +532,15 @@ export async function runRow(row: Row): Promise<Result> {
   if (unstable) flags.push("unstable");
   if (render !== bridge && !(breakParagraph(editor, saved) && render === `p ${bridge}`)) flags.push("render");
   if (row.parity && !(await parity(directBytes, story))) flags.push("parity");
+  let expected: string | undefined;
+  if (row.same) {
+    const oracle = await open(row.bytes);
+    await row.same.before(oracle, story, row.bytes);
+    await row.same.after(oracle, story, row.bytes);
+    expected = units(oracle, story);
+    oracle.destroy();
+    if (textOf(expected) !== textOf(editor)) flags.push("text");
+  }
 
   const cls = [rebase, ...flags].join("+");
   if (cls === "exact" && !process.env.MATRIX_DETAIL) return { id: row.id, cls };
@@ -521,6 +552,7 @@ export async function runRow(row: Row): Promise<Result> {
     `seq    ${seq}`,
     ...(unstable ? [`pubs   ${unstable}`] : []),
     ...(render !== bridge ? [`blocks ${bridge} | reopened ${render}`] : []),
+    ...(expected !== undefined && textOf(expected) !== textOf(editor) ? [`same   ${expected}`] : []),
   ].join("\n");
   return { id: row.id, cls, detail };
 }

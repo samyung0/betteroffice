@@ -1,8 +1,14 @@
-# docx-fields: 1295 rows, ids 3f88ceb0240f7c20; rows not listed are exact
+# docx-fields: 1442 rows, ids 274d8bd73e6a32d1; rows not listed are exact
 body | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+body | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | cap<edit	exact+text
+body | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | edit<cap<tail	exact+text
 body | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 body | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 body | join nested continued field, undo | setup<cap<edit	refused
+body | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+text
+body | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+text
+body | native [REF|xL(AA)¶0] | each peer deletes half the link | cap<edit	exact+moved
+body | native [REF|xL(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+moved
 body | pj:cf>fs | type after field | edit<cap<tail	refused
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 body | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved
@@ -11,13 +17,25 @@ body | toc | retype 1st entry's last letter | cap<edit	refused
 body | toc | type at 1st entry end | cap<edit	refused
 body | toc | type in 1st entry | cap<edit	refused
 cell | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+cell | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | cap<edit	exact+text
+cell | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | edit<cap<tail	exact+text
 cell | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 cell | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 cell | join nested continued field, undo | setup<cap<edit	refused
+cell | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+text
+cell | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+text
+cell | native [REF|xL(AA)¶0] | each peer deletes half the link | cap<edit	exact+moved
+cell | native [REF|xL(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+moved
 header | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+header | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | cap<edit	exact+text
+header | [REF|xL(AA)yy] | Enter in 1st, both peers Backspace the link left | edit<cap<tail	exact+text
 header | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 header | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 header | join nested continued field, undo | setup<cap<edit	refused
+header | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+text
+header | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+text
+header | native [REF|xL(AA)¶0] | each peer deletes half the link | cap<edit	exact+moved
+header | native [REF|xL(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+moved
 header | pj:cf>fs | type after field | edit<cap<tail	refused
 header | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
 header | pj:cf>link+ins | Enter before field | edit<cap<tail	exact+moved
