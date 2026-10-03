@@ -490,7 +490,7 @@ function PptxEditorContent({
     model?.slideIndex ?? 0
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
-  const resolveProposalImage = useCallback((assetId: string) =>
+  const resolveDeckImage = useCallback((assetId: string) =>
     resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
 
   useEffect(() => {
@@ -2503,12 +2503,7 @@ function PptxEditorContent({
                   }}
                 >
                   {thumbnail ? (
-                    <SlideThumbnail
-                      frame={thumbnail}
-                      resolveImage={(assetId) =>
-                        resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
-                      }
-                    />
+                    <SlideThumbnail frame={thumbnail} resolveImage={resolveDeckImage} />
                   ) : (
                     <span style={styles.slideTitle}>
                       {slideTitle(slide.shapes) ||
@@ -2731,7 +2726,7 @@ function PptxEditorContent({
                 {canvasReview.diff && <ProposalCanvasOverlay
                   key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
                   diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
-                  slideIndex={model.slideIndex} scale={scale} resolveImage={resolveProposalImage}
+                  slideIndex={model.slideIndex} scale={scale} resolveImage={resolveDeckImage}
                   onPainted={setPaintedReview}
                   onTarget={(slideId, shapeId) => {
                     navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
@@ -2890,7 +2885,7 @@ function NotesPanel({
   );
 }
 
-function SlideThumbnail({
+export function SlideThumbnail({
   frame,
   resolveImage,
 }: {
@@ -2899,17 +2894,30 @@ function SlideThumbnail({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    // Paints off screen and shows only the latest paint: an earlier one that
+    // is still awaiting images must not draw over a resized canvas.
+    let latest = true;
     const scale = THUMBNAIL_WIDTH / frame.width;
     const dpr = window.devicePixelRatio || 1;
-    sizeCanvasForSlide(canvas, frame, dpr, scale);
-    // Fills its frame, which is narrower in the narrow layout.
-    canvas.style.width = '100%';
-    canvas.style.height = 'auto';
-    void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
+    const painted = document.createElement('canvas');
+    sizeCanvasForSlide(painted, frame, dpr, scale);
+    const ctx = painted.getContext('2d');
+    if (!ctx) return;
+    void paintSlide(ctx, frame, dpr, scale, { resolveImage }).then(
+      () => {
+        const canvas = canvasRef.current;
+        if (!latest || !canvas) return;
+        sizeCanvasForSlide(canvas, frame, dpr, scale);
+        // Fills its frame, which is narrower in the narrow layout.
+        canvas.style.width = '100%';
+        canvas.style.height = 'auto';
+        canvas.getContext('2d')?.drawImage(painted, 0, 0);
+      },
+      () => undefined
+    );
+    return () => {
+      latest = false;
+    };
   }, [frame, resolveImage]);
   return <canvas ref={canvasRef} style={styles.thumbnailCanvas} aria-hidden="true" />;
 }
