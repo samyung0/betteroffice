@@ -40,6 +40,7 @@ export type {
   // Run Content
   TextContent,
   TabContent,
+  PositionalTabContent,
   BreakContent,
   SymbolContent,
   NoteReferenceContent,

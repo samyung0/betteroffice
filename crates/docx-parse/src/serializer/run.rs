@@ -269,6 +269,23 @@ fn serialize_run_content(
         RunContent::Tab => {
             writer.start_element("w:tab").end_element();
         }
+        RunContent::PositionalTab {
+            alignment,
+            relative_to,
+            leader,
+        } => {
+            writer.start_element("w:ptab");
+            for (name, value) in [
+                ("w:relativeTo", relative_to),
+                ("w:alignment", alignment),
+                ("w:leader", leader),
+            ] {
+                if let Some(value) = value {
+                    writer.attribute(name, value);
+                }
+            }
+            writer.end_element();
+        }
         RunContent::Break { break_type, clear } => {
             writer.start_element("w:br");
             match break_type.as_deref() {

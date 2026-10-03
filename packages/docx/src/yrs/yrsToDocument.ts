@@ -971,8 +971,10 @@ function rawContentForItem(item: InlineItem): ParagraphContent | null {
     case 'pageBreak':
     case 'columnBreak':
       return breakRun(item.embedKind === 'pageBreak' ? 'page' : 'column');
-    case 'tab':
-      return { type: 'run', content: [{ type: 'tab' }] };
+    case 'tab': {
+      const ptab = asObject(item.payload.ptab);
+      return { type: 'run', content: [ptab ? { ...ptab, type: 'ptab' } : { type: 'tab' }] };
+    }
     case 'image':
       return imageRunFromPayload(item.payload);
     case 'horizontalRule':
@@ -1355,6 +1357,7 @@ function runTextLength(run: Run): number {
     if (content.type === 'symbol') return length + content.char.length;
     if (
       content.type === 'tab' ||
+      content.type === 'ptab' ||
       content.type === 'softHyphen' ||
       content.type === 'noBreakHyphen' ||
       content.type === 'footnoteRef' ||
@@ -1412,6 +1415,7 @@ function runContentUnits(content: RunContent): number {
         ? 1
         : 0;
     case 'tab':
+    case 'ptab':
     case 'softHyphen':
     case 'noBreakHyphen':
     case 'horizontalRule':

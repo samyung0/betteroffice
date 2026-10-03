@@ -52,6 +52,16 @@ pub enum RunContent {
     },
     #[serde(rename = "tab")]
     Tab,
+    /// `w:ptab`: a tab aligned to the margin or indent, its attributes as authored.
+    #[serde(rename = "ptab")]
+    PositionalTab {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alignment: Option<String>,
+        #[serde(rename = "relativeTo", skip_serializing_if = "Option::is_none")]
+        relative_to: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        leader: Option<String>,
+    },
     #[serde(rename = "break")]
     Break {
         #[serde(rename = "breakType", skip_serializing_if = "Option::is_none")]
@@ -307,6 +317,11 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     .then_some(true),
             }),
             "tab" => output.push(RunContent::Tab),
+            "ptab" => output.push(RunContent::PositionalTab {
+                alignment: child.attribute(Some("w"), "alignment").map(str::to_owned),
+                relative_to: child.attribute(Some("w"), "relativeTo").map(str::to_owned),
+                leader: child.attribute(Some("w"), "leader").map(str::to_owned),
+            }),
             "br" => output.push(parse_break(child)),
             "sym" => output.push(RunContent::Symbol {
                 font: child
@@ -2339,6 +2354,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
                     text.encode_utf16().count()
                 }
                 RunContent::Tab
+                | RunContent::PositionalTab { .. }
                 | RunContent::SoftHyphen
                 | RunContent::NoBreakHyphen
                 | RunContent::Symbol { .. } => 1,

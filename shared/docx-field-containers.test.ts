@@ -2340,6 +2340,8 @@ test.each(
   const reopened = await open(saved);
   expect(fieldsShown(session, story)).toBe(fieldsShown(reopened, story));
   expect(storyText(saved, where).replaceAll("¶", "")).toBe(text);
+  const ptabs = (file: Uint8Array) => partXml(file, part).split("<w:ptab ").length - 1;
+  expect(ptabs(saved)).toBe(ptabs(bytes));
   if (splitFlows[flow]!.joined) {
     expect(fieldsShown(session, story)).toBe(original.shown);
     expect(matrixUnits(session, story)).toBe(original.units);
@@ -2404,6 +2406,21 @@ test.each(["body", "cell", "header"] as const)("%s | [REF|L(AA)y,z,<b/>]: Enter 
   const [, joinedZ, joinedB] = order(joined);
   expect(joinedB).toBeGreaterThan(joinedZ!);
   session.destroy();
+});
+
+// Decided 2026-10-04: w:ptab round-trips, in ordinary text and in a field's result, drawn as a tab.
+test.each(["body", "cell", "header"] as const)("%s | an untouched file keeps its positional tabs", async (where) => {
+  const [story, part] = STORY[where];
+  const bytes = matrixDocx(where, p("44444444", `${run("a")}${ptabRun}${run("b")}`) + holder44(field(link(run("AA")) + ptabRun + run("z"), " REF a \\h ")));
+  const session = await open(bytes);
+  const saved = await publish(bytes, session.encodeState());
+  const tabs = session.storySegments(story).filter((g) => g.kind === "embed" && g.embedKind === "tab");
+  session.destroy();
+  expect(tabs.length).toBe(1);
+  expect(partXml(saved, part).match(/<w:ptab [^>]*\/>/g)).toEqual([
+    '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/>',
+    '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/>',
+  ]);
 });
 
 // Decision 2026-10-02: Backspace and Delete beside a field marker that shows nothing step over it and delete the

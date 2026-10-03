@@ -1359,6 +1359,19 @@ fn run_content_to_units(
             .map(|text| vec![text_unit(text.to_owned(), marks)])
             .unwrap_or_default(),
         "tab" => vec![text_unit("\t".to_owned(), marks)],
+        // Drawn as a tab; its own attributes save it back as `w:ptab`.
+        "ptab" => {
+            let mut ptab = content.clone();
+            if let Some(entries) = ptab.as_object_mut() {
+                entries.remove("type");
+            }
+            vec![embed_unit(
+                "tab",
+                map_from_value(json!({ "ptab": ptab })),
+                marks,
+                1,
+            )]
+        }
         "break" if flow_break_type(content).is_some() => vec![embed_unit(
             if flow_break_type(content) == Some("column") {
                 "columnBreak"
@@ -1587,7 +1600,7 @@ fn inline_to_units(
 }
 
 /// A field whose result continues into a later paragraph, and the plain runs
-/// (text, and tabs without formatting of their own) that end its result in
+/// (text, and tabs and positional tabs without formatting of their own) that end its result in
 /// this one, after its projected children. They seed as ordinary text after
 /// the field's embed, as the result in the later paragraphs does and as typing
 /// at this paragraph's end adds to it, so the field no longer shows or stores
@@ -1615,8 +1628,11 @@ fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
         string(field(Some(node), "type")) == Some("run")
             && kinds
                 .iter()
-                .all(|kind| matches!(kind, Some("text" | "tab")))
-            && !(formatted && kinds.contains(&Some("tab")))
+                .all(|kind| matches!(kind, Some("text" | "tab" | "ptab")))
+            && !(formatted
+                && kinds
+                    .iter()
+                    .any(|kind| matches!(kind, Some("tab" | "ptab"))))
     };
     let tail = if continued {
         inline.iter().rev().take_while(plain).count()

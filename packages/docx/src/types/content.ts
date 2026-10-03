@@ -16,6 +16,7 @@
 export type {
   TextContent,
   TabContent,
+  PositionalTabContent,
   BreakContent,
   SymbolContent,
   NoteReferenceContent,

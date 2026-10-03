@@ -31,6 +31,16 @@ export interface TabContent {
 }
 
 /**
+ * Positional tab (`w:ptab`), aligned to the margin or indent
+ */
+export interface PositionalTabContent {
+  type: 'ptab';
+  alignment?: string;
+  relativeTo?: string;
+  leader?: string;
+}
+
+/**
  * Line break
  */
 export interface BreakContent {
@@ -216,6 +226,7 @@ export interface OpaqueDrawingContent {
 export type RunContent =
   | TextContent
   | TabContent
+  | PositionalTabContent
   | BreakContent
   | SymbolContent
   | NoteReferenceContent

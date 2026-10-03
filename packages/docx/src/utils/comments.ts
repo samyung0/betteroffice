@@ -29,6 +29,7 @@ function plainTextFromValue(value: unknown): string {
     case 'text':
       return typeof node.text === 'string' ? node.text : '';
     case 'tab':
+    case 'ptab':
       return '\t';
     case 'break':
       return '\n';

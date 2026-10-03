@@ -582,8 +582,8 @@ function continuedResultTail(value: SimpleField | ComplexField): [SimpleField | 
   // The save drops a tab's own formatting (seed.rs).
   const plain = (node: FieldInlineContent) =>
     node.type === 'run' &&
-    node.content.every((content) => content.type === 'text' || content.type === 'tab') &&
-    !(Object.keys(node.formatting ?? {}).length && node.content.some((content) => content.type === 'tab'));
+    node.content.every((content) => content.type === 'text' || content.type === 'tab' || content.type === 'ptab') &&
+    !(Object.keys(node.formatting ?? {}).length && node.content.some((content) => content.type === 'tab' || content.type === 'ptab'));
   let tail = 0;
   while (tail < inline.length && plain(inline[inline.length - 1 - tail]!)) tail += 1;
   if (value.type !== 'complexField' || tail === 0) return [value, []];
@@ -705,6 +705,11 @@ function runContentToUnits(content: RunContent, marks: readonly MarkDescriptor[]
       return content.text ? [textUnit(content.text, marks)] : [];
     case 'tab':
       return [textUnit('\t', marks)];
+    case 'ptab': {
+      // Drawn as a tab; its own attributes save it back as `w:ptab` (seed.rs).
+      const { type: _, ...ptab } = content;
+      return [embedUnit('tab', { ptab }, marks)];
+    }
     case 'break':
       return content.breakType === undefined || content.breakType === 'textWrapping'
         ? [embedUnit('break', {}, marks)]

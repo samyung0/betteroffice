@@ -1501,6 +1501,7 @@ fn inline_node_length(node: &InlineNode) -> usize {
                     text.encode_utf16().count()
                 }
                 RunContent::Tab
+                | RunContent::PositionalTab { .. }
                 | RunContent::SoftHyphen
                 | RunContent::NoBreakHyphen
                 | RunContent::Symbol { .. } => 1,
