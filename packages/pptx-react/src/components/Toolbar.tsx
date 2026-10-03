@@ -639,7 +639,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     <ToolbarDropdown
       title={t('toolbar.groups.alignment')}
       disabled={!formattingEnabled}
-      menuWidth={152}
+      menuWidth={42}
       testId="pptx-align"
       trigger={
         <>
@@ -649,7 +649,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       }
     >
       {(close) => (
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           {ALIGNMENTS.map((alignment) => (
             <ToolbarButton
               key={alignment.value}
