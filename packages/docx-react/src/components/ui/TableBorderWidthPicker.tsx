@@ -75,6 +75,7 @@ export function TableBorderWidthPicker({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          className="docx-popover"
           data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
@@ -91,6 +92,7 @@ export function TableBorderWidthPicker({
             <button
               key={size}
               type="button"
+              className="docx-popover-item"
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -114,6 +116,7 @@ export function TableBorderWidthPicker({
               onClick={() => handleSelect(size)}
             >
               <div
+                className="docx-border-sample"
                 style={{
                   width: 50,
                   height: Math.max(thickness, 1),

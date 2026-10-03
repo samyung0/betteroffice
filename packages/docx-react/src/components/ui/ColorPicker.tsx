@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import type { ColorValue, Theme, ThemeColorScheme } from '@betteroffice/docx/types/document';
 import {
@@ -18,6 +18,13 @@ import type { TranslationKey } from '@betteroffice/docx-i18n';
 // ============================================================================
 
 export type ColorPickerMode = 'text' | 'highlight' | 'border';
+
+/** A colour of a host's palette. */
+export interface ColorPaletteColor {
+  name: string;
+  /** `#rrggbb` */
+  value: string;
+}
 
 export interface ColorPickerProps {
   mode: ColorPickerMode;
@@ -44,6 +51,11 @@ export interface ColorPickerProps {
    * anything. Defaults: text → red, highlight → yellow, border → black.
    */
   defaultColor?: ColorValue | string;
+  /**
+   * A host's own palette, in place of the theme and standard colours: its
+   * swatches, the clear button and a custom colour.
+   */
+  palette?: readonly ColorPaletteColor[];
 }
 
 // ============================================================================
@@ -264,6 +276,15 @@ function isLightColor(hex: string): boolean {
   return (r * 299 + g * 587 + b * 114) / 1000 > 230;
 }
 
+/** Whether black reads better than white on the colour. */
+function isBrightColor(hex: string): boolean {
+  const h = hex.replace(/^#/, '');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 150;
+}
+
 function isSelectedCell(
   value: ColorValue | string | undefined,
   cellHex: string,
@@ -295,7 +316,10 @@ function ThemeColorMatrix({
   const [hovered, setHovered] = useState<string | null>(null);
 
   return (
-    <div style={{ ...S_GRID, gridTemplateColumns: `repeat(10, ${CELL_SIZE}px)` }}>
+    <div
+      className="docx-color-grid"
+      style={{ ...S_GRID, gridTemplateColumns: `repeat(10, ${CELL_SIZE}px)` }}
+    >
       {matrix.flatMap((row, ri) =>
         row.map((cell, ci) => {
           const key = `${ri}-${ci}`;
@@ -305,6 +329,7 @@ function ThemeColorMatrix({
             <button
               key={key}
               type="button"
+              className="docx-color-swatch"
               style={{
                 ...(isSel ? S_CELL_SELECTED : isHov ? S_CELL_HOVER : S_CELL),
                 backgroundColor: `#${cell.hex}`,
@@ -337,7 +362,10 @@ function StandardColorRow({
   const { t } = useTranslation();
 
   return (
-    <div style={{ ...S_GRID, gridTemplateColumns: `repeat(10, ${CELL_SIZE}px)` }}>
+    <div
+      className="docx-color-grid"
+      style={{ ...S_GRID, gridTemplateColumns: `repeat(10, ${CELL_SIZE}px)` }}
+    >
       {STANDARD_COLORS.map((c, i) => {
         const isHov = hovered === i;
         const isSel = isSelectedCell(selectedColor, c.hex, theme);
@@ -346,6 +374,7 @@ function StandardColorRow({
           <button
             key={c.hex}
             type="button"
+            className="docx-color-swatch"
             style={{
               ...(isSel ? S_CELL_SELECTED : isHov ? S_CELL_HOVER : S_CELL),
               backgroundColor: `#${c.hex}`,
@@ -360,6 +389,91 @@ function StandardColorRow({
           />
         );
       })}
+    </div>
+  );
+}
+
+function ColorPalette({
+  colors,
+  value,
+  label,
+  clearLabel,
+  onPick,
+  onClear,
+}: {
+  colors: readonly ColorPaletteColor[];
+  /** The selection's colour as `#rrggbb`, if it has one. */
+  value?: string;
+  label: string;
+  clearLabel: string;
+  /** An uppercase hex without `#`, as the standard colours. */
+  onPick: (hex: string) => void;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [draft, setDraft] = useState(value ?? '');
+
+  // The native picker reports every drag as `input`; only its `change`
+  // (the pick) reaches the document.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    const update = () => setDraft(input.value);
+    const commit = () => onPick(input.value.slice(1).toUpperCase());
+    input.addEventListener('input', update);
+    input.addEventListener('change', commit);
+    return () => {
+      input.removeEventListener('input', update);
+      input.removeEventListener('change', commit);
+    };
+  }, [onPick]);
+
+  return (
+    <div className="docx-color-palette">
+      <div className="docx-color-palette__head">
+        <span className="docx-popover-label">{label}</span>
+        <button
+          type="button"
+          className="docx-popover-button"
+          onClick={onClear}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          {clearLabel}
+        </button>
+      </div>
+      <div className="docx-color-grid" role="grid" aria-label={label}>
+        {colors.map((color) => {
+          const selected = color.value.toLowerCase() === value;
+          return (
+            <button
+              key={color.value}
+              type="button"
+              role="gridcell"
+              className="docx-color-swatch"
+              style={{ backgroundColor: color.value }}
+              title={`${color.name} (${color.value})`}
+              aria-label={color.name}
+              aria-selected={selected}
+              onClick={() => onPick(color.value.slice(1).toUpperCase())}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              {selected && (
+                <span style={{ color: isBrightColor(color.value) ? '#000' : '#fff' }}>
+                  <MaterialSymbol name="check" size={14} />
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <label className="docx-color-palette__custom">
+        {t('colorPicker.customColor')}
+        <span>
+          {draft}
+          <input ref={inputRef} type="color" defaultValue={value ?? '#000000'} />
+        </span>
+      </label>
     </div>
   );
 }
@@ -381,6 +495,7 @@ export function ColorPicker({
   autoLabel,
   splitButton = true,
   defaultColor,
+  palette,
 }: ColorPickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
@@ -629,10 +744,34 @@ export function ColorPicker({
         </button>
       )}
 
-      {isOpen && (
+      {isOpen && palette && (
         <div
           ref={dropdownRef}
-          className="docx-color-picker-dropdown"
+          className="docx-color-picker-dropdown docx-popover docx-popover--colors"
+          style={{ ...dropdownStyle, ...S_DROPDOWN }}
+          role="dialog"
+          aria-label={`${defaultTitle} picker`}
+          onMouseDown={(e) => {
+            if ((e.target as HTMLElement).tagName !== 'INPUT') e.preventDefault();
+          }}
+        >
+          <ColorPalette
+            colors={palette}
+            value={/^#[0-9a-f]{6}$/i.test(resolvedColor) ? resolvedColor.toLowerCase() : undefined}
+            label={title || defaultTitle}
+            clearLabel={
+              autoLabel ??
+              (mode === 'highlight' ? t('colorPicker.noColor') : t('colorPicker.automatic'))
+            }
+            onPick={handleStandardColorSelect}
+            onClear={handleAutomatic}
+          />
+        </div>
+      )}
+      {isOpen && !palette && (
+        <div
+          ref={dropdownRef}
+          className="docx-color-picker-dropdown docx-popover docx-popover--colors"
           style={{ ...dropdownStyle, ...S_DROPDOWN }}
           role="dialog"
           aria-label={`${defaultTitle} picker`}
@@ -647,6 +786,7 @@ export function ColorPicker({
           <>
             <button
               type="button"
+              className="docx-popover-item"
               style={S_AUTO_BUTTON}
               onClick={handleAutomatic}
               onMouseDown={(e) => e.preventDefault()}
@@ -689,27 +829,34 @@ export function ColorPicker({
               {autoLabel ??
                 (mode === 'highlight' ? t('colorPicker.noColor') : t('colorPicker.automatic'))}
             </button>
-            <div style={S_DIVIDER} />
-            <div style={S_SECTION_LABEL}>{t('colorPicker.themeColors')}</div>
+            <div className="docx-popover-separator" style={S_DIVIDER} />
+            <div className="docx-popover-label" style={S_SECTION_LABEL}>
+              {t('colorPicker.themeColors')}
+            </div>
             <ThemeColorMatrix
               matrix={matrix}
               selectedColor={value}
               theme={theme}
               onSelect={handleThemeCellSelect}
             />
-            <div style={S_DIVIDER} />
-            <div style={S_SECTION_LABEL}>{t('colorPicker.standardColors')}</div>
+            <div className="docx-popover-separator" style={S_DIVIDER} />
+            <div className="docx-popover-label" style={S_SECTION_LABEL}>
+              {t('colorPicker.standardColors')}
+            </div>
             <StandardColorRow
               selectedColor={value}
               theme={theme}
               onSelect={handleStandardColorSelect}
             />
-            <div style={S_DIVIDER} />
-            <div style={S_SECTION_LABEL}>{t('colorPicker.customColor')}</div>
+            <div className="docx-popover-separator" style={S_DIVIDER} />
+            <div className="docx-popover-label" style={S_SECTION_LABEL}>
+              {t('colorPicker.customColor')}
+            </div>
             <div style={S_CUSTOM_ROW}>
               <span style={{ fontSize: '12px', color: 'var(--doc-text-muted)' }}>#</span>
               <input
                 type="text"
+                className="docx-popover-input"
                 style={S_HEX_INPUT}
                 value={customHex}
                 onChange={(e) =>
@@ -727,6 +874,7 @@ export function ColorPicker({
               />
               <button
                 type="button"
+                className="docx-popover-button"
                 style={{
                   ...S_APPLY_BTN,
                   opacity: /^[0-9A-Fa-f]{6}$/.test(customHex) ? 1 : 0.4,

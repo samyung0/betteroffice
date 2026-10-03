@@ -198,6 +198,7 @@ export function AlignmentButtons({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          className="docx-popover docx-popover--icons"
           data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
@@ -218,6 +219,8 @@ export function AlignmentButtons({
                 <button
                   key={option.value}
                   type="button"
+                  className="docx-popover-icon-item"
+                  aria-pressed={isActive}
                   title={`${optLabel}${optShortcut ? ` (${optShortcut})` : ''}`}
                   data-testid={`alignment-${option.value}`}
                   style={{

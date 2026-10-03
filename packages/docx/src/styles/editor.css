@@ -1216,3 +1216,276 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+/* ============================================================
+ * Host-styled menus
+ * ============================================================ */
+
+/* A host that sets data-office-menus="host" on <html> draws the toolbar's
+ * dropdowns, pickers and context menus in its own menu style, from the
+ * --office-menu-* variables it defines. !important: the pickers style
+ * themselves inline. */
+[data-office-menus='host'] .docx-popover,
+[data-office-menus='host'] .docx-text-context-menu,
+[data-office-menus='host'] .docx-image-context-menu {
+  box-sizing: border-box;
+  padding: var(--office-menu-padding) !important;
+  font-family: var(--office-menu-font-family) !important;
+  font-size: var(--office-menu-font-size) !important;
+  font-weight: var(--office-menu-font-weight) !important;
+  line-height: var(--office-menu-line-height) !important;
+  color: var(--office-menu-text) !important;
+  background: var(--office-menu-bg) !important;
+  border: 1px solid var(--office-menu-border) !important;
+  border-radius: var(--office-menu-radius) !important;
+  box-shadow: var(--office-menu-shadow) !important;
+}
+/* The select's viewport scrolls, so it takes the padding. */
+[data-office-menus='host'] .docx-popover:has(> .docx-popover-viewport) {
+  padding: 0 !important;
+}
+[data-office-menus='host'] .docx-popover-viewport {
+  padding: var(--office-menu-padding) !important;
+}
+[data-office-menus='host']
+  :is(.docx-popover, .docx-text-context-menu, .docx-image-context-menu)
+  svg {
+  width: var(--office-menu-icon-size) !important;
+  height: var(--office-menu-icon-size) !important;
+}
+
+/* Rows. Font families stay, so the font list previews its fonts. */
+[data-office-menus='host'] .docx-popover-item,
+[data-office-menus='host']
+  :is(.docx-text-context-menu, .docx-image-context-menu)
+  > [role='menuitem'] {
+  display: flex !important;
+  gap: var(--office-menu-item-gap) !important;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--office-menu-item-height) !important;
+  padding: 0 var(--office-menu-item-padding-x) !important;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  line-height: inherit !important;
+  text-align: start;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: var(--office-menu-item-radius) !important;
+  outline: none;
+}
+[data-office-menus='host'] .docx-popover-item:hover:not(:disabled),
+[data-office-menus='host'] .docx-popover-item[data-highlighted],
+[data-office-menus='host'] .docx-text-context-menu-item-highlighted,
+[data-office-menus='host'] .docx-image-context-menu > [data-highlighted] {
+  background: var(--office-menu-hover) !important;
+}
+/* The select's tick sits at the end of the row. */
+[data-office-menus='host'] .docx-popover-item:has(> .docx-popover-check) {
+  padding-inline-end: calc(
+    var(--office-menu-icon-size) + 2 * var(--office-menu-item-padding-x)
+  ) !important;
+}
+[data-office-menus='host'] .docx-popover-check {
+  right: var(--office-menu-item-padding-x) !important;
+  width: var(--office-menu-icon-size) !important;
+  height: var(--office-menu-icon-size) !important;
+}
+[data-office-menus='host'] .docx-style-preview {
+  font-size: inherit !important;
+  line-height: inherit !important;
+}
+/* The border widths draw in the text colour, so they show in a dark theme. */
+[data-office-menus='host'] .docx-border-sample {
+  background: currentColor !important;
+}
+[data-office-menus='host']
+  :is(.docx-text-context-menu, .docx-image-context-menu)
+  [role='menuitem']
+  > span[style*='monospace'] {
+  margin-inline-start: auto;
+  font-family: inherit !important;
+  font-size: var(--office-menu-label-font-size) !important;
+  font-weight: 400 !important;
+  color: var(--office-menu-muted) !important;
+}
+
+/* The font size list: narrow, centred, the current size tinted. */
+[data-office-menus='host'] .docx-popover--sizes {
+  width: max-content !important;
+  min-width: 3.5rem !important;
+  padding: 4px !important;
+}
+[data-office-menus='host'] .docx-popover--sizes .docx-popover-item {
+  justify-content: center;
+}
+[data-office-menus='host'] .docx-popover--sizes .docx-popover-item[aria-selected='true'] {
+  color: var(--office-menu-selected-text) !important;
+  background: var(--office-menu-selected-bg) !important;
+}
+
+/* Rows and grids of toolbar buttons: alignment, borders, image wrap and transform. */
+[data-office-menus='host'] .docx-popover--icons {
+  padding: 4px !important;
+}
+[data-office-menus='host'] .docx-popover--icons > div {
+  gap: 4px !important;
+}
+[data-office-menus='host'] .docx-popover-icon-item {
+  width: var(--office-menu-button-size) !important;
+  height: var(--office-menu-button-size) !important;
+  color: var(--office-menu-text) !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: var(--office-menu-button-radius) !important;
+}
+[data-office-menus='host'] .docx-popover-icon-item:hover {
+  background: var(--office-menu-button-hover) !important;
+}
+[data-office-menus='host'] :is(.docx-popover-icon-item, .docx-popover-item)[aria-pressed='true'] {
+  color: var(--office-menu-pressed-text) !important;
+  background: var(--office-menu-pressed-bg) !important;
+}
+
+/* Section labels; the first in a list sits closer to the top. */
+[data-office-menus='host'] .docx-popover-label {
+  margin: 0 !important;
+  padding: var(--office-menu-label-padding) !important;
+  font-size: var(--office-menu-label-font-size) !important;
+  font-weight: var(--office-menu-label-font-weight) !important;
+  line-height: var(--office-menu-label-line-height) !important;
+  color: var(--office-menu-muted) !important;
+}
+[data-office-menus='host'] .docx-popover-viewport > :first-child > .docx-popover-label:first-child {
+  padding-top: 4px !important;
+}
+[data-office-menus='host'] .docx-popover-separator,
+[data-office-menus='host']
+  :is(.docx-text-context-menu, .docx-image-context-menu)
+  > :is([role='separator'], .docx-text-context-menu-separator) {
+  height: 0 !important;
+  margin: 4px 0 !important;
+  background: none !important;
+  border-top: 1px solid var(--office-menu-separator) !important;
+}
+
+/* Colour pickers: round swatches, the current one ringed. */
+[data-office-menus='host'] .docx-popover--colors {
+  padding: 6px 10px !important;
+}
+[data-office-menus='host'] .docx-popover--colors .docx-popover-label {
+  padding: 0 0 6px !important;
+}
+[data-office-menus='host'] .docx-popover--colors .docx-popover-separator {
+  margin: 8px 0 !important;
+}
+[data-office-menus='host'] .docx-color-grid {
+  grid-template-columns: repeat(10, 20px) !important;
+  gap: 4px !important;
+}
+[data-office-menus='host'] .docx-color-swatch {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 20px !important;
+  height: 20px !important;
+  border: 1px solid var(--office-menu-swatch-border) !important;
+  border-radius: 9999px !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: transform 0.15s;
+}
+[data-office-menus='host'] .docx-color-swatch:hover {
+  transform: scale(1.1) !important;
+}
+[data-office-menus='host'] .docx-color-swatch[aria-selected='true'] {
+  box-shadow: 0 0 0 1px var(--office-menu-bg), 0 0 0 3px var(--office-menu-ring) !important;
+}
+[data-office-menus='host'] .docx-popover-input,
+[data-office-menus='host'] .docx-popover-button {
+  box-sizing: border-box;
+  height: var(--office-menu-item-height) !important;
+  font: inherit !important;
+  color: inherit !important;
+  border-radius: var(--office-menu-button-radius) !important;
+}
+[data-office-menus='host'] .docx-popover-input {
+  background: transparent !important;
+  border: 1px solid var(--office-menu-border) !important;
+}
+[data-office-menus='host'] .docx-popover-button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 0 8px !important;
+  background: transparent !important;
+  border: 0 !important;
+}
+[data-office-menus='host'] .docx-popover-button:hover:not(:disabled) {
+  background: var(--office-menu-hover) !important;
+}
+
+/* A host's own palette (ColorPicker's `palette`): eight columns, a clear
+ * button by the label and a custom colour under the swatches. */
+.docx-color-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.docx-color-palette__head,
+.docx-color-palette__custom {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+[data-office-menus='host'] .docx-color-palette .docx-popover-label {
+  padding: 0 !important;
+  font-weight: 600 !important;
+  color: var(--office-menu-secondary) !important;
+}
+[data-office-menus='host'] .docx-color-palette .docx-popover-button {
+  margin-inline-end: -8px;
+  font-size: var(--office-menu-label-font-size) !important;
+  color: var(--office-menu-secondary) !important;
+}
+[data-office-menus='host'] .docx-color-palette .docx-color-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 24px) !important;
+  gap: 6px !important;
+}
+[data-office-menus='host'] .docx-color-swatch svg {
+  width: 14px !important;
+  height: 14px !important;
+}
+[data-office-menus='host'] .docx-color-palette .docx-color-swatch {
+  width: 24px !important;
+  height: 24px !important;
+}
+.docx-color-palette__custom {
+  padding-top: 8px;
+  margin-top: 8px;
+  font-size: var(--office-menu-label-font-size, 12px);
+  font-weight: 600;
+  color: var(--office-menu-secondary, inherit);
+  border-top: 1px solid var(--office-menu-separator, currentColor);
+}
+.docx-color-palette__custom span {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-family: monospace;
+  font-weight: 400;
+  color: var(--office-menu-text, inherit);
+}
+.docx-color-palette__custom input {
+  box-sizing: border-box;
+  width: 36px;
+  height: 28px;
+  padding: 2px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--office-menu-border, currentColor);
+  border-radius: var(--office-menu-button-radius, 6px);
+}

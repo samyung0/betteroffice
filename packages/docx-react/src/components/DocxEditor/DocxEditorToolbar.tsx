@@ -7,6 +7,7 @@ import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
 import { CommentsSidebarToggle } from './CommentsSidebarToggle';
 import { HostMenus, type DocxMenuModel, type HostMenuActions } from './hostMenus';
+import type { ColorPaletteColor } from '../ui/ColorPicker';
 
 interface ImageContext {
   pos: number;
@@ -46,6 +47,7 @@ export function DocxEditorToolbar({
   singleRow,
   hostMenus,
   hostMenuActions,
+  colorPalette,
   showOutline,
   showOutlineButton,
   onToggleOutline,
@@ -102,6 +104,7 @@ export function DocxEditorToolbar({
   /** The host draws the menu bar from this model; the row drops its ☰. */
   hostMenus?: (model: DocxMenuModel | null) => void;
   hostMenuActions: HostMenuActions;
+  colorPalette?: readonly ColorPaletteColor[];
   showOutline: boolean;
   showOutlineButton: boolean;
   onToggleOutline: () => void;
@@ -186,6 +189,7 @@ export function DocxEditorToolbar({
         leading={singleRow && !hostMenus && <EditorToolbar.MenuBar folded />}
         hostMenus={!!hostMenus}
         onAddComment={hostMenus ? hostMenuActions.onAddComment : undefined}
+        colorPalette={colorPalette}
         outlineOpen={showOutline}
         onToggleOutline={singleRow && showOutlineButton ? onToggleOutline : undefined}
       >

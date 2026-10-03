@@ -8,7 +8,7 @@
 import { useCallback } from 'react';
 import type { ColorValue, Theme } from '@betteroffice/docx/types/document';
 import type { TableAction } from './TableToolbar';
-import { ColorPicker } from './ColorPicker';
+import { ColorPicker, type ColorPaletteColor } from './ColorPicker';
 import { useTranslation } from '../../i18n';
 
 export interface TableCellFillPickerProps {
@@ -17,6 +17,8 @@ export interface TableCellFillPickerProps {
   theme?: Theme | null;
   /** Current fill color (RGB hex without #) */
   value?: string;
+  /** The host's colours, in place of the theme's (`ColorPicker` `palette`). */
+  palette?: readonly ColorPaletteColor[];
 }
 
 export function TableCellFillPicker({
@@ -24,6 +26,7 @@ export function TableCellFillPicker({
   disabled = false,
   theme,
   value,
+  palette,
 }: TableCellFillPickerProps) {
   const { t } = useTranslation();
   const handleChange = useCallback(
@@ -47,6 +50,7 @@ export function TableCellFillPicker({
       onChange={handleChange}
       theme={theme}
       disabled={disabled}
+      palette={palette}
       title={t('table.cellFillColor')}
       icon="format_color_fill"
       autoLabel={t('colorPicker.noColor')}

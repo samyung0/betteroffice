@@ -77,6 +77,7 @@ export function TableBorderPicker({ onAction, disabled = false }: TableBorderPic
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          className="docx-popover docx-popover--icons"
           data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
@@ -99,6 +100,7 @@ export function TableBorderPicker({ onAction, disabled = false }: TableBorderPic
               <button
                 key={typeof action === 'string' ? action : action.type}
                 type="button"
+                className="docx-popover-icon-item"
                 title={t(labelKey)}
                 style={{
                   display: 'flex',

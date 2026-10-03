@@ -170,7 +170,10 @@ export function StylePicker({
         {styleOptions.map((style) => (
           <SelectItem key={style.styleId} value={style.styleId} className="py-2.5 px-3">
             {/* The menu's own text colour, so every preview reads in any theme. */}
-            <span style={{ ...getStylePreviewProps(style), color: undefined }}>
+            <span
+              className="docx-style-preview"
+              style={{ ...getStylePreviewProps(style), color: undefined }}
+            >
               {getStyleName(style)}
             </span>
           </SelectItem>

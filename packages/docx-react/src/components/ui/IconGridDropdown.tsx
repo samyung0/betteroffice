@@ -100,6 +100,7 @@ export function IconGridDropdown<T extends string = string>({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          className={cn('docx-popover', !showLabels && 'docx-popover--icons')}
           data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
@@ -125,6 +126,8 @@ export function IconGridDropdown<T extends string = string>({
                 <button
                   key={option.value}
                   type="button"
+                  className={showLabels ? 'docx-popover-item' : 'docx-popover-icon-item'}
+                  aria-pressed={isActive}
                   title={option.label}
                   data-testid={testId ? `${testId}-${option.value}` : undefined}
                   style={{

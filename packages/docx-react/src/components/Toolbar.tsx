@@ -21,7 +21,7 @@ import { FontPicker } from './ui/FontPicker';
 import type { FontOption } from './ui/FontPicker';
 import { normalizeFontFamilies } from './ui/normalizeFontFamilies';
 import { FontSizePicker, halfPointsToPoints } from './ui/FontSizePicker';
-import { ColorPicker } from './ui/ColorPicker';
+import { ColorPicker, type ColorPaletteColor } from './ui/ColorPicker';
 import { AlignmentButtons } from './ui/AlignmentButtons';
 import { ListButtons, createDefaultListState } from './ui/ListButtons';
 import type { ListState } from './ui/ListButtons';
@@ -156,6 +156,8 @@ export interface ToolbarProps {
   hostMenus?: boolean;
   /** Comments the selection; the single row shows it beside the link. */
   onAddComment?: () => void;
+  /** The host's colours for the colour pickers (`DocxEditor` `colorPalette`). */
+  colorPalette?: readonly ColorPaletteColor[];
   /** Whether to show font family picker (default: true) */
   showFontPicker?: boolean;
   /**
@@ -450,6 +452,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     leading,
     hostMenus = false,
     onAddComment,
+    colorPalette,
     onInsertImage,
   } = props;
 
@@ -819,6 +822,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       theme={theme}
       disabled={disabled}
       title={t('formattingBar.fontColor')}
+      palette={colorPalette}
     />
   );
   const highlightPicker = showHighlightColorPicker && (
@@ -829,6 +833,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       theme={theme}
       disabled={disabled}
       title={t('formattingBar.highlightColor')}
+      palette={colorPalette}
     />
   );
   const linkButton = (
@@ -901,6 +906,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
         disabled={disabled}
         theme={theme}
         value={resolveColorToHex(tableContext?.cellBorderColor, theme)}
+        palette={colorPalette}
       />
       <TableBorderWidthPicker onAction={handleTableAction} disabled={disabled} />
       <TableCellFillPicker
@@ -908,6 +914,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
         disabled={disabled}
         theme={theme}
         value={tableContext?.cellBackgroundColor}
+        palette={colorPalette}
       />
       <TableMoreDropdown
         onAction={handleTableAction}

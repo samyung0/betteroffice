@@ -36,16 +36,18 @@ export function useFixedDropdown({
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     const width = dropdownRef.current?.getBoundingClientRect().width ?? 0;
+    const left = align === 'right' && width > 0 ? rect.right - width : rect.left;
     setPos({
       top: rect.bottom + 4,
-      left: align === 'right' && width > 0 ? rect.right - width : rect.left,
+      // Inside the viewport: a trigger near the edge would clip its menu.
+      left: width > 0 ? Math.max(4, Math.min(left, window.innerWidth - width - 4)) : left,
     });
   }, [align]);
 
   // Calculate position when opening
   useEffect(() => {
     if (!isOpen) return;
-    // The menu must render before right alignment can measure its width.
+    // The menu must render before it can be measured.
     const frame = requestAnimationFrame(updatePosition);
     return () => cancelAnimationFrame(frame);
   }, [isOpen, updatePosition]);

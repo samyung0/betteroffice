@@ -25,6 +25,7 @@ export type {
   HostMenu,
   HostMenuEntry,
 } from './components/DocxEditor/hostMenus';
+export type { ColorPaletteColor } from './components/ui/ColorPicker';
 export {
   DocxDisplayListViewer,
   DocxViewer,

@@ -224,6 +224,7 @@ export const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
             type="button"
             role="menuitem"
             data-action="open-properties"
+            data-highlighted={highlightedIndex === 0 || undefined}
             onClick={() => {
               onOpenProperties();
               onClose();
@@ -280,6 +281,7 @@ export const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
             type="button"
             role="menuitem"
             data-wrap-type={option.choice}
+            data-highlighted={isHighlighted || undefined}
             data-current={isCurrent ? 'true' : 'false'}
             data-disabled={!isEnabled ? 'true' : 'false'}
             disabled={!isEnabled}
@@ -352,6 +354,7 @@ export const ImageContextMenu: React.FC<ImageContextMenuProps> = ({
                   type="button"
                   role="menuitem"
                   data-action={item.action}
+                  data-highlighted={isHighlighted || undefined}
                   data-disabled={item.disabled ? 'true' : 'false'}
                   disabled={item.disabled}
                   onClick={() => {

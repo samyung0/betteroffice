@@ -9,7 +9,7 @@ import { useCallback } from 'react';
 import type { ColorValue } from '@betteroffice/docx/types/document';
 import type { Theme } from '@betteroffice/docx/types/document';
 import type { TableAction } from './TableToolbar';
-import { ColorPicker } from './ColorPicker';
+import { ColorPicker, type ColorPaletteColor } from './ColorPicker';
 import { useTranslation } from '../../i18n';
 
 export interface TableBorderColorPickerProps {
@@ -18,6 +18,8 @@ export interface TableBorderColorPickerProps {
   theme?: Theme | null;
   /** Current border color (RGB hex without #) */
   value?: string;
+  /** The host's colours, in place of the theme's (`ColorPicker` `palette`). */
+  palette?: readonly ColorPaletteColor[];
 }
 
 export function TableBorderColorPicker({
@@ -25,6 +27,7 @@ export function TableBorderColorPicker({
   disabled = false,
   theme,
   value,
+  palette,
 }: TableBorderColorPickerProps) {
   const { t } = useTranslation();
   const handleChange = useCallback(
@@ -47,6 +50,7 @@ export function TableBorderColorPicker({
       onChange={handleChange}
       theme={theme}
       disabled={disabled}
+      palette={palette}
       title={t('table.borderColor')}
     />
   );

@@ -56,6 +56,7 @@ import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
 import { pageBreakOffered, yrsSelectedText } from './DocxEditor/yrsCommands';
 import type { DocxMenuModel, HostMenuActions } from './DocxEditor/hostMenus';
+import type { ColorPaletteColor } from './ui/ColorPicker';
 import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
@@ -220,6 +221,11 @@ export interface DocxEditorProps {
    * The single-row toolbar then has no ☰ menu button.
    */
   onMenus?: (model: DocxMenuModel | null) => void;
+  /**
+   * The host's colours for the text, highlight and table colour pickers, in
+   * place of the theme and standard colours.
+   */
+  colorPalette?: readonly ColorPaletteColor[];
   /**
    * Custom list of fonts shown in the toolbar's font-family dropdown.
    * Strings render in the "Other" group; pass `FontOption[]` for category
@@ -629,6 +635,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     icons,
     singleRowToolbar = false,
     onMenus,
+    colorPalette,
     fontFamilies,
     fonts,
     watermarkPresets,
@@ -1928,6 +1935,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               singleRow={singleRowToolbar}
               hostMenus={onMenus}
               hostMenuActions={hostMenuActions}
+              colorPalette={colorPalette}
               showOutline={showOutline}
               showOutlineButton={showOutlineButton}
               onToggleOutline={handleToggleOutline}

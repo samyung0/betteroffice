@@ -98,7 +98,7 @@ function SelectContent({
         <SelectPrimitive.Content
           data-docx-escape-layer="true"
           className={cn(
-            'relative z-50 max-h-72 min-w-[8rem] overflow-hidden',
+            'docx-popover relative z-50 max-h-72 min-w-[8rem] overflow-hidden',
             'rounded-lg border border-border bg-popover text-popover-foreground shadow-lg',
             'data-[state=open]:animate-in data-[state=closed]:animate-out',
             'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
@@ -117,7 +117,7 @@ function SelectContent({
         >
           <SelectPrimitive.Viewport
             className={cn(
-              'p-1',
+              'docx-popover-viewport p-1',
               position === 'popper' &&
                 'h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]'
             )}
@@ -137,7 +137,10 @@ function SelectLabel({
 }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>) {
   return (
     <SelectPrimitive.Label
-      className={cn('px-2 py-1.5 text-xs font-medium text-muted-foreground', className)}
+      className={cn(
+        'docx-popover-label px-2 py-1.5 text-xs font-medium text-muted-foreground',
+        className
+      )}
       {...props}
     />
   );
@@ -152,7 +155,7 @@ function SelectItem({
   return (
     <SelectPrimitive.Item
       className={cn(
-        'relative flex w-full cursor-pointer select-none items-center',
+        'docx-popover-item relative flex w-full cursor-pointer select-none items-center',
         'rounded px-2 py-1.5 text-sm text-foreground outline-none',
         'hover:bg-muted focus:bg-muted',
         'data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
@@ -165,7 +168,7 @@ function SelectItem({
       {...props}
     >
       <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-      <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
+      <span className="docx-popover-check absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
         <SelectPrimitive.ItemIndicator>
           <MaterialSymbol name="check" size={16} />
         </SelectPrimitive.ItemIndicator>
@@ -179,7 +182,10 @@ function SelectSeparator({
   ...props
 }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>) {
   return (
-    <SelectPrimitive.Separator className={cn('-mx-1 my-1 h-px bg-muted', className)} {...props} />
+    <SelectPrimitive.Separator
+      className={cn('docx-popover-separator -mx-1 my-1 h-px bg-muted', className)}
+      {...props}
+    />
   );
 }
 

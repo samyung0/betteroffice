@@ -288,6 +288,7 @@ export function FontSizePicker({
       {isDropdownOpen && (
         <div
           ref={dropdownRef}
+          className="docx-popover docx-popover--sizes"
           data-docx-escape-layer="true"
           style={{
             ...fixedDropdownStyle,
@@ -308,7 +309,7 @@ export function FontSizePicker({
               type="button"
               onClick={() => handleSizeSelect(size)}
               className={cn(
-                'w-full px-3 py-1.5 text-sm text-left',
+                'docx-popover-item w-full px-3 py-1.5 text-sm text-left',
                 'hover:bg-muted',
                 size === currentValue && 'bg-muted font-medium'
               )}

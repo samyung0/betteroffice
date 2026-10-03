@@ -85,6 +85,7 @@ export function TableMoreDropdown({
         key={id}
         type="button"
         role="menuitem"
+        className="docx-popover-item"
         style={{
           ...menuItemStyles,
           backgroundColor:
@@ -139,6 +140,7 @@ export function TableMoreDropdown({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          className="docx-popover"
           style={{
             ...dropdownStyle,
             backgroundColor: 'var(--doc-surface)',
@@ -159,7 +161,7 @@ export function TableMoreDropdown({
           {menuItem('addColumnLeft', 'add', t('table.insertColumnLeft'), 'addColumnLeft')}
           {menuItem('addColumnRight', 'add', t('table.insertColumnRight'), 'addColumnRight')}
 
-          <div style={separatorStyles} role="separator" />
+          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
 
           {/* Merge/Split */}
           {menuItem('mergeCells', 'call_merge', t('table.mergeCells'), 'mergeCells', {
@@ -169,12 +171,12 @@ export function TableMoreDropdown({
             itemDisabled: !tableContext?.canSplitCell,
           })}
 
-          <div style={separatorStyles} role="separator" />
+          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
 
           {/* Select */}
           {menuItem('selectTable', 'select_all', t('table.selectTable'), 'selectTable')}
 
-          <div style={separatorStyles} role="separator" />
+          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
 
           {/* Delete actions */}
           {menuItem('deleteRow', 'delete', t('table.deleteRow'), 'deleteRow', {
@@ -189,7 +191,7 @@ export function TableMoreDropdown({
             danger: true,
           })}
 
-          <div style={separatorStyles} role="separator" />
+          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
 
           {menuItem('properties', 'settings', t('tableAdvanced.tableProperties'), {
             type: 'openTableProperties',
