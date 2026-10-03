@@ -118,6 +118,11 @@ const PAGE_WINDOW_MIN_PAGES = 12;
 // A page already mounted stays mounted until it drifts one page beyond the
 // mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
 const PAGE_WINDOW_HYSTERESIS = 1;
+// The positioned mirror follows the page window only once it has held still
+// this long: a page that scrolls through the window keeps its plain-text
+// mirror instead of being rebuilt twice (the plain text exposes the same
+// accessible content; only geometry waits for the scroll to settle).
+const MIRROR_WINDOW_SETTLE_MS = 300;
 
 interface PageWindowRange {
   start: number;
@@ -153,6 +158,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   zoom,
   interactive,
   deferChrome,
+  fullMirror,
   registerCanvas,
 }: {
   page: DisplayPage;
@@ -160,6 +166,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   zoom: number;
   interactive: boolean;
   deferChrome: boolean;
+  fullMirror: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
@@ -175,7 +182,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} full={!deferChrome} />
+      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} full={fullMirror} />
       {interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
@@ -375,6 +382,27 @@ export function CanvasPagesView({
     effectiveWindow === null
       ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
       : pageInWindow(index);
+  // The first measurement applies at once; later moves wait for the scroll
+  // to settle (MIRROR_WINDOW_SETTLE_MS).
+  const [mirrorWindow, setMirrorWindow] = useState<PageWindowRange | null>(null);
+  useEffect(() => {
+    if (effectiveWindow === null) {
+      setMirrorWindow(null);
+      return;
+    }
+    if (mirrorWindow === null) {
+      setMirrorWindow(effectiveWindow);
+      return;
+    }
+    const id = setTimeout(() => setMirrorWindow(effectiveWindow), MIRROR_WINDOW_SETTLE_MS);
+    return () => clearTimeout(id);
+    // mirrorWindow is read only to apply the first window at once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveWindow]);
+  const mirrorInWindow = (index: number): boolean =>
+    mirrorWindow === null
+      ? chromeInWindow(index)
+      : index >= mirrorWindow.start && index <= mirrorWindow.end;
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
@@ -596,6 +624,7 @@ export function CanvasPagesView({
               zoom={zoom}
               interactive={interactive}
               deferChrome={!chromeInWindow(i)}
+              fullMirror={mirrorInWindow(i)}
               registerCanvas={registerCanvas}
             />
           );
