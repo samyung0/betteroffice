@@ -270,6 +270,16 @@ test('Delete before a field that shows nothing at the story end leaves input wor
   expect(session.storySegments('body').filter((segment) => segment.kind === 'embed')).toHaveLength(1);
 });
 
+function clipboardSpy() {
+  const written: Record<string, string> = {};
+  const clipboardData = { setData: (type: string, value: string) => { written[type] = value; } };
+  return { written, clipboardData };
+}
+
+async function flush(input: { current: YrsInputRef | null }) {
+  await act(async () => { await input.current!.flushPendingInput(); });
+}
+
 async function mountAcrossParagraphs() {
   const mounted = await mount();
   const { session } = mounted;
@@ -312,4 +322,42 @@ test('cut copies and deletes the selection as one undo step', async () => {
   fireEvent.keyDown(textarea, { key: 'z', metaKey: true });
   await act(async () => { await input.current!.flushPendingInput(); });
   expect(texts()).toEqual(['Seed', 'Next']);
+});
+
+// S[e<embed>e]d: plain text carries a soft line break, so a cut over one
+// deletes; over anything else it only copies.
+for (const { name, kind, payload, copied, after } of [
+  { name: 'a field', kind: 'field', payload: { fieldType: 'REF', instruction: ' REF fig ', displayText: 'Figure 1' }, copied: 'eFigure 1e', after: null },
+  { name: 'an image', kind: 'image', payload: {}, copied: 'ee', after: null },
+  { name: 'a soft line break', kind: 'break', payload: {}, copied: 'e\ne', after: 'Sd' },
+]) {
+  test(`cut over ${name} ${after ? 'deletes' : 'only copies'}`, async () => {
+    const { session, input, view } = await mount();
+    const [seed] = session.paragraphs('body');
+    session.applyRawOps('body', [{ op: 'insertEmbed', index: 2, kind, payload }]);
+    const before = session.storySegments('body');
+    act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 1 }, { story: 'body', paraId: seed.paraId, offset: 4 }));
+    const { written, clipboardData } = clipboardSpy();
+    fireEvent.cut(view.getByTestId('yrs-input'), { clipboardData });
+    await flush(input);
+    expect(written).toEqual({ 'text/plain': copied });
+    if (after) expect(session.paragraphs('body').map((p) => p.text)).toEqual([after]);
+    else expect(session.storySegments('body')).toEqual(before);
+  });
+}
+
+test('cut over a table only copies', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  // Seed¶[table]¶, selected from Se|ed through the table.
+  const { secondParaId: slot } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
+  session.insertTable({ story: 'body', paraId: slot, offset: 0 }, 1, 1);
+  const before = session.storySegments('body');
+  // The table is the slot paragraph's one unit.
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 2 }, { story: 'body', paraId: slot, offset: 1 }));
+  const { written, clipboardData } = clipboardSpy();
+  fireEvent.cut(view.getByTestId('yrs-input'), { clipboardData });
+  await flush(input);
+  expect(written).toEqual({ 'text/plain': 'ed\n' });
+  expect(session.storySegments('body')).toEqual(before);
 });

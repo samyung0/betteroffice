@@ -35,9 +35,10 @@ import {
   performYrsHistoryAction,
   yrsCellLocFromStory,
   yrsCellStory,
-  yrsSelectedText,
   yrsSelectionNearTable,
+  yrsSelectionText,
   yrsTableSelectionRange,
+  type YrsSelectionText,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
@@ -1101,28 +1102,34 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  // What a copy or cut takes: null when the selection has no text or while
+  // composing.
+  const clipboardSelection = useCallback((): YrsSelectionText | null => {
+    if (!session || composingRef.current || compositionPendingRef.current) return null;
+    const selected = yrsSelectionText(session);
+    return selected.text ? selected : null;
+  }, [session]);
+
   // The textarea is empty outside composition, so the browser's own copy finds
   // nothing; put the document selection's plain text on the clipboard instead.
-  // Returns whether it did.
   const writeSelectionToClipboard = useCallback(
-    (event: React.ClipboardEvent<HTMLTextAreaElement>): boolean => {
-      if (!session || composingRef.current || compositionPendingRef.current) return false;
-      const text = yrsSelectedText(session);
-      if (!text) return false;
+    (event: React.ClipboardEvent<HTMLTextAreaElement>): YrsSelectionText | null => {
+      const selected = clipboardSelection();
+      if (!selected) return null;
       event.preventDefault();
-      event.clipboardData.setData('text/plain', text);
-      return true;
+      event.clipboardData.setData('text/plain', selected.text);
+      return selected;
     },
-    [session]
+    [clipboardSelection]
   );
 
   const handleCut = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       // Queued input would move the selection after the text was copied.
       if (inputOperationQueueRef.current?.hasPending()) return;
-      if (!writeSelectionToClipboard(event)) return;
-      // Read-only cut copies, as the context menu's does.
-      if (readOnly || pointerSelectionBlockedRef.current) return;
+      const selected = writeSelectionToClipboard(event);
+      // Read-only, or a selection plain text cannot carry, only copies.
+      if (!selected?.plain || readOnly || pointerSelectionBlockedRef.current) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       enqueueInputOperation(() => {

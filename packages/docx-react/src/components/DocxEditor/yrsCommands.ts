@@ -219,20 +219,53 @@ export function yrsHyperlinkAtSelection(
   };
 }
 
-/** Plain text covered by the current Yrs selection. */
-export function yrsSelectedText(session: YrsSession): string {
+export interface YrsSelectionText {
+  text: string;
+  /** The text carries everything selected, so a cut may delete it. */
+  plain: boolean;
+}
+
+/**
+ * The current Yrs selection as plain text: paragraph ends and soft line breaks
+ * become newlines, and a field its shown text. A selection holding anything
+ * plain text cannot carry (a table, image, field, note reference, content
+ * control, bookmark, page break…) is not `plain`.
+ */
+export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   const range = currentYrsSelectionRange(session);
-  if (!range) return '';
+  if (!range) return { text: '', plain: true };
   const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
   const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
-  if (start === end) return '';
-  return flatStorySegments(session, range.story)
-    .map((segment) => {
-      const from = Math.max(start, segment.start);
-      const to = Math.min(end, segment.end);
-      return from < to ? segment.text.slice(from - segment.start, to - segment.start) : '';
-    })
-    .join('');
+  let text = '';
+  let plain = true;
+  let offset = 0;
+  for (const segment of session.storySegments(range.story)) {
+    if (offset >= end) break;
+    const segmentStart = offset;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (offset <= start) continue;
+    if (segment.kind === 'text') {
+      text += segment.text.slice(
+        Math.max(start, segmentStart) - segmentStart,
+        Math.min(end, offset) - segmentStart
+      );
+      // A complex field's result shown as its own text is still the field's.
+      if (segment.attributes.fieldResult) plain = false;
+    } else if (segment.kind === 'pilcrow' || segment.embedKind === 'break') {
+      text += '\n';
+    } else {
+      plain = false;
+      if (segment.embedKind === 'field' && typeof segment.payload.displayText === 'string') {
+        text += segment.payload.displayText;
+      }
+    }
+  }
+  return { text, plain };
+}
+
+/** Plain text covered by the current Yrs selection. */
+export function yrsSelectedText(session: YrsSession): string {
+  return yrsSelectionText(session).text;
 }
 
 interface TablePayloadCell {

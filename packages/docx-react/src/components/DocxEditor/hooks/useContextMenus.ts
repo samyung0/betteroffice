@@ -12,7 +12,7 @@ import {
 import { isWithinPageArea } from '../internals/pageAreaRouting';
 import { formatKeys } from '../../dialogs/KeyboardShortcutsDialog/ShortcutItem';
 import type { PagedEditorRef } from '../PagedEditor';
-import { currentYrsTableTarget, yrsSelectedText } from '../yrsCommands';
+import { currentYrsTableTarget, yrsSelectedText, yrsSelectionText } from '../yrsCommands';
 
 interface TableContextInfo {
   hasMultiCellSelection?: boolean;
@@ -321,9 +321,10 @@ export function useContextMenus({
       switch (action) {
         case 'cut': {
           const session = paged.getYrsSession();
-          const text = session ? yrsSelectedText(session) : '';
-          if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
-          paged.deleteSelection();
+          const selected = session ? yrsSelectionText(session) : null;
+          if (selected?.text) await navigator.clipboard.writeText(selected.text).catch(() => undefined);
+          // A selection plain text cannot carry only copies, as keyboard cut does.
+          if (selected?.plain) paged.deleteSelection();
           break;
         }
         case 'copy': {
