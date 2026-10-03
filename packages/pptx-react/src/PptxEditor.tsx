@@ -3412,8 +3412,8 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
-  // Hosts lift it with --pptx-notes-toggle-bottom when their own chrome covers the corner.
-  notesToggle: { position: 'absolute', right: 8, bottom: 'var(--pptx-notes-toggle-bottom, 8px)', zIndex: 5 },
+  // Hosts move it left with --pptx-notes-toggle-right when their own chrome covers the corner.
+  notesToggle: { position: 'absolute', right: 'var(--pptx-notes-toggle-right, 8px)', bottom: 8, zIndex: 5 },
   notesPanel: {
     flex: '0 0 auto',
     display: 'flex',
