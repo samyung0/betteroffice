@@ -2550,21 +2550,40 @@ test("Backspace after an invisible field marker beside a peer's typing keeps the
   expect(fieldsSaved(saved, "body")).toBe("«REF a \\h»");
 });
 
-// Follow-up item 4 (decided 2026-10-02): a field whose result continues into the next paragraph seeds the runs that
-// end its result in its first paragraph as text after its embed, so text typed at that paragraph's end is result text
-// in the editor, where the save puts it, and the reopened file reads the same. Two shapes: a DATE result split over
-// two paragraphs, and a table of contents without links (entries as plain runs).
+// Follow-up item 4 (decided 2026-10-02, line breaks and comment references 2026-10-04): a field whose result continues
+// into the next paragraph seeds the runs that end its result in its first paragraph as text after its embed, so text
+// typed at that paragraph's end is result text in the editor, where the save puts it, and the reopened file reads the
+// same. Shapes: a DATE result split over two paragraphs, a table of contents without links (entries as plain runs), a
+// tail run holding a line break, and a tail ending in a comment's reference.
+// [name, body, field code, a text of the untouched save, the saved text after Backspace at the first paragraph's end]
 const continuedResults = [
-  ["a DATE result over two paragraphs", p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`)],
+  ["a DATE result over two paragraphs", p("11111111", `${run("a")}${char("begin")}${instr(" DATE ")}${char("separate")}${run("2")}`) + p("33333333", `${run("0")}${char("end")}${run("z")}`), " DATE ", ">2</w:t>", "a0ztail"],
   [
     "a table of contents without links",
     p("11111111", `${char("begin")}${instr(" TOC \\o ")}${char("separate")}${run("Intro")}<w:r><w:tab/></w:r>${run("1")}`) + p("33333333", `${run("Body")}<w:r><w:tab/></w:r>${run("2")}${char("end")}`),
+    " TOC \\o ",
+    ">Intro</w:t>",
+    "IntroBody2tail",
+  ],
+  [
+    "a result ending in a line break and text",
+    p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:t>B</w:t><w:br/><w:t>C</w:t></w:r>`) + p("33333333", `${run("D")}${char("end")}`),
+    " INCLUDETEXT x ",
+    'w:type="textWrapping"/>',
+    "xABDtail",
+  ],
+  [
+    "a result ending in a comment's reference",
+    p("11111111", `${commentStart(1)}${run("x")}${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}${run("AB")}${commentEnd(1)}${commentRef(1)}`) + p("33333333", `${run("EF")}${char("end")}${run("y")}`),
+    " DOCVARIABLE v ",
+    ">AB</w:t>",
+    "xAEFytail",
   ],
 ] as const;
 /** The saved document's text runs, joined. */
 const savedText = (bytes: Uint8Array) => [...documentXml(bytes).matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(([, text]) => text).join("");
-test.each(continuedResults)("Backspace at the end of %s's first paragraph deletes one character and keeps the field", async (_, body) => {
-  const bytes = docx(body + tail);
+test.each(continuedResults)("Backspace at the end of %s's first paragraph deletes one character and keeps the field", async (_, body, code, __, text) => {
+  const bytes = matrixDocx("body", body);
   const session = await open(bytes);
   const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
   session.deleteAt({ story: "body", paraId: "11111111", offset: length }, "backward");
@@ -2575,17 +2594,17 @@ test.each(continuedResults)("Backspace at the end of %s's first paragraph delete
   expect(matrixUnits(reopened, "body")).toBe(editor);
   reopened.destroy();
   const xml = documentXml(saved);
-  expect(xml).toContain(body.includes("TOC") ? " TOC \\o " : " DATE ");
+  expect(xml).toContain(code);
   expect(xml).toContain('w:fldCharType="end"');
-  expect(savedText(saved)).toBe(body.includes("TOC") ? "IntroBody2tail" : "a0ztail");
+  expect(savedText(saved)).toBe(text);
 });
-test.each(continuedResults)("text typed at the end of %s's first paragraph shows where the save puts it", async (_, body) => {
-  const bytes = docx(body + tail);
+test.each(continuedResults)("text typed at the end of %s's first paragraph shows where the save puts it", async (_, body, __, kept) => {
+  const bytes = matrixDocx("body", body);
   const untouched = await open(bytes);
   const original = documentXml(await publish(bytes, untouched.encodeState()));
   untouched.destroy();
-  // Untouched, the save is the source's.
-  expect(original).toContain(body.includes("TOC") ? ">Intro</w:t>" : ">2</w:t>");
+  // Untouched, the save keeps the source's text.
+  expect(original).toContain(kept);
   const session = await open(bytes);
   const { length } = session.paragraphSpans("body").find((span) => span.paraId === "11111111")!;
   session.insertText({ story: "body", paraId: "11111111", offset: length }, "Q");
@@ -2767,9 +2786,10 @@ test.each([
   session.destroy();
 });
 
-// Round 4 review, finding 4: a field whose result continues keeps in its own data any run that is more than text and
-// tabs (a page break, a comment's reference), and its characters keep the formatting its whole result lent them, so an
-// untouched file saves as it did before the result's tail became text.
+// Round 4 review, finding 4: a field whose result continues keeps in its own data any run that is more than text, tabs,
+// line breaks and comment references (a page break), and its characters keep the formatting its whole result lent
+// them, so an untouched file saves as it did before the result's tail became text. Since 2026-10-04 a comment's
+// reference in the tail is tail text and loses its CommentReference style on save, as references elsewhere do.
 const untouchedTails: Record<string, [string, string]> = {
   "a page break in the tail": [
     p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:br w:type="page"/><w:t>B</w:t></w:r>`) + p("33333333", `${run("C")}${char("end")}`),
@@ -2786,7 +2806,7 @@ const untouchedTails: Record<string, [string, string]> = {
   ],
   "a comment ending with its reference in the tail": [
     p("11111111", `${commentStart(1)}${run("x")}${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}${run("AB")}${commentEnd(1)}${commentRef(1)}${run("CD")}`) + p("33333333", `${run("EF")}${char("end")}${run("y")}`),
-    '<w:p w14:paraId="11111111"><w:commentRangeStart w:id="1"/><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DOCVARIABLE v </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>AB</w:t></w:r><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="1"/></w:r><w:r><w:t>CD</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
+    '<w:p w14:paraId="11111111"><w:commentRangeStart w:id="1"/><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DOCVARIABLE v </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>AB</w:t></w:r><w:r><w:commentReference w:id="1"/></w:r><w:r><w:t>CD</w:t></w:r><w:commentRangeEnd w:id="1"/></w:p>',
   ],
 };
 test.each(Object.keys(untouchedTails))("an untouched file with %s saves as before", async (shape) => {
@@ -2798,6 +2818,36 @@ test.each(Object.keys(untouchedTails))("an untouched file with %s saves as befor
   expect(saved.replaceAll(' xml:space="preserve"', "").match(/<w:p w14:paraId="11111111">[\s\S]*?<\/w:p>/)![0]).toBe(expected);
 });
 
+// Decided 2026-10-04: a line break (w:br, w:cr) in the runs ending a continued result's first paragraph is tail text
+// too. An untouched save may regroup those runs and write the break's w:type="textWrapping": it equals the source once
+// runs are merged and breaks written alike.
+const lineBreakTails: Record<string, [string, string]> = {
+  "a line break inside the tail's last run": [
+    p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:t>B</w:t><w:br/><w:t>C</w:t></w:r>`) + p("33333333", `${run("D")}${char("end")}`),
+    '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:t>B</w:t><w:br/><w:t>C</w:t></w:r></w:p>',
+  ],
+  "a carriage return ending the tail": [
+    p("11111111", `${run("x")}${char("begin")}${instr(" INCLUDETEXT x ")}${char("separate")}${run("A")}<w:r><w:cr/></w:r>`) + p("33333333", `${run("D")}${char("end")}`),
+    '<w:p w14:paraId="11111111"><w:r><w:t>x</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> INCLUDETEXT x </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>A</w:t></w:r><w:r><w:br/></w:r></w:p>',
+  ],
+};
+/** A paragraph's XML with runs merged and breaks written alike. */
+const runsMerged = (xml: string) =>
+  xml
+    .replaceAll(' xml:space="preserve"', "")
+    .replaceAll('<w:br w:type="textWrapping"/>', "<w:br/>")
+    .replaceAll("<w:cr/>", "<w:br/>")
+    .replaceAll("</w:r><w:r>", "")
+    .replaceAll("</w:t><w:t>", "");
+test.each(Object.keys(lineBreakTails))("an untouched file with %s saves its runs as before", async (shape) => {
+  const [xml, expected] = lineBreakTails[shape]!;
+  const bytes = matrixDocx("body", xml);
+  const session = await open(bytes);
+  const saved = documentXml(await publish(bytes, session.encodeState()));
+  session.destroy();
+  expect(runsMerged(saved.match(/<w:p w14:paraId="11111111">[\s\S]*?<\/w:p>/)![0])).toBe(runsMerged(expected));
+});
+
 // Round 4 review, finding 5: the projector (documentToYrs) reads a continued field's result tail as the engine seed
 // does, its field data included, in every story.
 test.each(
@@ -2807,6 +2857,7 @@ test.each(
       ["a link then own text", p("11111111", `${run("a ")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${link(run("AA"))}${run("yy")}`) + p("33333333", `${run("zz")}${char("end")}${run(" b")}`)],
       ...Object.entries(untouchedTails).map(([name, [xml]]) => [name, xml] as const),
       ["a bold tab first in the tail", p("11111111", `${char("begin")}${instr(" DOCVARIABLE v ")}${char("separate")}<w:r><w:rPr><w:b/></w:rPr><w:tab/></w:r>${run("A")}`) + p("33333333", `${run("D")}${char("end")}`)],
+      ...Object.entries(lineBreakTails).map(([name, [xml]]) => [name, xml] as const),
     ].map(([name, xml]) => [where, name, xml] as const)
   )
 )("%s | %s: the projector and the engine seed agree", async (where, _, xml) => {

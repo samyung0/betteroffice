@@ -23,6 +23,8 @@ import {
   p,
   ref,
   run,
+  S,
+  E,
   sdt,
   type Edit,
   type Row,
@@ -268,6 +270,13 @@ const CODE_CONTINUES =
 const RESULT_CONTINUES =
   p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DATE ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("2")}`) +
   p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+// Decided 2026-10-04: a line break or a comment's reference ending the first paragraph's result is tail text too.
+const RESULT_CONTINUES_BREAK =
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" INCLUDETEXT x ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("2")}<w:r><w:t>B</w:t><w:br/><w:t>C</w:t></w:r>`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+const RESULT_CONTINUES_REF =
+  p(P, `${S(1)}${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" DOCVARIABLE v ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("AB")}${E(1)}${ref(1)}`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
 // Review of ee62d514, finding 1: the link left in the first paragraph deleted after Enter.
 const deleteLeftLink: Edit = (s, st) => {
   const at = locate(s, st, "AA");
@@ -313,6 +322,12 @@ function rows(): Row[] {
       void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
     push(where, RESULT_CONTINUES, "field result continued | type at its paragraph's end", null, (s, st) =>
       void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+    for (const [name, xml] of [["line break", RESULT_CONTINUES_BREAK], ["comment reference", RESULT_CONTINUES_REF]] as const) {
+      push(where, xml, `field result continued, ${name} in its tail | type at its paragraph's end`, null, (s, st) =>
+        void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q"));
+      push(where, xml, `field result continued, ${name} in its tail | Backspace at its paragraph's end`, null, (s, st) =>
+        void s.deleteAt({ story: st, paraId: P, offset: len(s, st, P) }, "backward"));
+    }
     push(where, SPLITS["[REF|[PAGE|7]L(AA)yy]"]!, "[REF|[PAGE|7]L(AA)yy] | Enter in 1st, Backspace the link left", null, deleteLeftLink);
   }
   for (const where of ["body", "cell", "header"] as Where[])

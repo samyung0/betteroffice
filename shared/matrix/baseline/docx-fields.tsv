@@ -1,5 +1,7 @@
-# docx-fields: 1187 rows, ids 14c9752505884c47; rows not listed are exact
+# docx-fields: 1211 rows, ids 85a98edf02a04dc6; rows not listed are exact
 body | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+body | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
+body | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 body | join nested continued field, undo | setup<cap<edit	refused
 body | pj:cf>fs | type after field | edit<cap<tail	refused
 body | pj:cf>link+ins | Enter before field | cap<edit	exact+moved
@@ -9,8 +11,12 @@ body | toc | retype 1st entry's last letter | cap<edit	refused
 body | toc | type at 1st entry end | cap<edit	refused
 body | toc | type in 1st entry | cap<edit	refused
 cell | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+cell | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
+cell | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 cell | join nested continued field, undo | setup<cap<edit	refused
 header | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
+header | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
+header | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 header | join nested continued field, undo | setup<cap<edit	refused
 header | pj:cf>fs | type after field | edit<cap<tail	refused
 header | pj:cf>link+ins | Enter before field | cap<edit	exact+moved

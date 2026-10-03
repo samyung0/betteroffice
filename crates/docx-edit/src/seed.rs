@@ -1600,13 +1600,14 @@ fn inline_to_units(
 }
 
 /// A field whose result continues into a later paragraph, and the plain runs
-/// (text, and tabs and positional tabs without formatting of their own) that end its result in
-/// this one, after its projected children. They seed as ordinary text after
-/// the field's embed, as the result in the later paragraphs does and as typing
-/// at this paragraph's end adds to it, so the field no longer shows or stores
-/// them itself (decided 2026-10-02). A run holding more, such as a break, a
-/// comment's reference or a formatted tab, stays in the field with those
-/// before it, so an untouched file saves as before.
+/// (text, line breaks, comment references, and tabs or positional tabs without
+/// formatting of their own) that end its result in this one, after its projected children.
+/// They seed as ordinary text after the field's embed, as the result in the
+/// later paragraphs does and as typing at this paragraph's end adds to it, so
+/// the field no longer shows or stores them itself (decided 2026-10-02, line
+/// breaks and references 2026-10-04). A run holding more, such as a page or
+/// column break or a formatted tab, stays in the field with those before it,
+/// so an untouched file saves as before.
 fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
     let continuation = field(Some(value), "continuation");
     let continued = string(field(Some(value), "type")) == Some("complexField")
@@ -1615,24 +1616,24 @@ fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
     let inline = array(field(field(Some(value), "structuredResult"), "inline"));
     // The save drops a tab's own formatting (decided 2026-10-03).
     let plain = |node: &&Value| {
-        let kinds: Vec<_> = array(field(Some(node), "content"))
-            .iter()
-            .map(|content| string(field(Some(content), "type")))
-            .collect();
+        let contents = array(field(Some(node), "content"));
         let formatted = field(Some(node), "formatting").is_some_and(|formatting| {
             !formatting.is_null()
                 && formatting
                     .as_object()
                     .is_none_or(|entries| !entries.is_empty())
         });
+        let tab =
+            |content: &Value| matches!(string(field(Some(content), "type")), Some("tab" | "ptab"));
         string(field(Some(node), "type")) == Some("run")
-            && kinds
+            && contents
                 .iter()
-                .all(|kind| matches!(kind, Some("text" | "tab" | "ptab")))
-            && !(formatted
-                && kinds
-                    .iter()
-                    .any(|kind| matches!(kind, Some("tab" | "ptab"))))
+                .all(|content| match string(field(Some(content), "type")) {
+                    Some("text" | "tab" | "ptab" | "commentReference") => true,
+                    Some("break") => flow_break_type(content).is_none(),
+                    _ => false,
+                })
+            && !(formatted && contents.iter().any(tab))
     };
     let tail = if continued {
         inline.iter().rev().take_while(plain).count()
