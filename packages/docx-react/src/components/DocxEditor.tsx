@@ -22,7 +22,7 @@ import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
-  rasterizeDisplayListPages,
+  rasterizeDisplayPage,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
@@ -420,7 +420,14 @@ export interface DocxEditorRef {
    * Every page drawn to a canvas, with its size in CSS px, for a host that
    * prints itself (a sandboxed frame cannot open the print dialog).
    */
-  renderPages: () => Promise<{ canvas: HTMLCanvasElement; width: number; height: number }[]>;
+  /**
+   * Draws the print pages one at a time, handing each to `each` (which encodes
+   * it) before the canvas is released, so a long document never holds every
+   * page's bitmap at once.
+   */
+  renderPages: <T>(
+    each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
+  ) => Promise<T[]>;
   /** Load a pre-parsed document programmatically */
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
@@ -1379,15 +1386,26 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
   const { displayList: printList, resolveImage: printImages } = canvasRenderer;
-  const renderPages = useCallback(async () => {
-    if (!printList) return [];
-    const canvases = await rasterizeDisplayListPages(printList, { resolveImage: printImages });
-    return canvases.map((canvas, index) => ({
-      canvas,
-      width: printList.pages[index].width,
-      height: printList.pages[index].height,
-    }));
-  }, [printList, printImages]);
+  const renderPages = useCallback(
+    async <T,>(
+      each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
+    ) => {
+      if (!printList) return [];
+      const results: T[] = [];
+      for (const page of printList.pages) {
+        const canvas = await rasterizeDisplayPage(page, { resolveImage: printImages });
+        try {
+          results.push(await each({ canvas, width: page.width, height: page.height }));
+        } finally {
+          // Frees the bitmap now rather than at the next collection.
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      }
+      return results;
+    },
+    [printList, printImages]
+  );
 
   // Expose ref methods
   useDocxEditorRefApi({

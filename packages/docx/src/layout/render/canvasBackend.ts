@@ -168,6 +168,24 @@ export function sizeCanvasForPage(
   ctx.scale(backingScale, backingScale);
 }
 
+/**
+ * Raster one display page on a fresh canvas, for hosts that encode and release
+ * each page before drawing the next (printing a long document). Throws when the
+ * browser gives no 2D context, so a page is never silently left out.
+ */
+export async function rasterizeDisplayPage(
+  page: DisplayPage,
+  options: DrawPageOptions = {},
+  devicePixelRatio: number = 2
+): Promise<HTMLCanvasElement> {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('The page could not be drawn');
+  sizeCanvasForPage(canvas, ctx, page, devicePixelRatio);
+  await drawDisplayPage(ctx, page, options);
+  return canvas;
+}
+
 /** Raster every display page without requiring a mounted renderer surface. */
 export async function rasterizeDisplayListPages(
   list: DisplayList,

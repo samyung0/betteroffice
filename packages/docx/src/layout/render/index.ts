@@ -52,6 +52,7 @@ export {
   drawPrimitive,
   presentDisplayPageBackBuffer,
   presentOffscreenPageBackBuffer,
+  rasterizeDisplayPage,
   rasterizeDisplayPageToBackBuffer,
   rasterizeDisplayListPages,
   sizeCanvasForPage,
