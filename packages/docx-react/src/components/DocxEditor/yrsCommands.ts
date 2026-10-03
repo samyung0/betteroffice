@@ -7,6 +7,7 @@ import type {
   YrsParagraphAttrs,
   YrsSession,
   YrsStoryRange,
+  YrsStorySegment,
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
@@ -226,49 +227,67 @@ export interface YrsSelectionText {
 }
 
 /**
+ * Story offsets where continued fields end. A paragraph carries its bookmarks,
+ * a field's end marker among them, as offsets from its start.
+ */
+function continuedFieldEnds(segments: readonly YrsStorySegment[]): Map<unknown, number> {
+  const ends = new Map<unknown, number>();
+  let paragraphStart = 0;
+  let offset = 0;
+  for (const segment of segments) {
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (segment.kind !== 'pilcrow') continue;
+    const marks = segment.properties.bookmarks;
+    for (const mark of (Array.isArray(marks) ? marks : []) as Array<Record<string, unknown>>) {
+      if (mark?.kind === 'fieldend' && typeof mark.offset === 'number') {
+        ends.set(mark.id, paragraphStart + mark.offset);
+      }
+    }
+    paragraphStart = offset;
+  }
+  return ends;
+}
+
+/**
  * The current Yrs selection as plain text: paragraph ends and soft line breaks
- * become newlines, a field its shown text, and an invisible bookmark nothing.
- * A selection holding anything else plain text cannot carry (a table, image,
- * field, note reference, content control, page break…) is not `plain`.
+ * become newlines, and a field its shown text. A selection holding anything
+ * else plain text cannot carry (a table, image, field, note reference, content
+ * control, page break…) is not `plain`. Bookmarks are not in the text, so a
+ * selection over one stays plain.
  */
 export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   const range = currentYrsSelectionRange(session);
   if (!range) return { text: '', plain: true };
   const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
   const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
+  const segments = session.storySegments(range.story);
+  const fieldEnds = continuedFieldEnds(segments);
   let text = '';
   let plain = true;
   let offset = 0;
-  // Fields whose result runs on past their embed as ordinary text, into later
-  // paragraphs (a table of contents): open from the embed to their end marker.
-  const continued = new Set<unknown>();
-  for (const segment of session.storySegments(range.story)) {
+  // A continued field's result runs on past its embed as ordinary text, into
+  // later paragraphs (a table of contents), up to its end marker. With no end
+  // marker it is taken to end with the embed's paragraph.
+  let fieldUntil = -1;
+  let inUnmatchedField = false;
+  for (const segment of segments) {
     if (offset >= end) break;
     const segmentStart = offset;
     offset += segment.kind === 'text' ? segment.text.length : 1;
-    if (segment.kind === 'embed') {
-      if (segment.embedKind === 'field' && segment.payload.continuationId != null) {
-        continued.add(segment.payload.continuationId);
-      } else if (segment.embedKind === 'bookmark' && segment.payload.kind === 'fieldend') {
-        continued.delete(segment.payload.id);
-      }
+    if (segment.kind === 'pilcrow') inUnmatchedField = false;
+    if (segment.kind === 'embed' && segment.embedKind === 'field' && segment.payload.continuationId != null) {
+      const until = fieldEnds.get(segment.payload.continuationId);
+      if (until === undefined) inUnmatchedField = true;
+      else fieldUntil = Math.max(fieldUntil, until);
     }
     if (offset <= start) continue;
     if (segment.kind === 'text') {
-      text += segment.text.slice(
-        Math.max(start, segmentStart) - segmentStart,
-        Math.min(end, offset) - segmentStart
-      );
+      const from = Math.max(start, segmentStart);
+      text += segment.text.slice(from - segmentStart, Math.min(end, offset) - segmentStart);
       // A complex field's result shown as its own text is still the field's.
-      if (segment.attributes.fieldResult || continued.size > 0) plain = false;
+      if (segment.attributes.fieldResult || inUnmatchedField || from < fieldUntil) plain = false;
     } else if (segment.kind === 'pilcrow' || segment.embedKind === 'break') {
       text += '\n';
-    } else if (
-      segment.embedKind === 'bookmark' &&
-      (segment.payload.kind === 'start' || segment.payload.kind === 'end')
-    ) {
-      // An invisible bookmark goes with its text, as Backspace takes it. (A
-      // continued field's markers are bookmarks too, but of the field.)
     } else {
       plain = false;
       if (segment.embedKind === 'field' && typeof segment.payload.displayText === 'string') {

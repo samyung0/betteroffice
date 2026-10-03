@@ -401,15 +401,15 @@ test('cut over a heading holding a bookmark deletes its text', async () => {
   session.applyParagraphStyle(whole, 'Heading1');
   // [_Toc1 start]Seed[_Toc1 end], as Word marks a heading a table of contents links to.
   session.applyRawOps('body', [
-    { op: 'insertEmbed', index: 4, kind: 'bookmark', payload: { kind: 'end', id: 0 } },
-    { op: 'insertEmbed', index: 0, kind: 'bookmark', payload: { kind: 'start', id: 0, name: '_Toc1' } },
+    { op: 'setBookmark', index: 0, data: { kind: 'start', id: 0, name: '_Toc1' } },
+    { op: 'setBookmark', index: 4, data: { kind: 'end', id: 0 } },
   ]);
-  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 0 }, { story: 'body', paraId: seed.paraId, offset: 6 }));
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 0 }, { story: 'body', paraId: seed.paraId, offset: 4 }));
   const { written, clipboardData } = clipboardSpy();
   fireEvent.cut(view.getByTestId('yrs-input'), { clipboardData });
   await flush(input);
   expect(written).toEqual({ 'text/plain': 'Seed' });
-  expect(session.paragraphs('body')[0].text.replace(/￼/g, '')).toBe('');
+  expect(session.paragraphs('body')[0].text).toBe('');
 });
 
 test("cut inside a continued field's result only copies, and after its end deletes", async () => {
@@ -425,7 +425,7 @@ test("cut inside a continued field's result only copies, and after its end delet
   const { secondParaId: third } = session.splitParagraph({ story: 'body', paraId: second, offset: 8 });
   session.insertText({ story: 'body', paraId: third, offset: 0 }, 'end after');
   session.applyRawOps('body', [
-    { op: 'insertEmbed', index: session.locateParagraph('body', third).start + 3, kind: 'bookmark', payload: { kind: 'fieldend', id: 'toc' } },
+    { op: 'setBookmark', index: session.locateParagraph('body', third).start + 3, data: { kind: 'fieldend', id: 'toc' } },
   ]);
   const before = session.storySegments('body');
   const textarea = view.getByTestId('yrs-input');
@@ -439,6 +439,27 @@ test("cut inside a continued field's result only copies, and after its end delet
 
   expect(await cut(second, 0, 8)).toBe('line two');
   expect(session.storySegments('body')).toEqual(before);
-  expect(await cut(third, 5, 10)).toBe('after');
-  expect(session.paragraphs('body')[2].text.replace(/￼/g, '')).toBe('end ');
+  expect(await cut(third, 4, 9)).toBe('after');
+  expect(session.paragraphs('body')[2].text).toBe('end ');
+});
+
+test('a continued field with no end marker is the field only to its paragraph end', async () => {
+  const { session, input, view } = await mount();
+  // [TOC field]Seed¶line two¶, the end marker lost (a malformed file).
+  const [first] = session.paragraphs('body');
+  session.applyRawOps('body', [
+    { op: 'insertEmbed', index: 0, kind: 'field', payload: { fieldType: 'TOC', instruction: ' TOC ', displayText: '', continuationId: 'toc' } },
+  ]);
+  const { secondParaId: second } = session.splitParagraph({ story: 'body', paraId: first.paraId, offset: 5 });
+  session.insertText({ story: 'body', paraId: second, offset: 0 }, 'line two');
+  const textarea = view.getByTestId('yrs-input');
+  const cut = async (paraId: string, from: number, to: number) => {
+    act(() => session.setSelection({ story: 'body', paraId, offset: from }, { story: 'body', paraId, offset: to }));
+    fireEvent.cut(textarea, { clipboardData: clipboardSpy().clipboardData });
+    await flush(input);
+    return session.paragraphs('body').map((p) => p.text.replace(/￼/g, ''));
+  };
+
+  expect(await cut(first.paraId, 1, 5)).toEqual(['Seed', 'line two']);
+  expect(await cut(second, 0, 5)).toEqual(['Seed', 'two']);
 });
