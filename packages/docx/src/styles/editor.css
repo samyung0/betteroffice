@@ -1292,9 +1292,12 @@
   width: var(--office-menu-icon-size) !important;
   height: var(--office-menu-icon-size) !important;
 }
+/* Style names stay plain: no size, weight, slant or font of the style. */
 [data-office-menus='host'] .docx-style-preview {
-  font-size: inherit !important;
-  line-height: inherit !important;
+  font: inherit !important;
+  text-decoration: none !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
 }
 /* The border widths draw in the text colour, so they show in a dark theme. */
 [data-office-menus='host'] .docx-border-sample {
@@ -1331,6 +1334,10 @@
 }
 [data-office-menus='host'] .docx-popover--icons > div {
   gap: 4px !important;
+}
+/* Alignment stacks its buttons, as the note toolbar's. */
+[data-office-menus='host'] .docx-popover--stack > div {
+  flex-direction: column;
 }
 [data-office-menus='host'] .docx-popover-icon-item {
   width: var(--office-menu-button-size) !important;

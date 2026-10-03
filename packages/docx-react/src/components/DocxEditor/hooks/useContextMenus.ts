@@ -1,9 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ImageLayoutTarget } from '@betteroffice/docx/docx';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
-import { en as defaultLocale } from '@betteroffice/docx-i18n';
-import { useTranslation } from '../../../i18n';
-import type { Translations } from '@betteroffice/docx-i18n';
+import { createT, deepMerge, en as defaultLocale } from '@betteroffice/docx-i18n';
+import type { LocaleStrings, Translations } from '@betteroffice/docx-i18n';
 import { useImageContextMenu } from '../../ImageContextMenu';
 import { type TextContextAction, type TextContextMenuItem } from '../../TextContextMenu';
 import {
@@ -66,7 +65,16 @@ export function useContextMenus({
   partEditOpen: boolean;
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void;
 }) {
-  const { t } = useTranslation();
+  // DocxEditor's body sits outside its LocaleProvider, so the menus take the
+  // strings from `i18n` itself.
+  const t = useMemo(
+    () =>
+      createT(
+        deepMerge(defaultLocale, i18n) as LocaleStrings,
+        typeof i18n?._lang === 'string' ? i18n._lang : 'en'
+      ),
+    [i18n]
+  );
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     isOpen: false,
     position: { x: 0, y: 0 },
@@ -255,36 +263,36 @@ export function useContextMenus({
     if (contextMenu.hasSelection && !partEditOpen) {
       items.push({
         action: 'addComment',
-        label: 'Comment',
+        label: t('hostMenus.comment'),
         dividerAfter: !contextMenu.cursorInTable,
       });
     }
     if (contextMenu.cursorInTable) {
       items.push(
-        { action: 'addRowAbove', label: 'Insert row above' },
-        { action: 'addRowBelow', label: 'Insert row below' },
-        { action: 'deleteRow', label: 'Delete row', dividerAfter: true },
-        { action: 'addColumnLeft', label: 'Insert column left' },
-        { action: 'addColumnRight', label: 'Insert column right' },
-        { action: 'deleteColumn', label: 'Delete column' },
+        { action: 'addRowAbove', label: t('table.insertRowAbove') },
+        { action: 'addRowBelow', label: t('table.insertRowBelow') },
+        { action: 'deleteRow', label: t('table.deleteRow'), dividerAfter: true },
+        { action: 'addColumnLeft', label: t('table.insertColumnLeft') },
+        { action: 'addColumnRight', label: t('table.insertColumnRight') },
+        { action: 'deleteColumn', label: t('table.deleteColumn') },
         {
           action: 'mergeCells',
-          label: i18n?.table?.mergeCells ?? defaultLocale.table.mergeCells,
+          label: t('table.mergeCells'),
           disabled: !contextMenu.tableContext?.hasMultiCellSelection,
         },
         {
           action: 'splitCell',
-          label: i18n?.table?.splitCell ?? defaultLocale.table.splitCell,
+          label: t('table.splitCell'),
           disabled: !contextMenu.tableContext?.canSplitCell,
           dividerAfter: true,
         },
         {
           action: 'selectTable',
-          label: i18n?.table?.selectTable ?? defaultLocale.table.selectTable,
+          label: t('table.selectTable'),
         },
         {
           action: 'deleteTable',
-          label: i18n?.table?.deleteTable ?? defaultLocale.table.deleteTable,
+          label: t('table.deleteTable'),
           dividerAfter: true,
         }
       );

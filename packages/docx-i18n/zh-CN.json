@@ -118,7 +118,13 @@
     "subtitle": "副标题",
     "heading1": "标题 1",
     "heading2": "标题 2",
-    "heading3": "标题 3"
+    "heading3": "标题 3",
+    "heading4": "标题 4",
+    "heading5": "标题 5",
+    "heading6": "标题 6",
+    "heading7": "标题 7",
+    "heading8": "标题 8",
+    "heading9": "标题 9"
   },
   "font": {
     "selectAriaLabel": "选择字体",

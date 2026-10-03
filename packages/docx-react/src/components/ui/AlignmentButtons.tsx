@@ -198,7 +198,7 @@ export function AlignmentButtons({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
-          className="docx-popover docx-popover--icons"
+          className="docx-popover docx-popover--icons docx-popover--stack"
           data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,

@@ -115,6 +115,22 @@ const DEFAULT_STYLES: StyleOption[] = [
   },
 ];
 
+/**
+ * Word's built-in paragraph styles by their `w:name` ("heading 4"), which the
+ * picker shows as Word does ("Heading 4"). The document keeps its names.
+ */
+const BUILT_IN_NAME_KEYS: Record<string, TranslationKey> = {
+  normal: 'styles.normalText',
+  title: 'styles.title',
+  subtitle: 'styles.subtitle',
+  ...Object.fromEntries(
+    [1, 2, 3, 4, 5, 6, 7, 8, 9].map((level) => [
+      `heading ${level}`,
+      `styles.heading${level}` as TranslationKey,
+    ])
+  ),
+};
+
 /** The paragraph styles the picker offers, also listed by the host menus. */
 export function paragraphStyleOptions(styles: Style[] | undefined): StyleOption[] {
   const resolved = resolveParagraphStyleOptions(styles);
@@ -122,7 +138,9 @@ export function paragraphStyleOptions(styles: Style[] | undefined): StyleOption[
   return resolved.map((o) => ({
     ...o,
     type: 'paragraph' as StyleType,
-    nameKey: DEFAULT_STYLES.find((d) => d.styleId === o.styleId)?.nameKey,
+    nameKey:
+      BUILT_IN_NAME_KEYS[o.name.toLowerCase()] ??
+      DEFAULT_STYLES.find((d) => d.styleId === o.styleId)?.nameKey,
   }));
 }
 

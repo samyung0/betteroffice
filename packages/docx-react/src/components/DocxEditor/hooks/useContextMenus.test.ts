@@ -46,6 +46,15 @@ describe('selection context menu', () => {
     expect(result.current.contextMenuItems.map((item) => item.action)).toContain('addComment');
   });
 
+  test("labels the menu from the editor's i18n, which its LocaleProvider does not reach", () => {
+    const i18n = { contextMenu: { selectAll: 'Tout sélectionner' } };
+    const { result } = renderHook(() => useContextMenus({ ...options(false), i18n }));
+    openSelectionMenu(result);
+
+    const selectAll = result.current.contextMenuItems.find((item) => item.action === 'selectAll');
+    expect(selectAll?.label).toBe('Tout sélectionner');
+  });
+
   test('does not offer Comment for a selection in an open note', () => {
     const { result } = renderHook(() => useContextMenus(options(true)));
     openSelectionMenu(result);
