@@ -1337,7 +1337,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!enabled || !session) return;
     ensureSelection();
     emitSelection(false);
-    if (!readOnly) requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }));
+    // Not when the document lacks focus (an embedding page, say a menu open in
+    // the host): focusing the frame would take the focus from that page.
+    if (!readOnly)
+      requestAnimationFrame(() => {
+        if (document.hasFocus()) textareaRef.current?.focus({ preventScroll: true });
+      });
   }, [emitSelection, enabled, ensureSelection, readOnly, session]);
 
   useEffect(() => {
