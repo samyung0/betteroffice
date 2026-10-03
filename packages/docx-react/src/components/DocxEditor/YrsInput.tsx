@@ -1102,10 +1102,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
-  // What a copy or cut takes: null when the selection has no text or while
-  // composing.
+  // A cut or a menu delete is its own undo step, apart from typing around it.
+  const deleteSelectionStep = useCallback((): boolean => {
+    if (!session) return false;
+    session.addUndoBoundary();
+    const deleted = deleteSelected() !== null;
+    session.addUndoBoundary();
+    return deleted;
+  }, [deleteSelected, session]);
+
+  // What a copy or cut takes: null when the selection has no text, while
+  // composing, or while queued input could still move the selection.
   const clipboardSelection = useCallback((): YrsSelectionText | null => {
     if (!session || composingRef.current || compositionPendingRef.current) return null;
+    if (inputOperationQueueRef.current?.hasPending()) return null;
     const selected = yrsSelectionText(session);
     return selected.text ? selected : null;
   }, [session]);
@@ -1125,19 +1135,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCut = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      // Queued input would move the selection after the text was copied.
-      if (inputOperationQueueRef.current?.hasPending()) return;
       const selected = writeSelectionToClipboard(event);
       // Read-only, or a selection plain text cannot carry, only copies.
       if (!selected?.plain || readOnly || pointerSelectionBlockedRef.current) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       enqueueInputOperation(() => {
-        if (deleteSelected()) finishMutation();
+        if (deleteSelectionStep()) finishMutation();
       });
     },
     [
-      deleteSelected,
+      deleteSelectionStep,
       dispatchCaretInput,
       enqueueInputOperation,
       finishMutation,
@@ -1267,7 +1275,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && !pointerSelectionBlockedRef.current && deleteSelected()) {
+        if (!readOnly && !pointerSelectionBlockedRef.current && deleteSelectionStep()) {
           advanceInteractionEpoch();
           finishMutation();
         }
@@ -1287,7 +1295,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       finishMutation,
       flushPendingInput,
       insertText,
-      deleteSelected,
+      deleteSelectionStep,
       readOnly,
       selectAll,
       session,

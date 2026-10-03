@@ -280,28 +280,28 @@ async function flush(input: { current: YrsInputRef | null }) {
   await act(async () => { await input.current!.flushPendingInput(); });
 }
 
+// Seed¶Next, built with no undo boundary, as typing leaves it.
 async function mountAcrossParagraphs() {
   const mounted = await mount();
   const { session } = mounted;
   const [seed] = session.paragraphs('body');
-  const { secondParaId } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
-  session.insertText({ story: 'body', paraId: secondParaId, offset: 0 }, 'Next');
-  session.addUndoBoundary();
+  const { secondParaId: next } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
+  session.insertText({ story: 'body', paraId: next, offset: 0 }, 'Next');
   // Se[ed¶Ne]xt
-  act(() =>
-    session.setSelection(
-      { story: 'body', paraId: seed.paraId, offset: 2 },
-      { story: 'body', paraId: secondParaId, offset: 2 }
-    )
-  );
-  const written: Record<string, string> = {};
-  const clipboardData = { setData: (type: string, value: string) => { written[type] = value; } };
+  const select = () =>
+    act(() =>
+      session.setSelection(
+        { story: 'body', paraId: seed.paraId, offset: 2 },
+        { story: 'body', paraId: next, offset: 2 }
+      )
+    );
   const texts = () => session.paragraphs('body').map((p) => p.text);
-  return { ...mounted, textarea: mounted.view.getByTestId('yrs-input'), clipboardData, written, texts };
+  return { ...mounted, ...clipboardSpy(), next, select, texts, textarea: mounted.view.getByTestId('yrs-input') };
 }
 
 test('copy writes the selection as plain text with paragraph newlines; read-only cut only copies', async () => {
-  const { textarea, clipboardData, written, texts, setReadOnly } = await mountAcrossParagraphs();
+  const { textarea, clipboardData, written, select, texts, setReadOnly } = await mountAcrossParagraphs();
+  select();
   expect(fireEvent.copy(textarea, { clipboardData })).toBe(false);
   expect(written).toEqual({ 'text/plain': 'ed\nNe' });
 
@@ -312,16 +312,48 @@ test('copy writes the selection as plain text with paragraph newlines; read-only
   expect(texts()).toEqual(['Seed', 'Next']);
 });
 
-test('cut copies and deletes the selection as one undo step', async () => {
-  const { input, textarea, clipboardData, written, texts } = await mountAcrossParagraphs();
+test('cut is its own undo step, apart from the typing on either side', async () => {
+  const { session, input, textarea, clipboardData, written, next, select, texts } = await mountAcrossParagraphs();
+  act(() => session.setSelection({ story: 'body', paraId: next, offset: 4 }));
+  act(() => input.current!.insertText('!'));
+  await flush(input);
+  select();
   fireEvent.cut(textarea, { clipboardData });
-  await act(async () => { await input.current!.flushPendingInput(); });
+  await flush(input);
   expect(written).toEqual({ 'text/plain': 'ed\nNe' });
-  expect(texts()).toEqual(['Sext']);
+  expect(texts()).toEqual(['Sext!']);
+  act(() => input.current!.insertText('X'));
+  await flush(input);
 
-  fireEvent.keyDown(textarea, { key: 'z', metaKey: true });
-  await act(async () => { await input.current!.flushPendingInput(); });
-  expect(texts()).toEqual(['Seed', 'Next']);
+  const undo = async () => {
+    fireEvent.keyDown(textarea, { key: 'z', metaKey: true });
+    await flush(input);
+  };
+  await undo();
+  expect(texts()).toEqual(['Sext!']);
+  await undo();
+  expect(texts()).toEqual(['Seed', 'Next!']);
+});
+
+test('copy and cut take nothing while earlier input is still being applied', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const { session, input, view } = await mount(async () => { await blocked; return null; });
+  const textarea = view.getByTestId('yrs-input');
+  const { written, clipboardData } = clipboardSpy();
+  act(() => input.current!.insertText('!'));
+  await Promise.resolve(); // the typing is now waiting on the resident engine
+  const [seed] = session.paragraphs('body');
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 1 }, { story: 'body', paraId: seed.paraId, offset: 3 }));
+  expect(fireEvent.copy(textarea, { clipboardData })).toBe(true);
+  expect(fireEvent.cut(textarea, { clipboardData })).toBe(true);
+  expect(written).toEqual({});
+  await act(async () => { release(); await input.current!.flushPendingInput(); });
+  // The typing landed at its own caret and left the selection after it.
+  expect(session.paragraphs('body')[0].text).toBe('Seed!');
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 1 }, { story: 'body', paraId: seed.paraId, offset: 3 }));
+  expect(fireEvent.copy(textarea, { clipboardData })).toBe(false);
+  expect(written).toEqual({ 'text/plain': 'ee' });
 });
 
 // S[e<embed>e]d: plain text carries a soft line break, so a cut over one
