@@ -13,8 +13,8 @@ use crate::format::{FIELD_RESULT, HYPERLINK};
 use crate::op::{OpError, OpResult};
 use crate::ops::{Chunk, ChunkKind, snapshot};
 use crate::seed::{
-    JsonObject, PackageContext, any_from_value, field_units, payload, run_units, shown_runs,
-    yrs_attrs,
+    JsonObject, PackageContext, any_from_value, field_units, own_shown_runs, payload, run_units,
+    shown_runs, yrs_attrs,
 };
 use crate::{KIND_KEY, RawOp, map_string};
 
@@ -497,7 +497,7 @@ pub(crate) fn split_field(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let shown = shown_runs(
+        let shown = own_shown_runs(
             &inline
                 .iter()
                 .enumerate()
@@ -561,7 +561,7 @@ pub(crate) fn split_field(
     if !runs.is_empty() {
         // The moved runs read as children the field lost, so its save leaves
         // them out of the result; it shows what stays.
-        let shown = shown_runs(
+        let shown = own_shown_runs(
             &inline
                 .iter()
                 .enumerate()
@@ -798,6 +798,21 @@ pub(crate) fn rejoin_fields(
             })
             .unwrap_or(false)
     };
+    // A moved run that seeds nothing (one holding only markup the parser
+    // drops, such as w:ptab) has no place in the editor: it takes no slot and
+    // goes back with the others.
+    let silent = |index: &i64| {
+        !projected_run(*index)
+            && inline
+                .get(*index as usize)
+                .is_some_and(|node| node["type"] == "run" && run_units(node, None, None).is_empty())
+    };
+    let next_slot = |from: i64| {
+        recorded
+            .iter()
+            .copied()
+            .find(|next| *next >= from && !silent(next))
+    };
     let mut slot = units
         .last()
         .map(|(chunk, index, _)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
@@ -832,7 +847,7 @@ pub(crate) fn rejoin_fields(
             let mut taken = Vec::new();
             let mut lengths = Vec::new();
             while !left.is_empty() {
-                let next = recorded.iter().copied().find(|next| *next > last);
+                let next = next_slot(last + 1);
                 let node = next
                     .and_then(|next| inline.get(next as usize).cloned())
                     .unwrap_or(Value::Null);
@@ -874,18 +889,19 @@ pub(crate) fn rejoin_fields(
         }
         let index = match &slot {
             Some((index, previous)) if *previous == link => *index,
-            Some((index, _)) => match recorded.iter().find(|next| **next > *index) {
-                Some(next) => *next,
+            Some((index, _)) => match next_slot(index + 1) {
+                Some(next) => next,
                 None => return Ok(()),
             },
-            None => match recorded.iter().find(|next| **next >= 0) {
-                Some(next) => *next,
+            None => match next_slot(0) {
+                Some(next) => next,
                 None => return Ok(()),
             },
         };
         slot = Some((index, link));
         units.push((chunk, index, len));
     }
+    dropped.extend(recorded.iter().filter(|index| silent(index)));
     let target = tail.unwrap_or(target);
     if tail.is_some()
         && folded.is_empty()
@@ -905,9 +921,9 @@ pub(crate) fn rejoin_fields(
         }
     }
     let mut overrides: Vec<(String, Any)> = Vec::new();
-    if !folded.is_empty() {
+    if !dropped.is_empty() {
         recorded.retain(|index| !dropped.contains(index));
-        let shown = shown_runs(
+        let shown = own_shown_runs(
             &inline
                 .iter()
                 .enumerate()

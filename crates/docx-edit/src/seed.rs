@@ -1722,24 +1722,15 @@ fn field_to_units(
         }
         units.extend(projected);
     }
-    // The field shows the result its projected children leave: runs, and a
-    // kept change's or content control's text.
     let mut visible = value.clone();
-    visible["fieldResult"] = Value::Array(
-        result
+    visible["fieldResult"] = Value::Array(own_shown_runs(
+        &result
             .iter()
             .enumerate()
-            .filter(|(index, child)| {
-                !projected_runs.contains(&(*index as isize))
-                    && matches!(
-                        string(field(Some(child), "type")),
-                        Some("run" | "rawXml" | "inlineSdt")
-                    )
-            })
-            .map(|(_, child)| child)
-            .flat_map(|child| shown_runs(std::slice::from_ref(child)))
-            .collect(),
-    );
+            .filter(|(index, _)| !projected_runs.contains(&(*index as isize)))
+            .map(|(_, child)| child.clone())
+            .collect::<Vec<_>>(),
+    ));
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
     payload.insert(
         "fieldData".to_owned(),
@@ -1821,6 +1812,22 @@ pub(crate) fn run_units(
         (content, unit.attrs)
     })
     .collect()
+}
+
+/// The runs a projecting field shows of the result `nodes` its projected
+/// children leave: runs, and a kept change's or content control's text; a
+/// nested field shows nothing there.
+pub(crate) fn own_shown_runs(nodes: &[Value]) -> Vec<Value> {
+    nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                string(field(Some(node), "type")),
+                Some("run" | "rawXml" | "inlineSdt")
+            )
+        })
+        .flat_map(|node| shown_runs(std::slice::from_ref(node)))
+        .collect()
 }
 
 /// The runs field result `nodes` show (`shown_runs` in docx-parse's paragraph module).

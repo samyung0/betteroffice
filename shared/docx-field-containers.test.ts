@@ -2283,6 +2283,69 @@ test("Enter then Backspace in a field whose moved run holds a tab restores the f
   session.destroy();
 });
 
+// Follow-ups after round 3: Enter in a projected link, alone or joined back, leaves a field showing what the seed of
+// the saved state shows, in every story. A nested complex field before the link shows nothing in the seed, so it shows
+// nothing after the split either; a moved run holding only a w:ptab (which seeds nothing) rejoins with the runs around
+// it, so the join saves one link. Oracle: the original seed, the untouched save and the saved text.
+const ptabRun = `<w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>`;
+const splitShapes: Record<string, [string, string]> = {
+  "[REF|[PAGE|7]L(AA)yy]": [field(field(run("7"), " PAGE ") + link(run("AA")) + run("yy"), " REF a \\h "), "a 7AAyy b"],
+  "[REF|L(AA)y<ptab>z]": [field(link(run("AA")) + run("y") + ptabRun + run("z"), " REF a \\h "), "a AAyz b"],
+  "[REF|L(AA)<ptab>yz]": [field(link(run("AA")) + ptabRun + run("yz"), " REF a \\h "), "a AAyz b"],
+};
+const splitFlows: Record<string, { joined: boolean; act: (session: YrsSession, story: string, first: string, second: string) => void }> = {
+  Enter: { joined: false, act: () => {} },
+  "Enter, Backspace": { joined: true, act: (session, story, _, second) => void session.deleteAt({ story, paraId: second, offset: 0 }, "backward") },
+  "Enter, Delete": {
+    joined: true,
+    act: (session, story, first) => void session.deleteAt({ story, paraId: first, offset: session.paragraphSpans(story).find((span) => span.paraId === first)!.length }, "forward"),
+  },
+  "Enter, Undo, Redo": { joined: false, act: (session) => (session.undo(), session.redo()) },
+  "Enter, Backspace, Undo, Redo": {
+    joined: true,
+    act: (session, story, _, second) => {
+      session.deleteAt({ story, paraId: second, offset: 0 }, "backward");
+      session.undo();
+      session.redo();
+    },
+  },
+};
+/** Each field's code and shown text. */
+const fieldsShown = (session: YrsSession, story: string) =>
+  session
+    .storySegments(story)
+    .filter((g) => g.kind === "embed" && g.embedKind === "field")
+    .map((g) => `${String(g.payload.instruction).trim()}=${String(g.payload.displayText)}`)
+    .join(" | ");
+test.each(
+  (["body", "cell", "header"] as const).flatMap((where) =>
+    Object.keys(splitShapes).flatMap((shape) => Object.keys(splitFlows).map((flow) => [where, shape, flow] as const))
+  )
+)("%s | %s: %s shows what the seed of the save shows", async (where, shape, flow) => {
+  const [xml, text] = splitShapes[shape]!;
+  const [story, part] = STORY[where];
+  const bytes = matrixDocx(where, holder44(xml));
+  const untouched = await open(bytes);
+  const original = { units: matrixUnits(untouched, story), shown: fieldsShown(untouched, story) };
+  const originalSave = await publish(bytes, untouched.encodeState());
+  untouched.destroy();
+  const session = await open(bytes);
+  const at = matrixLocate(session, story, "AA");
+  const { firstParaId, secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+  splitFlows[flow]!.act(session, story, firstParaId, secondParaId);
+  const saved = await publish(bytes, session.encodeState());
+  const reopened = await open(saved);
+  expect(fieldsShown(session, story)).toBe(fieldsShown(reopened, story));
+  expect(storyText(saved, where).replaceAll("¶", "")).toBe(text);
+  if (splitFlows[flow]!.joined) {
+    expect(fieldsShown(session, story)).toBe(original.shown);
+    expect(matrixUnits(session, story)).toBe(original.units);
+    expect(sig(saved, part)).toBe(sig(originalSave, part));
+  } else expect(matrixUnits(reopened, story)).toBe(matrixUnits(session, story));
+  session.destroy();
+  reopened.destroy();
+});
+
 // Decision 2026-10-02: Backspace and Delete beside a field marker that shows nothing step over it and delete the
 // visible unit past it; only a selection covering it removes the field. Each file has one such marker: a table of
 // contents' own embed after its first entry, a REF field over links only, a field whose own result text Enter moved

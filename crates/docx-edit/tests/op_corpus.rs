@@ -314,6 +314,118 @@ fn a_continued_fields_tail_stays_in_it_when_it_holds_more_than_text() {
     }
 }
 
+/// The body seeded from `paragraphs`, each `(paraId, content)`.
+fn seeded(paragraphs: &[(&str, &str)]) -> EditingDoc {
+    let body: String = paragraphs
+        .iter()
+        .map(|(id, content)| format!(r#"<w:p w14:paraId="{id}">{content}</w:p>"#))
+        .collect();
+    let xml = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}</w:body></w:document>"#
+    );
+    let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.into_bytes())]).unwrap();
+    let doc = EditingDoc::new(7);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc
+}
+
+/// What each field in the body shows.
+fn shown(doc: &EditingDoc) -> Vec<String> {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter_map(|segment| match segment.content {
+            SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                match payload.get("displayText") {
+                    Some(Any::String(text)) => Some(text.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn enter_in_a_projected_link_shows_what_the_seed_of_its_save_shows() {
+    // A nested complex field before the link shows nothing in the seed, so it
+    // shows nothing after the split or the join either; a moved run that seeds
+    // nothing (a lone w:ptab) rejoins with the runs around it, leaving one link.
+    let begin = |code: &str| {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{code}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#
+        )
+    };
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let link = |text: &str| format!(r#"<w:hyperlink w:anchor="a">{}</w:hyperlink>"#, run(text));
+    let page = format!("{}{}{end}", begin(" PAGE "), run("7"));
+    let ptab = r#"<w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>"#;
+    for (result, moved) in [
+        (format!("{page}{}{}", link("AA"), run("yy")), run("yy")),
+        (
+            format!("{}{}{ptab}{}", link("AA"), run("y"), run("z")),
+            format!("{}{ptab}{}", run("y"), run("z")),
+        ),
+    ] {
+        let paragraph = format!(
+            "{}{}{result}{end}{}",
+            run("a "),
+            begin(" REF a \\h "),
+            run(" b")
+        );
+        let original = seeded(&[("11111111", &paragraph)]);
+        let (units, text) = (slot_units(&original), shown(&original));
+        // The save of the split, as the export writes it.
+        let saved = seeded(&[
+            (
+                "11111111",
+                &format!(
+                    "{}{}{}{}",
+                    run("a "),
+                    begin(" REF a \\h "),
+                    if result.starts_with(&page) {
+                        page.as_str()
+                    } else {
+                        ""
+                    },
+                    link("A")
+                ),
+            ),
+            (
+                "33333333",
+                &format!("{}{moved}{end}{}", link("A"), run(" b")),
+            ),
+        ]);
+        for forward in [false, true] {
+            let doc = seeded(&[("11111111", &paragraph)]);
+            let at = units.find('A').unwrap() as u32 + 1;
+            let split = doc
+                .split_paragraph(&ctx(), Position::new("body", at), None)
+                .unwrap();
+            assert_eq!(shown(&doc), shown(&saved), "{result}");
+            let para = if forward {
+                split.first_para_id
+            } else {
+                split.second_para_id
+            };
+            merge(&doc, &ctx(), &para, forward);
+            assert_eq!(slot_units(&doc), units, "{result} forward {forward}");
+            assert_eq!(shown(&doc), text, "{result} forward {forward}");
+            let links = doc
+                .story_segments("body")
+                .unwrap()
+                .into_iter()
+                .filter(|segment| matches!(&segment.content, SegmentContent::Text(text) if text.contains('A')))
+                .count();
+            assert_eq!(
+                links, 1,
+                "the link is one run again: {result} forward {forward}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
     // Decided 2026-10-02: the result text ending the first paragraph of a

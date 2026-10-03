@@ -214,6 +214,11 @@ const SPLITS: Record<string, string> = {
   // Round 2 review C: a field showing its own result text.
   "[REF|L(AA)yL(BB)]": holder(field(`${link(run("AA"))}${run("y")}${link(run("BB"), "other")}`, " REF a \\h ")),
   "[REF|xL(AA)y]": holder(field(`${run("x")}${link(run("AA"))}${run("y")}`, " REF a \\h ")),
+  // Follow-ups after round 3: a nested complex field before the link, and a moved run holding only a w:ptab.
+  "[REF|[PAGE|7]L(AA)yy]": holder(field(`${field(run("7"), " PAGE ")}${link(run("AA"))}${run("yy")}`, " REF a \\h ")),
+  "[REF|L(AA)y<ptab>z]": holder(
+    field(`${link(run("AA"))}${run("y")}<w:r><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="dot"/></w:r>${run("z")}`, " REF a \\h ")
+  ),
 };
 const firstLink = (s: YrsSession, st: string) => {
   const at = locate(s, st, s.storySegments(st).some((g) => g.kind === "text" && g.text.includes("AA")) ? "AA" : "Intro");
