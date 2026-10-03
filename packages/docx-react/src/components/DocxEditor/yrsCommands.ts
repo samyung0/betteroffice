@@ -239,10 +239,20 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   let text = '';
   let plain = true;
   let offset = 0;
+  // Fields whose result runs on past their embed as ordinary text, into later
+  // paragraphs (a table of contents): open from the embed to their end marker.
+  const continued = new Set<unknown>();
   for (const segment of session.storySegments(range.story)) {
     if (offset >= end) break;
     const segmentStart = offset;
     offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (segment.kind === 'embed') {
+      if (segment.embedKind === 'field' && segment.payload.continuationId != null) {
+        continued.add(segment.payload.continuationId);
+      } else if (segment.embedKind === 'bookmark' && segment.payload.kind === 'fieldend') {
+        continued.delete(segment.payload.id);
+      }
+    }
     if (offset <= start) continue;
     if (segment.kind === 'text') {
       text += segment.text.slice(
@@ -250,7 +260,7 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
         Math.min(end, offset) - segmentStart
       );
       // A complex field's result shown as its own text is still the field's.
-      if (segment.attributes.fieldResult) plain = false;
+      if (segment.attributes.fieldResult || continued.size > 0) plain = false;
     } else if (segment.kind === 'pilcrow' || segment.embedKind === 'break') {
       text += '\n';
     } else if (
