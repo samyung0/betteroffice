@@ -189,8 +189,7 @@ function ColorPalette({
         }}
       >
         {t('toolbar.customColor')}
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: menuColors.text, font: '400 12px ui-monospace, monospace' }}>
-          {current ?? ''}
+        <span style={{ display: 'flex', alignItems: 'center' }}>
           <input
             ref={custom}
             data-testid={testId && `${testId}-custom`}
