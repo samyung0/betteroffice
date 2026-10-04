@@ -10,9 +10,12 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
-import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
+import type { HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
+import { storyClipboard } from './clipboard';
+import { pointerTargetAtPoint } from './interactions';
+import { textRangeAt } from './textSelection';
 
 const root = resolve(import.meta.dir, '../../..');
 
@@ -20,7 +23,7 @@ const root = resolve(import.meta.dir, '../../..');
 // installed it may tear it down.
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, createEvent, fireEvent, render, waitFor } = await import('@testing-library/react');
 
 let fixture: Uint8Array;
 let fontBytes: Uint8Array;
@@ -104,6 +107,69 @@ describe('PptxEditor native text input', () => {
     view.unmount();
     await expect(abandoned).rejects.toThrow('changed while composing');
   }, 60_000);
+});
+
+describe('PptxEditor copy', () => {
+  for (const readOnly of [false, true]) {
+    it(`copies a clicked shape's text, then a double-clicked word${readOnly ? ', and refuses input when read-only' : ''}`, async () => {
+      let api: PptxEditorApi | undefined;
+      const errors: Error[] = [];
+      const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} readOnly={readOnly}
+        onReady={(ready) => { api = ready; }} onError={(error) => errors.push(error)} />);
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+      const slide = api!.handle.snapshot().slides[0];
+      const frame = api!.handle.layoutSlide(0);
+      let hit: Extract<HitTestResult, { kind: 'text' }> | undefined;
+      let point = { x: 0, y: 0 };
+      for (let y = 0; y < frame.height && !hit; y += 4) {
+        for (let x = 0; x < frame.width; x += 4) {
+          const candidate = api!.handle.hitTest(x, y);
+          if (candidate?.kind === 'text' && slide.shapes.some((shape) => shape.id === candidate.shapeId) &&
+            pointerTargetAtPoint(frame, { x, y }, 1) === 'text') { hit = candidate; point = { x, y }; break; }
+        }
+      }
+      expect(hit).toBeDefined();
+      const story = api!.handle.story(hit!.storyId);
+      const text = story.paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n');
+      const canvas = view.getByTestId('pptx-slide-canvas');
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+      const pointer = (type: 'pointerDown' | 'pointerUp', timeStamp: number) => {
+        const event = createEvent[type](canvas, { pointerId: 1, isPrimary: true, button: 0, clientX: point.x, clientY: point.y });
+        Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+        fireEvent(canvas, event);
+      };
+      const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+      const copy = () => {
+        const written = new Map<string, string>();
+        const handled = !fireEvent.copy(input, { clipboardData: { setData: (type: string, value: string) => written.set(type, value) } });
+        return { handled, text: written.get('text/plain'), html: written.get('text/html') };
+      };
+
+      pointer('pointerDown', 1_000);
+      pointer('pointerUp', 1_050);
+      expect(document.activeElement?.getAttribute('data-testid')).toBe('pptx-text-input');
+      expect(copy()).toEqual({ handled: true, text, html: storyClipboard(story, 0, story.length).html });
+
+      pointer('pointerDown', 1_200);
+      pointer('pointerUp', 1_250);
+      const word = textRangeAt(text, hit!.position, 'word');
+      expect(word.end).toBeGreaterThan(word.start);
+      expect(document.activeElement?.getAttribute('data-testid')).toBe('pptx-text-input');
+      expect(copy()).toEqual({ handled: true, text: text.slice(word.start, word.end), html: storyClipboard(story, word.start, word.end).html });
+
+      if (readOnly) {
+        const before = api!.handle.snapshot();
+        expect(input.readOnly).toBe(true);
+        fireEvent.input(input, { target: { value: 'typed' } });
+        fireEvent.paste(input, { clipboardData: { getData: () => 'pasted' } });
+        fireEvent.cut(input, { clipboardData: { setData: () => {} } });
+        for (const key of ['Backspace', 'Delete', 'Enter']) fireEvent.keyDown(input, { key });
+        expect(api!.handle.snapshot()).toEqual(before);
+        expect(copy().text).toBe(text.slice(word.start, word.end));
+      }
+      expect(errors).toEqual([]);
+    }, 60_000);
+  }
 });
 
 describe('PptxEditor PNG export', () => {

@@ -93,6 +93,7 @@ import {
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
 import { shapeFormattingFromShape } from './shapeFormatting';
+import { shapeClipboard, storyClipboard, type ClipboardText } from './clipboard';
 import {
   caretGoalX,
   caretLineIndex,
@@ -468,10 +469,11 @@ function PptxEditorContent({
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
-  useEffect(() => {
-    if (selection && document.activeElement === stageRef.current) textInputRef.current?.focus({ preventScroll: true });
-  }, [selection]);
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
+  // The input holds focus for a shape too, so a copy event reaches it.
+  useEffect(() => {
+    if ((selection || shapeSelection) && document.activeElement === stageRef.current) textInputRef.current?.focus({ preventScroll: true });
+  }, [selection, shapeSelection]);
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
@@ -1434,7 +1436,16 @@ function PptxEditorContent({
             };
             event.currentTarget.setPointerCapture(event.pointerId);
           } else {
+            // Only a drag gesture counts its click on pointerup; count this one now so a read-only double-click still reaches the text.
             pointerGestureRef.current = null;
+            recentClickRef.current = {
+              slideId: slide.id,
+              shapeId: shape.id,
+              clientX: event.clientX,
+              clientY: event.clientY,
+              timeStamp: event.timeStamp,
+              count: clickCount,
+            };
           }
         } else {
           setSelection(null);
@@ -1664,6 +1675,39 @@ function PptxEditorContent({
   };
   const insertSlideTextRef = useRef(insertSlideText);
   insertSlideTextRef.current = insertSlideText;
+
+  // What a copy takes: the selected text, else the selected shape's whole text.
+  const clipboardText = (): ClipboardText | null => {
+    const handle = handleRef.current;
+    if (!handle || compositionRef.current || canvasReview.reviewing) return null;
+    try {
+      const copied = selection
+        ? storyClipboard(
+            handle.story(selection.storyId),
+            Math.min(selection.anchor, selection.focus),
+            Math.max(selection.anchor, selection.focus)
+          )
+        : selectedShape && shapeClipboard(selectedShape);
+      return copied?.text ? copied : null;
+    } catch (value) {
+      reportError(value);
+      return null;
+    }
+  };
+  const clipboardTextRef = useRef(clipboardText);
+  clipboardTextRef.current = clipboardText;
+
+  // WebKit enables Copy on a caret-only textarea only when beforecopy is
+  // cancelled. React has no prop for it.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const enableCopy = (event: Event) => {
+      if (event.target === textInputRef.current && clipboardTextRef.current()) event.preventDefault();
+    };
+    stage.addEventListener('beforecopy', enableCopy);
+    return () => stage.removeEventListener('beforecopy', enableCopy);
+  }, []);
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (compositionRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -2560,7 +2604,7 @@ function PptxEditorContent({
           onKeyDown={keyDown}
           onFocus={(event) => {
             setStageFocused(true);
-            if (event.target === event.currentTarget && selectionRef.current) textInputRef.current?.focus({ preventScroll: true });
+            if (event.target === event.currentTarget && (selectionRef.current || shapeSelection)) textInputRef.current?.focus({ preventScroll: true });
           }}
           onBlur={() => setStageFocused(false)}
         >
@@ -2593,6 +2637,13 @@ function PptxEditorContent({
                   onPaste={(event) => {
                     event.preventDefault();
                     if (!compositionRef.current) insertSlideText(event.clipboardData.getData('text/plain'));
+                  }}
+                  onCopy={(event) => {
+                    const copied = clipboardText();
+                    if (!copied) return;
+                    event.preventDefault();
+                    event.clipboardData.setData('text/plain', copied.text);
+                    event.clipboardData.setData('text/html', copied.html);
                   }}
                   onCompositionStart={() => {
                     if (!handleRef.current || !selectionRef.current || readOnly || canvasReview.reviewing || compositionRef.current) return;
