@@ -444,6 +444,8 @@ export interface Result {
 const breaksOf = (u: string) => (u.match(/\[[+-]?(PB|CB)/g) ?? []).length;
 /** The text, field codes and field text a story holds, as a multiset: where they sit is `moved`, not `lost`. */
 const textOf = (u: string) => [...u.replace(/\[[^\]:]*(?::([^\]]*))?\]|\{[^}]*\}|[¶§<+\-()]/g, "$1")].sort().join("");
+/** The same text in document order: the `same` oracle compares it, so reordered text counts too. */
+const textInOrder = (u: string) => u.replace(/\[[^\]:]*(?::([^\]]*))?\]|\{[^}]*\}|[¶§<+\-()]/g, "$1");
 const marksOf = (u: string) => (u.match(/[BE]\d+|§/g) ?? []).sort().join();
 /** Units compared across a save: the leading flag and reference marks are the save's to place. */
 const placed = (u: string) => u.replaceAll("{ref}", "").replaceAll("^", "");
@@ -539,7 +541,7 @@ export async function runRow(row: Row): Promise<Result> {
     await row.same.after(oracle, story, row.bytes);
     expected = units(oracle, story);
     oracle.destroy();
-    if (textOf(expected) !== textOf(editor)) flags.push("text");
+    if (textInOrder(expected) !== textInOrder(editor)) flags.push("text");
   }
 
   const cls = [rebase, ...flags].join("+");
@@ -552,7 +554,7 @@ export async function runRow(row: Row): Promise<Result> {
     `seq    ${seq}`,
     ...(unstable ? [`pubs   ${unstable}`] : []),
     ...(render !== bridge ? [`blocks ${bridge} | reopened ${render}`] : []),
-    ...(expected !== undefined && textOf(expected) !== textOf(editor) ? [`same   ${expected}`] : []),
+    ...(expected !== undefined && textInOrder(expected) !== textInOrder(editor) ? [`same   ${expected}`] : []),
   ].join("\n");
   return { id: row.id, cls, detail };
 }

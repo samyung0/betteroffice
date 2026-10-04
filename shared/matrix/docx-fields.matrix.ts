@@ -331,6 +331,10 @@ const LEFT_LINK_OPS: Record<string, Edit> = {
 const NATIVE_TAIL =
   p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" REF a \\h ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${run("x")}${link(run("AA"))}`) +
   p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
+// A nested field before the link instead of the plain run.
+const NATIVE_NESTED =
+  p(P, `${run("a")}<w:r><w:fldChar w:fldCharType="begin"/></w:r>${instr(" REF a \\h ")}<w:r><w:fldChar w:fldCharType="separate"/></w:r>${field(run("7"), " PAGE ")}${link(run("AA"))}`) +
+  p("45454545", `${run("0")}<w:r><w:fldChar w:fldCharType="end"/></w:r>${run("z")}`);
 // The native field's link is units 1..3 of its paragraph ("a" before it).
 const dropUnits = (from: number, to: number): Edit => (s, st) =>
   void s.deleteRange({ story: st, start: { paraId: P, offset: from }, end: { paraId: P, offset: to } });
@@ -418,6 +422,7 @@ function rows(): Row[] {
       both(enterInAA, LEFT_LINK_OPS["Backspace the link left"]!));
     push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | both peers delete the link", null, peers(dropUnits(1, 3), dropUnits(1, 3)), dropUnits(1, 3));
     push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
+    push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
   }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {

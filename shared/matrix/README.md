@@ -55,7 +55,7 @@ Then flags on the direct save, joined with `+`:
 | `unstable` | The saved story or its comment coverage changes over three publications. |
 | `render` | The editor's blocks (page breaks with their space-before flag) differ from the reopened file's. |
 | `parity` | The projector (`documentToYrs`) and the engine seed read the save differently (untouched rows only). |
-| `text` | The editor's story text differs from what an equivalent edit leaves (`Row.same`, e.g. one peer doing what two did). |
+| `text` | The editor's story text, in document order, differs from what an equivalent edit leaves (`Row.same`, e.g. one peer doing what two did). |
 
 A row is worse when its rebase class ranks lower (`timing` and `marker-order` rank together), changes within a rank,
 or gains a flag. A refusal ranks above the accepted classes: it costs one publication, while they save a file that
@@ -92,6 +92,10 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   it as text after the field (no tail move), so concurrent deletes converge without duplicates. One peer, two peers
   deleting the same link, and two peers each deleting half of it all land here; the `text` oracle checks the two-peer
   rows against one peer's delete.
+- `exact+lost+text` rows (queued): a half-link delete by two peers leaves a stale shown text in the editor until
+  publication. Neither partial delete removes the field's last link, so no refresh runs; with a nested field before
+  the link the editor shows `REF=` where the save, which equals the single-peer save, and its reopened file show
+  `REF=7`.
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
     simple field before a capture, which shares that field's result slot the export's seed splits (accepted like
