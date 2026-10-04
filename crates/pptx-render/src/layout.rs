@@ -1964,20 +1964,32 @@ impl BodyCascade<'_> {
         })
     }
 
-    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
-    /// runs of its own.
-    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
-        [self.primary, self.layout, self.master]
-            .into_iter()
-            .flatten()
-            .find_map(|body| {
-                body.paragraphs
-                    .get(index)
-                    .and_then(|paragraph| paragraph.end_properties.as_ref())
-            })
+    /// The shape's own file paragraph a laid-out paragraph takes its markup
+    /// from, found by its source paragraph rather than its position, which
+    /// splits and joins move.
+    fn primary_paragraph(&self, source: Option<usize>) -> Option<&pptx_parse::TextParagraph> {
+        self.primary?.paragraphs.get(source?)
     }
 
-    fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, source: Option<usize>, index: usize) -> Option<&RunProperties> {
+        let inherited = [self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .filter_map(|body| body.paragraphs.get(index));
+        self.primary_paragraph(source)
+            .into_iter()
+            .chain(inherited)
+            .find_map(|paragraph| paragraph.end_properties.as_ref())
+    }
+
+    fn paragraph_properties(
+        &self,
+        source: Option<usize>,
+        index: usize,
+        level: u32,
+    ) -> ParagraphProperties {
         let mut properties = self
             .master_slide
             .and_then(|master| master_style(master, self.placeholder, level))
@@ -1989,39 +2001,48 @@ impl BodyCascade<'_> {
                 .get_or_insert_with(RunProperties::default)
                 .color = Some(color.clone());
         }
-        for body in [self.master, self.layout, self.primary]
-            .into_iter()
-            .flatten()
-        {
+        for (body, paragraph) in [
+            (self.master, inherited_paragraph(self.master, index, level)),
+            (self.layout, inherited_paragraph(self.layout, index, level)),
+            (self.primary, self.primary_paragraph(source)),
+        ] {
+            let Some(body) = body else {
+                continue;
+            };
             if let Some(source) = &body.default_list_style {
                 merge_paragraph_properties(&mut properties, source);
             }
             if let Some(source) = body.list_style.get(level as usize) {
                 merge_paragraph_properties(&mut properties, source);
             }
-            if let Some(source) = body
-                .paragraphs
-                .get(index)
-                .or_else(|| body.paragraphs.get(level as usize))
-                .map(|paragraph| &paragraph.properties)
-            {
-                merge_paragraph_properties(&mut properties, source);
+            if let Some(paragraph) = paragraph {
+                merge_paragraph_properties(&mut properties, &paragraph.properties);
             }
         }
         if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
-            *restart = self
-                .primary
-                .and_then(|body| body.paragraphs.get(index))
-                .is_some_and(|paragraph| {
-                    matches!(
-                        paragraph.properties.bullet,
-                        Some(Bullet::AutoNumber { restart: true, .. })
-                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
-                    )
-                });
+            *restart = self.primary_paragraph(source).is_some_and(|paragraph| {
+                matches!(
+                    paragraph.properties.bullet,
+                    Some(Bullet::AutoNumber { restart: true, .. })
+                        | Some(Bullet::AutoNumber { start_at: 2.., .. })
+                )
+            });
         }
         properties
     }
+}
+
+/// A layout or master body's paragraph for a laid-out one: by position,
+/// else by level.
+fn inherited_paragraph(
+    body: Option<&TextBody>,
+    index: usize,
+    level: u32,
+) -> Option<&pptx_parse::TextParagraph> {
+    let body = body?;
+    body.paragraphs
+        .get(index)
+        .or_else(|| body.paragraphs.get(level as usize))
 }
 
 fn cascade_value<T: Copy>(
@@ -2044,6 +2065,8 @@ struct TextContent {
 
 #[derive(Clone)]
 struct ContentParagraph {
+    /// The shape's file paragraph this one takes its markup from.
+    source: Option<usize>,
     alignment: Option<String>,
     level: u32,
     bullet: Option<Bullet>,
@@ -2063,6 +2086,7 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
             .paragraphs
             .iter()
             .map(|paragraph| ContentParagraph {
+                source: paragraph.template_index(&story.id),
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
                 bullet: paragraph
@@ -2101,7 +2125,9 @@ fn content_from_body(
         paragraphs: body
             .paragraphs
             .iter()
-            .map(|paragraph| ContentParagraph {
+            .enumerate()
+            .map(|(index, paragraph)| ContentParagraph {
+                source: Some(index),
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet: paragraph.properties.bullet.clone(),
@@ -2203,7 +2229,7 @@ fn resolve_content(
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
     let mut numbering = AutoNumbering::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let mut properties = cascade.paragraph_properties(index, paragraph.level);
+        let mut properties = cascade.paragraph_properties(paragraph.source, index, paragraph.level);
         if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
             properties.bullet = paragraph.bullet.clone();
             if let Some(Bullet::AutoNumber {
@@ -2227,7 +2253,7 @@ fn resolve_content(
         }
         if runs.is_empty() {
             let end_style = cascade
-                .end_run_properties(index)
+                .end_run_properties(paragraph.source, index)
                 .map(|end| style_from_properties(end, theme))
                 .unwrap_or_default();
             runs.push(ResolvedRun {

@@ -10,9 +10,9 @@ use yrs::{
     TextPrelim, TextRef, Transact, TransactionMut,
 };
 
-use crate::model::validate_xml_text;
+use crate::model::{source_paragraph_index, validate_xml_text};
 use crate::{
-    CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
+    CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND, PROPERTIES_FROM,
     ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
     TextStylePatch,
 };
@@ -168,26 +168,6 @@ fn append_pilcrow(
     bullet_json: Option<&str>,
 ) {
     let index = story.len(txn);
-    insert_pilcrow(
-        story,
-        txn,
-        index,
-        paragraph_id,
-        alignment,
-        level,
-        bullet_json,
-    );
-}
-
-fn insert_pilcrow(
-    story: &TextRef,
-    txn: &mut TransactionMut<'_>,
-    index: u32,
-    paragraph_id: &str,
-    alignment: Option<&str>,
-    level: u32,
-    bullet_json: Option<&str>,
-) {
     let pilcrow =
         story.insert_embed_with_attributes(txn, index, MapPrelim::default(), Attrs::default());
     pilcrow.insert(txn, KIND, PILCROW_KIND);
@@ -336,15 +316,7 @@ impl DeckSession {
         let mut index = start;
         for (line_index, line) in text.split('\n').enumerate() {
             if line_index > 0 {
-                insert_pilcrow(
-                    &story,
-                    &mut txn,
-                    index,
-                    &self.next_id("para"),
-                    None,
-                    0,
-                    None,
-                );
+                split_paragraph(&story, &mut txn, story_id, index, self.next_id("para"));
                 index += 1;
             }
             if !line.is_empty() {
@@ -430,6 +402,8 @@ impl DeckSession {
         })
     }
 
+    /// Splits the paragraph at `index`. The first half keeps its id; both
+    /// halves keep its properties, as PowerPoint continues a list on Enter.
     pub fn insert_paragraph_break(
         &self,
         context: &crate::EditCtx,
@@ -445,15 +419,7 @@ impl DeckSession {
                 length: final_pilcrow,
             });
         }
-        insert_pilcrow(
-            &story,
-            &mut txn,
-            index,
-            &self.next_id("para"),
-            None,
-            0,
-            None,
-        );
+        split_paragraph(&story, &mut txn, story_id, index, self.next_id("para"));
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
             start: index,
@@ -462,6 +428,8 @@ impl DeckSession {
         })
     }
 
+    /// Joins the paragraph ending at `index` with the next one, keeping the
+    /// first one's id and properties.
     pub fn delete_paragraph_break(
         &self,
         context: &crate::EditCtx,
@@ -495,7 +463,7 @@ impl DeckSession {
                 end: index.saturating_add(1),
             });
         }
-        story.remove_range(&mut txn, index, 1);
+        remove_joining(&story, &mut txn, index, index + 1);
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
             start: index,
@@ -547,6 +515,7 @@ pub(crate) fn baseline_story(
             alignment: None,
             level: 0,
             bullet_json: None,
+            properties_from: None,
             runs: Vec::new(),
         });
     } else {
@@ -588,6 +557,7 @@ pub(crate) fn baseline_story(
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet_json,
+                properties_from: None,
                 runs,
             });
         }
@@ -625,11 +595,16 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
                 style: style_from_attrs(diff.attributes.as_deref()),
             }),
             Out::YMap(map) => {
+                let id = map_string(&map, txn, PARA_ID).unwrap_or_default();
+                // A rebase can give a split paragraph a file paragraph of its own.
+                let properties_from = map_string(&map, txn, PROPERTIES_FROM)
+                    .filter(|_| source_paragraph_index(&id, story_id).is_none());
                 paragraphs.push(ParagraphSnapshot {
-                    id: map_string(&map, txn, PARA_ID).unwrap_or_default(),
+                    id,
                     alignment: map_string(&map, txn, "alignment"),
                     level: map_number(&map, txn, "level").unwrap_or_default() as u32,
                     bullet_json: map_string(&map, txn, "bulletJson"),
+                    properties_from,
                     runs: std::mem::take(&mut runs),
                 });
             }
@@ -692,6 +667,36 @@ fn remove_joining(story: &TextRef, txn: &mut TransactionMut<'_>, start: u32, end
     for (key, value) in properties {
         survivor.insert(txn, key, value);
     }
+}
+
+/// Splits the paragraph holding `index` with a pilcrow there. The new pilcrow
+/// ends the first half and takes the paragraph's id and properties; the old
+/// one ends the second half and becomes `new_id`, still taking its file
+/// markup from the file paragraph the paragraph is or continues.
+fn split_paragraph(
+    story: &TextRef,
+    txn: &mut TransactionMut<'_>,
+    story_id: &str,
+    index: u32,
+    new_id: String,
+) {
+    let Some((_, original)) = pilcrow_from(story, txn, index) else {
+        return;
+    };
+    let id = map_string(&original, txn, PARA_ID).unwrap_or_default();
+    let in_file = source_paragraph_index(&id, story_id).is_some();
+    let first =
+        story.insert_embed_with_attributes(txn, index, MapPrelim::default(), Attrs::default());
+    first.insert(txn, KIND, PILCROW_KIND);
+    for (key, value) in pilcrow_properties(&original, txn) {
+        if !(in_file && key == PROPERTIES_FROM) {
+            first.insert(txn, key, value);
+        }
+    }
+    if in_file {
+        original.insert(txn, PROPERTIES_FROM, id);
+    }
+    original.insert(txn, PARA_ID, new_id);
 }
 
 /// The first pilcrow at or after `index`, with its offset.

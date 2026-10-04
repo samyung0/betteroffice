@@ -117,6 +117,9 @@ pub enum TextTarget {
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
+    /// A source paragraph to build on when there is no `source_index`: its
+    /// properties, end-of-paragraph run properties and the runs that match.
+    pub template_index: Option<usize>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
     pub properties_changed: bool,
@@ -2112,11 +2115,17 @@ fn rebuild_paragraphs(
             other => preamble.push(other),
         }
     }
+    let templates: HashMap<usize, XmlElement> = paragraphs
+        .iter()
+        .filter_map(|paragraph| paragraph.template_index)
+        .filter_map(|index| Some((index, originals.get(index)?.clone()?)))
+        .collect();
     let mut children = preamble;
     for paragraph in paragraphs {
         let source = paragraph
             .source_index
-            .and_then(|index| originals.get_mut(index).and_then(Option::take));
+            .and_then(|index| originals.get_mut(index).and_then(Option::take))
+            .or_else(|| templates.get(&paragraph.template_index?).cloned());
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -3541,6 +3550,7 @@ mod tests {
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
             source_index: Some(0),
+            template_index: None,
             rebuild: true,
             properties_changed: false,
             alignment: None,

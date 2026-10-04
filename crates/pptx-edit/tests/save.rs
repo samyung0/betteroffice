@@ -747,7 +747,11 @@ fn replacing_with_lines_splits_in_one_transaction_or_none() {
     assert_eq!((receipt.start, receipt.end), (2, 5));
     let replaced = session.story(&story_id).unwrap();
     assert_eq!(replaced.plain_text(), "OfX\nYout the office.");
-    assert_eq!(replaced.paragraphs[1].id, before.paragraphs[0].id);
+    assert_eq!(replaced.paragraphs[0].id, before.paragraphs[0].id);
+    assert_eq!(
+        replaced.paragraphs[1].properties_from.as_ref(),
+        Some(&before.paragraphs[0].id)
+    );
     assert!(session.undo());
     assert_eq!(session.story(&story_id).unwrap(), before);
     assert!(!session.can_undo());

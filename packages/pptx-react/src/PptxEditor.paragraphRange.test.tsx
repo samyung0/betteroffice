@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import * as pptx from '@betteroffice/pptx';
 import type { StorySnapshot } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
@@ -76,8 +77,8 @@ describe('PptxEditor edits across paragraphs', () => {
       await act(async () => { await edit(); });
       expect([name, plain(api.handle.story(STORY))]).toEqual([name, expected]);
       const { paragraphs } = api.handle.story(STORY);
-      const joined = paragraphs[paragraphs.length - 1];
-      expect([name, joined.id, joined.alignment]).toEqual([name, before.paragraphs[0].id, before.paragraphs[0].alignment]);
+      expect([name, paragraphs[0].id]).toEqual([name, before.paragraphs[0].id]);
+      expect([name, ...paragraphs.map((paragraph) => paragraph.alignment)]).toEqual([name, ...paragraphs.map(() => before.paragraphs[0].alignment)]);
       fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
       expect([name, api.handle.story(STORY)]).toEqual([name, before]);
     }
@@ -98,5 +99,32 @@ describe('PptxEditor edits across paragraphs', () => {
     } finally {
       reopened.dispose();
     }
+  }, 60_000);
+
+  it('restores the paragraph and the saved slide exactly after Enter then Backspace', async () => {
+    const opened: PptxEditorApi[] = [];
+    const errors: Error[] = [];
+    const view = render(<PptxEditor file={fixture} fonts={fonts} onReady={(api) => opened.push(api)} onError={(error) => errors.push(error)} />);
+    await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+    const api = opened[0];
+    const shape = api.handle.snapshot().slides[0].shapes.find((item) => item.textStories.some((story) => story.id === STORY))!;
+    const before = api.handle.story(STORY);
+    const slide = async (bytes: Uint8Array) => (await JSZip.loadAsync(bytes)).file('ppt/slides/slide1.xml')!.async('string');
+    const source = await slide(api.save());
+    const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+    const caret = 'Office'.length;
+    await act(async () => {
+      expect(api.selectText({ slide: 1, shapeId: shape.id, storyId: STORY, start: caret, end: caret })).toBe(true);
+    });
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    const split = api.handle.story(STORY);
+    expect(plain(split)).toBe('Office\n files,\nwithout the office.');
+    expect(split.paragraphs[0].id).toBe(before.paragraphs[0].id);
+    fireEvent.keyDown(input, { key: 'Backspace' });
+    expect(api.handle.story(STORY)).toEqual(before);
+    await act(async () => { await api.flushPendingInput(); });
+    expect(await slide(api.save())).toBe(source);
+    expect(errors).toEqual([]);
   }, 60_000);
 });

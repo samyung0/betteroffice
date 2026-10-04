@@ -56,8 +56,9 @@ describe('text ranges across paragraphs', () => {
         edit(handle);
         const after = handle.story(STORY);
         expect(plain(after)).toBe(expected);
-        const joined = after.paragraphs[after.paragraphs.length - 1];
-        expect([joined.id, joined.alignment]).toEqual([before.paragraphs[0].id, 'l']);
+        // A typed newline splits the joined paragraph; its first half keeps the id.
+        expect(after.paragraphs[0].id).toBe(before.paragraphs[0].id);
+        expect(after.paragraphs.map((paragraph) => paragraph.alignment)).toEqual(after.paragraphs.map(() => 'l'));
 
         expect(handle.undo().applied).toBe(true);
         expect(handle.story(STORY)).toEqual(before);
@@ -68,7 +69,7 @@ describe('text ranges across paragraphs', () => {
         try {
           const saved = reopened.story(STORY);
           expect(plain(saved)).toBe(expected);
-          expect(saved.paragraphs[saved.paragraphs.length - 1].alignment).toBe('l');
+          expect(saved.paragraphs.map((paragraph) => paragraph.alignment)).toEqual(saved.paragraphs.map(() => 'l'));
         } finally {
           reopened.dispose();
         }

@@ -80,7 +80,35 @@ pub struct ParagraphSnapshot {
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet_json: Option<String>,
+    /// The file paragraph a split one continues and takes its markup from;
+    /// only on a paragraph with no file paragraph of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties_from: Option<String>,
     pub runs: Vec<TextRunSnapshot>,
+}
+
+impl ParagraphSnapshot {
+    /// The source paragraph this one is, by its position in the file's text body.
+    pub fn source_index(&self, story_id: &str) -> Option<usize> {
+        source_paragraph_index(&self.id, story_id)
+    }
+
+    /// The source paragraph whose markup (spacing, indents, end-of-paragraph
+    /// run properties) this one is laid out and written with: its own, else
+    /// the one it was split from.
+    pub fn template_index(&self, story_id: &str) -> Option<usize> {
+        self.source_index(story_id)
+            .or_else(|| source_paragraph_index(self.properties_from.as_deref()?, story_id))
+    }
+}
+
+pub(crate) fn source_paragraph_index(paragraph_id: &str, story_id: &str) -> Option<usize> {
+    paragraph_id
+        .strip_prefix("para:")?
+        .strip_prefix(story_id)?
+        .strip_prefix(':')?
+        .parse()
+        .ok()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 //! Baseline-diff write-back: the live CRDT state is compared against the
 //! package's seeded baseline snapshot and only differences are written.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
@@ -602,17 +602,23 @@ fn paragraph_writes(
         .flat_map(|story| &story.paragraphs)
         .map(|paragraph| (paragraph.id.as_str(), paragraph))
         .collect();
-    let prefix = format!("para:{}:", story.id);
     let mut writes = Vec::with_capacity(story.paragraphs.len());
+    // Peers splitting one paragraph at once both keep its id; the file
+    // paragraph is written once, and the copy is built like a split's half.
+    let mut claimed = HashSet::new();
     for paragraph in &story.paragraphs {
         let source_index = paragraph
-            .id
-            .strip_prefix(&prefix)
-            .and_then(|index| index.parse::<usize>().ok());
+            .source_index(&story.id)
+            .filter(|index| claimed.insert(*index));
+        let template_index = source_index
+            .is_none()
+            .then(|| paragraph.template_index(&story.id))
+            .flatten();
         let base = baseline_paragraphs.get(paragraph.id.as_str()).copied();
         if base == Some(paragraph) && source_index.is_some() {
             writes.push(ParagraphWrite {
                 source_index,
+                template_index: None,
                 rebuild: false,
                 properties_changed: false,
                 alignment: None,
@@ -638,6 +644,7 @@ fn paragraph_writes(
             .map_err(|error| EditError::Json(error.to_string()))?;
         writes.push(ParagraphWrite {
             source_index,
+            template_index,
             rebuild: true,
             properties_changed,
             alignment: paragraph.alignment.clone(),

@@ -37,6 +37,9 @@ export interface ParagraphSnapshot {
   alignment: string | null;
   level: number;
   bulletJson: string | null;
+  /** On a split paragraph without a file paragraph of its own: the id of the
+   *  file paragraph it continues, whose markup (spacing, indents) it takes. */
+  propertiesFrom?: string;
   runs: TextRunSnapshot[];
 }
 
