@@ -652,6 +652,112 @@ fn deleting_a_paragraph_break_rejects_text_and_the_final_pilcrow() {
     assert_eq!(session.story(&story_id).unwrap(), story);
 }
 
+/// The demo deck's first story: "Office files," then "without the office.".
+fn two_paragraph_story(session: &DeckSession) -> (String, u32) {
+    let story_id = "story:slide:0:256:shape:2:0".to_owned();
+    let story = session.story(&story_id).unwrap();
+    assert_eq!(story.plain_text(), "Office files,\nwithout the office.");
+    let first_end = "Office files,".encode_utf16().count() as u32;
+    (story_id, first_end)
+}
+
+#[test]
+fn replacing_across_paragraphs_joins_them_under_the_first_and_undoes_exactly() {
+    let session = open_fixture();
+    let (story_id, first_end) = two_paragraph_story(&session);
+    session
+        .set_paragraph_alignment(
+            &context(),
+            &story_id,
+            first_end + 1,
+            first_end + 1,
+            Some("ctr"),
+        )
+        .unwrap();
+    let before = session.story(&story_id).unwrap();
+    session.add_undo_barrier();
+    let error = session
+        .delete_text(&context(), &story_id, 2, first_end + 5)
+        .unwrap_err();
+    assert!(matches!(error, EditError::ParagraphBoundary { .. }));
+
+    session
+        .replace_text(
+            &context(),
+            &story_id,
+            2,
+            first_end + 5,
+            "",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let joined = session.story(&story_id).unwrap();
+    assert_eq!(joined.plain_text(), "Ofout the office.");
+    assert_eq!(joined.paragraphs.len(), 1);
+    assert_eq!(joined.paragraphs[0].id, before.paragraphs[0].id);
+    assert_eq!(joined.paragraphs[0].alignment.as_deref(), Some("l"));
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(session.redo());
+    assert_eq!(reopen(&session).story(&story_id).unwrap(), joined);
+
+    let error = session
+        .replace_text(
+            &context(),
+            &story_id,
+            0,
+            joined.length,
+            "",
+            &TextStyle::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::OutOfBounds { .. }));
+    assert_eq!(session.story(&story_id).unwrap(), joined);
+}
+
+#[test]
+fn replacing_with_lines_splits_in_one_transaction_or_none() {
+    let session = open_fixture();
+    let (story_id, first_end) = two_paragraph_story(&session);
+    let before = session.story(&story_id).unwrap();
+
+    let error = session
+        .replace_text(
+            &context(),
+            &story_id,
+            2,
+            first_end + 5,
+            "X\n\u{1}",
+            &TextStyle::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidText(_)));
+    assert_eq!(session.story(&story_id).unwrap(), before);
+
+    let receipt = session
+        .replace_text(
+            &context(),
+            &story_id,
+            2,
+            first_end + 5,
+            "X\nY",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    assert_eq!((receipt.start, receipt.end), (2, 5));
+    let replaced = session.story(&story_id).unwrap();
+    assert_eq!(replaced.plain_text(), "OfX\nYout the office.");
+    assert_eq!(replaced.paragraphs[1].id, before.paragraphs[0].id);
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+    assert!(session.redo());
+    assert_eq!(
+        reopen(&session).story(&story_id).unwrap().plain_text(),
+        replaced.plain_text()
+    );
+}
+
 #[test]
 fn an_edited_save_reaches_a_part_fixed_point() {
     let session = open_fixture();

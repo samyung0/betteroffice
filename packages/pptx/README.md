@@ -71,7 +71,8 @@ replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
 
 Beyond rendering, `PresentationHandle` covers editing: text
-(`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
+(`insertText` / `deleteText` / `replaceText` / `formatText` /
+`setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
 (`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
 `setShapeRect`), paint order (`bringShapeToFront` / `sendShapeToBack` /

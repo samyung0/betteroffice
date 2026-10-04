@@ -1658,18 +1658,11 @@ function PptxEditorContent({
     const current = selectionRef.current;
     if (!handle || !current || readOnly || canvasReview.reviewing || !text) return;
     try {
-      let position = Math.min(current.anchor, current.focus);
+      const start = Math.min(current.anchor, current.focus);
       const end = Math.max(current.anchor, current.focus);
-      if (position !== end) handle.deleteText(current.storyId, position, end);
-      const lines = text.replace(/\r\n?/g, '\n').split('\n');
-      for (const [index, line] of lines.entries()) {
-        if (index > 0) handle.insertParagraphBreak(current.storyId, position++);
-        if (line) handle.insertText(current.storyId, position, line, textStyle);
-        position += line.length;
-      }
-      commit({ ...current, anchor: position, focus: position });
+      const receipt = handle.replaceText(current.storyId, start, end, text.replace(/\r\n?/g, '\n'), textStyle);
+      commit({ ...current, anchor: receipt.end, focus: receipt.end });
     } catch (value) {
-      inputFailureRef.current = value instanceof Error ? value : new Error(String(value));
       reportError(value);
     }
   };
@@ -1787,16 +1780,17 @@ function PptxEditorContent({
         return;
       }
       if (readOnly) return;
+      // replaceText, unlike deleteText, joins the paragraphs a range crosses.
       if (event.key === 'Backspace') {
         event.preventDefault();
         if (start !== end) {
-          handle.deleteText(selection.storyId, start, end);
+          handle.replaceText(selection.storyId, start, end, '');
           commit({ ...selection, anchor: start, focus: start });
           return;
         }
         const previous = previousTextIndex(handle.story(selection.storyId), start);
         if (previous < start) {
-          handle.deleteText(selection.storyId, previous, start);
+          handle.replaceText(selection.storyId, previous, start, '');
           commit({ ...selection, anchor: previous, focus: previous });
         }
         return;
@@ -1804,21 +1798,20 @@ function PptxEditorContent({
       if (event.key === 'Delete') {
         event.preventDefault();
         if (start !== end) {
-          handle.deleteText(selection.storyId, start, end);
+          handle.replaceText(selection.storyId, start, end, '');
           commit({ ...selection, anchor: start, focus: start });
           return;
         }
         const next = nextTextIndex(handle.story(selection.storyId), end);
         if (next > end) {
-          handle.deleteText(selection.storyId, end, next);
+          handle.replaceText(selection.storyId, end, next, '');
           commit({ ...selection, anchor: end, focus: end });
         }
         return;
       }
       if (event.key === 'Enter') {
         event.preventDefault();
-        if (start !== end) handle.deleteText(selection.storyId, start, end);
-        handle.insertParagraphBreak(selection.storyId, start);
+        handle.replaceText(selection.storyId, start, end, '\n');
         commit({ ...selection, anchor: start + 1, focus: start + 1 });
         return;
       }

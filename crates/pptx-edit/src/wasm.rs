@@ -64,6 +64,17 @@ struct DeleteTextArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ReplaceTextArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    text: String,
+    #[serde(default)]
+    style: TextStyle,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FormatTextArgs {
     story_id: String,
     start: u32,
@@ -483,6 +494,23 @@ impl PptxDocument {
     #[wasm_bindgen(js_name = deleteTextProfiledJson)]
     pub fn delete_text_profiled_json(&self, args: &str) -> Result<String, JsValue> {
         profiled(args, &mut performance_now, |args| self.delete_text(args))
+    }
+
+    #[wasm_bindgen(js_name = replaceTextJson)]
+    pub fn replace_text_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ReplaceTextArgs = parse_args(args)?;
+        json(
+            self.session
+                .replace_text(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    &args.text,
+                    &args.style,
+                )
+                .map_err(js_error)?,
+        )
     }
 
     #[wasm_bindgen(js_name = formatTextJson)]

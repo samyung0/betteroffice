@@ -168,6 +168,26 @@ fn append_pilcrow(
     bullet_json: Option<&str>,
 ) {
     let index = story.len(txn);
+    insert_pilcrow(
+        story,
+        txn,
+        index,
+        paragraph_id,
+        alignment,
+        level,
+        bullet_json,
+    );
+}
+
+fn insert_pilcrow(
+    story: &TextRef,
+    txn: &mut TransactionMut<'_>,
+    index: u32,
+    paragraph_id: &str,
+    alignment: Option<&str>,
+    level: u32,
+    bullet_json: Option<&str>,
+) {
     let pilcrow =
         story.insert_embed_with_attributes(txn, index, MapPrelim::default(), Attrs::default());
     pilcrow.insert(txn, KIND, PILCROW_KIND);
@@ -280,6 +300,66 @@ impl DeckSession {
         })
     }
 
+    /// Replaces `[start, end)` with `text` in one transaction, so a refused
+    /// replacement changes nothing. Unlike [`Self::delete_text`], the range
+    /// may cross paragraphs: they join, keeping the first one's properties
+    /// and id as PowerPoint does. Each `\n` in `text` then splits the
+    /// paragraph the way [`Self::insert_paragraph_break`] does.
+    pub fn replace_text(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        text: &str,
+        style: &TextStyle,
+    ) -> EditResult<TextReceipt> {
+        validate_xml_text(text)?;
+        validate_style_values(
+            style.font_family.as_deref(),
+            style.underline.as_deref(),
+            style.color.as_deref(),
+            style.font_size_pt,
+            style.spacing_pt,
+            style.baseline_pct,
+        )?;
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        let final_pilcrow = final_pilcrow_index(&story, &txn)?;
+        if start > end || end > final_pilcrow {
+            return Err(EditError::OutOfBounds {
+                index: end.max(start),
+                length: final_pilcrow,
+            });
+        }
+        remove_joining(&story, &mut txn, start, end);
+        let mut index = start;
+        for (line_index, line) in text.split('\n').enumerate() {
+            if line_index > 0 {
+                insert_pilcrow(
+                    &story,
+                    &mut txn,
+                    index,
+                    &self.next_id("para"),
+                    None,
+                    0,
+                    None,
+                );
+                index += 1;
+            }
+            if !line.is_empty() {
+                insert_styled_text(&story, &mut txn, index, line, style);
+                index += line.encode_utf16().count() as u32;
+            }
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end: index,
+            text: text.to_owned(),
+        })
+    }
+
     pub fn format_text(
         &self,
         context: &crate::EditCtx,
@@ -365,16 +445,15 @@ impl DeckSession {
                 length: final_pilcrow,
             });
         }
-        let paragraph_id = self.next_id("para");
-        let pilcrow = story.insert_embed_with_attributes(
+        insert_pilcrow(
+            &story,
             &mut txn,
             index,
-            MapPrelim::default(),
-            Attrs::default(),
+            &self.next_id("para"),
+            None,
+            0,
+            None,
         );
-        pilcrow.insert(&mut txn, KIND, PILCROW_KIND);
-        pilcrow.insert(&mut txn, PARA_ID, paragraph_id);
-        pilcrow.insert(&mut txn, "level", 0_f64);
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
             start: index,
@@ -587,6 +666,59 @@ fn check_text_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) 
         offset += item_length;
     }
     Ok(())
+}
+
+/// Removes `[start, end)`. Removed pilcrows join the paragraphs around them,
+/// and the joined paragraph keeps the first one's properties and id.
+fn remove_joining(story: &TextRef, txn: &mut TransactionMut<'_>, start: u32, end: u32) {
+    if start == end {
+        return;
+    }
+    let first = pilcrow_from(story, txn, start)
+        .filter(|(offset, _)| *offset < end)
+        .map(|(_, pilcrow)| pilcrow_properties(&pilcrow, txn));
+    story.remove_range(txn, start, end - start);
+    let (Some(properties), Some((_, survivor))) = (first, pilcrow_from(story, txn, start)) else {
+        return;
+    };
+    let stale: Vec<String> = pilcrow_properties(&survivor, txn)
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| properties.iter().all(|(kept, _)| kept != key))
+        .collect();
+    for key in stale {
+        survivor.remove(txn, &key);
+    }
+    for (key, value) in properties {
+        survivor.insert(txn, key, value);
+    }
+}
+
+/// The first pilcrow at or after `index`, with its offset.
+fn pilcrow_from<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Option<(u32, MapRef)> {
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let length = out_len(&diff.insert);
+        if let Out::YMap(map) = diff.insert
+            && offset >= index
+        {
+            return Some((offset, map));
+        }
+        offset += length;
+    }
+    None
+}
+
+/// Every pilcrow entry but the kind: the paragraph id and properties.
+fn pilcrow_properties<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> Vec<(String, Any)> {
+    pilcrow
+        .iter(txn)
+        .filter(|(key, _)| *key != KIND)
+        .filter_map(|(key, value)| match value {
+            Out::Any(value) => Some((key.to_owned(), value)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> EditResult<()> {

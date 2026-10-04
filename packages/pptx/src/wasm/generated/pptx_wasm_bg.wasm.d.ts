@@ -55,6 +55,7 @@ export const pptxdocument_redoJson: (a: number) => [number, number, number, numb
 export const pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_replaceTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_saveBytes: (a: number) => [number, number, number, number];

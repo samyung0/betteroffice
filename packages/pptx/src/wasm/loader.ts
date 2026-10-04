@@ -92,6 +92,17 @@ export interface PresentationHandle extends CollaborationReplica {
   ): Profiled<TextReceipt>;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   deleteTextProfiled(storyId: string, start: number, end: number): Profiled<TextReceipt>;
+  /** Replaces `[start, end)` with `text` in one undoable step that changes
+   *  nothing when refused. Unlike `deleteText`, the range may cross
+   *  paragraphs: they join under the first one's properties. Each `\n` in
+   *  `text` starts a new paragraph. */
+  replaceText(
+    storyId: string,
+    start: number,
+    end: number,
+    text: string,
+    style?: TextStyle
+  ): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
   /** Sets the alignment of every paragraph the range touches; `null` restores
@@ -433,6 +444,12 @@ export function openPresentation(
     deleteTextProfiled(storyId, start, end): Profiled<TextReceipt> {
       return jsonWasmCall(
         () => doc.deleteTextProfiledJson(JSON.stringify({ storyId, start, end })),
+        true
+      );
+    },
+    replaceText(storyId, start, end, text, style = {}): TextReceipt {
+      return jsonWasmCall(
+        () => doc.replaceTextJson(JSON.stringify({ storyId, start, end, text, style })),
         true
       );
     },

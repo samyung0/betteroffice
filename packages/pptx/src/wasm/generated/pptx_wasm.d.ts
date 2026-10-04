@@ -48,6 +48,7 @@ export class PptxDocument {
     rejectProposalJson(args: string): string;
     removeCommentJson(args: string): string;
     removeShapeJson(args: string): string;
+    replaceTextJson(args: string): string;
     replyToCommentJson(args: string): string;
     resizeShapeJson(args: string): string;
     /**
@@ -163,6 +164,7 @@ export interface InitOutput {
     readonly pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_replaceTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
