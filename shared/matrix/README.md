@@ -87,9 +87,11 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
 - `unstable` rows with a continued result whose first-paragraph tail ends in a comment's reference and text typed
   after it (same classes on dd87c75e): the parser hoists the comment's end out of the field, so the reopened file
   counts the typed text inside the comment and the next publication writes its end after it.
-- `exact+text` and `exact+moved` two-peer rows (recheck of 7d3ef664, awaiting a decision): two peers dropping the same
-  last link of a continued field both move the text left to the tail, which is then duplicated; and two peers each
-  deleting half of it leave the field unrefreshed until it is reopened.
+- `exact+moved` rows for text left in a field after its last link is deleted (accepted 2026-10-04): a plain run left
+  ending a continued result's first paragraph stays in the field, which shows it, until the next publication reads
+  it as text after the field (no tail move), so concurrent deletes converge without duplicates. One peer, two peers
+  deleting the same link, and two peers each deleting half of it all land here; the `text` oracle checks the two-peer
+  rows against one peer's delete.
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
     simple field before a capture, which shares that field's result slot the export's seed splits (accepted like

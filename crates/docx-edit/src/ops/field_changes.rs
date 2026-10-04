@@ -724,35 +724,24 @@ pub(crate) fn child_owners(chunks: &[Chunk], start: u32, end: u32) -> Vec<i64> {
         .collect()
 }
 
-/// Re-reads the projecting fields numbered `ids`, after an edit removed some
-/// of their projected children, as the seed reads their export: the plain
-/// runs that now end a continued result's first paragraph leave the field as
-/// text after its embed (`continued_result_tail`), and the field shows what
-/// [`seeded_display`] gives.
-pub(crate) fn refresh_shown(
-    txn: &mut TransactionMut<'_>,
-    story: &TextRef,
-    story_id: &str,
-    ids: &[i64],
-    package: Option<&PackageContext>,
-) -> OpResult<()> {
+/// Re-reads what the projecting fields numbered `ids` show, after an edit
+/// removed some of their projected children ([`seeded_display`]). Only the
+/// shown text changes, so peers refreshing at once converge; text left ending
+/// a continued result stays in the field until the next publication, which
+/// reads it as text after the field (decided 2026-10-04).
+pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: &[i64]) {
     if ids.is_empty() {
-        return Ok(());
+        return;
     }
     let chunks = snapshot(story, txn);
-    let owners: Vec<usize> = (0..chunks.len())
-        .filter(|position| {
-            projection(txn, &chunks[*position]).is_some_and(|(id, _)| ids.contains(&id))
-        })
-        .collect();
-    // The last first, so the tail text inserted keeps earlier positions.
-    for position in owners.into_iter().rev() {
-        let chunk = &chunks[position];
-        let (id, recorded) = projection(txn, chunk).expect("a projecting field");
+    for (position, chunk) in chunks.iter().enumerate() {
+        let Some((id, recorded)) = projection(txn, chunk).filter(|(id, _)| ids.contains(id)) else {
+            continue;
+        };
         let ChunkKind::Embed(Some(map)) = &chunk.kind else {
             continue;
         };
-        let Some(Ok(mut data)) =
+        let Some(Ok(data)) =
             map_string(map, txn, "fieldData").map(|data| serde_json::from_str::<Value>(&data))
         else {
             continue;
@@ -766,69 +755,11 @@ pub(crate) fn refresh_shown(
             })
             .map(|(_, index)| index)
             .collect();
-        let inline = data["structuredResult"]["inline"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        // The export drops the children that are gone; the runs left ending
-        // a continued result are its tail.
-        let mut tail: Vec<usize> = Vec::new();
-        if crate::seed::result_continues(&data) {
-            for index in (0..inline.len()).rev() {
-                let at = index as i64;
-                if recorded.contains(&at) && !live.contains(&at) {
-                    continue;
-                }
-                if live.contains(&at) || !crate::seed::tail_run(&inline[index]) {
-                    break;
-                }
-                tail.push(index);
-            }
-            tail.reverse();
-        }
-        let shift =
-            |index: i64| index - tail.iter().filter(|at| (**at as i64) < index).count() as i64;
-        let recorded: Vec<i64> = recorded.iter().map(|index| shift(*index)).collect();
-        if !tail.is_empty() {
-            data = crate::seed::without_result_nodes(&data, &tail);
-            map.insert(txn, "fieldData", data.to_string());
-            if let Some(Out::Any(Any::Map(projection))) = map.get(txn, "resultProjection") {
-                let mut projection = (*projection).clone();
-                if let Some(Any::Array(children)) = projection.get("children") {
-                    let children: Vec<Any> = children
-                        .iter()
-                        .map(|child| match child {
-                            Any::Map(child) => {
-                                let mut child = (**child).clone();
-                                if let Some(Any::Number(index)) = child.get("index") {
-                                    let index = shift(*index as i64);
-                                    child.insert("index".to_owned(), Any::Number(index as f64));
-                                }
-                                Any::Map(Arc::new(child))
-                            }
-                            other => other.clone(),
-                        })
-                        .collect();
-                    projection.insert("children".to_owned(), Any::Array(Arc::from(children)));
-                }
-                map.insert(txn, "resultProjection", Any::Map(Arc::new(projection)));
-            }
-            let style = paragraph_style(txn, &chunks, position);
-            let mut at = chunk.start + 1;
-            for index in &tail {
-                for unit in run_units(&inline[*index], package, style.as_deref()) {
-                    let (len, op) = unit_op(at, unit)?;
-                    apply(txn, story, story_id, vec![(at, 0, op)])?;
-                    at += len;
-                }
-            }
-        }
         let shown = seeded_display(&data, &recorded, &live);
         if map_string(map, txn, "displayText").as_deref() != Some(shown.as_str()) {
             map.insert(txn, "displayText", shown);
         }
     }
-    Ok(())
 }
 
 /// What a field shows of `runs`, as the seed's `displayText` reads them: their

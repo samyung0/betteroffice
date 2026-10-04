@@ -1632,7 +1632,7 @@ fn continued_result_tail(value: &Value) -> (Value, Vec<Value>) {
 
 /// Whether a complex field's result continues from this paragraph into a
 /// later one (its code does not).
-pub(crate) fn result_continues(value: &Value) -> bool {
+fn result_continues(value: &Value) -> bool {
     let continuation = field(Some(value), "continuation");
     string(field(Some(value), "type")) == Some("complexField")
         && boolean(field(continuation, "end")) == Some(true)
@@ -1644,7 +1644,7 @@ pub(crate) fn result_continues(value: &Value) -> bool {
 /// references and tabs. The save drops the own formatting of a tab or break
 /// and a break's `w:clear` (decided 2026-10-03 for tabs, 2026-10-04 for
 /// breaks), so a run holding one with either stays in the field.
-pub(crate) fn tail_run(node: &Value) -> bool {
+fn tail_run(node: &Value) -> bool {
     let contents = array(field(Some(node), "content"));
     let formatted = field(Some(node), "formatting").is_some_and(|formatting| {
         !formatting.is_null()
@@ -1674,7 +1674,7 @@ pub(crate) fn tail_run(node: &Value) -> bool {
 
 /// `value` without the result nodes at `drop` (indices into its structured
 /// result), its shown runs re-read from the rest.
-pub(crate) fn without_result_nodes(value: &Value, drop: &[usize]) -> Value {
+fn without_result_nodes(value: &Value, drop: &[usize]) -> Value {
     let kept: Vec<Value> = array(field(field(Some(value), "structuredResult"), "inline"))
         .iter()
         .enumerate()

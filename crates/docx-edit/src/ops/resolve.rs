@@ -45,7 +45,6 @@ use crate::ops::field_changes::{self, release_children, resolve_field_changes};
 use crate::ops::table::resolve_table_row_revisions;
 use crate::ops::{Chunk, ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
-use crate::seed::PackageContext;
 use crate::segments::is_block_embed;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
@@ -410,7 +409,6 @@ fn holds_content<T: ReadTxn>(
 /// Resolves one story's tracked changes in place. `span` limits the walk to a story range
 /// (`None` = the whole story, the by-id path); `filter` limits it to one revision id.
 /// Returns the number of units physically removed inside `span`.
-#[allow(clippy::too_many_arguments)]
 fn resolve_story(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -419,8 +417,7 @@ fn resolve_story(
     span: Option<(u32, u32)>,
     filter: Option<&str>,
     resolved: &mut Vec<String>,
-    package: Option<&PackageContext>,
-) -> OpResult<u32> {
+) -> u32 {
     let mut owners = Vec::new();
     resolve_field_boundaries(txn, story_id, span, filter, resolved);
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
@@ -577,8 +574,8 @@ fn resolve_story(
             }
         }
     }
-    field_changes::refresh_shown(txn, story, story_id, &owners, package)?;
-    Ok(removed)
+    field_changes::refresh_shown(txn, story, &owners);
+    removed
 }
 
 /// Every story, by id.
@@ -646,7 +643,6 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
         let mut resolved: Vec<String> = Vec::new();
-        let package = self.package();
         match target {
             ChangeTarget::Range(range) => {
                 let len = crate::format::range_len(range)?;
@@ -672,8 +668,7 @@ impl EditingDoc {
                     Some((range.start, range.end)),
                     None,
                     &mut resolved,
-                    package.as_deref(),
-                )?;
+                );
                 let loc_range =
                     loc_range_in_txn(&range.story, &story, &txn, range.start, range.end - removed)?;
                 Ok(Receipt {
@@ -693,19 +688,11 @@ impl EditingDoc {
                         None,
                         &mut resolved,
                     )?;
-                    resolve_story(
-                        &mut txn,
-                        story,
-                        story_id,
-                        mode,
-                        None,
-                        None,
-                        &mut resolved,
-                        package.as_deref(),
-                    )?;
+                    resolve_story(&mut txn, story, story_id, mode, None, None, &mut resolved);
                 }
                 // Fields number themselves by the comment boundaries of the
                 // resolved stories, as the seed of their export reads them.
+                let package = self.package();
                 let comments = crate::comment_boundaries(&txn);
                 for (story_id, story) in &sorted_stories(&txn) {
                     resolve_field_changes(
@@ -742,8 +729,7 @@ impl EditingDoc {
                         None,
                         Some(revision_id.as_str()),
                         &mut resolved,
-                        package.as_deref(),
-                    )?;
+                    );
                 }
                 if resolved.is_empty() {
                     return Err(OpError::UnknownChange(revision_id.clone()));

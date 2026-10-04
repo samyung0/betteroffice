@@ -2379,7 +2379,8 @@ test.each(
 
 // Recheck of e7bf01fc, finding 3: the shown text follows the seed after every edit that drops the link left in the
 // first paragraph: Accept All of its suggested deletion, typing over it (the typed text takes its slot), and a delete
-// leaving an own run to end the continued result (which becomes text after the field, as the seed reads it).
+// leaving an own run to end the continued result. That run stays in the field, which shows it, until the next
+// publication reads it as text after the field (decided 2026-10-04, so peers deleting at once converge).
 const dropLink: Record<string, [string, (session: YrsSession, story: string, paraId: string, offset: number) => void]> = {
   "Accept All of its suggested deletion": [
     field(field(run("7"), " PAGE ") + link(run("AA")) + run("yy"), " REF a \\h "),
@@ -2411,8 +2412,13 @@ test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(d
     edit(session, story, firstParaId, at.offset + 1);
     const saved = await publish(bytes, session.encodeState());
     const reopened = await open(saved);
-    expect(fieldsShown(session, story)).toBe(fieldsShown(reopened, story));
-    expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    if (how === "deleting it after an own run") {
+      expect(fieldsShown(session, story)).toBe("REF a \\h=x");
+      expect(matrixUnits(reopened, story)).toBe(matrixUnits(session, story).replace("|x]", "|]x"));
+    } else {
+      expect(fieldsShown(session, story)).toBe(fieldsShown(reopened, story));
+      expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    }
     session.undo();
     if (how !== "Accept All of its suggested deletion") expect(matrixUnits(session, story)).toBe(split);
     session.destroy();

@@ -356,10 +356,8 @@ impl EditingDoc {
             refresh_shown(
                 &mut txn,
                 &story,
-                &range.story,
                 &child_owners(&chunks, range.start, range.end),
-                self.package().as_deref(),
-            )?;
+            );
         }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
         Ok(Receipt {
@@ -469,10 +467,8 @@ impl EditingDoc {
             refresh_shown(
                 &mut txn,
                 &story,
-                &range.story,
                 &child_owners(&chunks, range.start, range.end),
-                self.package().as_deref(),
-            )?;
+            );
         }
         let end = landing + utf16_len(text);
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, end)?;
@@ -564,10 +560,8 @@ impl EditingDoc {
             refresh_shown(
                 &mut txn,
                 &story,
-                &range.story,
                 &child_owners(&chunks, range.start, range.end),
-                self.package().as_deref(),
-            )?;
+            );
         }
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, cursor)?;
         Ok(Receipt {

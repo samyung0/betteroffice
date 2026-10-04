@@ -499,9 +499,10 @@ fn a_split_field_left_without_its_link_shows_its_whole_result() {
 fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
     // Accepting a suggested deletion of the link left in the first paragraph,
     // typing over it, and deleting it when an own run precedes it: each time
-    // the editor shows what the seed of the save shows, and a plain run left
-    // ending the continued result becomes text after the field, as the seed
-    // reads it.
+    // the editor shows what the seed of the save shows, except that a plain
+    // run left ending the continued result stays in the field, which shows
+    // it, until the next publication reads it as text after the field
+    // (decided 2026-10-04, so peers deleting at once converge).
     let begin = |code: &str| {
         format!(
             r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{code}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#
@@ -522,7 +523,8 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
     let first = |result: &str| format!("{}{}{result}", run("a "), begin(" REF a \\h "));
     let second = |result: &str| format!("{result}{end}{}", run(" b"));
     type Edit = fn(&EditingDoc);
-    let cases: [(String, Edit, EditingDoc); 3] = [
+    // [paragraph, edit, the seed of the save, the text the field keeps meanwhile]
+    let cases: [(String, Edit, EditingDoc, &str); 3] = [
         (
             field(&format!("{page}{}{}", link("AA"), run("yy"))),
             |doc| {
@@ -534,6 +536,7 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
                 ("11111111", &first(&page)),
                 ("33333333", &second(&format!("{}{}", link("A"), run("yy")))),
             ]),
+            "",
         ),
         (
             field(&format!("{page}{}{}", link("AA"), link("BB"))),
@@ -545,6 +548,7 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
                 ("11111111", &first(&format!("{page}{}", link("Q")))),
                 ("33333333", &second(&format!("{}{}", link("A"), link("BB")))),
             ]),
+            "",
         ),
         (
             field(&format!("{}{}{}", run("x"), link("AA"), run("yy"))),
@@ -556,9 +560,10 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
                 ("11111111", &first(&run("x"))),
                 ("33333333", &second(&format!("{}{}", link("A"), run("yy")))),
             ]),
+            "x",
         ),
     ];
-    for (paragraph, edit, saved) in cases {
+    for (paragraph, edit, saved, kept) in cases {
         let doc = seeded(&[("11111111", &paragraph)]);
         let mut undo = doc.undo_manager();
         doc.split_paragraph(&ctx(), Position::new("body", 3), None)
@@ -566,10 +571,14 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
         let split = (slot_units(&doc), shown(&doc));
         undo.add_undo_barrier();
         edit(&doc);
-        assert_eq!(shown(&doc), shown(&saved), "{paragraph}");
+        let mut expected = shown(&saved);
+        expected[0].insert_str(0, kept);
+        assert_eq!(shown(&doc), expected, "{paragraph}");
         assert_eq!(
             slot_units(&doc).replace('Q', "A"),
-            slot_units(&saved).replace('Q', "A"),
+            slot_units(&saved)
+                .replace('Q', "A")
+                .replacen(&format!("[field]{kept}"), "[field]", 1),
             "{paragraph}"
         );
         undo.undo();
