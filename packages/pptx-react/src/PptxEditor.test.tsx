@@ -506,7 +506,7 @@ describe('PptxEditor host integration', () => {
     const snapshot = api!.handle.snapshot();
     expect(snapshot.slides.length).toBeGreaterThan(1);
     expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
-    expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).disabled).toBe(true);
+    expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(view.container.querySelector('button[aria-current="page"]')?.textContent).toContain('2');
 
     await act(async () => {
@@ -973,6 +973,30 @@ describe('PptxEditor speaker notes', () => {
     } finally {
       peer.dispose();
     }
+  }, 60_000);
+
+  it('keeps read-only notes focusable and selectable for copying, but not editable', async () => {
+    const deck = pptx.openPresentation(fixture);
+    const slideId = deck.snapshot().slides[0].id;
+    deck.setSlideNotes(slideId, 'Speaker notes to copy');
+    const file = deck.save();
+    deck.dispose();
+    let api: PptxEditorApi | undefined;
+    const view = render(<PptxEditor file={file} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} readOnly defaultSpeakerNotes onReady={(ready) => { api = ready; }} />);
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    const notes = await waitFor(() => view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement);
+    expect([notes.readOnly, notes.disabled, notes.value]).toEqual([true, false, 'Speaker notes to copy']);
+
+    await act(async () => {
+      notes.focus();
+      notes.setSelectionRange(0, 'Speaker'.length);
+    });
+    expect(document.activeElement).toBe(notes);
+    expect(notes.value.slice(notes.selectionStart, notes.selectionEnd)).toBe('Speaker');
+
+    fireEvent.change(notes, { target: { value: 'typed over' } });
+    expect(notes.value).toBe('Speaker notes to copy');
+    expect(api!.handle.snapshot().slides[0].notes).toBe('Speaker notes to copy');
   }, 60_000);
 });
 

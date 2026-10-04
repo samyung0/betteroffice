@@ -2834,7 +2834,7 @@ function PptxEditorContent({
         <NotesPanel
           key={activeSlide.id}
           value={activeSlide.notes ?? ''}
-          disabled={!model || canvasReview.reviewing || readOnly}
+          readOnly={!model || canvasReview.reviewing || readOnly}
           label={t('notes.panelLabel')}
           placeholder={t('notes.placeholder')}
           onCommit={(text) => {
@@ -2933,13 +2933,14 @@ function RemoteShapeOutline({
 
 function NotesPanel({
   value,
-  disabled,
+  readOnly,
   label,
   placeholder,
   onCommit,
 }: {
   value: string;
-  disabled: boolean;
+  /** Read-only, not disabled, so the notes can still be selected and copied. */
+  readOnly: boolean;
   label: string;
   placeholder: string;
   onCommit: (text: string) => void;
@@ -2951,7 +2952,7 @@ function NotesPanel({
         aria-label={label}
         style={styles.notesTextarea}
         value={value}
-        disabled={disabled}
+        readOnly={readOnly}
         placeholder={placeholder}
         data-testid="pptx-notes-textarea"
         onChange={(event) => onCommit(event.target.value)}
