@@ -1955,6 +1955,9 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     }
   }
 
+  const grid = Array.isArray(payload.grid)
+    ? payload.grid.filter((width): width is number => typeof width === 'number')
+    : [];
   const rows: TableRow[] = rowPayloads.map((rowPayload, rowIndex) => {
     const cells: TableCell[] = [];
     for (let col = 0; col < totalColumns; ) {
@@ -1985,18 +1988,33 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       formatting.vMerge = 'continue';
       cells.push({
         ...covering.cell,
-        content: context.continuationContent(covering.story, rowIndex - covering.row),
+        content: context.continuationContent(
+          covering.story,
+          (Array.isArray(rowPayload.cells) ? rowPayload.cells : []).map((cell) => cell.story),
+          rowIndex - covering.row,
+          rowPayloads.length
+        ),
         formatting,
       });
       col += covering.colspan;
     }
 
     const attrs = { ...TABLE_ROW_ATTR_DEFAULTS, ...(rowPayload.trPr ?? {}) } as TableRowSaveAttrs;
-    const row: TableRow = {
-      type: 'tableRow',
-      formatting: tableRowAttrsToFormatting(attrs),
-      cells,
-    };
+    const formatting = tableRowAttrsToFormatting(attrs);
+    // The editor's rows start at the grid's first column, so a row keeps the
+    // grid columns it skips only while they still fit the grid (a row the
+    // editor added or a column it deleted can make them not).
+    if (formatting && (formatting.gridBefore || formatting.gridAfter)) {
+      const spans = cells.reduce((sum, cell) => sum + (cell.formatting?.gridSpan ?? 1), 0);
+      const columns = grid.length || totalColumns;
+      if (spans + (formatting.gridBefore ?? 0) + (formatting.gridAfter ?? 0) !== columns) {
+        delete formatting.gridBefore;
+        delete formatting.gridAfter;
+        delete formatting.widthBefore;
+        delete formatting.widthAfter;
+      }
+    }
+    const row: TableRow = { type: 'tableRow', formatting, cells };
     const ins = trackedInfo(attrs.trIns, true);
     const del = trackedInfo(attrs.trDel, true);
     if (ins) row.structuralChange = { type: 'tableRowInsertion', info: ins };
@@ -2008,9 +2026,6 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
   });
 
   normalizeVMergeRuns(rows);
-  const grid = Array.isArray(payload.grid)
-    ? payload.grid.filter((width): width is number => typeof width === 'number')
-    : [];
   const attrs = {
     ...TABLE_ATTR_DEFAULTS,
     ...(payload.tblPr ?? {}),
@@ -2690,24 +2705,57 @@ class SaveContext {
   }
 
   /**
-   * The paragraphs a vMerge continuation cell `rows` below its restart cell
+   * The paragraphs a vMerge continuation cell under the restart cell
    * `anchorStory` saves with: the source continuation's, with their pPr and
-   * no text, as the seed keeps none. Empty when the source has none there.
+   * no text, as the seed keeps none. Its source row is the one a seeded cell
+   * of the same row (`siblings`) names; with none, the row `offset` below the
+   * restart while the table keeps its source rows (`rowCount`). Empty when
+   * the source has no continuation of that merge there.
    */
-  continuationContent(anchorStory: string | undefined, rows: number): BlockContent[] {
-    const anchor = anchorStory === undefined ? undefined : this.baseCells.get(anchorStory);
-    let column = 0;
-    const cell = anchor?.table.rows[anchor.row + rows]?.cells.find((candidate) => {
-      const start = column;
-      column += candidate.formatting?.gridSpan ?? 1;
-      return start === anchor.column;
-    });
-    if (cell?.formatting?.vMerge !== 'continue') return [];
-    return cell.content.flatMap((block) =>
-      block.type === 'paragraph' && block.formatting
-        ? [{ type: 'paragraph', formatting: block.formatting, content: [] } satisfies Paragraph]
-        : []
+  continuationContent(
+    anchorStory: string | undefined,
+    siblings: ReadonlyArray<string | undefined>,
+    offset: number,
+    rowCount: number
+  ): BlockContent[] {
+    const anchor = this.sourceCell(anchorStory);
+    if (!anchor) return [];
+    const sibling = siblings.map((story) => this.sourceCell(story)).find((cell) => cell?.table === anchor.table);
+    const row = sibling?.row ?? (rowCount === anchor.table.rows.length ? anchor.row + offset : -1);
+    const cellAt = (index: number) => {
+      let column = 0;
+      return anchor.table.rows[index]?.cells.find((candidate) => {
+        const start = column;
+        column += candidate.formatting?.gridSpan ?? 1;
+        return start === anchor.column;
+      });
+    };
+    for (let index = anchor.row + 1; index <= row; index += 1) {
+      if (cellAt(index)?.formatting?.vMerge !== 'continue') return [];
+    }
+    return row > anchor.row
+      ? (cellAt(row)?.content ?? []).flatMap((block) =>
+          block.type === 'paragraph' && block.formatting
+            ? [{ type: 'paragraph', formatting: block.formatting, content: [] } satisfies Paragraph]
+            : []
+        )
+      : [];
+  }
+
+  /**
+   * The source cell a cell story seeded from. A table made in the session can
+   * take a deleted table's story ids, so the story must still hold one of the
+   * source cell's paragraphs.
+   */
+  private sourceCell(story: string | undefined): BaseCell | undefined {
+    const cell = story === undefined ? undefined : this.baseCells.get(story);
+    if (!cell) return undefined;
+    const source = new Set(
+      (this.baseStories.get(story!) ?? [])
+        .filter((block): block is Paragraph => block.type === 'paragraph')
+        .map((block, index) => block.paraId ?? `${story}:p${index}`)
     );
+    return this.session.paragraphs(story!).some(({ paraId }) => source.has(paraId)) ? cell : undefined;
   }
 
   private storyIsClean(storyId: string): boolean {
