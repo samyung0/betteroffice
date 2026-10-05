@@ -2092,18 +2092,49 @@ function XlsxEditorContent({
     const scroll = scrollRef.current;
     const painted = paintedRef.current;
     const grid = painted?.frame.grid;
-    if (!scroll || !painted || !grid || !sheetInfo || !paintedIsLive(painted, scroll, zoom))
+    if (
+      !scroll ||
+      !painted ||
+      !grid ||
+      !sheetInfo ||
+      painted.revision !== revisionRef.current ||
+      !paintedIsLive(painted, scroll, zoom)
+    )
       return false;
     const rect = cellRect(grid, row, col);
     if (!rect) return false;
-    const whole = (start: number, size: number, pane: number | undefined, extent: number) =>
-      pane !== undefined && (start > pane || (start === 0 && pane === 0)) && start + size <= extent;
+    // on one axis: the cell fits between the pane and the window's edge, or
+    // spans all of it (a cell wider than the view shows as much as it can).
+    // Scrolled, a start exactly at the pane edge may be a clamped track.
+    const whole = (
+      start: number,
+      size: number,
+      pane: number | undefined,
+      extent: number,
+      scrolled: number
+    ) =>
+      pane !== undefined &&
+      (((start > pane || (start === pane && (pane === 0 || scrolled === 0))) &&
+        start + size <= extent) ||
+        (start <= pane && start + size >= extent));
     const { frozenCols, frozenRows } = sheetInfo;
     return (
       (col < frozenCols ||
-        whole(rect.x, rect.w, frozenCols ? grid.colOffsets[frozenCols] : 0, scroll.clientWidth / zoom)) &&
+        whole(
+          rect.x,
+          rect.w,
+          frozenCols ? grid.colOffsets[frozenCols] : 0,
+          scroll.clientWidth / zoom,
+          painted.viewport.x
+        )) &&
       (row < frozenRows ||
-        whole(rect.y, rect.h, frozenRows ? grid.rowOffsets[frozenRows] : 0, scroll.clientHeight / zoom))
+        whole(
+          rect.y,
+          rect.h,
+          frozenRows ? grid.rowOffsets[frozenRows] : 0,
+          scroll.clientHeight / zoom,
+          painted.viewport.y
+        ))
     );
   };
 
@@ -2144,11 +2175,12 @@ function XlsxEditorContent({
     const x = axis(left, col < sheetInfo.frozenCols, cell.x, cell.width, width, paneWidth);
     const y = axis(top, row < sheetInfo.frozenRows, cell.y, cell.height, height, paneHeight);
     if (x === left && y === top) return;
-    // whole pixels, rounded toward the cell so no sliver of it stays hidden.
-    const snap = (to: number, from: number) =>
-      to > from ? Math.ceil(to * zoom) : Math.floor(to * zoom);
-    const scrollLeft = x === left ? scroll.scrollLeft : snap(x, left);
-    const scrollTop = y === top ? scroll.scrollTop : snap(y, top);
+    // whole pixels, rounded toward the cell so no sliver of it stays hidden: a
+    // start alignment rounds down, an end alignment up.
+    const snap = (to: number, start: number) =>
+      to === start ? Math.floor(to * zoom) : Math.ceil(to * zoom);
+    const scrollLeft = x === left ? scroll.scrollLeft : snap(x, cell.x);
+    const scrollTop = y === top ? scroll.scrollTop : snap(y, cell.y);
     // a cell past the used range: grow the scroll area first, then come back.
     const needWidth = (scrollLeft + scroll.clientWidth) / zoom;
     const needHeight = (scrollTop + scroll.clientHeight) / zoom;
@@ -2193,6 +2225,8 @@ function XlsxEditorContent({
       setCapturedFormat(null);
       paintSourceRef.current = null;
       setSheetInfo(handle.sheetInfo());
+      // keys go to the new sheet's grid, not the tab that was clicked.
+      focusContainer();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -2625,12 +2659,17 @@ function XlsxEditorContent({
                     e.preventDefault();
                   }
                 }}
-                onBlur={() => {
+                onBlur={(e) => {
                   if (suppressBlurRef.current) {
                     suppressBlurRef.current = false;
                     return;
                   }
+                  // the window or tab lost focus: the edit stays open and takes
+                  // the next key on return, as in Excel and Sheets.
+                  if (!document.hasFocus()) return;
                   commitEditor(undefined, false);
+                  // a press on nothing focusable: the grid takes the keys again.
+                  if (!e.relatedTarget) focusContainer();
                 }}
                 style={
                   scaledEditRect

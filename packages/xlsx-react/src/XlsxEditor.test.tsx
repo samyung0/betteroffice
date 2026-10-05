@@ -9,9 +9,10 @@
  */
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
@@ -100,6 +101,57 @@ function withFarCell(bytes: Uint8Array, frozen = 0): Uint8Array {
   }
 }
 
+// column B wider than the window.
+function withWideColumn(bytes: Uint8Array): Uint8Array {
+  const handle = openWorkbook(bytes);
+  try {
+    handle.applyOps([{ type: 'setColWidth', sheet: 0, col: 1, width: 200 }]);
+    return handle.save();
+  } finally {
+    handle.dispose();
+  }
+}
+
+// column F styled with a 36pt font: a value typed there grows its row.
+async function withTallFontColumn(bytes: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(bytes);
+  let styles = await zip.file('xl/styles.xml')!.async('string');
+  styles = styles
+    .replace(/<fonts count="(\d+)">/, (_, n) => `<fonts count="${Number(n) + 1}">`)
+    .replace('</fonts>', '<font><sz val="36"/><name val="Calibri"/></font></fonts>');
+  const fonts = Number(/<fonts count="(\d+)">/.exec(styles)![1]);
+  styles = styles
+    .replace(/<cellXfs count="(\d+)">/, (_, n) => `<cellXfs count="${Number(n) + 1}">`)
+    .replace(
+      '</cellXfs>',
+      `<xf numFmtId="0" fontId="${fonts - 1}" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>`
+    );
+  const xfs = Number(/<cellXfs count="(\d+)">/.exec(styles)![1]);
+  zip.file('xl/styles.xml', styles);
+  const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    sheet.replace('</cols>', `<col min="6" max="6" width="9" style="${xfs - 1}"/></cols>`)
+  );
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+// engine geometry calls and paints from here on.
+function countEngine(handle: WorkbookHandle) {
+  const counts = { positions: 0, paints: 0 };
+  const cellPosition = handle.cellPosition.bind(handle);
+  const displayList = handle.displayList.bind(handle);
+  handle.cellPosition = (sheet, row, col) => {
+    counts.positions += 1;
+    return cellPosition(sheet, row, col);
+  };
+  handle.displayList = (viewport) => {
+    counts.paints += 1;
+    return displayList(viewport);
+  };
+  return counts;
+}
+
 interface Fixture {
   bytes: Uint8Array;
   grid: GridMeta;
@@ -124,6 +176,8 @@ let wide: Fixture;
 let wideFrozen: Fixture;
 // frozen panes larger than the window on both axes.
 let paneFilled: Fixture;
+let wideColumn: Fixture;
+let tallFont: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -148,6 +202,8 @@ beforeAll(async () => {
   wide = fixtureFrom(withFarCell(source));
   wideFrozen = fixtureFrom(withFarCell(source, 2));
   paneFilled = fixtureFrom(withFarCell(source, 40));
+  wideColumn = fixtureFrom(withWideColumn(source));
+  tallFont = fixtureFrom(await withTallFontColumn(source));
 });
 
 afterAll(async () => {
@@ -584,7 +640,7 @@ describe('XlsxEditor keyboard', () => {
     const view = await mountEditor(wide);
     // the last row the window shows whole: Enter moves below the edge.
     const offsets = wide.grid.rowOffsets;
-    const last = offsets.findLastIndex((bottom) => bottom <= VIEWPORT.height) - 1;
+    const last = offsets.filter((bottom) => bottom <= VIEWPORT.height).length - 2;
     view.click({ row: last, col: 1 });
     await press(view.surface, '7');
     const handle = view.workbook();
@@ -626,6 +682,100 @@ describe('XlsxEditor keyboard', () => {
     expect(view.editor()!.style.opacity).toBe('');
     await press(view.editor()!, '5');
     expect(view.surface.scrollLeft).toBe(Math.floor(start));
+  });
+
+  it('shows a cell wider than the view as it is, typing or moving down', async () => {
+    const view = await mountEditor(wideColumn);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    // inside the wide cell, to the right of its start.
+    await scrollTo(view, view.surface.scrollLeft + 500, 0);
+    const counts = countEngine(view.workbook());
+    const left = view.surface.scrollLeft;
+    for (const key of ['a', 'b', 'c']) {
+      await press(input, key);
+      fireEvent.change(input, { target: { value: `${input.value}${key}` } });
+    }
+    expect(view.surface.scrollLeft).toBe(left);
+    await press(input, 'Escape');
+    for (let step = 0; step < 3; step += 1) await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('B7');
+    expect(view.surface.scrollLeft).toBe(left);
+    expect(counts).toEqual({ positions: 0, paints: 0 });
+  });
+
+  it('judges the cell an Enter lands on against the row its commit grew', async () => {
+    const view = await mountEditor(tallFont);
+    // Enter lands on the last row the window shows whole.
+    const target = tallFont.grid.rowOffsets.filter((bottom) => bottom <= VIEWPORT.height).length - 2;
+    view.click({ row: target - 1, col: 5 });
+    await press(view.surface, '7');
+    await press(view.editor()!, 'Enter');
+    expect(view.workbook().cell(0, target - 1, 5).input).toBe('7');
+    const cell = view.workbook().cellPosition(0, target, 5);
+    expect(cell.y + cell.height).toBeLessThanOrEqual(view.surface.scrollTop + VIEWPORT.height);
+    expect(view.surface.scrollTop).toBeGreaterThan(0);
+  });
+
+  it('asks the engine nothing for the first cell under frozen panes at scroll 0', async () => {
+    const view = await mountEditor(wideFrozen);
+    const counts = countEngine(view.workbook());
+    view.click({ row: 2, col: 2 });
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    for (const key of ['a', 'b', 'c']) {
+      await press(input, key);
+      fireEvent.change(input, { target: { value: `${input.value}${key}` } });
+    }
+    expect([view.surface.scrollLeft, view.surface.scrollTop]).toEqual([0, 0]);
+    expect(counts.positions).toBe(0);
+  });
+
+  it('commits an edit a press on nothing focusable ends, and gives the grid the keys', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    await act(async () => {
+      fireEvent.blur(view.editor()!, { relatedTarget: null });
+    });
+    expect(view.editor()).toBeNull();
+    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    // identity checks stay cheap to print when they fail.
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('xlsx-scroll');
+  });
+
+  it('keeps the edit open across a window or tab switch', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    const before = view.workbook().cell(0, 3, 1).input;
+    const away = spyOn(document, 'hasFocus').mockReturnValue(false);
+    try {
+      await act(async () => {
+        fireEvent.blur(input, { relatedTarget: null });
+      });
+    } finally {
+      away.mockRestore();
+    }
+    expect(view.editor() === input).toBe(true);
+    expect(view.workbook().cell(0, 3, 1).input).toBe(before);
+    // back: the next key types into the edit.
+    fireEvent.change(input, { target: { value: '78' } });
+    await press(input, 'Enter');
+    expect(view.workbook().cell(0, 3, 1).input).toBe('78');
+  });
+
+  it('gives the grid the keys after a sheet tab is clicked', async () => {
+    const view = await mountEditor(wide);
+    const tab = view.surface.ownerDocument.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1];
+    await act(async () => {
+      tab.focus();
+      fireEvent.click(tab);
+    });
+    expect(tab.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('xlsx-scroll');
   });
 
   it('leaves the formula bar focused when an edit it committed scrolls back', async () => {
