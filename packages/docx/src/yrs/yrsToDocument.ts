@@ -527,14 +527,32 @@ function fnv53(value: string): number {
   return Number(hash & ((1n << 53n) - 1n));
 }
 
+/** The number each editor revision id saves as, during one projection. */
+let editorRevisionNumbers: ReadonlyMap<string, number> | undefined;
+
 function revisionId(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
-    return fnv53(value);
+    return editorRevisionNumbers?.get(value) ?? fnv53(value);
   }
   return 0;
+}
+
+/**
+ * Numbers for the revisions the editor made (`client:clock` ids): above the
+ * largest id the document's revisions hold, in id order, so every peer saves
+ * the same small, unique `w:id`s.
+ */
+function numberEditorRevisions(session: YrsSession): Map<string, number> {
+  let largest = 0;
+  const editor = new Set<string>();
+  for (const { revisionId: id } of session.listRevisions()) {
+    if (/^\d+$/.test(id)) largest = Math.max(largest, Number(id));
+    else editor.add(id);
+  }
+  return new Map([...editor].sort().map((id, index) => [id, largest + 1 + index]));
 }
 
 function trackedInfo(raw: unknown, _pmShape = false): TrackedChangeInfo | null {
@@ -2552,6 +2570,8 @@ interface SessionProjectionMemo {
   clean: Set<string>;
   dirty: Set<string>;
   stories: Map<string, ProjectedStory>;
+  /** The editor revision numbers the memoized stories were projected with. */
+  revisionNumbers?: string;
 }
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
@@ -2631,6 +2651,7 @@ class SaveContext {
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
   private readonly memo: SessionProjectionMemo;
+  readonly revisionNumbers: ReadonlyMap<string, number>;
   private readonly bypassMemo: boolean;
   /** Comments some story holds a reference mark for; read when a save first needs it. */
   private referencedComments?: Set<number>;
@@ -2650,6 +2671,16 @@ class SaveContext {
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
     this.memo = sessionProjectionMemo(session);
+    this.revisionNumbers = numberEditorRevisions(session);
+    const numbers = JSON.stringify([...this.revisionNumbers]);
+    if (this.memo.revisionNumbers !== numbers) {
+      // A new editor revision can renumber others in stories saved before.
+      this.memo.revisionNumbers = numbers;
+      this.memo.wholesale = true;
+      this.memo.clean.clear();
+      this.memo.dirty.clear();
+      this.memo.stories.clear();
+    }
     // Hooked projections (checkpoint export, rebase) run once and must see
     // every block, so they neither read nor fill the session cache.
     this.bypassMemo = trackStories || onEmbed !== undefined || onParagraph !== undefined;
@@ -3360,6 +3391,16 @@ export function yrsToDocument(
     options.onParagraph,
     options.onStory !== undefined
   );
+  const outer = editorRevisionNumbers;
+  editorRevisionNumbers = context.revisionNumbers;
+  try {
+    return projectDocument(context, base, options);
+  } finally {
+    editorRevisionNumbers = outer;
+  }
+}
+
+function projectDocument(context: SaveContext, base: Document, options: YrsToDocumentOptions): Document {
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')
