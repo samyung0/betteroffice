@@ -36,6 +36,7 @@ export {
   buildMirrorPage,
   buildMirrorTextPage,
   MIRROR_CLASS_NAMES,
+  MIRROR_TEXT_PAGE_CLASS,
   type BuildMirrorPageOptions,
   type MirrorLabels,
 } from './mirrorDom';

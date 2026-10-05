@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   openDocumentViewer,
   type DocxViewerAnalysis,
@@ -9,6 +9,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import { CanvasPagesView } from './DocxEditor/CanvasPagesView';
 import { DefaultLoadingIndicator, ParseError } from './DocxEditorHelpers';
+import { useTextLayer } from './textLayer';
 
 export interface DocxViewerProps {
   documentBuffer: ArrayBuffer | Uint8Array;
@@ -22,18 +23,25 @@ export interface DocxDisplayListViewerProps {
   zoom?: number;
 }
 
-/** Canvas-only surface for hosts that parse/layout in a disposable worker. */
+/**
+ * Canvas surface for hosts that parse/layout in a disposable worker, with a
+ * selectable text layer over the pages (see textLayer.ts).
+ */
 export function DocxDisplayListViewer({
   displayList,
   zoom = 1,
 }: DocxDisplayListViewerProps) {
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
+  const hostRef = useRef<HTMLDivElement>(null);
+  useTextLayer(hostRef, displayList.pages);
   return (
     <CanvasPagesView
       displayList={displayList}
       glyphOutlineProvider={false}
+      hostRef={hostRef}
       interactive={false}
       resolveImage={resolveImage}
+      selectableText
       zoom={zoom}
     />
   );

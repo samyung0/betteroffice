@@ -593,6 +593,79 @@
 }
 
 /* ============================================================================
+ * VIEWER TEXT LAYER
+ * A read-only viewer's positioned a11y mirror doubles as its text layer, as a
+ * PDF viewer's: transparent text over the canvas, so only the selection shows.
+ * textLayer.ts marks the pages host with data-text-selection="body",
+ * "footnotes" or "endnotes" while a selection exists, by the story it started in.
+ * The plain-text mirror of far pages stays invisible and pointer-inert.
+ * Headers, footers, charts and repeated table header rows are not selectable,
+ * as in the editor, whose body selection never takes them.
+ * ============================================================================ */
+
+.canvas-pages--selectable canvas {
+  user-select: none;
+}
+/* Shown only while a selection exists: until then the mirror stays as
+   invisible as the editor's, so reading and scrolling paint nothing more. */
+.canvas-pages[data-text-selection] .canvas-page-mirror--selectable .layout-page-mirror:not(.layout-page-mirror-text) {
+  opacity: 1 !important;
+}
+.canvas-page-mirror--selectable .layout-page-mirror * {
+  color: transparent !important;
+  text-shadow: none !important;
+  outline: none !important;
+  border-color: transparent !important;
+  background: transparent !important;
+}
+.canvas-page-mirror--selectable .layout-page-mirror:not(.layout-page-mirror-text) .layout-run-text {
+  pointer-events: auto;
+  cursor: text;
+  white-space: pre;
+  -webkit-user-drag: none;
+}
+/* clips Chrome's line-end selection box, which overlaps the next run */
+.canvas-pages[data-text-selection] .canvas-page-mirror--selectable .layout-run-text {
+  overflow: clip;
+}
+.canvas-page-mirror--selectable
+  :is(
+    .layout-page-header,
+    .layout-page-footer,
+    .layout-run-chart,
+    [data-repeated-header='true'],
+    [aria-hidden='true']:not(.layout-list-marker)
+  ),
+.canvas-page-mirror--selectable
+  :is(
+    .layout-page-header,
+    .layout-page-footer,
+    .layout-run-chart,
+    [data-repeated-header='true']
+  )
+  .layout-run-text {
+  pointer-events: none !important;
+  user-select: none;
+}
+/* Footnotes and endnotes are stories of their own, as in Word: a selection
+   keeps to the story it started in. */
+.canvas-pages[data-text-selection='body'] .canvas-page-mirror--selectable .layout-page-notes,
+.canvas-pages[data-text-selection='footnotes']
+  .canvas-page-mirror--selectable
+  .layout-page-content
+  > :not(.layout-page-notes[data-note-kind='footnote']),
+.canvas-pages[data-text-selection='endnotes']
+  .canvas-page-mirror--selectable
+  .layout-page-content
+  > :not(.layout-page-notes[data-note-kind='endnote']) {
+  user-select: none;
+}
+.canvas-page-mirror--selectable ::selection {
+  color: transparent;
+  background: rgba(66, 133, 244, 0.3);
+}
+
+/* ============================================================================
  * SPECIAL CONTENT TYPES
  * ============================================================================ */
 

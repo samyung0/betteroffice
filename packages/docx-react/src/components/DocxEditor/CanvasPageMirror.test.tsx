@@ -56,3 +56,32 @@ test('swaps between the positioned and the plain-text mirror at idle time', asyn
   expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(false);
   expect(mirrorPage(container)?.querySelector('.layout-run-text')?.textContent).toBe('Hello');
 });
+
+test('a selectable page holding a selection end keeps its positioned mirror', async () => {
+  const { container, rerender } = render(<CanvasPageMirror page={page} full selectable />);
+  expect(container.querySelector('.canvas-page-mirror--selectable')).not.toBeNull();
+  const text = container.querySelector('.layout-run-text')?.firstChild as Text;
+  document.getSelection()?.setBaseAndExtent(text, 1, text, 4);
+
+  rerender(<CanvasPageMirror page={page} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(false);
+  expect(document.getSelection()?.toString()).toBe('ell');
+
+  // once the selection lets go, the page goes plain
+  document.getSelection()?.removeAllRanges();
+  await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+  expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(true);
+});
+
+test('a selection end in a plain-text page does not keep it from turning positioned', async () => {
+  const { container, rerender } = render(<CanvasPageMirror page={page} full={false} selectable />);
+  const plain = container.querySelector('.layout-page-mirror-text')!;
+  const text = document.createTreeWalker(plain, NodeFilter.SHOW_TEXT).nextNode() as Text;
+  document.getSelection()?.setBaseAndExtent(text, 1, text, 4);
+
+  rerender(<CanvasPageMirror page={page} full selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(false);
+  document.getSelection()?.removeAllRanges();
+});

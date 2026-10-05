@@ -348,6 +348,24 @@ pub struct DocAttrs {
     /// Leader glyph metadata shared by text and glyph primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<LeaderGlyphMetadata>,
+    /// Tabs between this run and the line's previous painted run, in document
+    /// order (other positions there, such as hidden text or content-control
+    /// edges, paint nothing). Set on the first run after them, for copying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs_before: Option<u32>,
+    /// Line breaks between the line's previous painted run (or the line
+    /// start) and this run, for copying. Measured lines start with the break
+    /// that ended the line before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breaks_before: Option<u32>,
+    /// Tabs after the line's last painted run (or on an empty line, for its
+    /// marker), for copying: `Name<tab>` ending a line or paragraph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs_after: Option<u32>,
+    /// Line breaks after this run (or this empty line's marker) that no later
+    /// run on the line takes, for copying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breaks_after: Option<u32>,
     /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_slice: Option<HighlightSliceMetadata>,
@@ -6221,6 +6239,8 @@ fn emit_line(
         (0..logical_items.len()).collect()
     };
 
+    // Primitives each text item emitted, for `stamp_copy_separators`.
+    let mut text_prims = Vec::new();
     for item_idx in visual_order {
         let Some(item) = logical_items.get(item_idx) else {
             continue;
@@ -6264,6 +6284,7 @@ fn emit_line(
                             0.0
                         }
                 };
+                let text_from = prims.len();
                 emit_text_segment(
                     prims,
                     &item.text,
@@ -6290,6 +6311,7 @@ fn emit_line(
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
                 }
+                text_prims.push(text_from..prims.len());
                 pen_x = text_x + paint_width;
             }
             LinePaintItem::Tab {
@@ -6466,6 +6488,8 @@ fn emit_line(
         }
     }
 
+    let (trailing_tabs, trailing_breaks) = stamp_copy_separators(prims, &segments, &text_prims);
+
     // A line with no positioned text still needs a doc position for hit
     // testing. A blank row from a line break carries the break's own inline
     // position; an empty paragraph line carries the paragraph's CONTENT
@@ -6478,6 +6502,8 @@ fn emit_line(
             let mut marker_attrs = block_ref.attrs();
             marker_attrs.doc_start = Some(p);
             marker_attrs.doc_end = Some(p);
+            marker_attrs.tabs_after = trailing_tabs;
+            marker_attrs.breaks_after = trailing_breaks;
             prims.push(Primitive::Text(TextRunPrimitive {
                 text: String::new(),
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
@@ -6508,6 +6534,79 @@ fn emit_line(
         end_x: pen_x,
         baseline,
     })
+}
+
+/// Stamps `tabs_before`, `breaks_before`, `tabs_after` and `breaks_after`
+/// on a line's painted runs, so copying from the viewer need not guess from
+/// gaps in the runs' document positions. Returns the tabs and line breaks no
+/// run took (an empty line's), for its marker.
+fn stamp_copy_separators(
+    prims: &mut [Primitive],
+    segments: &[ResolvedSegment<'_>],
+    emitted: &[std::ops::Range<usize>],
+) -> (Option<u32>, Option<u32>) {
+    // (doc start, doc end, first primitive, last primitive) per text item
+    let mut runs: Vec<(i64, i64, usize, usize)> = emitted
+        .iter()
+        .filter_map(|range| {
+            let mut first: Option<(i64, usize)> = None;
+            let mut last: Option<(i64, usize)> = None;
+            for index in range.clone() {
+                let attrs = match &prims[index] {
+                    Primitive::Text(text) => &text.attrs,
+                    Primitive::GlyphRun(glyphs) => &glyphs.attrs,
+                    _ => continue,
+                };
+                let (Some(start), Some(end)) = (attrs.doc_start, attrs.doc_end) else {
+                    continue;
+                };
+                if first.is_none_or(|(at, _)| start < at) {
+                    first = Some((start, index));
+                }
+                if last.is_none_or(|(at, _)| end > at) {
+                    last = Some((end, index));
+                }
+            }
+            Some((first?.0, last?.0, first?.1, last?.1))
+        })
+        .collect();
+    runs.sort_by_key(|run| run.0);
+    // From the line's runs: measured lines carry no paint item for a break.
+    let positions = |tab: bool| -> Vec<i64> {
+        segments
+            .iter()
+            .filter_map(|segment| match segment.run {
+                RunIn::Tab(run) if tab => run.pm_start,
+                RunIn::LineBreak(run) if !tab => run.pm_start,
+                _ => None,
+            })
+            .collect()
+    };
+    let (tabs, breaks) = (positions(true), positions(false));
+    let between = |at: &[i64], from: i64, to: i64| {
+        let count = at.iter().filter(|&&pos| pos >= from && pos < to).count();
+        u32::try_from(count).ok().filter(|count| *count > 0)
+    };
+    let mut previous_end = i64::MIN;
+    for &(start, end, first, _) in &runs {
+        if let Some(attrs) = doc_attrs_mut(&mut prims[first]) {
+            attrs.tabs_before = between(&tabs, previous_end, start);
+            attrs.breaks_before = between(&breaks, previous_end, start);
+        }
+        previous_end = end;
+    }
+    let trailing_tabs = between(&tabs, previous_end, i64::MAX);
+    let trailing_breaks = between(&breaks, previous_end, i64::MAX);
+    match runs.last() {
+        Some(&(_, _, _, last)) => {
+            if let Some(attrs) = doc_attrs_mut(&mut prims[last]) {
+                attrs.tabs_after = trailing_tabs;
+                attrs.breaks_after = trailing_breaks;
+            }
+            (None, None)
+        }
+        None => (trailing_tabs, trailing_breaks),
+    }
 }
 
 fn tab_leader_for(attrs: Option<&ParaAttrsIn>, current_x_px: f64) -> Option<String> {

@@ -102,3 +102,24 @@ describe('buildMirrorTextPage', () => {
     });
   }
 });
+
+describe('buildMirrorPage text runs', () => {
+  test('sit on the painted text: spacing replayed, clipped-out runs hidden', () => {
+    const page = {
+      pageIndex: 0,
+      width: 500,
+      height: 500,
+      primitives: [
+        run('Spaced out', 0, { letterSpacing: 1.5, wordSpacing: 4 }),
+        // a split row's cut line, repeated on the next page
+        run('cut', 10, { clipGroup: { clip: { x: 0, y: 0, w: 500, h: 50 } } }),
+        run('kept', 13, { clipGroup: { clip: { x: 0, y: 50, w: 500, h: 100 } } }),
+      ],
+    } as unknown as DisplayPage;
+    const [spaced, cut, kept] = buildMirrorPage(page).querySelectorAll<HTMLElement>('.layout-run-text');
+    expect(spaced.style.letterSpacing).toBe('1.5px');
+    expect(spaced.style.wordSpacing).toBe('4px');
+    expect(cut.getAttribute('aria-hidden')).toBe('true');
+    expect(kept.hasAttribute('aria-hidden')).toBe(false);
+  });
+});

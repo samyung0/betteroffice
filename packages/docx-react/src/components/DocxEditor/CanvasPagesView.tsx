@@ -124,6 +124,42 @@ const PAGE_WINDOW_HYSTERESIS = 1;
 // accessible content; only geometry waits for the scroll to settle).
 const MIRROR_WINDOW_SETTLE_MS = 300;
 
+export interface TextDragWatch {
+  /** A mouse or pen press that started in the host is still down. */
+  held(): boolean;
+  stop(): void;
+}
+
+/**
+ * Watches for a text-layer drag held in `host`. A touch press pans instead
+ * (pointercancel, no pointerup), so it never counts, and a cancelled press
+ * ends the drag.
+ */
+export function watchTextDrag(host: HTMLElement): TextDragWatch {
+  const doc = host.ownerDocument;
+  let held = false;
+  const down = (event: PointerEvent): void => {
+    held =
+      event.pointerType !== 'touch' && event.button === 0 && host.contains(event.target as Node);
+  };
+  const up = (): void => {
+    held = false;
+  };
+  doc.addEventListener('pointerdown', down, true);
+  doc.addEventListener('pointerup', up, true);
+  doc.addEventListener('pointercancel', up, true);
+  doc.defaultView?.addEventListener('blur', up);
+  return {
+    held: () => held,
+    stop() {
+      doc.removeEventListener('pointerdown', down, true);
+      doc.removeEventListener('pointerup', up, true);
+      doc.removeEventListener('pointercancel', up, true);
+      doc.defaultView?.removeEventListener('blur', up);
+    },
+  };
+}
+
 interface PageWindowRange {
   start: number;
   end: number;
@@ -159,6 +195,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   interactive,
   deferChrome,
   fullMirror,
+  selectableText,
   registerCanvas,
 }: {
   page: DisplayPage;
@@ -167,6 +204,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   interactive: boolean;
   deferChrome: boolean;
   fullMirror: boolean;
+  selectableText: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
@@ -182,7 +220,13 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} full={fullMirror} />
+      <CanvasPageMirror
+        page={page}
+        zoom={zoom}
+        defer={deferChrome}
+        full={fullMirror}
+        selectable={selectableText}
+      />
       {interactive ? (
         <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
       ) : null}
@@ -198,6 +242,7 @@ export function CanvasPagesView({
   sidebarOpen = false,
   zoom = 1,
   interactive = false,
+  selectableText = false,
   glyphOutlineProvider,
   offscreenReplay,
   onWorkerPresentationChange,
@@ -224,6 +269,8 @@ export function CanvasPagesView({
    * owns the only clickable/focusable SDT controls on the canvas path.
    */
   interactive?: boolean;
+  /** Read-only viewers: the a11y mirror becomes a selectable text layer (see CanvasPageMirror). */
+  selectableText?: boolean;
   /** Outline source sharing the display engine's resident font store. */
   /** False disables the separate outline WASM for display lists that contain browser text runs. */
   glyphOutlineProvider?: GlyphOutlineProvider | null | false;
@@ -385,18 +432,31 @@ export function CanvasPagesView({
   // The first measurement applies at once; later moves wait for the scroll
   // to settle (MIRROR_WINDOW_SETTLE_MS).
   const [mirrorWindow, setMirrorWindow] = useState<PageWindowRange | null>(null);
+  // While a text-layer drag is held the window applies at once, so pages that
+  // an auto-scrolling drag reaches get their positioned (selectable) mirror.
+  const textDragRef = useRef<TextDragWatch | null>(null);
+  useEffect(() => {
+    const host = innerHostRef.current;
+    if (!selectableText || !host) return;
+    const watch = watchTextDrag(host);
+    textDragRef.current = watch;
+    return () => {
+      watch.stop();
+      textDragRef.current = null;
+    };
+  }, [selectableText]);
   useEffect(() => {
     if (effectiveWindow === null) {
       setMirrorWindow(null);
       return;
     }
-    if (mirrorWindow === null) {
+    if (mirrorWindow === null || textDragRef.current?.held()) {
       setMirrorWindow(effectiveWindow);
       return;
     }
     const id = setTimeout(() => setMirrorWindow(effectiveWindow), MIRROR_WINDOW_SETTLE_MS);
     return () => clearTimeout(id);
-    // mirrorWindow is read only to apply the first window at once
+    // mirrorWindow (and the held drag) are read only to apply the window at once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveWindow]);
   const mirrorInWindow = (index: number): boolean =>
@@ -594,7 +654,11 @@ export function CanvasPagesView({
   // routing reads each canvas's live `getBoundingClientRect`, so the transform
   // is factored out for free.
   return (
-    <div ref={setHostRef} className="canvas-pages" style={{ position: 'relative' }}>
+    <div
+      ref={setHostRef}
+      className={selectableText ? 'canvas-pages canvas-pages--selectable' : 'canvas-pages'}
+      style={{ position: 'relative' }}
+    >
       <div
         className="canvas-pages__column"
         style={{
@@ -625,6 +689,7 @@ export function CanvasPagesView({
               interactive={interactive}
               deferChrome={!chromeInWindow(i)}
               fullMirror={mirrorInWindow(i)}
+              selectableText={selectableText}
               registerCanvas={registerCanvas}
             />
           );

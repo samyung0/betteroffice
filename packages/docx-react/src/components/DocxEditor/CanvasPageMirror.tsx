@@ -13,6 +13,13 @@
  * restyling every page's positioned mirror.
  *
  * Focus never lands here: the hidden input remains the editing surface.
+ *
+ * `selectable` (read-only viewers) turns the positioned mirror into the page's
+ * text layer, as a PDF viewer's: its text stays transparent over the canvas and
+ * only the selection shows (styles: `.canvas-page-mirror--selectable`). A page
+ * holding a selection end keeps its positioned form when it leaves the
+ * viewport, until the selection lets go of it, so scrolling away and back
+ * keeps the selection.
  */
 
 import { useEffect, useRef } from 'react';
@@ -30,6 +37,7 @@ export function CanvasPageMirror({
   zoom = 1,
   defer = false,
   full = true,
+  selectable = false,
 }: {
   page: DisplayPage;
   zoom?: number;
@@ -37,6 +45,8 @@ export function CanvasPageMirror({
   defer?: boolean;
   /** Positioned mirror near the viewport; plain accessible text elsewhere. */
   full?: boolean;
+  /** Text layer of a read-only viewer: selectable, transparent text. */
+  selectable?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   // Position-shift deltas mutate primitives in place — identity alone is stale.
@@ -60,7 +70,26 @@ export function CanvasPageMirror({
     ) {
       return;
     }
+    // A page crossing the viewport window already holds the other form of its
+    // mirror, so the swap waits for idle time instead of a scroll frame.
+    const swapOnly =
+      built?.page === page && built.revision === displayPageRevision(page) && built.t === t;
+    let releaseHold: (() => void) | undefined;
     const build = (): void => {
+      // Going plain would drop the selection end this page holds: wait until
+      // the selection lets go of it.
+      if (swapOnly && selectable && !full && holdsSelectionEnd(host)) {
+        const doc = host.ownerDocument;
+        const retry = (): void => {
+          if (holdsSelectionEnd(host)) return;
+          doc.removeEventListener('selectionchange', retry);
+          releaseHold = undefined;
+          build();
+        };
+        doc.addEventListener('selectionchange', retry);
+        releaseHold = () => doc.removeEventListener('selectionchange', retry);
+        return;
+      }
       const mirror = (full ? buildMirrorPage : buildMirrorTextPage)(page, {
         labels: {
           page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
@@ -74,26 +103,30 @@ export function CanvasPageMirror({
       host.replaceChildren(mirror);
       builtForRef.current = { page, revision: displayPageRevision(page), t, full };
     };
-    // A page crossing the viewport window already holds the other form of its
-    // mirror, so the swap waits for idle time instead of a scroll frame.
-    const swapOnly =
-      built?.page === page && built.revision === displayPageRevision(page) && built.t === t;
     if (!defer && !swapOnly) {
       build();
       return;
     }
     if (typeof requestIdleCallback === 'function') {
       const id = requestIdleCallback(build, { timeout: 1500 });
-      return () => cancelIdleCallback(id);
+      return () => {
+        cancelIdleCallback(id);
+        releaseHold?.();
+      };
     }
     const id = setTimeout(build, 150);
-    return () => clearTimeout(id);
-  }, [page, t, defer, full]);
+    return () => {
+      clearTimeout(id);
+      releaseHold?.();
+    };
+  }, [page, t, defer, full, selectable]);
 
   return (
     <div
       ref={hostRef}
-      className="canvas-page-mirror"
+      className={
+        selectable ? 'canvas-page-mirror canvas-page-mirror--selectable' : 'canvas-page-mirror'
+      }
       // The mirror content is built in page-local px; when the canvas is
       // enlarged for zoom (CSS size = page * zoom), CSS-scale the mirror by the
       // same factor from its top-left origin so its nodes' `getBoundingClientRect`
@@ -108,4 +141,11 @@ export function CanvasPageMirror({
       }}
     />
   );
+}
+
+/** Also a caret: a drag starts as one, before its first extension. */
+function holdsSelectionEnd(host: HTMLElement): boolean {
+  const selection = host.ownerDocument.getSelection();
+  if (!selection) return false;
+  return host.contains(selection.anchorNode) || host.contains(selection.focusNode);
 }

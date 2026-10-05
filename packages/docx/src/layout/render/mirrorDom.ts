@@ -713,10 +713,15 @@ function renderMirrorPrimitive(
       const el = createTextMirrorElement(doc, p, ctx);
       el.className = MIRROR_CLASS_NAMES.text;
       el.textContent = p.text;
-      placeAt(el, textRunRect(p), offsetY);
+      const rect = textRunRect(p);
+      placeAt(el, rect, offsetY);
+      hideClippedOut(el, rect, p.clipGroup?.clip);
       // single-property CSSOM assignment: a hostile font string cannot escape
       // into other declarations, and geometry never derives from this value
       el.style.font = p.font;
+      // the canvas replays both; without them selection boxes fall short
+      if (p.letterSpacing) el.style.letterSpacing = `${p.letterSpacing}px`;
+      if (p.wordSpacing) el.style.wordSpacing = `${p.wordSpacing}px`;
       applyRunLanguageAndDirection(el, p);
       applyTextVisualStyles(el, p);
       applyPrimitiveVisualStyle(
@@ -735,6 +740,8 @@ function renderMirrorPrimitive(
         }
         el.setAttribute('aria-hidden', 'true');
       }
+      // a tab's leader dots: the tab itself is the next run's tabsBefore
+      if (p.leaderGlyphs) el.dataset.tabLeader = 'true';
       if (p.listMarker) {
         el.classList.add(MIRROR_CLASS_NAMES.listMarker);
         el.setAttribute('aria-hidden', 'true');
@@ -754,10 +761,13 @@ function renderMirrorPrimitive(
       const el = createTextMirrorElement(doc, p, ctx);
       el.className = MIRROR_CLASS_NAMES.text;
       el.textContent = p.text;
-      placeAt(el, glyphRunRect(p), offsetY);
+      const rect = glyphRunRect(p);
+      placeAt(el, rect, offsetY);
+      hideClippedOut(el, rect, p.clipGroup?.clip);
       // numeric size only — no file-derived family string reaches the CSSOM
       el.style.fontSize = `${p.size}px`;
       applyGlyphRunWeightAndStyle(el, p.fallbackFont);
+      if (p.leaderGlyphs) el.dataset.tabLeader = 'true';
       applyRunLanguageAndDirection(el, p);
       applyTextVisualStyles(el, p);
       applyPrimitiveVisualStyle(
@@ -853,6 +863,25 @@ function renderPageBorderMirror(
   applyPageBorderSideStyle(el, 'Bottom', p.bottom);
   applyPageBorderSideStyle(el, 'Left', p.left);
   return el;
+}
+
+/**
+ * A run whose middle falls outside its clip is not painted (a table row cut by
+ * a page break, which repeats the cut line on the next page, or by an exact
+ * row height): screen readers and text-layer selection skip it.
+ */
+function hideClippedOut(
+  el: HTMLElement,
+  rect: GeoRect,
+  clip: { x?: number; y?: number; w?: number; h?: number } | undefined
+): void {
+  if (!clip) return;
+  const x = rect.x + rect.w / 2;
+  const y = rect.y + rect.h / 2;
+  const inside =
+    (clip.x === undefined || clip.w === undefined || (x >= clip.x && x <= clip.x + clip.w)) &&
+    (clip.y === undefined || clip.h === undefined || (y >= clip.y && y <= clip.y + clip.h));
+  if (!inside) el.setAttribute('aria-hidden', 'true');
 }
 
 function placeAt(el: HTMLElement, rect: GeoRect, offsetY = 0): void {
@@ -1040,6 +1069,10 @@ function applyTextVisualStyles(
 function applyDocAttrs(el: HTMLElement, p: DocAttrs): void {
   if (p.docStart !== undefined) el.dataset.docStart = String(p.docStart);
   if (p.docEnd !== undefined) el.dataset.docEnd = String(p.docEnd);
+  if (p.tabsBefore) el.dataset.tabsBefore = String(p.tabsBefore);
+  if (p.breaksBefore) el.dataset.breaksBefore = String(p.breaksBefore);
+  if (p.tabsAfter) el.dataset.tabsAfter = String(p.tabsAfter);
+  if (p.breaksAfter) el.dataset.breaksAfter = String(p.breaksAfter);
   if (p.commentIds && p.commentIds.length > 0) {
     el.dataset.commentId = p.commentIds.join(' ');
   }

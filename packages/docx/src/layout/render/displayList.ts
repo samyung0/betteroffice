@@ -278,6 +278,18 @@ export interface DocAttrs {
   /** Resolved line index within the owning paragraph. */
   lineIndex?: number;
   /**
+   * Tabs between this run and the line's previous painted run, in document
+   * order; set on the first run after them. Other positions there (hidden
+   * text, content-control edges) paint nothing. Read by text-layer copy.
+   */
+  tabsBefore?: number;
+  /** Line breaks between the line's previous painted run (or its start) and this run. */
+  breaksBefore?: number;
+  /** Tabs after the line's last painted run (or on an empty line, for its marker). */
+  tabsAfter?: number;
+  /** Line breaks after this run (or an empty line's marker) no later run on the line takes. */
+  breaksAfter?: number;
+  /**
    * Table cell the primitive paints inside, when any. The a11y mirror builds
    * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
    * this — without it a table block reads as a flat run of text.
