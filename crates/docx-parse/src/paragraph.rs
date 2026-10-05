@@ -460,9 +460,11 @@ fn parse_paragraph_contents(
     let mut field_ends = Vec::new();
     for child in transparent_children(element, false) {
         // Deleted text reads as text, in runs and in the fields and links a
-        // deletion holds.
+        // deletion holds; other markup is kept as written.
         let normalized;
-        let child = if tracked_context == TrackedContext::Deletion {
+        let child = if tracked_context == TrackedContext::Deletion
+            && matches!(child.local_name(), "r" | "hyperlink" | "fldSimple")
+        {
             normalized = normalize_deletion_element(child);
             &normalized
         } else {

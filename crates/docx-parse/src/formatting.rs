@@ -615,7 +615,10 @@ pub fn unmodeled_paragraph_children(
                 .attributes
                 .iter()
                 .filter_map(|(name, value)| {
-                    Some((name.strip_prefix("w:")?.to_owned(), value.clone()))
+                    let local = name
+                        .strip_prefix("w:")
+                        .or_else(|| (!name.contains(':') && name != "xmlns").then_some(name))?;
+                    Some((local.to_owned(), value.clone()))
                 })
                 .collect();
             (child.local_name().to_owned(), attributes)

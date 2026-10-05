@@ -1112,6 +1112,22 @@ mod tests {
             serialize_paragraph_formatting(Some(&formatting), None, None, None, false, None)
                 .unwrap();
         assert_eq!(saved, source);
+
+        // An unprefixed attribute, which the parser also reads, keeps its value.
+        let document = crate::xml::parse_xml(
+            b"<w:p xmlns:w=\"urn:w\"><w:pPr><w:kinsoku val=\"0\"/></w:pPr></w:p>",
+            "p.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let p_pr = document.root().unwrap().child("w", "pPr").unwrap().clone();
+        let formatting =
+            crate::paragraph::parse_document_paragraph_properties(&p_pr, None, None).unwrap();
+        assert_eq!(
+            serialize_paragraph_formatting(Some(&formatting), None, None, None, false, None)
+                .unwrap(),
+            "<w:pPr><w:kinsoku w:val=\"0\"/></w:pPr>"
+        );
     }
 
     /// A hanging character indent of zero has no sign to carry its kind, so
