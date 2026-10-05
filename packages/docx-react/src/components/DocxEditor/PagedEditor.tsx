@@ -1508,22 +1508,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Initial Layout
     // =========================================================================
 
-    // The session that took the focus, or was shown read-only: leaving
-    // read-only takes the focus back only when the frame still has it, so a
-    // field the host was typing in keeps it.
+    // The session that took the focus, or was shown read-only: only a new
+    // session takes it. Leaving read-only (a pause ending) leaves the focus
+    // where it is, in a host field, Find or a comment; read-only never blurs
+    // the document input, so typing there goes on.
     const focusedSessionRef = useRef<YrsSession | null>(null);
     useEffect(() => {
       const session = yrsCore.session;
       if (!session) return;
       runLayoutPipelineRef.current?.();
       updateSelectionOverlayRef.current();
-      const fresh = focusedSessionRef.current !== session;
-      if (readOnly) {
+      if (readOnly || focusedSessionRef.current === session) {
         focusedSessionRef.current = session;
         return;
       }
       const raf = requestAnimationFrame(() => {
-        if (!fresh && !window.document.hasFocus()) return;
         focusedSessionRef.current = session;
         focusBodyInput();
         setIsFocused(true);

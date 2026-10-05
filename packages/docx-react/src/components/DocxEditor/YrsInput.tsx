@@ -1334,13 +1334,21 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     pendingResidentFrameEpochRef.current = null;
   }, [session, story]);
 
+  // The session the input last took the focus for: leaving read-only (a pause
+  // ending) leaves the focus where it is, in Find or a comment, say.
+  const focusedSessionRef = useRef<YrsSession | null>(null);
   useEffect(() => {
-    if (!enabled || !session) return;
+    if (!enabled || !session) {
+      focusedSessionRef.current = null;
+      return;
+    }
     ensureSelection();
     emitSelection(false);
+    const fresh = focusedSessionRef.current !== session;
+    focusedSessionRef.current = session;
     // Not when the document lacks focus (an embedding page, say a menu open in
     // the host): focusing the frame would take the focus from that page.
-    if (!readOnly)
+    if (!readOnly && fresh)
       requestAnimationFrame(() => {
         if (document.hasFocus()) textareaRef.current?.focus({ preventScroll: true });
       });

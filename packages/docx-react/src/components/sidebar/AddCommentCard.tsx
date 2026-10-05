@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
 import { submitButtonStyle, CANCEL_BUTTON_STYLE } from './cardUtils';
 import { useTranslation } from '../../i18n';
@@ -11,6 +11,11 @@ export interface AddCommentCardProps extends SidebarItemRenderProps {
 export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCardProps) {
   const [text, setText] = useState('');
   const { t } = useTranslation();
+  // Focus once, when the card opens: a re-render (a pause starting or ending,
+  // a peer's edit) must not take the focus from the host.
+  const focusOnOpen = useCallback((el: HTMLTextAreaElement | null) => {
+    el?.focus({ preventScroll: true });
+  }, []);
 
   const handleSubmit = () => {
     if (text.trim()) {
@@ -32,7 +37,7 @@ export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCar
       }}
     >
       <textarea
-        ref={(el) => el?.focus({ preventScroll: true })}
+        ref={focusOnOpen}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onMouseDown={(e) => e.stopPropagation()}
