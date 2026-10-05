@@ -2008,9 +2008,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
         ...covering.cell,
         content: context.continuationContent(
           covering.story,
-          (Array.isArray(rowPayload.cells) ? rowPayload.cells : []).map((cell) => cell.story),
-          rowIndex - covering.row,
-          rowPayloads.length
+          (Array.isArray(rowPayload.cells) ? rowPayload.cells : []).map((cell) => cell.story)
         ),
         formatting,
       });
@@ -2739,20 +2737,14 @@ class SaveContext {
    * The paragraphs a vMerge continuation cell under the restart cell
    * `anchorStory` saves with: the source continuation's, with their pPr and
    * no text, as the seed keeps none. Its source row is the one a seeded cell
-   * of the same row (`siblings`) names; with none, the row `offset` below the
-   * restart while the table keeps its source rows (`rowCount`). Empty when
-   * the source has no continuation of that merge there.
+   * of the same row (`siblings`) names. Empty when the row has no such cell
+   * or the source has no continuation of that merge there.
    */
-  continuationContent(
-    anchorStory: string | undefined,
-    siblings: ReadonlyArray<string | undefined>,
-    offset: number,
-    rowCount: number
-  ): BlockContent[] {
+  continuationContent(anchorStory: string | undefined, siblings: ReadonlyArray<string | undefined>): BlockContent[] {
     const anchor = this.sourceCell(anchorStory);
     if (!anchor) return [];
     const sibling = siblings.map((story) => this.sourceCell(story)).find((cell) => cell?.table === anchor.table);
-    const row = sibling?.row ?? (rowCount === anchor.table.rows.length ? anchor.row + offset : -1);
+    const row = sibling?.row ?? -1;
     const cellAt = (index: number) => {
       let column = 0;
       return anchor.table.rows[index]?.cells.find((candidate) => {
