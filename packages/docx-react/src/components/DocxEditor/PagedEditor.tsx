@@ -1147,6 +1147,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             if (!current || isSuggesting || (!command.update && !caret)) return false;
             // One Undo step: the TOC, then its page numbers once it is laid
             // out, so they count its own pages as Word's do.
+            const captureMode = session.undoCaptureMode();
             session.addUndoBoundary();
             session.setUndoCaptureMode('manual');
             try {
@@ -1171,7 +1172,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 session.setSelection({ story: 'body', paraId: receipt.nextParaId, offset: 0 });
               }
             } finally {
-              session.setUndoCaptureMode('auto');
+              session.setUndoCaptureMode(captureMode);
               session.addUndoBoundary();
             }
           } else if (command.type === 'insertPageBreak' || command.type === 'insertSectionBreak') {

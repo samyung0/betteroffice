@@ -1212,7 +1212,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     noTocEntries,
   });
 
-  // Update table of contents is offered while the body holds one.
+  // Update table of contents is offered while the body holds one; the count
+  // reads the whole body, so it runs once edits pause.
   const [hasToc, setHasToc] = useState(false);
   useEffect(() => {
     const session = yrsCore.session;
@@ -1221,10 +1222,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     const refresh = () => setHasToc(session.tableOfContentsCount() > 0);
     refresh();
     const unsubscribe = session.onUpdate(() => {
-      timer ??= setTimeout(() => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
         timer = null;
         refresh();
-      }, 300);
+      }, 1000);
     });
     return () => {
       unsubscribe();

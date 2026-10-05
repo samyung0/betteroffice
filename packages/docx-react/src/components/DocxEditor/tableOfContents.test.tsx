@@ -44,7 +44,11 @@ beforeAll(async () => {
   fontBytes = readFileSync(FONT).buffer as ArrayBuffer;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Let the layouts the commands scheduled land before unmounting.
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
   cleanup();
   for (const session of sessions.splice(0)) session.destroy();
 });
