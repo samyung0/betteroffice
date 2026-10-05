@@ -952,8 +952,9 @@ export type IconName = keyof typeof iconMap;
 
 /**
  * Icons the editor draws inline instead of from the Material set: the
- * right-click menu, the link popup and the table insert overlay. `DrawnIcon`
- * renders them.
+ * right-click menu, the link popup, the table insert overlay, the find and
+ * link dialogs, the error toasts and the empty and error placeholders.
+ * `DrawnIcon` renders them.
  */
 export const DRAWN_ICON_NAMES = [
   'menu-cut',
@@ -979,6 +980,15 @@ export const DRAWN_ICON_NAMES = [
   'link-text',
   'link-url',
   'table-insert',
+  'dialog-close',
+  'find-previous',
+  'find-next',
+  'notice-error',
+  'notice-warning',
+  'notice-info',
+  'notice-dismiss',
+  'placeholder-document',
+  'placeholder-error',
 ] as const;
 export type DrawnIconName = (typeof DRAWN_ICON_NAMES)[number];
 

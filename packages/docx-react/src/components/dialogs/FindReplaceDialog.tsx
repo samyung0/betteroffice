@@ -12,6 +12,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, ChangeEvent } from 'react';
 import { useTranslation } from '../../i18n';
+import { DrawnIcon } from '../ui/Icons';
 
 // Re-export types and utilities so existing imports still work
 export type { FindMatch, FindOptions, FindResult, HighlightOptions } from './findReplaceUtils';
@@ -575,7 +576,9 @@ export function FindReplaceDialog({
             onClick={onClose}
             aria-label={t('common.closeDialog')}
           >
-            &times;
+            <DrawnIcon name="dialog-close" size={16}>
+              &times;
+            </DrawnIcon>
           </button>
         </div>
 
@@ -615,7 +618,9 @@ export function FindReplaceDialog({
                 aria-label={t('dialogs.findReplace.findPrevious')}
                 title={t('dialogs.findReplace.findPreviousTitle')}
               >
-                <ChevronUpIcon />
+                <DrawnIcon name="find-previous" size={14}>
+                  <ChevronUpIcon />
+                </DrawnIcon>
               </button>
               <button
                 type="button"
@@ -626,7 +631,9 @@ export function FindReplaceDialog({
                 aria-label={t('dialogs.findReplace.findNext')}
                 title={t('dialogs.findReplace.findNextTitle')}
               >
-                <ChevronDownIcon />
+                <DrawnIcon name="find-next" size={14}>
+                  <ChevronDownIcon />
+                </DrawnIcon>
               </button>
             </div>
           </div>

@@ -108,7 +108,7 @@ import { useDocumentHistory } from '../hooks/useHistory';
 
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
-import type { IconSet } from './ui/Icons';
+import { IconSetContext, type IconSet } from './ui/Icons';
 
 // Paginated editor
 import { type PagedEditorRef, DEFAULT_PAGE_WIDTH } from './DocxEditor/PagedEditor';
@@ -1824,7 +1824,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         style={containerStyle}
         data-testid="docx-editor"
       >
-        <ParseError message={state.parseError} />
+        <IconSetContext.Provider value={icons ?? null}>
+          <ParseError message={state.parseError} />
+        </IconSetContext.Provider>
       </div>
     );
   }
@@ -1837,7 +1839,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         style={containerStyle}
         data-testid="docx-editor"
       >
-        {placeholder || <DefaultPlaceholder />}
+        <IconSetContext.Provider value={icons ?? null}>
+          {placeholder || <DefaultPlaceholder />}
+        </IconSetContext.Provider>
       </div>
     );
   }

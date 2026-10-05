@@ -16,6 +16,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
+import { DrawnIcon } from '../ui/Icons';
 
 // ============================================================================
 // TYPES
@@ -508,7 +509,9 @@ export function HyperlinkDialog({
             onClick={onClose}
             aria-label={t('common.closeDialog')}
           >
-            &times;
+            <DrawnIcon name="dialog-close" size={16}>
+              &times;
+            </DrawnIcon>
           </button>
         </div>
 

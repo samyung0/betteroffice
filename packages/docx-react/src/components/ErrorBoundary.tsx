@@ -18,6 +18,7 @@ import type { ReactNode, ErrorInfo, CSSProperties } from 'react';
 import { ErrorManager } from '@betteroffice/docx';
 import type { ErrorSeverity, ErrorNotification } from '@betteroffice/docx';
 import { useTranslation } from '../i18n';
+import { DrawnIcon } from './ui/Icons';
 
 // Re-export for backwards compat
 export type { ErrorSeverity, ErrorNotification };
@@ -364,7 +365,11 @@ function NotificationToast({ notification, onDismiss }: NotificationToastProps) 
         `}
       </style>
       <div style={headerStyle}>
-        <span style={iconStyle}>{getIcon(notification.severity)}</span>
+        <span style={iconStyle}>
+          <DrawnIcon name={`notice-${notification.severity}`} size={20}>
+            {getIcon(notification.severity)}
+          </DrawnIcon>
+        </span>
         <div style={contentStyle}>
           <div style={messageStyle}>{notification.message}</div>
           {notification.details && (
@@ -386,14 +391,16 @@ function NotificationToast({ notification, onDismiss }: NotificationToastProps) 
           )}
         </div>
         <button type="button" onClick={onDismiss} style={buttonStyle} title={t('common.dismiss')}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M4 4l8 8M12 4l-8 8"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
+          <DrawnIcon name="notice-dismiss" size={16}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M4 4l8 8M12 4l-8 8"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </DrawnIcon>
         </button>
       </div>
     </div>
@@ -551,10 +558,12 @@ function DefaultErrorFallback({
   return (
     <div className="docx-error-fallback" style={containerStyle}>
       <div style={iconStyle}>
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-          <circle cx="24" cy="24" r="20" stroke="currentColor" strokeWidth="2" />
-          <path d="M24 14v12M24 30v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-        </svg>
+        <DrawnIcon name="placeholder-error" size={48}>
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <circle cx="24" cy="24" r="20" stroke="currentColor" strokeWidth="2" />
+            <path d="M24 14v12M24 30v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </DrawnIcon>
       </div>
       <h2 style={titleStyle}>{t('errors.somethingWentWrong')}</h2>
       <p style={messageStyle}>{t('errors.errorDescription')}</p>

@@ -7,6 +7,7 @@
 
 import React from 'react';
 import { useTranslation } from '../i18n';
+import { DrawnIcon } from './ui/Icons';
 
 // ============================================================================
 // HELPER COMPONENTS
@@ -67,17 +68,19 @@ export function DefaultPlaceholder(): React.ReactElement {
         color: 'var(--doc-text-placeholder)',
       }}
     >
-      <svg
-        width="64"
-        height="64"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      >
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <polyline points="14 2 14 8 20 8" />
-      </svg>
+      <DrawnIcon name="placeholder-document" size={64}>
+        <svg
+          width="64"
+          height="64"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        >
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+        </svg>
+      </DrawnIcon>
       <div style={{ marginTop: '16px' }}>{t('errors.noDocumentLoaded')}</div>
     </div>
   );
@@ -101,17 +104,19 @@ export function ParseError({ message }: { message: string }): React.ReactElement
       }}
     >
       <div style={{ color: 'var(--doc-error)', marginBottom: '16px' }}>
-        <svg
-          width="48"
-          height="48"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <circle cx="12" cy="12" r="10" />
-          <path d="M12 8v4M12 16v.01" />
-        </svg>
+        <DrawnIcon name="placeholder-error" size={48}>
+          <svg
+            width="48"
+            height="48"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 8v4M12 16v.01" />
+          </svg>
+        </DrawnIcon>
       </div>
       <h3 style={{ color: 'var(--doc-error)', marginBottom: '8px' }}>{t('errors.failedToLoad')}</h3>
       <p style={{ color: 'var(--doc-text-muted)', maxWidth: '400px' }}>{message}</p>

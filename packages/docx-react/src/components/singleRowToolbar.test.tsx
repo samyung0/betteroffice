@@ -7,6 +7,8 @@ if (ownsDom) GlobalRegistrator.register();
 import { en } from '@betteroffice/docx-i18n';
 import type { ComponentProps } from 'react';
 import { EditorToolbar } from './EditorToolbar';
+import { DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
+import { FindReplaceDialog } from './dialogs/FindReplaceDialog';
 import { HostMenus, type DocxMenuModel, type HostMenuEntry } from './DocxEditor/hostMenus';
 import {
   DrawnIcon,
@@ -66,6 +68,41 @@ test('a host icon set replaces the built-in icons, drawn ones included', () => {
   expect(own.container.querySelector('[data-host-icon]')).toBeNull();
   expect(own.getByTestId('own-cut')).toBeTruthy();
   expect(own.container.querySelectorAll('svg')).toHaveLength(2);
+});
+
+test('the find dialog and the placeholders draw the host icons', () => {
+  const icons = Object.fromEntries(
+    ICON_NAMES.map((name) => [
+      name,
+      function HostIcon() {
+        return <i data-host-icon={name} />;
+      },
+    ])
+  ) as IconSet;
+  const { container } = render(
+    <IconSetContext.Provider value={icons}>
+      <FindReplaceDialog
+        isOpen
+        onClose={() => {}}
+        onFind={() => null}
+        onFindNext={() => null}
+        onFindPrevious={() => null}
+        onReplace={() => false}
+        onReplaceAll={() => 0}
+      />
+      <DefaultPlaceholder />
+      <ParseError message="Broken" />
+    </IconSetContext.Provider>
+  );
+  expect(container.querySelector('svg')).toBeNull();
+  for (const name of [
+    'dialog-close',
+    'find-previous',
+    'find-next',
+    'placeholder-document',
+    'placeholder-error',
+  ])
+    expect(container.querySelector(`[data-host-icon="${name}"]`)).not.toBeNull();
 });
 
 test('the single row scrolls the menu, history, zoom and groups and pins the trailing items', () => {
