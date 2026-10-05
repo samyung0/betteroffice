@@ -21,6 +21,8 @@ export interface CommentCardProps extends SidebarItemRenderProps {
   onResolve?: (commentId: number) => void;
   onUnresolve?: (commentId: number) => void;
   onDelete?: (commentId: number) => void;
+  /** No reply, resolve or delete: the card only shows the thread. */
+  readOnly?: boolean;
 }
 
 export function CommentCard({
@@ -33,6 +35,7 @@ export function CommentCard({
   onResolve,
   onUnresolve,
   onDelete,
+  readOnly = false,
 }: CommentCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { t } = useTranslation();
@@ -86,7 +89,7 @@ export function CommentCard({
             {formatDate(comment.date)}
           </div>
         </div>
-        {isExpanded && (
+        {isExpanded && !readOnly && (
           <div style={{ display: 'flex', gap: 4, marginTop: 2, position: 'relative' }}>
             <button
               onClick={(e) => {
@@ -170,7 +173,7 @@ export function CommentCard({
 
       <ReplyThread replies={replies} isExpanded={isExpanded} />
 
-      {isExpanded && !comment.done && (
+      {isExpanded && !comment.done && !readOnly && (
         <ReplyInput onSubmit={(text) => onReply?.(comment.id, text)} />
       )}
     </div>

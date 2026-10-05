@@ -538,7 +538,13 @@ describe('PptxEditor host integration', () => {
     });
     const snapshot = api!.handle.snapshot();
     expect(snapshot.slides.length).toBeGreaterThan(1);
-    expect(view.queryByTestId('pptx-editor-toolbar')).toBeNull();
+    // The toolbar row stays, disabled, so the slide keeps its place.
+    const toolbar = view.getByTestId('pptx-editor-toolbar');
+    // Only the overflow menu stays live; its items are disabled too.
+    const live = toolbar.querySelectorAll('button:not(:disabled), input:not(:disabled)');
+    expect(Array.from(live, (node) => node.getAttribute('data-testid'))).toEqual([
+      'pptx-toolbar-more',
+    ]);
     expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(view.container.querySelector('button[aria-current="page"]')?.textContent).toContain('2');
 

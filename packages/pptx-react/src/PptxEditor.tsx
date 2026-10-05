@@ -2449,7 +2449,6 @@ function PptxEditorContent({
       }}
     >
       <div style={singleRowToolbar ? styles.singleRowShell : styles.toolbarShell}>
-        {!readOnly && (
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
           textSelectionActive={textActive}
@@ -2472,7 +2471,8 @@ function PptxEditorContent({
           onZoomChange={setZoom}
           activeTool={activeTool}
           onToolChange={changeTool}
-          disabled={!model || slideCount === 0}
+          // Read-only keeps the row, disabled, so the slide stays put.
+          disabled={readOnly || !model || slideCount === 0}
           singleRow={singleRowToolbar}
           showFontPicker={showFontPicker}
           showFontSizePicker={showFontSizePicker}
@@ -2481,7 +2481,6 @@ function PptxEditorContent({
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
-        )}
         {!readOnly && showProposals && handleRef.current?.isProposalsAvailable() && (
           <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
             aria-expanded={proposalsOpen} style={styles.presentButton}

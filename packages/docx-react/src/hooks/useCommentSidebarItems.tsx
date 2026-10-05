@@ -35,6 +35,8 @@ export interface UseCommentSidebarItemsProps {
   showResolved?: boolean;
   isAddingComment?: boolean;
   addCommentYPosition?: number | null;
+  /** Cards without reply, resolve, accept or reject. */
+  readOnly?: boolean;
 }
 
 export function useCommentSidebarItems({
@@ -44,6 +46,7 @@ export function useCommentSidebarItems({
   showResolved = false,
   isAddingComment = false,
   addCommentYPosition = null,
+  readOnly = false,
 }: UseCommentSidebarItemsProps): ReactSidebarItem[] {
   // Active comments always, resolved only when showResolved
   const visibleComments = useMemo(
@@ -112,6 +115,7 @@ export function useCommentSidebarItems({
               onResolve={callbacks.onCommentResolve}
               onUnresolve={callbacks.onCommentUnresolve}
               onDelete={callbacks.onCommentDelete}
+              readOnly={readOnly}
             />
           ),
       });
@@ -136,6 +140,7 @@ export function useCommentSidebarItems({
             onAcceptById={callbacks.onAcceptChangeById}
             onRejectById={callbacks.onRejectChangeById}
             onReply={callbacks.onTrackedChangeReply}
+            readOnly={readOnly}
           />
         ),
       });
@@ -149,5 +154,6 @@ export function useCommentSidebarItems({
     callbacks,
     isAddingComment,
     addCommentYPosition,
+    readOnly,
   ]);
 }

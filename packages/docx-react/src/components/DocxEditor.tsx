@@ -1635,6 +1635,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showResolved: showCommentsSidebar,
     isAddingComment: showCommentsSidebar ? isAddingComment : false,
     addCommentYPosition,
+    readOnly,
   });
 
   const handleReviewAllResolved = useCallback(

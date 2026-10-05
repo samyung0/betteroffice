@@ -32,6 +32,8 @@ export interface TrackedChangeCardProps extends SidebarItemRenderProps {
   /** Reject every site of the revision. Counterpart to `onAcceptById`. */
   onRejectById?: (revisionId: number) => void;
   onReply?: (revisionId: number, text: string) => void;
+  /** No accept, reject or reply: the card only shows the change. */
+  readOnly?: boolean;
 }
 
 export function TrackedChangeCard({
@@ -45,6 +47,7 @@ export function TrackedChangeCard({
   onAcceptById,
   onRejectById,
   onReply,
+  readOnly = false,
 }: TrackedChangeCardProps) {
   const { t } = useTranslation();
   const authorName = change.author || t('trackedChanges.unknown');
@@ -104,7 +107,7 @@ export function TrackedChangeCard({
             </div>
           )}
         </div>
-        {isExpanded && (
+        {isExpanded && !readOnly && (
           <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
             <button onClick={handleAccept} title={t('common.accept')} style={ICON_BUTTON_STYLE}>
               <MaterialSymbol name="check" size={20} />
@@ -221,7 +224,9 @@ export function TrackedChangeCard({
 
       <ReplyThread replies={replies} isExpanded={isExpanded} />
 
-      {isExpanded && <ReplyInput onSubmit={(text) => onReply?.(change.revisionId, text)} />}
+      {isExpanded && !readOnly && (
+        <ReplyInput onSubmit={(text) => onReply?.(change.revisionId, text)} />
+      )}
     </div>
   );
 }

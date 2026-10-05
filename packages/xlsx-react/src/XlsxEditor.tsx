@@ -2404,8 +2404,8 @@ function XlsxEditorContent({
         fontFamily: chromeFont,
       }}
     >
-      {!readOnly && (
-        <div
+      {/* Read-only keeps the toolbar and formula bar, disabled, so the grid stays put. */}
+      <div
           ref={toolbarRef}
           data-testid="xlsx-toolbar"
           style={singleRowToolbar ? xlsxToolbarStyles.flatShell : xlsxToolbarStyles.shell}
@@ -2438,6 +2438,7 @@ function XlsxEditorContent({
           showFontPicker={showFontPicker}
           showFontSizePicker={showFontSizePicker}
           showZoomControl={showZoomControl}
+          disabled={readOnly}
         >
           <EditorToolbar.Toolbar />
           <div
@@ -2453,7 +2454,7 @@ function XlsxEditorContent({
                 <ToolbarButton
                   testId="xlsx-save"
                   onClick={save}
-                  disabled={!sheetInfo}
+                  disabled={!sheetInfo || readOnly}
                   title={t('toolbar.save')}
                 >
                   <ToolbarIcon name="save" size={18} />
@@ -2493,7 +2494,7 @@ function XlsxEditorContent({
                 value={formulaValue}
                 placeholder={t('toolbar.formulaPlaceholder')}
                 aria-label={t('toolbar.formulaPlaceholder')}
-                disabled={!sheetInfo}
+                disabled={!sheetInfo || readOnly}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   setFormulaDraft(e.target.value);
@@ -2527,7 +2528,7 @@ function XlsxEditorContent({
                 <ToolbarButton
                   testId="xlsx-proposals-button"
                   onClick={() => setProposalsPanelOpen((open) => !open)}
-                  disabled={!sheetInfo}
+                  disabled={!sheetInfo || readOnly}
                   active={proposalsPanelOpen}
                   ariaExpanded={proposalsPanelOpen}
                   title={t('proposals.panelLabel')}
@@ -2545,7 +2546,6 @@ function XlsxEditorContent({
           </div>
         </EditorToolbar>
         </div>
-      )}
       {!readOnly && proposalsAvailable && showProposals && proposalsPanelOpen && (
         <ProposalsPanel
           proposals={proposals}

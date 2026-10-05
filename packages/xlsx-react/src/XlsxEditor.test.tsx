@@ -1389,7 +1389,15 @@ describe('XlsxEditor host integration', () => {
     fireEvent.keyDown(surface, { key: 'x' });
     fireEvent.keyDown(surface, { key: 'Delete' });
 
-    expect(view.queryByTestId('xlsx-toolbar')).toBeNull();
+    // The toolbar and formula bar stay, disabled, so the grid keeps its place.
+    const toolbar = view.getByTestId('xlsx-toolbar');
+    const live = toolbar.querySelectorAll('button:not(:disabled), input:not(:disabled):not([readonly])');
+    expect(Array.from(live, (node) => node.getAttribute('data-testid'))).toEqual([
+      'xlsx-search-menus',
+      'xlsx-toolbar-more',
+      'xlsx-export-png',
+    ]);
+    expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).disabled).toBe(true);
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
     expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
     expect(changes).toBe(0);
