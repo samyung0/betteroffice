@@ -75,3 +75,35 @@ test('a reply being typed survives a pause and is not sent while it lasts', () =
   expect(view.getByDisplayValue('Draft').closest('[hidden]')).toBeNull();
   expect(replies).toEqual([]);
 });
+
+test('a comment being written survives a pause hidden, and is not sent while it lasts', () => {
+  const added: string[] = [];
+  function Sidebar({ readOnly }: { readOnly: boolean }) {
+    const items = useCommentSidebarItems({
+      comments: [],
+      trackedChanges: [],
+      callbacks: { onAddComment: (text) => added.push(text) },
+      isAddingComment: true,
+      addCommentYPosition: 0,
+      readOnly,
+    });
+    return (
+      <>
+        {items.map((item) => (
+          <div key={item.id}>{item.render(expanded)}</div>
+        ))}
+      </>
+    );
+  }
+  const view = render(<Sidebar readOnly={false} />);
+  fireEvent.change(view.getByPlaceholderText('Add a comment...'), {
+    target: { value: 'Note' },
+  });
+
+  view.rerender(<Sidebar readOnly />);
+  expect(view.getByDisplayValue('Note').closest('[hidden]')).not.toBeNull();
+
+  view.rerender(<Sidebar readOnly={false} />);
+  expect(view.getByDisplayValue('Note').closest('[hidden]')).toBeNull();
+  expect(added).toEqual([]);
+});

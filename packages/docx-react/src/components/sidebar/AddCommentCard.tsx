@@ -6,9 +6,16 @@ import { useTranslation } from '../../i18n';
 export interface AddCommentCardProps extends SidebarItemRenderProps {
   onSubmit?: (text: string) => void;
   onCancel?: () => void;
+  /** Hidden, not unmounted: the comment being typed keeps its draft. */
+  readOnly?: boolean;
 }
 
-export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCardProps) {
+export function AddCommentCard({
+  measureRef,
+  onSubmit,
+  onCancel,
+  readOnly = false,
+}: AddCommentCardProps) {
   const [text, setText] = useState('');
   const { t } = useTranslation();
   // Focus once, when the card opens: a re-render (a pause starting or ending,
@@ -27,6 +34,7 @@ export function AddCommentCard({ measureRef, onSubmit, onCancel }: AddCommentCar
   return (
     <div
       ref={measureRef}
+      hidden={readOnly}
       onMouseDown={(e) => e.stopPropagation()}
       style={{
         padding: 12,

@@ -89,6 +89,7 @@ export function useCommentSidebarItems({
             {...props}
             onSubmit={callbacks.onAddComment}
             onCancel={callbacks.onCancelAddComment}
+            readOnly={readOnly}
           />
         ),
       });

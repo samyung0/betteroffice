@@ -1522,12 +1522,25 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         focusedSessionRef.current = session;
         return;
       }
-      const raf = requestAnimationFrame(() => {
+      const take = () => {
         focusedSessionRef.current = session;
         focusBodyInput();
         setIsFocused(true);
+      };
+      // Never from an embedding page: while the frame lacks the focus, the
+      // new session takes it when the frame itself is focused (the host
+      // focusing it), not when a control in the frame is clicked.
+      const onFrameFocus = () => {
+        if (window.document.activeElement === window.document.body) take();
+      };
+      const raf = requestAnimationFrame(() => {
+        if (window.document.hasFocus()) take();
+        else window.addEventListener('focus', onFrameFocus, { once: true });
       });
-      return () => cancelAnimationFrame(raf);
+      return () => {
+        cancelAnimationFrame(raf);
+        window.removeEventListener('focus', onFrameFocus);
+      };
     }, [focusBodyInput, readOnly, runLayoutPipelineRef, yrsCore.session]);
 
     // Canvas renderer: re-derive sidebar anchor Ys from the display list once
