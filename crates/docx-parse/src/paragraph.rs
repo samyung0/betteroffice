@@ -6,6 +6,7 @@ use crate::block::transparent_children;
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
+    unmodeled_paragraph_children,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
@@ -331,6 +332,7 @@ pub fn parse_document_paragraph_properties(
     if let Some(frame) = properties.child("w", "framePr") {
         value.frame = parse_frame(frame);
     }
+    value.extra_children = unmodeled_paragraph_children(properties);
     if let Some(run_properties) = properties.child("w", "rPr") {
         let shell = XmlElement {
             name: "w:r".to_owned(),
@@ -357,6 +359,12 @@ fn parse_frame(element: &XmlElement) -> Option<ParagraphFrame> {
         x_align: nonempty_attribute(element, "xAlign"),
         y_align: nonempty_attribute(element, "yAlign"),
         wrap: nonempty_attribute(element, "wrap"),
+        drop_cap: nonempty_attribute(element, "dropCap"),
+        lines: element.parse_numeric_attribute(Some("w"), "lines", 1.0),
+        h_space: element.parse_numeric_attribute(Some("w"), "hSpace", 1.0),
+        v_space: element.parse_numeric_attribute(Some("w"), "vSpace", 1.0),
+        h_rule: nonempty_attribute(element, "hRule"),
+        anchor_lock: nonempty_attribute(element, "anchorLock"),
     };
     (value != ParagraphFrame::default()).then_some(value)
 }

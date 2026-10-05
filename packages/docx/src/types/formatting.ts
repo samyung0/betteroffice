@@ -427,6 +427,12 @@ export interface ParagraphFormatting {
     xAlign?: 'left' | 'center' | 'right' | 'inside' | 'outside';
     yAlign?: 'top' | 'center' | 'bottom' | 'inside' | 'outside' | 'inline';
     wrap?: 'around' | 'auto' | 'none' | 'notBeside' | 'through' | 'tight';
+    dropCap?: string;
+    lines?: number;
+    hSpace?: number;
+    vSpace?: number;
+    hRule?: string;
+    anchorLock?: string;
   };
 
   // Suppress
@@ -438,6 +444,9 @@ export interface ParagraphFormatting {
   // Default run properties for this paragraph
   /** Run properties to apply to all runs (w:rPr) */
   runProperties?: TextFormatting;
+
+  /** pPr children the model has no field for (w:kinsoku, w:cnfStyle, …), by local name with their attributes, kept for the save */
+  extraChildren?: Record<string, Record<string, string>>;
 }
 
 // ============================================================================

@@ -1,5 +1,7 @@
 //! Typed run, paragraph, row, cell, and table property bags shared by styles and numbering.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::borders::{BorderSpec, Borders, parse_border_spec, parse_paragraph_borders};
@@ -476,6 +478,18 @@ pub struct ParagraphFrame {
     pub y_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drop_cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h_space: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v_space: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h_rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_lock: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -567,6 +581,46 @@ pub struct ParagraphFormatting {
     pub auto_space_dn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_properties: Option<TextFormatting>,
+    /// The pPr children the model has no field for ([`UNMODELED_PPR`]), by
+    /// local name, with their attributes by local name, so a save re-emits them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_children: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The `CT_PPrBase` children (ECMA-376 §17.3.1.26) `ParagraphFormatting` has
+/// no field for. All are empty elements in the `w` namespace.
+pub const UNMODELED_PPR: [&str; 12] = [
+    "kinsoku",
+    "wordWrap",
+    "overflowPunct",
+    "topLinePunct",
+    "adjustRightInd",
+    "mirrorIndents",
+    "suppressOverlap",
+    "textDirection",
+    "textAlignment",
+    "textboxTightWrap",
+    "divId",
+    "cnfStyle",
+];
+
+/// The [`UNMODELED_PPR`] children of `p_pr` that hold no content, as authored.
+pub fn unmodeled_paragraph_children(
+    p_pr: &XmlElement,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    p_pr.child_elements()
+        .filter(|child| UNMODELED_PPR.contains(&child.local_name()) && child.children.is_empty())
+        .map(|child| {
+            let attributes = child
+                .attributes
+                .iter()
+                .filter_map(|(name, value)| {
+                    Some((name.strip_prefix("w:")?.to_owned(), value.clone()))
+                })
+                .collect();
+            (child.local_name().to_owned(), attributes)
+        })
+        .collect()
 }
 
 pub fn parse_paragraph_properties(
@@ -731,6 +785,7 @@ pub fn merge_paragraph_formatting(
                 &source.suppress_auto_hyphens,
             );
             overlay(&mut result.snap_to_grid, &source.snap_to_grid);
+            result.extra_children.extend(source.extra_children.clone());
             result.run_properties = merge_text_formatting(
                 target.run_properties.as_ref(),
                 source.run_properties.as_ref(),

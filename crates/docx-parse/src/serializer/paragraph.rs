@@ -107,50 +107,65 @@ pub fn serialize_paragraph_formatting(
 ) -> Result<String, ParseError> {
     let mut body = XmlWriter::with_capacity(512);
     if let Some(formatting) = formatting {
+        // CT_PPrBase order (ECMA-376 §17.3.1.26).
+        let kept = |body: &mut XmlWriter, name: &'static str| {
+            write_unmodeled(body, formatting, name);
+        };
         if let Some(value) = nonempty(formatting.style_id.as_deref()) {
             empty_attr(&mut body, "w:pStyle", "w:val", value);
         }
         on_off(&mut body, "w:keepNext", formatting.keep_next);
         on_off(&mut body, "w:keepLines", formatting.keep_lines);
-        on_off(
-            &mut body,
-            "w:contextualSpacing",
-            formatting.contextual_spacing,
-        );
         on_off(&mut body, "w:pageBreakBefore", formatting.page_break_before);
         write_frame(&mut body, formatting.frame.as_ref());
         on_off(&mut body, "w:widowControl", formatting.widow_control);
-
         if formatting.num_pr != formatting.num_pr_from_style
             || formatting.num_pr_from_style.is_none()
         {
             write_numbering(&mut body, formatting.num_pr.as_ref());
         }
-        write_paragraph_borders(&mut body, formatting.borders.as_ref());
-        write_shading(&mut body, formatting.shading.as_ref());
-        write_tabs(&mut body, formatting.tabs.as_deref());
         on_off(
             &mut body,
             "w:suppressLineNumbers",
             formatting.suppress_line_numbers,
         );
+        write_paragraph_borders(&mut body, formatting.borders.as_ref());
+        write_shading(&mut body, formatting.shading.as_ref());
+        write_tabs(&mut body, formatting.tabs.as_deref());
         on_off(
             &mut body,
             "w:suppressAutoHyphens",
             formatting.suppress_auto_hyphens,
         );
+        kept(&mut body, "w:kinsoku");
+        kept(&mut body, "w:wordWrap");
+        kept(&mut body, "w:overflowPunct");
+        kept(&mut body, "w:topLinePunct");
         on_off(&mut body, "w:autoSpaceDE", formatting.auto_space_de);
         on_off(&mut body, "w:autoSpaceDN", formatting.auto_space_dn);
+        on_off(&mut body, "w:bidi", formatting.bidi);
+        kept(&mut body, "w:adjustRightInd");
+        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         write_spacing(&mut body, formatting);
         write_indentation(&mut body, formatting);
-        on_off(&mut body, "w:bidi", formatting.bidi);
-        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
+        on_off(
+            &mut body,
+            "w:contextualSpacing",
+            formatting.contextual_spacing,
+        );
+        kept(&mut body, "w:mirrorIndents");
+        kept(&mut body, "w:suppressOverlap");
         if let Some(value) = nonempty(formatting.alignment.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
         }
+        kept(&mut body, "w:textDirection");
+        kept(&mut body, "w:textAlignment");
+        kept(&mut body, "w:textboxTightWrap");
         if let Some(value) = formatting.outline_level {
             empty_attr(&mut body, "w:outlineLvl", "w:val", &js_number(value));
         }
+        kept(&mut body, "w:divId");
+        kept(&mut body, "w:cnfStyle");
     }
 
     if !base_only {
@@ -902,7 +917,13 @@ fn write_frame(writer: &mut XmlWriter, frame: Option<&ParagraphFrame>) {
         || frame.y.is_some()
         || nonempty(frame.x_align.as_deref()).is_some()
         || nonempty(frame.y_align.as_deref()).is_some()
-        || nonempty(frame.wrap.as_deref()).is_some();
+        || nonempty(frame.wrap.as_deref()).is_some()
+        || nonempty(frame.drop_cap.as_deref()).is_some()
+        || frame.lines.is_some()
+        || frame.h_space.is_some()
+        || frame.v_space.is_some()
+        || nonempty(frame.h_rule.as_deref()).is_some()
+        || nonempty(frame.anchor_lock.as_deref()).is_some();
     if !has_attributes {
         return;
     }
@@ -916,6 +937,30 @@ fn write_frame(writer: &mut XmlWriter, frame: Option<&ParagraphFrame>) {
     optional_attr(writer, "w:xAlign", frame.x_align.as_deref());
     optional_attr(writer, "w:yAlign", frame.y_align.as_deref());
     optional_attr(writer, "w:wrap", frame.wrap.as_deref());
+    optional_attr(writer, "w:dropCap", frame.drop_cap.as_deref());
+    optional_int(writer, "w:lines", frame.lines);
+    optional_int(writer, "w:hSpace", frame.h_space);
+    optional_int(writer, "w:vSpace", frame.v_space);
+    optional_attr(writer, "w:hRule", frame.h_rule.as_deref());
+    optional_attr(writer, "w:anchorLock", frame.anchor_lock.as_deref());
+    writer.end_element();
+}
+
+/// One kept [`crate::formatting::UNMODELED_PPR`] child, as the source wrote it.
+fn write_unmodeled(writer: &mut XmlWriter, formatting: &ParagraphFormatting, name: &'static str) {
+    let Some(attributes) = name
+        .strip_prefix("w:")
+        .and_then(|local| formatting.extra_children.get(local))
+    else {
+        return;
+    };
+    writer.start_element(name);
+    for (attribute, value) in attributes {
+        let attribute = format!("w:{attribute}");
+        if is_safe_attribute_name(&attribute) {
+            writer.dynamic_attribute(&attribute, value);
+        }
+    }
     writer.end_element();
 }
 
@@ -1032,6 +1077,41 @@ mod tests {
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
         );
+    }
+
+    /// Word reads pPr children in schema order; the ones the model has no
+    /// field for come back where they stood.
+    #[test]
+    fn paragraph_properties_round_trip_in_schema_order_with_unmodeled_children() {
+        let source = concat!(
+            "<w:pPr><w:pStyle w:val=\"Body\"/><w:keepNext/><w:keepLines w:val=\"0\"/>",
+            "<w:pageBreakBefore/><w:framePr w:w=\"2000\" w:hAnchor=\"text\" w:wrap=\"around\" ",
+            "w:dropCap=\"drop\" w:lines=\"3\" w:hSpace=\"72\" w:vSpace=\"0\" w:hRule=\"exact\" ",
+            "w:anchorLock=\"1\"/><w:widowControl w:val=\"0\"/>",
+            "<w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"2\"/></w:numPr><w:suppressLineNumbers/>",
+            "<w:suppressAutoHyphens/><w:kinsoku w:val=\"0\"/><w:wordWrap w:val=\"0\"/>",
+            "<w:overflowPunct w:val=\"0\"/><w:topLinePunct/><w:autoSpaceDE w:val=\"0\"/>",
+            "<w:autoSpaceDN w:val=\"0\"/><w:bidi/><w:adjustRightInd w:val=\"0\"/>",
+            "<w:snapToGrid w:val=\"0\"/><w:spacing w:after=\"0\"/><w:ind w:left=\"100\"/>",
+            "<w:contextualSpacing/><w:mirrorIndents/><w:suppressOverlap/><w:jc w:val=\"both\"/>",
+            "<w:textDirection w:val=\"tbRl\"/><w:textAlignment w:val=\"center\"/>",
+            "<w:textboxTightWrap w:val=\"allLines\"/><w:outlineLvl w:val=\"8\"/>",
+            "<w:divId w:val=\"123\"/><w:cnfStyle w:firstRow=\"1\" w:val=\"100000000000\"/></w:pPr>"
+        );
+        let limits = crate::xml::ParseLimits::default();
+        let document = crate::xml::parse_xml(
+            format!("<w:p xmlns:w=\"urn:w\">{source}</w:p>").as_bytes(),
+            "p.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let p_pr = document.root().unwrap().child("w", "pPr").unwrap().clone();
+        let formatting =
+            crate::paragraph::parse_document_paragraph_properties(&p_pr, None, None).unwrap();
+        let saved =
+            serialize_paragraph_formatting(Some(&formatting), None, None, None, false, None)
+                .unwrap();
+        assert_eq!(saved, source);
     }
 
     /// A hanging character indent of zero has no sign to carry its kind, so
