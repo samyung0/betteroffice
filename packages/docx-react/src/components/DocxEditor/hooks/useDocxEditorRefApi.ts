@@ -1,12 +1,13 @@
 import { useImperativeHandle } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
-import type {
-  YrsInlineFormatDelta,
-  YrsLoc,
-  YrsParagraph,
-  YrsSession,
-  YrsStoryRange,
+import {
+  styleParagraphValues,
+  type YrsInlineFormatDelta,
+  type YrsLoc,
+  type YrsParagraph,
+  type YrsSession,
+  type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
@@ -282,7 +283,11 @@ export function useDocxEditorRefApi({
           ? getCachedStyleResolver(currentDocument.package.styles)
           : null;
         if (resolver && !resolver.hasParagraphStyle(options.styleId)) return false;
-        session.applyParagraphStyle(range, options.styleId);
+        session.applyParagraphStyle(
+          range,
+          options.styleId,
+          styleParagraphValues(resolver, options.styleId)
+        );
         editor.syncYrsInputState(true);
         return true;
       },

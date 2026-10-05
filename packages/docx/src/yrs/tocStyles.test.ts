@@ -8,7 +8,8 @@ import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import type { Document, Run } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { documentToYrs } from './documentToYrs';
+import { createStyleResolver } from '../styles';
+import { documentToYrs, styleParagraphValues } from './documentToYrs';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -75,9 +76,10 @@ for (const seeder of ['projected', 'native']) {
       expect(blocks[0]!.runs[1]?.color).toBe('#112233');
       const firstPara = session.paragraphs('body')[0]!.paraId;
       const firstRange = { story: 'body', start: { paraId: firstPara, offset: 0 }, end: { paraId: firstPara, offset: 9 } };
-      session.applyParagraphStyle(firstRange, 'Body');
+      const styles = createStyleResolver(parsed.package.styles);
+      session.applyParagraphStyle(firstRange, 'Body', styleParagraphValues(styles, 'Body'));
       expect((session.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]?.color).toBe('#0000FF');
-      session.applyParagraphStyle(firstRange, '10');
+      session.applyParagraphStyle(firstRange, '10', styleParagraphValues(styles, '10'));
       expect((session.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]).not.toHaveProperty('color');
       const first = session.storySegments('body')[0]!;
       expect(first.attributes.textColor).toMatchObject({ inheritedHyperlink: true });

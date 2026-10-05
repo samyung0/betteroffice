@@ -267,7 +267,7 @@ export function useSelectionTracker({
         paragraphIndentRight: paragraphFormatting.indentRight ?? 0,
         paragraphFirstLineIndent: paragraphFormatting.indentFirstLine ?? 0,
         paragraphHangingIndent: paragraphFormatting.hangingIndent ?? false,
-        paragraphTabs: paragraphFormatting.tabs ?? null,
+        paragraphTabs: paragraphFormatting.tabs?.filter((tab) => tab.alignment !== 'clear') ?? null,
         pmTableContext: pmTableCtx,
         pmImageContext: null,
       });

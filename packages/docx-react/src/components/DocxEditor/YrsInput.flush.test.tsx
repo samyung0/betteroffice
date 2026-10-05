@@ -38,7 +38,7 @@ afterAll(async () => {
 async function mount(
   applyResidentInput?: YrsInputProps['applyResidentInput'],
   onPendingChange?: YrsInputProps['onPendingChange'],
-  nextParagraphStyleId?: YrsInputProps['nextParagraphStyleId'],
+  nextParagraphStyle?: YrsInputProps['nextParagraphStyle'],
 ) {
   const session = await createYrsSession();
   sessions.push(session);
@@ -60,7 +60,7 @@ async function mount(
       onDirectInput={() => {}}
       onPendingChange={onPendingChange}
       applyResidentInput={applyResidentInput}
-      nextParagraphStyleId={nextParagraphStyleId}
+      nextParagraphStyle={nextParagraphStyle}
     />
   );
   const view = render(component());
@@ -222,7 +222,7 @@ test('read-only interrupts active composition and rejects flush without waiting 
 });
 
 test("Enter before a table leaves the table paragraph's style alone", async () => {
-  const { session, input, view } = await mount(undefined, undefined, () => 'Normal');
+  const { session, input, view } = await mount(undefined, undefined, () => ({ styleId: 'Normal', values: {} }));
   const [seed] = session.paragraphs('body');
   // Seed¶[table]¶: the paragraph after the table is empty.
   const { secondParaId: slot } = session.splitParagraph({ story: 'body', paraId: seed.paraId, offset: 4 });
@@ -398,7 +398,7 @@ test('cut over a heading holding a bookmark deletes its text', async () => {
   const { session, input, view } = await mount();
   const [seed] = session.paragraphs('body');
   const whole = { story: 'body', start: { paraId: seed.paraId, offset: 0 }, end: { paraId: seed.paraId, offset: 4 } };
-  session.applyParagraphStyle(whole, 'Heading1');
+  session.applyParagraphStyle(whole, 'Heading1', {});
   // [_Toc1 start]Seed[_Toc1 end], as Word marks a heading a table of contents links to.
   session.applyRawOps('body', [
     { op: 'setBookmark', index: 0, data: { kind: 'start', id: 0, name: '_Toc1' } },

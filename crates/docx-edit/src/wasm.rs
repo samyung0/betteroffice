@@ -57,8 +57,9 @@ use crate::segments::{Seg, SegKind};
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
-    TableLocator, TableRange, TriState, UndoCaptureMode, UndoSession, story_ref,
+    Patch, Position, RawOp, STYLE_CONTROLLED_PARA_ATTRS, SeedParagraph, SegmentContent,
+    SimpleFormat, StoryRange, TabStop, TableLocator, TableRange, TriState, UndoCaptureMode,
+    UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -2894,10 +2895,11 @@ impl EditSession {
     }
 
     /// Writes `style_id` as the `pStyle` of every paragraph intersecting
-    /// `[start, end)`. Only that key changes: this boundary has no style
-    /// resolver, so it never fabricates the paragraph attributes or run marks
-    /// the style definition would imply. In suggesting mode the property
-    /// change is recorded as a `pPrChange` revision.
+    /// `[start, end)` and resets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to
+    /// the host-resolved `values_json` (an object of the style's paragraph
+    /// values), clearing the keys it leaves out. Run marks are the host's to
+    /// apply. In suggesting mode the property change is recorded as a
+    /// `pPrChange` revision.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -2907,16 +2909,28 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         style_id: &str,
+        values_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<(), JsValue> {
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
+        let values: Value = serde_json::from_str(values_json).map_err(js_err)?;
+        let values = values
+            .as_object()
+            .ok_or_else(|| js_err("paragraph style values must be an object"))?;
         let mut delta = ParaAttrDelta::default();
         delta
             .other
             .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+        for key in STYLE_CONTROLLED_PARA_ATTRS {
+            let value = match values.get(key) {
+                Some(value) if !value.is_null() => Some(json_to_any(value)?),
+                _ => None,
+            };
+            delta.other.insert(key.to_owned(), value);
+        }
         let ctx = edit_ctx(author_name, author_date)?;
         self.engine
             .doc()

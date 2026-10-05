@@ -1005,6 +1005,15 @@ function runBoundary(
   };
 }
 
+/**
+ * The paragraph values applying `styleId` gives a paragraph: what the seed
+ * gives one carrying only that style.
+ */
+export function styleParagraphValues(styles: StyleResolver | null, styleId: string | null): Attrs {
+  const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined }, content: [] };
+  return paragraphAttrs(paragraph, styles, [], undefined);
+}
+
 function paragraphAttrs(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,

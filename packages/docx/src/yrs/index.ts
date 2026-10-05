@@ -39,7 +39,8 @@ export {
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
-export { documentToYrs } from './documentToYrs';
+export { documentToYrs, styleParagraphValues } from './documentToYrs';
+export { explicitParagraphAttrs } from './paragraphSeed';
 export { yrsToDocument } from './yrsToDocument';
 export { projectYrsComments, commentSharedId, commentNumericId } from './comments';
 
@@ -950,8 +951,17 @@ export interface YrsSession extends CollaborationReplica {
   setHyperlink(range: YrsStoryRange, hyperlink: YrsHyperlinkAttrs | null): void;
   /** Clears direct formatting while retaining hyperlinks and tracked-change stamps. */
   clearFormatting(range: YrsStoryRange): void;
-  /** Applies a paragraph style id to every paragraph intersecting the range. */
-  applyParagraphStyle(range: YrsStoryRange, styleId: string, suggesting?: YrsAuthor): void;
+  /**
+   * Applies a paragraph style to every paragraph intersecting the range: its id
+   * and its paragraph values (`styleParagraphValues`), the keys the style
+   * controls that `values` leaves out cleared.
+   */
+  applyParagraphStyle(
+    range: YrsStoryRange,
+    styleId: string,
+    values: Readonly<Record<string, unknown>>,
+    suggesting?: YrsAuthor
+  ): void;
   /** Applies tri-state paragraph properties to every paragraph intersecting the range. */
   setParagraphAttrs(range: YrsStoryRange, attrs: YrsParagraphAttrs, suggesting?: YrsAuthor): void;
   /** Inserts one inline image embed, optionally as a tracked insertion. */
@@ -1803,7 +1813,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         )
       );
     },
-    applyParagraphStyle: (range, styleId, suggesting) => {
+    applyParagraphStyle: (range, styleId, values, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.apply_paragraph_style(
@@ -1813,6 +1823,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
           range.end.paraId,
           range.end.offset,
           styleId,
+          JSON.stringify(values),
           suggesting?.name,
           suggesting?.date
         )

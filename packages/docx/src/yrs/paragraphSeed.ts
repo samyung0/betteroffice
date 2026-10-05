@@ -1,4 +1,5 @@
 import type { Paragraph, ParagraphFormatting } from '../types/document';
+import type { YrsParagraphAttrs, YrsParagraphTabStop } from './index';
 
 type Attrs = Record<string, unknown>;
 
@@ -94,4 +95,31 @@ export function seededParagraphProperties(
     attrs.bidi = formatting?.bidi ?? null;
   }
   return attrs;
+}
+
+/**
+ * `attrs` as an editor operation stores them: a property cleared that the
+ * paragraph's style sets (`style`, from `styleParagraphValues`) becomes 0 or
+ * false, and a style tab stop left out becomes a `clear` stop, so the
+ * paragraph shows, saves and reopens without the style's value.
+ */
+export function explicitParagraphAttrs(
+  attrs: YrsParagraphAttrs,
+  style: Readonly<Record<string, unknown>>
+): YrsParagraphAttrs {
+  const result: Record<string, unknown> = { ...attrs };
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value !== null || key === 'tabs') continue;
+    if (typeof style[key] === 'number' && style[key] !== 0) result[key] = 0;
+    else if (style[key] === true) result[key] = false;
+  }
+  if ('tabs' in attrs) {
+    const kept = attrs.tabs ?? [];
+    const styleTabs = Array.isArray(style.tabs) ? (style.tabs as YrsParagraphTabStop[]) : [];
+    const cleared = styleTabs
+      .filter((stop) => stop.alignment !== 'clear' && !kept.some((tab) => tab.position === stop.position))
+      .map((stop): YrsParagraphTabStop => ({ position: stop.position, alignment: 'clear' }));
+    result.tabs = kept.length + cleared.length > 0 ? [...kept, ...cleared] : null;
+  }
+  return result as YrsParagraphAttrs;
 }

@@ -68,9 +68,11 @@ import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
   projectYrsComments,
   commentSharedId,
+  styleParagraphValues,
   yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
   type YrsInlineFormatDelta,
   type YrsLoc,
+  type YrsParagraphTabStop,
   type YrsRenderEnv,
   type YrsResidentCaretSnapshot,
   type YrsSession,
@@ -110,6 +112,7 @@ import type { FormattingAction } from '../Toolbar';
 import {
   applyYrsToolbarFormatting,
   currentYrsToolbarSelection,
+  setSelectedParagraphAttrs,
   storedYrsToolbarFormatting,
   withStoredYrsFormatting,
   type YrsToolbarSelection,
@@ -942,7 +945,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           ) {
             const resolved = yrsStyleResolver.resolveParagraphStyle(action.value);
             const delta = yrsDeltaForTextFormatting(resolved.runFormatting);
-            yrsCore.session.applyParagraphStyle(selection.range, action.value, structuralAuthor);
+            yrsCore.session.applyParagraphStyle(
+              selection.range,
+              action.value,
+              styleParagraphValues(yrsStyleResolver, action.value),
+              structuralAuthor
+            );
             if (selection.context.hasSelection) {
               if (Object.keys(delta).length > 0) {
                 yrsCore.session.formatRange(selection.range, delta);
@@ -963,7 +971,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               return true;
             }
           }
-          const changed = applyYrsToolbarFormatting(yrsCore.session, map, action, structuralAuthor);
+          const changed = applyYrsToolbarFormatting(
+            yrsCore.session,
+            map,
+            action,
+            yrsStyleResolver,
+            structuralAuthor
+          );
           if (!changed) return false;
           yrsInputRef.current?.clearStoredFormatting();
           if (!syncYrsInputState(true)) return false;
@@ -1044,20 +1058,26 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             const selection = map ? currentYrsToolbarSelection(session, map) : null;
             if (!selection) return false;
             if (command.type === 'paragraphAttrs') {
-              session.setParagraphAttrs(selection.range, command.attrs, structuralAuthor);
+              setSelectedParagraphAttrs(
+                session,
+                selection,
+                () => command.attrs,
+                yrsStyleResolver,
+                structuralAuthor
+              );
             } else {
-              const currentTabs = selection.context.paragraphProperties.tabs;
-              const tabs = Array.isArray(currentTabs)
-                ? currentTabs.filter(
-                    (tab) =>
-                      tab != null &&
-                      typeof tab === 'object' &&
-                      Number((tab as { position?: unknown }).position) !== command.positionTwips
-                  )
-                : [];
-              session.setParagraphAttrs(
-                selection.range,
-                { tabs: tabs.length > 0 ? (tabs as never) : null },
+              setSelectedParagraphAttrs(
+                session,
+                selection,
+                ({ tabs }) => {
+                  const kept = Array.isArray(tabs)
+                    ? (tabs as YrsParagraphTabStop[]).filter(
+                        (tab) => tab.position !== command.positionTwips
+                      )
+                    : [];
+                  return { tabs: kept.length > 0 ? kept : null };
+                },
+                yrsStyleResolver,
                 structuralAuthor
               );
             }
@@ -1780,7 +1800,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           displayPositionToLoc={yrsDisplayPositionToLoc}
           resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
-          nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
+          nextParagraphStyle={(styleId) => {
+            const next = yrsStyleResolver?.getNextStyleId(styleId);
+            return next ? { styleId: next, values: styleParagraphValues(yrsStyleResolver, next) } : null;
+          }}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
           resolveDisplayListQueries={
             activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined

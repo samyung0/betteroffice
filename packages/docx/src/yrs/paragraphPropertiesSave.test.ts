@@ -7,7 +7,10 @@ import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import type { BlockContent, Document, Paragraph, ParagraphFormatting } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsParagraphAttrs, type YrsSession } from './index';
+import { createStyleResolver } from '../styles';
+import { styleParagraphValues } from './documentToYrs';
+import { createYrsSession, type YrsParagraphAttrs, type YrsParagraphTabStop, type YrsSession } from './index';
+import { explicitParagraphAttrs } from './paragraphSeed';
 import { yrsToDocument } from './yrsToDocument';
 
 // Word reads the saved file; the oracle is that reopening it (a publication
@@ -33,6 +36,8 @@ const BODY = [
     '<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
     '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
   '<w:p><w:r><w:t>Tail</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr><w:r><w:t>Styled indent</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:pStyle w:val="Tabbed"/></w:pPr><w:r><w:t>Styled tabs</w:t></w:r></w:p>',
 ].join('');
 
 const STYLES =
@@ -43,6 +48,9 @@ const STYLES =
   '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/>' +
   '<w:pPr><w:ind w:left="720"/><w:contextualSpacing/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Tabbed"><w:name w:val="Tabbed"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:keepNext/><w:tabs><w:tab w:val="left" w:pos="1000"/><w:tab w:val="right" w:pos="5000"/></w:tabs>' +
+  '<w:ind w:firstLine="360"/></w:pPr></w:style>' +
   '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/>' +
   '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:style></w:styles>';
 
@@ -327,19 +335,95 @@ describe('paragraph properties on save', () => {
     }
   });
 
-  // A property the editor holds nothing for saves as unset, so Word shows the new style's value there.
-  it('saves every property the editor holds after a style change', async () => {
+  it('applies a style’s paragraph values and reopens as the editor showed them', async () => {
     const bytes = fixture();
     const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const styles = createStyleResolver(source.package.styles);
     const session = await createYrsSession({ clientId: 81008 });
     let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
     try {
       session.seedFromDocx(bytes);
-      session.applyParagraphStyle(range(session, 1), 'Normal');
-      session.applyParagraphStyle(range(session, 0), 'Title');
+      for (const [index, styleId] of [[0, 'Title'], [1, 'Normal'], [2, 'Tabbed']] as const) {
+        session.applyParagraphStyle(range(session, index), styleId, styleParagraphValues(styles, styleId));
+      }
       const editor = shownAll(session);
+      // A paragraph styled anew shows exactly what a fresh one with that style seeds as.
+      expect(editor[0]).toMatchObject({ pStyle: 'Title', contextualSpacing: true, spaceAfter: 0, lineSpacing: 240 });
+      expect(editor[1]).toMatchObject({ pStyle: 'Normal', spaceAfter: 160, lineSpacing: 259 });
+      expect(editor[1]!.contextualSpacing).toBeUndefined();
+      expect(editor[2]).toMatchObject({ pStyle: 'Tabbed', keepNext: true, indentFirstLine: 360 });
+      expect(editor[2]!.keepLines).toBeUndefined();
       reopened = await reopen(await save(session, source), 81009);
-      expect(shownAll(reopened.session)).toMatchObject(editor);
+      expect(shownAll(reopened.session)).toEqual(editor);
+      // Nothing the style gives is copied into a paragraph that had no direct formatting.
+      expect(paragraphs(reopened.document)[0]!.formatting).toEqual({ styleId: 'Title' });
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('stores a cleared style value as 0, false or a clear tab stop, and reopens it', async () => {
+    const bytes = fixture();
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const styles = createStyleResolver(source.package.styles);
+    const session = await createYrsSession({ clientId: 81012 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    // What the ruler, the outdent button and tab removal send, made explicit as the editor does.
+    const set = (index: number, attrs: (properties: Record<string, unknown>) => YrsParagraphAttrs) => {
+      const { properties } = session.paragraphs('body')[index]!;
+      const style = styleParagraphValues(styles, properties.pStyle as string);
+      session.setParagraphAttrs(range(session, index), explicitParagraphAttrs(attrs(properties), style));
+    };
+    const removeTab = (position: number) => (properties: Record<string, unknown>) => {
+      const kept = (properties.tabs as YrsParagraphTabStop[]).filter((tab) => tab.position !== position);
+      return { tabs: kept.length > 0 ? kept : null };
+    };
+    try {
+      session.seedFromDocx(bytes);
+      set(6, () => ({ indentLeft: null }));
+      set(7, () => ({ indentFirstLine: null, hangingIndent: false }));
+      set(7, removeTab(1000));
+      set(7, removeTab(5000));
+      // A paragraph whose style sets nothing there clears to unset.
+      set(2, () => ({ indentLeft: null }));
+      const editor = shown(session, 'body');
+      expect(editor[6]).toMatchObject({ indentLeft: 0 });
+      expect(editor[7]).toMatchObject({
+        indentFirstLine: 0,
+        tabs: [{ position: 1000, alignment: 'clear' }, { position: 5000, alignment: 'clear' }],
+      });
+      expect(editor[2]!.indentLeft).toBeUndefined();
+      const saved = await save(session, source);
+      reopened = await reopen(saved, 81013);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+      const after = paragraphs(reopened.document);
+      expect(after[7]!.formatting).toMatchObject({ indentLeft: 0 });
+      expect(after[8]!.formatting).toMatchObject({
+        indentFirstLine: 0,
+        tabs: [{ position: 1000, alignment: 'clear' }, { position: 5000, alignment: 'clear' }],
+      });
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('saves a hanging first line set from the ruler', async () => {
+    const bytes = fixture();
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 81014 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      session.setParagraphAttrs(range(session, 0), { indentFirstLine: 360, hangingIndent: true });
+      const editor = shown(session, 'body');
+      expect(editor[0]).toMatchObject({ indentFirstLine: 360, hangingIndent: true });
+      reopened = await reopen(await save(session, source), 81015);
+      // The parser signs a hanging first line negative; the editor draws its magnitude either way.
+      const hanging = (value: Record<string, unknown> | undefined) => [Math.abs(Number(value?.indentFirstLine)), value?.hangingIndent];
+      expect(hanging(paragraphs(reopened.document)[0]!.formatting as Record<string, unknown>)).toEqual([360, true]);
+      expect(hanging(shown(reopened.session, 'body')[0])).toEqual([360, true]);
     } finally {
       session.destroy();
       reopened?.session.destroy();

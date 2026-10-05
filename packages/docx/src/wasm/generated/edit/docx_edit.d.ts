@@ -95,19 +95,13 @@ export class EditSession {
     apply_local_update(update: Uint8Array): void;
     /**
      * Writes `style_id` as the `pStyle` of every paragraph intersecting
-     * `[start, end)`. Only that key changes: this boundary has no style
-     * resolver, so it never fabricates the paragraph attributes or run marks
-     * the style definition would imply. In suggesting mode the property
-     * change is recorded as a `pPrChange` revision.
+     * `[start, end)` and resets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to
+     * the host-resolved `values_json` (an object of the style's paragraph
+     * values), clearing the keys it leaves out. Run marks are the host's to
+     * apply. In suggesting mode the property change is recorded as a
+     * `pPrChange` revision.
      */
-    apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, author_name?: string | null, author_date?: string | null): void;
-    /**
-     * [`EditSession::apply_update_with_inference`] for the replica peers edit
-     * through: it then re-reads what each field a deleted range now ends at
-     * shows, as a local system edit its peers and mirrors (the resident
-     * engine) receive.
-     */
-    apply_peer_update(update: Uint8Array): string;
+    apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, values_json: string, author_name?: string | null, author_date?: string | null): void;
     /**
      * Applies a batch of raw story mutations in ONE transaction. Unlike every
      * other op here these carry no user intent: indices are story-global
@@ -645,7 +639,6 @@ export class EditSession {
      * {
      *   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
      *   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
-     *   "highlight": string|null,
      *   "paraId": string, "styleId": string|null, "alignment": string|null,
      *   "paragraphProperties": {…},
      *   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
@@ -1038,8 +1031,7 @@ export interface InitOutput {
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
     readonly editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
-    readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
-    readonly editsession_apply_peer_update: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
