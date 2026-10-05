@@ -276,6 +276,7 @@ const goldenSeeds: Array<[string, string, number]> = [
   ["opaque-objects.docx", "eb05e432b8ed65821f8fd25f74c95ec0d59b1473f2ab498e6a589483758e4d5b", 48_900],
   ["book-30p.docx", "0a3dc43928c896635127a4f1b0760ae9dc8a3ef331a94cd1a8b7e823999d9095", 264_500],
   ["images-10.docx", "1a23a77334fa4372b546362c7763047c254ab7f418a980279ab2317a32203a17", 68_700],
+  ["wordprocessingml-comprehensive.docx", "cb750c601718d4604dd7bb0feecb9975d10324aaba1deaf14269338b5fba5167", 83_500],
   ["lecture.pptx", "b5613d351f5fd656f178875800331eb89199bfafb18d541fc5b7df9d354822f4", 111_300],
   ["deck-50.pptx", "02d15d15807bf30eb01e862fc707951d8ed5e94dcd6855da69d457d558951928", 164_500],
 ];

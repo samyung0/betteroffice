@@ -22,6 +22,8 @@ rewrites.
 - `book-30p.docx`, `images-10.docx` and `deck-50.pptx` come from a full run of the Capy
   storage probe `gen_files.py` (seeded RNG): a text-only book, ten large pictures, and 50
   text-heavy slides. The golden seed tests pin their seeds and state sizes.
+- `wordprocessingml-comprehensive.docx` (a copy of the `betteroffice-docx` corpus fixture)
+  carries run-level `w:rFonts w:hint`, so the golden seed test sees a change to how runs seed.
 
 Regenerate the `feature-rich` fixtures with the scripts in `../scripts`. Preview outputs live
 under `../preview` and are intentionally not part of the fixture contract.
