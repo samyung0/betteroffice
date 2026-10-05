@@ -1012,8 +1012,9 @@ function rawContentForItem(item: InlineItem): ParagraphContent | null {
     case 'noteRef': {
       const footnote = item.payload.footnoteRefId;
       const endnote = item.payload.endnoteRefId;
+      // The reference keeps its run's formatting (its FootnoteReference style).
       return {
-        type: 'run',
+        ...createTextRun('', item.attributes),
         content: [
           footnote !== undefined
             ? { type: 'footnoteRef', id: revisionId(footnote) }
@@ -1032,8 +1033,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   return content?.type === 'run' && changes ? { ...content, propertyChanges: changes } : content;
 }
 
-function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): TrackedRunChange {
-  const link = createHyperlink(item.attributes);
+function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, linked = true): TrackedRunChange {
+  const link = linked ? createHyperlink(item.attributes) : null;
   if (link) addToHyperlink(link, item);
   const child = link ?? ordinaryContentForItem(item) ?? { type: 'run' as const, content: [] };
   let content = inlineSdtContent([child]);
@@ -1187,11 +1188,12 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks.
+    // A note reference is handled before link marks; a tracked one keeps its revision.
     if (item.kind === 'embed' && item.embedKind === 'noteRef') {
       flushRun();
       flushHyperlink();
-      const note = ordinaryContentForItem(item);
+      const revision = trackedInfo(item.attributes.ins ?? item.attributes.del);
+      const note = revision ? trackedContentForItem(item, revision, false) : ordinaryContentForItem(item);
       if (note) content.push(note);
       continue;
     }

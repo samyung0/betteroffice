@@ -459,17 +459,19 @@ fn parse_paragraph_contents(
     // Range ends met inside a complex field go after it, as starts go before it.
     let mut field_ends = Vec::new();
     for child in transparent_children(element, false) {
+        // Deleted text reads as text, in runs and in the fields and links a
+        // deletion holds.
+        let normalized;
+        let child = if tracked_context == TrackedContext::Deletion {
+            normalized = normalize_deletion_element(child);
+            &normalized
+        } else {
+            child
+        };
         match child.local_name() {
             "r" => {
-                let normalized;
-                let run_element = if tracked_context == TrackedContext::Deletion {
-                    normalized = normalize_deletion_element(child);
-                    &normalized
-                } else {
-                    child
-                };
                 let run = parse_run_composed(
-                    run_element,
+                    child,
                     relationships,
                     theme,
                     styles,
