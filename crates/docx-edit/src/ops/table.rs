@@ -1981,7 +1981,7 @@ impl EditingDoc {
             .sum::<f64>()
             .round();
         let count = spread.len() as f64;
-        if !(total >= count) {
+        if total < count {
             return Err(invalid("the columns have no width to distribute"));
         }
         let each = (total / count).floor();
