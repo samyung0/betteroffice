@@ -710,7 +710,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
+      // A read-only editor never opens a header or footer to edit.
+      if (e.detail === 2 && !partEdit && !readOnly && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
           e.preventDefault();
@@ -742,6 +743,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       onHyperlinkClick,
       pagesContainerRef,
       partEdit,
+      readOnly,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,

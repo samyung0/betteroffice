@@ -1606,8 +1606,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       updateComments((prev) => [...prev, comment]);
     },
   };
-  // A read-only editor's comment cards change nothing.
-  if (readOnly) commentCallbacksRef.current = {};
+  // A read-only editor's comment cards change nothing; an add-comment card
+  // left open can still be cancelled.
+  if (readOnly)
+    commentCallbacksRef.current = {
+      onCancelAddComment: commentCallbacksRef.current.onCancelAddComment,
+    };
 
   // Stable callbacks wrapper that delegates to ref (avoids recreating items on every render)
   const stableCallbacks = useMemo<CommentCallbacks>(

@@ -922,7 +922,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           return true;
         }
         // Terminal-Tab behavior when the document has no trailing paragraph:
-        // append a row and enter its first cell.
+        // append a row and enter its first cell (never in a read-only one).
+        if (readOnly) return true;
         session.insertRow(focused, 'below');
         row = lastRow + 1;
         column = 0;
@@ -936,7 +937,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       setSelection({ story: nextStory, paraId: paragraph.paraId, offset: 0 });
       return true;
     },
-    [ensureSelection, session, setSelection]
+    [ensureSelection, readOnly, session, setSelection]
   );
 
   const handleBeforeInput = useCallback(

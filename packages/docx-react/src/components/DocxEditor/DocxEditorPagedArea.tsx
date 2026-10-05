@@ -565,7 +565,7 @@ export function DocxEditorPagedArea({
               onClose={() => {
                 setPartEditTarget(null);
               }}
-              onRemove={onRemoveHeaderFooter}
+              onRemove={readOnly ? undefined : onRemoveHeaderFooter}
             />
           );
           return canvasOverlayTarget ? createPortal(editor, canvasOverlayTarget) : editor;

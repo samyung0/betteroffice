@@ -87,13 +87,14 @@ export function useHyperlinkActions({
   );
 
   const handleHyperlinkPopupRemove = useCallback(() => {
-    pagedEditorRef.current?.applyYrsCommand({
+    const removed = pagedEditorRef.current?.applyYrsCommand({
       type: 'removeHyperlink',
       href: hyperlinkPopupData?.href,
     });
     setHyperlinkPopupData(null);
     focusActiveEditor();
-    toast('Link removed');
+    // A read-only editor refuses the command: nothing to report.
+    if (removed) toast('Link removed');
   }, [focusActiveEditor, hyperlinkPopupData, pagedEditorRef]);
 
   const handleHyperlinkPopupClose = useCallback(() => {

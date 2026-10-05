@@ -605,6 +605,30 @@ describe('clicking a note', () => {
   });
 });
 
+describe('double-clicking a header band', () => {
+  for (const readOnly of [false, true])
+    test(readOnly ? 'never opens it in a read-only document' : 'opens it for editing', () => {
+      const opened: string[] = [];
+      const options = stableOptions();
+      const { result } = renderHook(() =>
+        usePagesPointer(
+          options({
+            readOnly,
+            displayListQueries: fakeQueries({
+              region: 'header',
+              pos: null,
+              target: 'none',
+            } as DisplayListRegionHit),
+            onHeaderFooterDoubleClick: (region) => opened.push(region),
+          })
+        )
+      );
+      const click = new MouseEvent('click', { detail: 2, clientX: 400, clientY: 20 });
+      act(() => result.current.handlePagesClick(click as unknown as React.MouseEvent));
+      expect(opened).toEqual(readOnly ? [] : ['header']);
+    });
+});
+
 describe('closing an open part with Escape', () => {
   test('ignores composition Escape events', () => {
     let closed = 0;

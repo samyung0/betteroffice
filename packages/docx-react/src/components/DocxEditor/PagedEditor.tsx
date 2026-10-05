@@ -1508,17 +1508,27 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Initial Layout
     // =========================================================================
 
+    // The session that took the focus, or was shown read-only: leaving
+    // read-only takes the focus back only when the frame still has it, so a
+    // field the host was typing in keeps it.
+    const focusedSessionRef = useRef<YrsSession | null>(null);
     useEffect(() => {
-      if (!yrsCore.session) return;
+      const session = yrsCore.session;
+      if (!session) return;
       runLayoutPipelineRef.current?.();
       updateSelectionOverlayRef.current();
-      if (!readOnly) {
-        const raf = requestAnimationFrame(() => {
-          focusBodyInput();
-          setIsFocused(true);
-        });
-        return () => cancelAnimationFrame(raf);
+      const fresh = focusedSessionRef.current !== session;
+      if (readOnly) {
+        focusedSessionRef.current = session;
+        return;
       }
+      const raf = requestAnimationFrame(() => {
+        if (!fresh && !window.document.hasFocus()) return;
+        focusedSessionRef.current = session;
+        focusBodyInput();
+        setIsFocused(true);
+      });
+      return () => cancelAnimationFrame(raf);
     }, [focusBodyInput, readOnly, runLayoutPipelineRef, yrsCore.session]);
 
     // Canvas renderer: re-derive sidebar anchor Ys from the display list once
