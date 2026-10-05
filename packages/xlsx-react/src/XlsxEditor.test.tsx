@@ -810,8 +810,8 @@ describe('XlsxEditor keyboard', () => {
   it('keeps the top-left cell where it is when the zoom changes, as Google Sheets does', async () => {
     const view = await mountEditor(wide);
     await scrollTo(view, 480, 240);
-    for (const percent of [200, 50, 90, 125]) {
-      await view.run(`zoom:${percent}`);
+    for (const command of ['zoom:200', 'zoom:50', 'zoom:90', 'zoom:125'] as const) {
+      await view.run(command);
       expect(view.shown().x).toBeCloseTo(480, 6);
       expect(view.shown().y).toBeCloseTo(240, 6);
     }
