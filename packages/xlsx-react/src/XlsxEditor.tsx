@@ -2302,6 +2302,8 @@ function XlsxEditorContent({
         anchor: { row: 0, col: 0 },
         focus: { row: lastRows - 1, col: lastCols - 1 },
       });
+      // The grid takes the keys next, Ctrl/Cmd+C first.
+      focusContainer();
       return;
     }
     const [kind, value] = command.split(':') as [string, string | undefined];
