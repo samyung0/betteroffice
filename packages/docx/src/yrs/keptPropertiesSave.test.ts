@@ -311,6 +311,37 @@ describe('a run’s fonts', () => {
   });
 });
 
+describe('a font picked across runs with different fonts', () => {
+  const bytes = fixture(
+    '<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="PMingLiU"/></w:rPr><w:t>中一</w:t></w:r>' +
+      '<w:r><w:t>plain</w:t></w:r></w:p>' +
+      '<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="PMingLiU"/></w:rPr><w:t>中二</w:t></w:r></w:p>' +
+      '<w:p><w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/></w:rPr><w:t>中三</w:t></w:r></w:p><w:p/>'
+  );
+
+  it('keeps each run’s East Asian font in one pick', async () => {
+    const { session, base } = await open(bytes);
+    const [first, , third] = session.paragraphs('body');
+    session.formatRange(
+      { story: 'body', start: { paraId: first!.paraId, offset: 0 }, end: { paraId: third!.paraId, offset: 2 } },
+      { fontFamily: { ascii: 'Arial', hAnsi: 'Arial' } }
+    );
+    const xml = await savedDocumentXml(session, base);
+    const runs = [...xml.matchAll(/<w:r>(?:<w:rPr>.*?<\/w:rPr>)?<w:t>([^<]*)<\/w:t><\/w:r>/g)].map((match) => [
+      match[1],
+      match[0].match(/<w:rFonts ([^>]*)\/>/)?.[1],
+    ]);
+    const ARIAL = 'w:ascii="Arial" w:hAnsi="Arial"';
+    expect(runs).toEqual([
+      ['中一', `${ARIAL} w:eastAsia="PMingLiU" w:cs="Arial"`],
+      ['plain', `${ARIAL} w:cs="Arial"`],
+      ['中二', `${ARIAL} w:eastAsia="PMingLiU" w:cs="Arial"`],
+      ['中三', `${ARIAL} w:eastAsia="SimSun" w:cs="Arial"`],
+    ]);
+    session.destroy();
+  });
+});
+
 describe('a tracked deletion of a note reference or a simple field', () => {
   const BY = 'w:author="Rev" w:date="2026-01-01T00:00:00Z"';
   const NOTE = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
