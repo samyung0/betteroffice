@@ -388,23 +388,23 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
-/// The paragraph's numbering when its style gives it: `numPrFromStyle`, on the
-/// paragraph or in its source formatting, equal to `numPr`.
-fn style_numbering(props: &[(String, Any)]) -> Option<Any> {
+/// The paragraph's numbering, and whether its style gives it
+/// (`numPrFromStyle`, on the paragraph or in its source formatting, equal to
+/// `numPr`).
+fn list_numbering(props: &[(String, Any)]) -> Option<(Any, bool)> {
     let get = |key: &str| {
         props
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
+            .filter(|value| !matches!(value, Any::Null))
     };
-    let num_pr = get("numPr").filter(|value| !matches!(value, Any::Null))?;
-    let from_style = get("numPrFromStyle")
-        .filter(|value| !matches!(value, Any::Null))
-        .or_else(|| match get(ORIGINAL_FORMATTING) {
-            Some(Any::Map(original)) => original.get("numPrFromStyle"),
-            _ => None,
-        })?;
-    (from_style == num_pr).then(|| from_style.clone())
+    let num_pr = get("numPr")?;
+    let from_style = get("numPrFromStyle").or_else(|| match get(ORIGINAL_FORMATTING) {
+        Some(Any::Map(original)) => original.get("numPrFromStyle"),
+        _ => None,
+    });
+    Some((num_pr.clone(), from_style == Some(num_pr)))
 }
 
 /// `pPrChange` records under new revision ids.
@@ -494,7 +494,7 @@ impl EditingDoc {
     /// - at the paragraph end, so the second half is empty: only
     ///   the `INHERITED_PARA_ATTRS` subset survives, with
     ///   `defaultTextFormatting` reduced to the font/size/color carry keys,
-    ///   plus the numbering and level indents of a list the style gives;
+    ///   plus the list's numbering and level indents, so the list goes on;
     /// - at the end WITH a `next_style`: it switches to that style's
     ///   projection outright instead.
     ///
@@ -638,9 +638,9 @@ impl EditingDoc {
                 orig_map.remove(&mut txn, BORDERS);
             } else {
                 // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep. A list the
-                // style gives goes on with the style, as the file shows it.
-                let style_list = style_numbering(&props);
+                // font/size/color carry. Borders fall out of the sweep. The list goes on,
+                // as in Word, with its numbering and level indents.
+                let list = list_numbering(&props);
                 for (key, value) in &props {
                     if SECTION_KEYS.contains(&key.as_str()) {
                         continue;
@@ -648,7 +648,7 @@ impl EditingDoc {
                     let list_key = STYLE_NUMBERING_ATTRS.contains(&key.as_str())
                         || LIST_INDENT_ATTRS.contains(&key.as_str());
                     if !INHERITED_PARA_ATTRS.contains(&key.as_str())
-                        && !(style_list.is_some() && list_key)
+                        && !(list.is_some() && list_key)
                     {
                         orig_map.remove(&mut txn, key);
                     } else if key == DEFAULT_TEXT_FORMATTING {
@@ -660,8 +660,8 @@ impl EditingDoc {
                         );
                     }
                 }
-                if let Some(from_style) = style_list {
-                    orig_map.insert(&mut txn, "numPrFromStyle", from_style);
+                if let Some((num_pr, true)) = list {
+                    orig_map.insert(&mut txn, "numPrFromStyle", num_pr);
                 }
             }
         } else {
