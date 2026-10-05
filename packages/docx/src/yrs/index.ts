@@ -42,7 +42,9 @@ export {
 export { documentToYrs, styleParagraphValues } from './documentToYrs';
 export {
   applyStyleValues,
+  endEmptyListItem,
   explicitParagraphAttrs,
+  styleNewCells,
   type ParagraphStyleValues,
 } from './paragraphSeed';
 export { yrsToDocument } from './yrsToDocument';

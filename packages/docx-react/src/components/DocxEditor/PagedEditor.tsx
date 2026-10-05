@@ -69,6 +69,7 @@ import {
   applyStyleValues,
   type ParagraphStyleValues,
   projectYrsComments,
+  styleNewCells,
   cellParagraphFormatting,
   commentSharedId,
   styleParagraphValues,
@@ -521,12 +522,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
     const { session: yrsCoreSession, sourceNumbering } = yrsCore;
     const paragraphStyleValues = useCallback<ParagraphStyleValues>(
-      (styleId, story) =>
+      (styleId, story, list = true) =>
         styleParagraphValues(yrsStyleResolver, styleId, {
           cell: yrsCoreSession
             ? cellParagraphFormatting(yrsCoreSession, yrsStyleResolver, story)
             : undefined,
-          numbering: sourceNumbering(),
+          numbering: list ? sourceNumbering() : undefined,
         }),
       [sourceNumbering, yrsCoreSession, yrsStyleResolver]
     );
@@ -1214,6 +1215,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               command.columns,
               structuralAuthor
             );
+            styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
             const firstCell = {
               story: receipt.table.story,
               tableIndex: receipt.table.tableIndex,
@@ -1270,11 +1272,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             if (command.type === 'tableInsertRow') {
               const at = command.at ?? target.focused;
               session.setCellSelection({ anchor: at, head: at });
-              session.insertRow(at, command.side, structuralAuthor);
+              const receipt = session.insertRow(at, command.side, structuralAuthor);
+              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
             } else if (command.type === 'tableInsertColumn') {
               const at = command.at ?? target.focused;
               session.setCellSelection({ anchor: at, head: at });
-              session.insertColumn(at, command.side);
+              const receipt = session.insertColumn(at, command.side);
+              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
             } else if (command.type === 'tableDeleteRow') {
               const receipt = session.deleteRow(target.range, structuralAuthor);
               if (receipt.deletedTable) {
@@ -1305,7 +1309,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               const surviving = session.cellSelection()?.anchor ?? target.range.anchor;
               setYrsSelectionInCell(session, surviving);
             } else if (command.type === 'tableSplitCell') {
-              session.splitCell(target.focused, command.rows, command.columns);
+              const receipt = session.splitCell(target.focused, command.rows, command.columns);
+              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
             } else if (command.type === 'tableCellShading') {
               session.setCellShading(target.range, command.color);
             } else {
@@ -1336,6 +1341,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         getLatestLayout,
         handleYrsStateChange,
         isSuggesting,
+        paragraphStyleValues,
         readOnly,
         runLayoutPipeline,
         yrsCore.inputPositionMap,

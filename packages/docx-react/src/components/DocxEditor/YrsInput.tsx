@@ -12,7 +12,9 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  endEmptyListItem,
   sameYrsSelection,
+  styleNewCells,
   type ParagraphStyleValues,
   type YrsAuthor,
   type YrsInputPositionMap,
@@ -624,6 +626,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const currentParagraph = session
         .paragraphs(current.story)
         .find((paragraph) => paragraph.paraId === current.paraId);
+      // Enter in an empty list item ends the list, as in Word.
+      if (
+        paragraphStyleValues &&
+        endEmptyListItem(session, current.story, current.paraId, paragraphStyleValues, suggestingAuthor())
+      ) {
+        finishMutation();
+        return;
+      }
       const inheritedStored = storedFormattingByParagraphRef.current.get(
         `${current.story}\u0000${current.paraId}`
       );
@@ -933,7 +943,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         // Terminal-Tab behavior when the document has no trailing paragraph:
         // append a row and enter its first cell (never in a read-only one).
         if (readOnly) return true;
-        session.insertRow(focused, 'below');
+        const receipt = session.insertRow(focused, 'below');
+        if (paragraphStyleValues) styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
         row = lastRow + 1;
         column = 0;
       }
@@ -946,7 +957,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       setSelection({ story: nextStory, paraId: paragraph.paraId, offset: 0 });
       return true;
     },
-    [ensureSelection, readOnly, session, setSelection]
+    [ensureSelection, paragraphStyleValues, readOnly, session, setSelection]
   );
 
   const handleBeforeInput = useCallback(

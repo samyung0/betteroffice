@@ -152,9 +152,11 @@ export function explicitParagraphAttrs(
  * A paragraph style's values for a paragraph in `story`: `styleParagraphValues`
  * with that story's cell context (`cellParagraphFormatting`) and the package's numbering.
  */
+/** A style's paragraph values in `story`; `list` false leaves the style's numbering out. */
 export type ParagraphStyleValues = (
   styleId: string | null,
-  story: string
+  story: string,
+  list?: boolean
 ) => Readonly<Record<string, unknown>>;
 
 /**
@@ -178,6 +180,80 @@ export function applyStyleValues(
     previous[current] ??= styleValues(current || null, range.story);
   }
   session.applyParagraphStyle(range, styleId, styleValues(styleId, range.story), previous, suggesting);
+}
+
+/**
+ * Gives the paragraphs of cells a table op made (`storyIds`) their style's
+ * values in their cell, table style included, as the seed gives a file's
+ * cells, so the editor shows a new header-row cell centred as Word does.
+ */
+export function styleNewCells(
+  session: YrsSession,
+  storyIds: readonly string[],
+  styleValues: ParagraphStyleValues
+): void {
+  for (const story of storyIds) {
+    const paragraphs = session.paragraphs(story);
+    const first = paragraphs[0];
+    const last = paragraphs.at(-1);
+    if (!first || !last) continue;
+    const styleId = typeof first.properties.pStyle === 'string' ? first.properties.pStyle : 'Normal';
+    const range = { story, start: { paraId: first.paraId, offset: 0 }, end: { paraId: last.paraId, offset: 0 } };
+    applyStyleValues(session, range, styleId, styleValues);
+  }
+}
+
+const LIST_ATTRS = [
+  'listNumFmt',
+  'listIsBullet',
+  'listMarker',
+  'listMarkerHidden',
+  'listMarkerFontFamily',
+  'listMarkerFontSize',
+  'listMarkerBold',
+  'listMarkerItalic',
+  'listMarkerColor',
+  'listMarkerSuffix',
+  'listLevelNumFmts',
+  'listAbstractNumId',
+  'listStartOverride',
+] as const;
+
+/**
+ * Enter in an empty list item ends the list, as in Word: numbering set on the
+ * paragraph goes, a style's is turned off (`numId` 0), and the indents become
+ * the style's without its list. Returns false, changing nothing, for a
+ * paragraph that is not an empty list item.
+ */
+export function endEmptyListItem(
+  session: YrsSession,
+  story: string,
+  paraId: string,
+  styleValues: ParagraphStyleValues,
+  suggesting?: YrsAuthor
+): boolean {
+  const paragraph = session.paragraphs(story).find((candidate) => candidate.paraId === paraId);
+  const properties = paragraph?.properties ?? {};
+  const numPr = properties.numPr as { numId?: number; ilvl?: number } | null | undefined;
+  if (!paragraph || paragraph.text !== '' || !numPr?.numId) return false;
+  const original = properties._originalFormatting as ParagraphFormatting | null | undefined;
+  const fromStyle =
+    JSON.stringify(properties.numPrFromStyle ?? original?.numPrFromStyle ?? null) === JSON.stringify(numPr);
+  const styleId = typeof properties.pStyle === 'string' ? properties.pStyle : null;
+  const values = styleValues(styleId, story, false);
+  const attrs: YrsParagraphAttrs = {
+    numPr: fromStyle ? { numId: 0, ilvl: numPr.ilvl ?? 0 } : null,
+    indentLeft: (values.indentLeft as number | undefined) ?? null,
+    indentFirstLine: (values.indentFirstLine as number | undefined) ?? null,
+    hangingIndent: (values.hangingIndent as boolean | undefined) ?? null,
+  };
+  for (const key of LIST_ATTRS) (attrs as Record<string, unknown>)[key] = null;
+  session.setParagraphAttrs(
+    { story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+    attrs,
+    suggesting
+  );
+  return true;
 }
 
 /**
