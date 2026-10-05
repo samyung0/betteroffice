@@ -388,6 +388,50 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
+/// The paragraph's numbering when its style gives it: `numPrFromStyle`, on the
+/// paragraph or in its source formatting, equal to `numPr`.
+fn style_numbering(props: &[(String, Any)]) -> Option<Any> {
+    let get = |key: &str| {
+        props
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    };
+    let num_pr = get("numPr").filter(|value| !matches!(value, Any::Null))?;
+    let from_style = get("numPrFromStyle")
+        .filter(|value| !matches!(value, Any::Null))
+        .or_else(|| match get(ORIGINAL_FORMATTING) {
+            Some(Any::Map(original)) => original.get("numPrFromStyle"),
+            _ => None,
+        })?;
+    (from_style == num_pr).then(|| from_style.clone())
+}
+
+/// `pPrChange` records under new revision ids.
+fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -> Any {
+    let Any::Array(changes) = changes else {
+        return changes.clone();
+    };
+    Any::Array(
+        changes
+            .iter()
+            .map(|change| {
+                let Any::Map(change) = change else {
+                    return change.clone();
+                };
+                let mut change = (**change).clone();
+                if let Some(Any::Map(info)) = change.get("info") {
+                    let mut info = (**info).clone();
+                    info.remove("revisionId");
+                    info.insert("id".to_owned(), Any::from(next_id()));
+                    change.insert("info".to_owned(), Any::Map(Arc::new(info)));
+                }
+                Any::Map(Arc::new(change))
+            })
+            .collect(),
+    )
+}
+
 /// `_originalFormatting` without its borders.
 fn original_without_borders(value: &Any) -> Option<Any> {
     match value {
@@ -439,14 +483,18 @@ impl EditingDoc {
     ///
     /// The new pilcrow terminates the FIRST half, carrying the source
     /// paragraph's properties (but the section it ends) and its ORIGINAL
-    /// paraId; the original
+    /// paraId. Where the source mark keeps its own properties (a split
+    /// mid-paragraph or before a block), the new mark leaves out the source
+    /// mark's tracked insertion or deletion, and its copy of a tracked
+    /// property change takes new revision ids. The original
     /// pilcrow is re-minted with a fresh paraId and becomes the second half's
     /// mark. What the second half then keeps depends on where the split fell:
     ///
     /// - mid-paragraph: it keeps its own properties;
     /// - at the paragraph end, so the second half is empty: only
     ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys;
+    ///   `defaultTextFormatting` reduced to the font/size/color carry keys,
+    ///   plus the numbering and level indents of a list the style gives;
     /// - at the end WITH a `next_style`: it switches to that style's
     ///   projection outright instead.
     ///
@@ -537,12 +585,22 @@ impl EditingDoc {
             &first_para_id
         };
         new_pilcrow.insert(&mut txn, PARA_ID, new_para_id.as_str());
+        // Where the source mark keeps its properties, the new mark is a plain
+        // one, as in Word: the source mark's own insertion or deletion stays
+        // on it, and the new mark's copy of a tracked property change is a
+        // change of its own.
+        let source_keeps = before_block || !second_half_empty;
         for (key, value) in &props {
-            if SECTION_KEYS.contains(&key.as_str()) || (before_block && key == BORDERS) {
+            if SECTION_KEYS.contains(&key.as_str())
+                || (before_block && key == BORDERS)
+                || (source_keeps && (key == PPR_INS || key == PPR_DEL))
+            {
                 continue;
             }
             let value = if before_block && key == ORIGINAL_FORMATTING {
                 original_without_borders(value).unwrap_or_else(|| value.clone())
+            } else if source_keeps && key == PPR_CHANGE {
+                with_fresh_revision_ids(value, || self.next_id())
             } else {
                 value.clone()
             };
@@ -580,12 +638,18 @@ impl EditingDoc {
                 orig_map.remove(&mut txn, BORDERS);
             } else {
                 // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep.
+                // font/size/color carry. Borders fall out of the sweep. A list the
+                // style gives goes on with the style, as the file shows it.
+                let style_list = style_numbering(&props);
                 for (key, value) in &props {
                     if SECTION_KEYS.contains(&key.as_str()) {
                         continue;
                     }
-                    if !INHERITED_PARA_ATTRS.contains(&key.as_str()) {
+                    let list_key = STYLE_NUMBERING_ATTRS.contains(&key.as_str())
+                        || LIST_INDENT_ATTRS.contains(&key.as_str());
+                    if !INHERITED_PARA_ATTRS.contains(&key.as_str())
+                        && !(style_list.is_some() && list_key)
+                    {
                         orig_map.remove(&mut txn, key);
                     } else if key == DEFAULT_TEXT_FORMATTING {
                         set_or_remove(
@@ -595,6 +659,9 @@ impl EditingDoc {
                             style_carry_dtf(value),
                         );
                     }
+                }
+                if let Some(from_style) = style_list {
+                    orig_map.insert(&mut txn, "numPrFromStyle", from_style);
                 }
             }
         } else {

@@ -1780,7 +1780,10 @@ function paragraphFromStory(
   if (pPrIns) paragraph.pPrIns = pPrIns;
   if (pPrDel) paragraph.pPrDel = pPrDel;
   if (Array.isArray(properties.pPrChange) && properties.pPrChange.length > 0) {
-    paragraph.propertyChanges = properties.pPrChange as Paragraph['propertyChanges'];
+    // A split's copy carries an editor revision id; the file takes numbers.
+    paragraph.propertyChanges = (properties.pPrChange as NonNullable<Paragraph['propertyChanges']>).map(
+      (change) => ({ ...change, info: trackedInfo(change.info) ?? change.info })
+    );
   }
   if (properties.sectPr) {
     paragraph.sectionProperties = properties.sectPr as Paragraph['sectionProperties'];
