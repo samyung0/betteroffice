@@ -1,4 +1,5 @@
 import { expect } from 'bun:test';
+import { decodeStateVector } from 'yjs';
 
 import {
   STORY,
@@ -100,8 +101,11 @@ export const twoEditorsConverge: DocxScenario = {
         .some((paragraph) => paragraph.paraId === split.secondParaId)
     ).toBe(true);
     expect(fingerprint(a.editor.session)).toBe(fingerprint(b.editor.session));
-    expect([...a.editor.session.encodeStateVector()].join()).toBe(
-      [...b.editor.session.encodeStateVector()].join()
+    // Yrs writes a state vector in hash-map order, so compare clocks by client.
+    const clocks = (vector: Uint8Array) =>
+      [...decodeStateVector(vector)].sort(([x], [y]) => x - y);
+    expect(clocks(a.editor.session.encodeStateVector())).toEqual(
+      clocks(b.editor.session.encodeStateVector())
     );
 
     const catchUp = a.timer.op('encodeStateAsUpdate:inSync', () =>
