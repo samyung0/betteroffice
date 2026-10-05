@@ -4,6 +4,8 @@ use std::sync::Arc;
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
 
+pub use pptx_parse::{Bullet, BulletFont, LineSpacing};
+
 pub use pptx_parse::{CommentFlavor, TextCaps};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -49,6 +51,12 @@ pub struct TextStyle {
     pub baseline_pct: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
+    /// `a:rPr@strike`: `noStrike`, `sngStrike` or `dblStrike`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    /// Highlight colour, `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -64,6 +72,10 @@ pub struct TextStylePatch {
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,7 +96,33 @@ pub struct ParagraphSnapshot {
     /// only on a paragraph with no file paragraph of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties_from: Option<String>,
+    /// Paragraph markup an edit set (`marL`, `indent`, `a:lnSpc`, `a:spcBef`,
+    /// `a:spcAft`, `a:buFont`); `None` keeps the file's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indent: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_before: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_after: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_font: Option<BulletFont>,
     pub runs: Vec<TextRunSnapshot>,
+}
+
+/// What [`crate::DeckSession::set_paragraph_spacing`] sets; `None` leaves a value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParagraphSpacing {
+    #[serde(default)]
+    pub line: Option<LineSpacing>,
+    #[serde(default)]
+    pub before: Option<LineSpacing>,
+    #[serde(default)]
+    pub after: Option<LineSpacing>,
 }
 
 impl ParagraphSnapshot {
@@ -165,6 +203,9 @@ pub struct ShapeSnapshot {
     pub pending_media: Option<PendingMedia>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blip_effects: Vec<BlipEffect>,
+    /// `a:bodyPr@anchor` an edit set (`t`, `ctr`, `b`); `None` keeps the file's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_anchor: Option<String>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,

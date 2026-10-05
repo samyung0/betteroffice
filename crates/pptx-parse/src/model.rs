@@ -863,10 +863,16 @@ pub struct RunProperties {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
+    /// `a:rPr@strike`: `sngStrike`, `dblStrike` or `noStrike`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,
+    /// `a:rPr/a:highlight`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<ColorValue>,
     pub language: Option<String>,
     pub hyperlink_relationship_id: Option<String>,
 }

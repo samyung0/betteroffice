@@ -5,7 +5,7 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide};
+use pptx_parse::{GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -15,7 +15,10 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
-use crate::story::{baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story};
+use crate::story::{
+    baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story,
+    validate_text_style,
+};
 use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, PendingMedia, PictureDraft,
     PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft,
@@ -194,6 +197,44 @@ fn seed_shape(
     shape_map.insert(txn, "textStories", string_array(&text_story_ids));
     shape_map.insert(txn, "children", string_array(&child_ids));
     Ok(shape_id)
+}
+
+/// The file text body a seeded story was read from: a shape's body or a table
+/// cell's. Stories of shapes added in the session have none.
+pub(crate) fn source_text_body<'a>(
+    package: &'a PptxPackage,
+    story_id: &str,
+) -> Option<&'a TextBody> {
+    let rest = story_id.strip_prefix("story:slide:")?;
+    let (slide_index, rest) = rest.split_once(':')?;
+    let slide = package.slides.get(slide_index.parse::<usize>().ok()?)?;
+    let (_, rest) = rest.split_once(":shape:")?;
+    let (path, suffix) = rest.split_once(':')?;
+    let mut nodes = slide.shapes.as_slice();
+    let mut node = None;
+    for index in path.split('.') {
+        let found = nodes.get(index.parse::<usize>().ok()?)?;
+        nodes = match found {
+            ShapeNode::Group(group) => &group.children,
+            _ => &[],
+        };
+        node = Some(found);
+    }
+    match (node?, suffix.split(':').collect::<Vec<_>>().as_slice()) {
+        (ShapeNode::Shape(shape), ["0"]) => shape.text.as_ref(),
+        (ShapeNode::GraphicFrame(frame), ["table", row, cell]) => match &frame.data {
+            GraphicFrameData::Table(table) => Some(
+                &table
+                    .rows
+                    .get(row.parse::<usize>().ok()?)?
+                    .cells
+                    .get(cell.parse::<usize>().ok()?)?
+                    .text,
+            ),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn seeded_slide_id(slide_index: usize, reference_id: u32) -> String {
@@ -383,14 +424,7 @@ impl DeckSession {
         validate_rect(draft.rect)?;
         crate::model::validate_xml_text(&draft.name)?;
         crate::model::validate_xml_text(&draft.text)?;
-        crate::story::validate_style_values(
-            draft.style.font_family.as_deref(),
-            draft.style.underline.as_deref(),
-            draft.style.color.as_deref(),
-            draft.style.font_size_pt,
-            draft.style.spacing_pt,
-            draft.style.baseline_pct,
-        )?;
+        validate_text_style(&draft.style)?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
@@ -885,6 +919,51 @@ impl DeckSession {
             after: rect,
         })
     }
+
+    /// Sets where a shape's text sits in it (`a:bodyPr@anchor`: `t`, `ctr`
+    /// or `b`); `None` restores the file's or the placeholder's.
+    pub fn set_text_anchor(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        anchor: Option<&str>,
+    ) -> EditResult<()> {
+        if let Some(anchor) = anchor {
+            validate_text_anchor(anchor)?;
+        }
+        let mut txn = self.transact_for(context);
+        require_shape_membership(&txn, slide_id, shape_id)?;
+        let shape = shape_ref(&txn, shape_id)?;
+        if required_string(&shape, &txn, "kind")? != "shape"
+            || map_string_array(&shape, &txn, "textStories")?.is_empty()
+        {
+            return Err(EditError::InvalidText(format!(
+                "shape {shape_id} has no text body"
+            )));
+        }
+        match anchor {
+            Some(anchor) => {
+                shape.insert(&mut txn, TEXT_ANCHOR, anchor);
+            }
+            None => {
+                shape.remove(&mut txn, TEXT_ANCHOR);
+            }
+        }
+        Ok(())
+    }
+}
+
+const TEXT_ANCHOR: &str = "textAnchor";
+
+fn validate_text_anchor(anchor: &str) -> EditResult<()> {
+    if matches!(anchor, "t" | "ctr" | "b") {
+        Ok(())
+    } else {
+        Err(EditError::InvalidText(format!(
+            "unrecognized text anchor {anchor:?}"
+        )))
+    }
 }
 
 /// Schema and fingerprint checks that need no package.
@@ -1162,6 +1241,14 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
             _ => None,
         },
         blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
+        text_anchor: match map_string(&shape, txn, TEXT_ANCHOR) {
+            Some(anchor) => {
+                validate_text_anchor(&anchor)
+                    .map_err(|error| EditError::InvalidState(error.to_string()))?;
+                Some(anchor)
+            }
+            None => None,
+        },
         graphic: optional_json(&shape, txn, "graphicJson")?,
         text_stories: text_snapshots,
         children,
@@ -1335,6 +1422,7 @@ fn baseline_shape(
         media_part_path,
         pending_media: None,
         blip_effects,
+        text_anchor: None,
         graphic,
         text_stories,
         children,

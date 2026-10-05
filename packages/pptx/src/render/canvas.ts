@@ -823,6 +823,12 @@ function paintTextBox(
   const changes = textChanges.filter((change) => change.storyId === textBox.storyId);
   paintTextChanges(ctx, textBox, changes, false);
   for (const line of textBox.lines) {
+    // Highlights first, so one run's never covers its neighbour's text.
+    for (const run of line.runs) {
+      if (!run.highlight) continue;
+      ctx.fillStyle = run.highlight;
+      ctx.fillRect(run.x, line.y, run.width, line.height);
+    }
     for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
   }
   paintTextChanges(ctx, textBox, changes, true);
@@ -880,6 +886,14 @@ function paintTextRun(
     ctx.fillRect(
       run.x,
       runBaseline + run.fontSizePx * 0.08,
+      run.width,
+      Math.max(1, run.fontSizePx * 0.05)
+    );
+  }
+  if (run.strike) {
+    ctx.fillRect(
+      run.x,
+      runBaseline - run.fontSizePx * 0.3,
       run.width,
       Math.max(1, run.fontSizePx * 0.05)
     );

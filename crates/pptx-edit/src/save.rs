@@ -483,6 +483,9 @@ fn shape_patch(
     if shape.adjust_values != base.adjust_values {
         patch.adjust_values = Some(shape.adjust_values.clone());
     }
+    if shape.text_anchor != base.text_anchor {
+        patch.text_anchor.clone_from(&shape.text_anchor);
+    }
     let baseline_stories: HashMap<&str, &StorySnapshot> = base
         .text_stories
         .iter()
@@ -618,13 +621,7 @@ fn paragraph_writes(
         if base == Some(paragraph) && source_index.is_some() {
             writes.push(ParagraphWrite {
                 source_index,
-                template_index: None,
-                rebuild: false,
-                properties_changed: false,
-                alignment: None,
-                level: 0,
-                bullet: None,
-                runs: Vec::new(),
+                ..ParagraphWrite::default()
             });
             continue;
         }
@@ -633,6 +630,12 @@ fn paragraph_writes(
                 base.alignment != paragraph.alignment
                     || base.level != paragraph.level
                     || base.bullet_json != paragraph.bullet_json
+                    || base.margin_left != paragraph.margin_left
+                    || base.indent != paragraph.indent
+                    || base.line_spacing != paragraph.line_spacing
+                    || base.space_before != paragraph.space_before
+                    || base.space_after != paragraph.space_after
+                    || base.bullet_font != paragraph.bullet_font
             }
             None => true,
         };
@@ -650,6 +653,12 @@ fn paragraph_writes(
             alignment: paragraph.alignment.clone(),
             level: paragraph.level,
             bullet,
+            margin_left: paragraph.margin_left,
+            indent: paragraph.indent,
+            line_spacing: paragraph.line_spacing,
+            space_before: paragraph.space_before,
+            space_after: paragraph.space_after,
+            bullet_font: paragraph.bullet_font.clone(),
             runs: paragraph.runs.iter().map(run_write).collect(),
         });
     }
@@ -666,9 +675,11 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
+            strike: run.style.strike.clone(),
             caps: run.style.caps,
             font_family: run.style.font_family.clone(),
             color: run.style.color.as_deref().map(color_from_hex),
+            highlight: run.style.highlight.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,
         },
@@ -713,6 +724,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         fill: shape.fill.clone(),
         outline: shape.outline.clone(),
         paragraphs,
+        text_anchor: shape.text_anchor.clone(),
         picture: None,
     })
 }
@@ -736,6 +748,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         fill: None,
         outline: None,
         paragraphs: None,
+        text_anchor: None,
         picture: Some(PictureAdd {
             media_bytes,
             content_type: pending.content_type.clone(),

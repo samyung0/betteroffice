@@ -7,9 +7,9 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft, ShapeDraft,
-    ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt, TextStyle, TextStylePatch,
-    TransformReceipt, UpdateEvent, UpdateOrigin,
+    Bullet, CommentFlavor, DeckSession, DeckSnapshot, EditCtx, ParagraphSpacing, PictureDraft,
+    PresetShapeDraft, ShapeDraft, ShapeReceipt, ShapeRect, ShapeStroke, SlideReceipt, TextReceipt,
+    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -91,6 +91,55 @@ struct SetParagraphAlignmentArgs {
     end: u32,
     #[serde(default)]
     alignment: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearTextFormattingArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    #[serde(default)]
+    attributes: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetParagraphListArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    #[serde(default)]
+    levels: Option<Vec<Bullet>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeParagraphLevelArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    delta: i32,
+    #[serde(default)]
+    levels: Option<Vec<Bullet>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetParagraphSpacingArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    spacing: ParagraphSpacing,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetTextAnchorArgs {
+    slide_id: String,
+    shape_id: String,
+    #[serde(default)]
+    anchor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -543,6 +592,84 @@ impl PptxDocument {
                 )
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = clearTextFormattingJson)]
+    pub fn clear_text_formatting_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ClearTextFormattingArgs = parse_args(args)?;
+        json(
+            self.session
+                .clear_text_formatting(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    args.attributes.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setParagraphListJson)]
+    pub fn set_paragraph_list_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetParagraphListArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_paragraph_list(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    args.levels.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = changeParagraphLevelJson)]
+    pub fn change_paragraph_level_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ChangeParagraphLevelArgs = parse_args(args)?;
+        json(
+            self.session
+                .change_paragraph_level(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    args.delta,
+                    args.levels.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setParagraphSpacingJson)]
+    pub fn set_paragraph_spacing_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetParagraphSpacingArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_paragraph_spacing(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    &args.spacing,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setTextAnchorJson)]
+    pub fn set_text_anchor_json(&self, args: &str) -> Result<(), JsValue> {
+        let args: SetTextAnchorArgs = parse_args(args)?;
+        self.session
+            .set_text_anchor(
+                &local_context(),
+                &args.slide_id,
+                &args.shape_id,
+                args.anchor.as_deref(),
+            )
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = addCommentJson)]

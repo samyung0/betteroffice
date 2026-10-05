@@ -54,7 +54,27 @@ impl PptxRenderer {
         slide_index: u32,
     ) -> Result<String, JsValue> {
         Ok(self
-            .layout_slide_timed(document, slide_index, &mut || 0.0)?
+            .layout_slide_timed(document, slide_index, None, &mut || 0.0)?
+            .0)
+    }
+
+    /// `layoutSlideJson` with the editor's caret in paragraph `paragraph` of
+    /// `story_id`, whose list marker then shows even while it is empty.
+    #[wasm_bindgen(js_name = layoutSlideAtCaretJson)]
+    pub fn layout_slide_at_caret_json(
+        &mut self,
+        document: &PptxDocument,
+        slide_index: u32,
+        story_id: &str,
+        paragraph: u32,
+    ) -> Result<String, JsValue> {
+        Ok(self
+            .layout_slide_timed(
+                document,
+                slide_index,
+                Some((story_id, paragraph as usize)),
+                &mut || 0.0,
+            )?
             .0)
     }
 
@@ -67,7 +87,7 @@ impl PptxRenderer {
         slide_index: u32,
     ) -> Result<String, JsValue> {
         let (json, profile) =
-            self.layout_slide_timed(document, slide_index, &mut performance_now)?;
+            self.layout_slide_timed(document, slide_index, None, &mut performance_now)?;
         let profile = serde_json::json!({
             "scopeMs": profile.scope_ms,
             "layoutMs": profile.layout_ms,
@@ -141,6 +161,7 @@ impl PptxRenderer {
         &mut self,
         document: &PptxDocument,
         slide_index: u32,
+        caret: Option<(&str, usize)>,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(String, LayoutProfile), JsValue> {
         let started = now();
@@ -149,7 +170,7 @@ impl PptxRenderer {
         let scoped = now();
         let rendered = self
             .renderer
-            .layout_scoped_slide(session.package(), &scope)
+            .layout_scoped_slide_at_caret(session.package(), &scope, caret)
             .map_err(js_error)?;
         let laid_out = now();
         let json = serde_json::to_string(&rendered.display_list).map_err(js_error)?;

@@ -12,7 +12,9 @@ use ooxml_drawingml::{
 use crate::PptxError;
 use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
 use crate::drawing::parse_run_properties;
-use crate::model::{Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference};
+use crate::model::{
+    Bullet, BulletFont, LineSpacing, PptxPackage, RunProperties, ShapeElements, SlideReference,
+};
 use crate::xml::{
     DRAWINGML_NS, PRESENTATIONML_NS, ParseBudget, ParseLimits, XmlElement, XmlNode,
     alternate_content_branch_index, parse_xml, serialize_xml,
@@ -87,6 +89,8 @@ pub struct ShapePatch {
     /// A default outline clears the stroke.
     pub outline: Option<ShapeOutline>,
     pub adjust_values: Option<BTreeMap<String, f64>>,
+    /// `a:bodyPr@anchor` of the shape's own text body.
+    pub text_anchor: Option<String>,
     pub texts: Vec<TextWrite>,
     /// Non-empty only when a group's child list must be rebuilt.
     pub children: Vec<ShapeWrite>,
@@ -114,6 +118,7 @@ pub enum TextTarget {
     TableCell { row: usize, cell: usize },
 }
 
+#[derive(Default)]
 pub struct ParagraphWrite {
     /// Index of the paragraph in the source text body, when it survives.
     pub source_index: Option<usize>,
@@ -126,6 +131,13 @@ pub struct ParagraphWrite {
     pub alignment: Option<String>,
     pub level: u32,
     pub bullet: Option<Bullet>,
+    /// The fields below are set when `Some`; `None` keeps the source's.
+    pub margin_left: Option<i64>,
+    pub indent: Option<i64>,
+    pub line_spacing: Option<LineSpacing>,
+    pub space_before: Option<LineSpacing>,
+    pub space_after: Option<LineSpacing>,
+    pub bullet_font: Option<BulletFont>,
     pub runs: Vec<RunWrite>,
 }
 
@@ -145,6 +157,8 @@ pub struct ShapeAdd {
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
     pub paragraphs: Option<Vec<ParagraphWrite>>,
+    /// `a:bodyPr@anchor`; only with `paragraphs`.
+    pub text_anchor: Option<String>,
     /// A picture instead of an autoshape; mints its own media part and relationship.
     pub picture: Option<PictureAdd>,
 }
@@ -1642,6 +1656,13 @@ fn patch_shape(
         let properties = shape_properties_mut(element, part)?;
         set_adjust_values(properties, adjust_values, prefixes, part)?;
     }
+    if let Some(anchor) = &patch.text_anchor {
+        element
+            .child_mut("txBody")
+            .and_then(|body| body.child_mut("bodyPr"))
+            .ok_or_else(|| write_error(part, "shape has no text body properties"))?
+            .set_attribute("anchor", anchor.clone());
+    }
     for text in &patch.texts {
         patch_text(element, text, theme, prefixes, part)?;
     }
@@ -2198,10 +2219,13 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.font_size_pt == target.font_size_pt
         && source.spacing_pt == target.spacing_pt
         && source.underline == target.underline
+        && source.strike == target.strike
         && source.caps == target.caps
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
             == resolve_color_value_to_hex_with_theme(target.color.as_ref(), theme)
+        && resolve_color_value_to_hex_with_theme(source.highlight.as_ref(), theme)
+            == resolve_color_value_to_hex_with_theme(target.highlight.as_ref(), theme)
 }
 
 fn build_paragraph(
@@ -2687,6 +2711,22 @@ fn field_element(
     element
 }
 
+/// `a:rPr` children that follow `a:highlight` in schema order.
+const POST_HIGHLIGHT_ELEMENTS: [&str; 12] = [
+    "uLnTx",
+    "uLn",
+    "uFillTx",
+    "uFill",
+    "latin",
+    "ea",
+    "cs",
+    "sym",
+    "hlinkClick",
+    "hlinkMouseOver",
+    "rtl",
+    "extLst",
+];
+
 const POST_LATIN_ELEMENTS: [&str; 7] = [
     "ea",
     "cs",
@@ -2741,6 +2781,12 @@ fn apply_run_properties(
         Some(underline) => base.set_attribute("u", underline.clone()),
         None => {
             base.attributes.remove("u");
+        }
+    }
+    match &properties.strike {
+        Some(strike) => base.set_attribute("strike", strike.clone()),
+        None => {
+            base.attributes.remove("strike");
         }
     }
     let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
@@ -2815,6 +2861,40 @@ fn apply_run_properties(
             ),
         );
     }
+    let authored_highlight = base
+        .child("highlight")
+        .and_then(crate::drawing::parse_color_container);
+    let same_highlight = resolve_color_value_to_hex_with_theme(authored_highlight.as_ref(), theme)
+        == resolve_color_value_to_hex_with_theme(properties.highlight.as_ref(), theme);
+    if !same_highlight {
+        base.children.retain(|child| {
+            !matches!(
+                child,
+                XmlNode::Element(element) if element.local_name() == "highlight"
+            )
+        });
+        if let Some(color) = properties
+            .highlight
+            .as_ref()
+            .and_then(|color| color_element(color, prefixes))
+        {
+            let position = base
+                .children
+                .iter()
+                .position(|child| {
+                    matches!(
+                        child,
+                        XmlNode::Element(element)
+                            if POST_HIGHLIGHT_ELEMENTS.contains(&element.local_name())
+                    )
+                })
+                .unwrap_or(base.children.len());
+            base.children.insert(
+                position,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("highlight")).with_child(color)),
+            );
+        }
+    }
 }
 
 fn apply_paragraph_properties(
@@ -2822,7 +2902,15 @@ fn apply_paragraph_properties(
     write: &ParagraphWrite,
     prefixes: &Prefixes,
 ) {
-    let needs_properties = write.alignment.is_some() || write.level > 0 || write.bullet.is_some();
+    let needs_properties = write.alignment.is_some()
+        || write.level > 0
+        || write.bullet.is_some()
+        || write.margin_left.is_some()
+        || write.indent.is_some()
+        || write.line_spacing.is_some()
+        || write.space_before.is_some()
+        || write.space_after.is_some()
+        || write.bullet_font.is_some();
     if paragraph.child_mut("pPr").is_none() {
         if !needs_properties {
             return;
@@ -2843,6 +2931,42 @@ fn apply_paragraph_properties(
         properties.set_attribute("lvl", write.level.to_string());
     } else {
         properties.attributes.remove("lvl");
+    }
+    if let Some(margin) = write.margin_left {
+        properties.set_attribute("marL", margin.to_string());
+    }
+    if let Some(indent) = write.indent {
+        properties.set_attribute("indent", indent.to_string());
+    }
+    let spacings = [
+        ("lnSpc", write.line_spacing),
+        ("spcBef", write.space_before),
+        ("spcAft", write.space_after),
+    ];
+    for (name, spacing) in spacings {
+        if let Some(spacing) = spacing {
+            let value = match spacing {
+                LineSpacing::Percent { value } => XmlElement::new(prefixes.drawing("spcPct"))
+                    .with_attribute("val", format_fixed(value * 100_000.0)),
+                LineSpacing::Points { value } => XmlElement::new(prefixes.drawing("spcPts"))
+                    .with_attribute("val", format_fixed(value * 100.0)),
+            };
+            replace_paragraph_child(
+                properties,
+                XmlElement::new(prefixes.drawing(name)).with_child(value),
+            );
+        }
+    }
+    match &write.bullet_font {
+        Some(BulletFont::Typeface(typeface)) => replace_paragraph_child(
+            properties,
+            XmlElement::new(prefixes.drawing("buFont"))
+                .with_attribute("typeface", typeface.clone()),
+        ),
+        Some(BulletFont::FollowText) => {
+            replace_paragraph_child(properties, XmlElement::new(prefixes.drawing("buFontTx")))
+        }
+        None => {}
     }
     properties.children.retain(|child| {
         !matches!(
@@ -2871,21 +2995,50 @@ fn apply_paragraph_properties(
         None => None,
     };
     if let Some(bullet) = bullet {
-        let position = properties
-            .children
-            .iter()
-            .position(|child| {
-                matches!(
-                    child,
-                    XmlNode::Element(element)
-                        if matches!(element.local_name(), "tabLst" | "defRPr" | "extLst")
-                )
-            })
-            .unwrap_or(properties.children.len());
-        properties
-            .children
-            .insert(position, XmlNode::Element(bullet));
+        replace_paragraph_child(properties, bullet);
     }
+}
+
+/// `a:pPr` children in schema order; one entry per choice group.
+const PARAGRAPH_CHILD_ORDER: [&[&str]; 10] = [
+    &["lnSpc"],
+    &["spcBef"],
+    &["spcAft"],
+    &["buClrTx", "buClr"],
+    &["buSzTx", "buSzPct", "buSzPts"],
+    &["buFontTx", "buFont"],
+    &["buNone", "buAutoNum", "buChar", "buBlip"],
+    &["tabLst"],
+    &["defRPr"],
+    &["extLst"],
+];
+
+fn paragraph_child_group(local: &str) -> Option<usize> {
+    PARAGRAPH_CHILD_ORDER
+        .iter()
+        .position(|group| group.contains(&local))
+}
+
+/// Puts `child` in its schema place, replacing whatever filled its choice group.
+fn replace_paragraph_child(properties: &mut XmlElement, child: XmlElement) {
+    let Some(group) = paragraph_child_group(child.local_name()) else {
+        return;
+    };
+    properties.children.retain(|node| {
+        !matches!(node, XmlNode::Element(element)
+            if paragraph_child_group(element.local_name()) == Some(group))
+    });
+    let position = properties
+        .children
+        .iter()
+        .position(|node| {
+            matches!(node, XmlNode::Element(element)
+                if paragraph_child_group(element.local_name()).is_some_and(|other| other > group))
+        })
+        .unwrap_or(properties.children.len());
+    properties
+        .children
+        .insert(position, XmlNode::Element(child));
 }
 
 fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Option<XmlElement> {
@@ -2919,6 +3072,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
         element.set_attribute("u", underline.clone());
         present = true;
     }
+    if let Some(strike) = &properties.strike {
+        element.set_attribute("strike", strike.clone());
+        present = true;
+    }
     if let Some(caps) = properties.caps {
         element.set_attribute("cap", caps.as_attribute());
         present = true;
@@ -2930,6 +3087,15 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     {
         element =
             element.with_child(XmlElement::new(prefixes.drawing("solidFill")).with_child(color));
+        present = true;
+    }
+    if let Some(color) = properties
+        .highlight
+        .as_ref()
+        .and_then(|color| color_element(color, prefixes))
+    {
+        element =
+            element.with_child(XmlElement::new(prefixes.drawing("highlight")).with_child(color));
         present = true;
     }
     if let Some(family) = &properties.font_family {
@@ -2999,8 +3165,12 @@ fn shape_element(
         .with_child(non_visual)
         .with_child(properties);
     if let Some(paragraphs) = &add.paragraphs {
+        let mut body_properties = XmlElement::new(prefixes.drawing("bodyPr"));
+        if let Some(anchor) = &add.text_anchor {
+            body_properties.set_attribute("anchor", anchor.clone());
+        }
         let mut body = XmlElement::new(prefixes.presentation("txBody"))
-            .with_child(XmlElement::new(prefixes.drawing("bodyPr")))
+            .with_child(body_properties)
             .with_child(XmlElement::new(prefixes.drawing("lstStyle")));
         for paragraph in paragraphs {
             body = body.with_child(build_paragraph(paragraph, None, None, prefixes));
@@ -3538,9 +3708,9 @@ mod tests {
         }
     }
 
-    const LINKED_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" dirty="0"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r></a:p>"#;
+    const LINKED_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" dirty="0"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US" noProof="1"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r></a:p>"#;
     const LINK_PROPERTIES: &str =
-        r#"<a:rPr lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+        r#"<a:rPr lang="en-US" noProof="1"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
     const FIELD_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t> of </a:t></a:r><a:fld id="{B}" type="datetime1"><a:rPr lang="en-US"/><a:t>2024</a:t></a:fld></a:p>"#;
 
     fn rebuilt_paragraph(xml: &[u8], runs: &[(&str, RunProperties)]) -> String {
@@ -3563,6 +3733,7 @@ mod tests {
                     properties: properties.clone(),
                 })
                 .collect(),
+            ..ParagraphWrite::default()
         };
         let paragraph = build_paragraph(&write, Some(root), None, &prefixes);
         String::from_utf8(serialize_xml(&paragraph)).unwrap()
@@ -3652,7 +3823,7 @@ mod tests {
         );
         assert!(
             xml.contains(&format!(
-                r#"<a:r>{LINK_PROPERTIES}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r>"#
+                r#"<a:r>{LINK_PROPERTIES}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US" noProof="1"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r>"#
             )),
             "{xml}"
         );

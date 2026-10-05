@@ -1,6 +1,6 @@
 use pptx_edit::DeckSession;
 use pptx_parse::{Bullet, ShapeNode};
-use pptx_render::{PositionedTextLine, Primitive, SlideRenderer, SurfaceDisplayList};
+use pptx_render::{ListKind, PositionedTextLine, Primitive, SlideRenderer, SurfaceDisplayList};
 
 const DECK: &[u8] = include_bytes!("fixtures/autonumber-bullets.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -123,10 +123,19 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
         .unwrap();
     let mut stripped = list.clone();
     for primitive in &mut stripped.primitives {
-        if let Primitive::TextBox { lines, .. } = primitive {
+        if let Primitive::TextBox {
+            lines, paragraphs, ..
+        } = primitive
+        {
             for line in lines {
                 line.runs
                     .retain(|run| run.start != run.end || ["–", "•"].contains(&run.text.as_str()));
+            }
+            // The numbered paragraphs are list items there and plain here.
+            for paragraph in paragraphs {
+                if paragraph.list == Some(ListKind::Number) {
+                    paragraph.list = None;
+                }
             }
         }
     }

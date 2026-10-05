@@ -53,6 +53,17 @@ pub(crate) fn paint_lines(
     clip: Option<&Mask>,
 ) -> Result<(), String> {
     for line in lines {
+        // Highlights first, so a run's highlight never covers its neighbour's text.
+        for run in &line.runs {
+            let Some(color) = &run.highlight else {
+                continue;
+            };
+            let mut paint = Paint::default();
+            paint.set_color(parse_color(color)?);
+            if let Some(rect) = Rect::from_xywh(run.x, line.y, run.width, line.height) {
+                pixmap.fill_rect(rect, &paint, transform, clip);
+            }
+        }
         for run in &line.runs {
             paint_run(
                 pixmap,
@@ -116,7 +127,37 @@ fn paint_run(
             clip,
         );
     }
+    if run.strike {
+        paint_line_through(
+            pixmap,
+            run,
+            baseline - run.baseline_offset_px,
+            &paint,
+            transform,
+            clip,
+        );
+    }
     Ok(())
+}
+
+/// The strikethrough the canvas backend draws, through the x-height.
+fn paint_line_through(
+    pixmap: &mut Pixmap,
+    run: &PositionedTextRun,
+    baseline: f32,
+    paint: &Paint<'_>,
+    transform: Transform,
+    clip: Option<&Mask>,
+) {
+    let Some(rect) = Rect::from_xywh(
+        run.x,
+        baseline - run.font_size_px * 0.3,
+        run.width,
+        1.0_f32.max(run.font_size_px * 0.05),
+    ) else {
+        return;
+    };
+    pixmap.fill_rect(rect, paint, transform, clip);
 }
 
 /// The underline geometry the canvas backend draws, so raster and browser

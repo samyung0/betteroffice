@@ -343,6 +343,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
                     underline: false,
                     color: text.color.to_owned(),
                 }],
+                ..TextParagraph::default()
             }],
             lines: Vec::new(),
             overflow: false,
@@ -410,6 +411,7 @@ fn text_primitive(
                         color: run.color_hex,
                     })
                     .collect(),
+                ..TextParagraph::default()
             })
             .collect(),
         lines: Vec::new(),

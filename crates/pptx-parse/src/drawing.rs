@@ -1424,6 +1424,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
+        strike: element.attribute("strike").map(str::to_owned),
         caps: element.attribute("cap").and_then(TextCaps::from_attribute),
         font_family: element
             .child("latin")
@@ -1433,6 +1434,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .child("solidFill")
             .and_then(parse_color_container)
             .or_else(|| run_gradient_color(element.child("gradFill")?)),
+        highlight: element.child("highlight").and_then(parse_color_container),
         language: element.attribute("lang").map(str::to_owned),
         hyperlink_relationship_id: element
             .child("hlinkClick")

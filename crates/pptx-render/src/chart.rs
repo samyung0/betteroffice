@@ -452,6 +452,7 @@ mod tests {
                         underline: false,
                         color: text.color.to_owned(),
                     }],
+                    ..crate::TextParagraph::default()
                 }],
                 lines: Vec::new(),
                 overflow: false,

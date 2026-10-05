@@ -1,4 +1,5 @@
 use ooxml_drawingml::GeometryPathCommand;
+use pptx_parse::LineSpacing;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -326,13 +327,30 @@ pub enum TextAnchor {
     Bottom,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextParagraph {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<TextAlign>,
     pub level: u32,
+    /// The list the paragraph is an item of, whether or not its marker shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListKind>,
+    /// The spacing the paragraph lays out with, from wherever it comes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_before: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_after: Option<LineSpacing>,
     pub runs: Vec<TextRun>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ListKind {
+    Bullet,
+    Number,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -394,7 +412,12 @@ pub struct PositionedTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strike: bool,
     pub color: String,
+    /// Highlight colour painted behind the run's line box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
     /// Tracking between clusters in pixels.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub letter_spacing_px: f32,

@@ -13,6 +13,7 @@ import type {
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 import type {
+  Bullet,
   CommentFlavor,
   CommentReceipt,
   CommentSnapshot,
@@ -21,7 +22,9 @@ import type {
   HistoryResult,
   HitTestResult,
   ParagraphAlignment,
+  ParagraphSpacing,
   PictureDraft,
+  RunAttribute,
   PresetShapeDraft,
   Profiled,
   ProfiledLayout,
@@ -39,6 +42,7 @@ import type {
   SlideDisplayList,
   SlideReceipt,
   StorySnapshot,
+  TextAnchorValue,
   TextReceipt,
   TextStyle,
   TextStylePatch,
@@ -75,7 +79,11 @@ export interface PresentationHandle extends CollaborationReplica {
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
-  layoutSlide(slideIndex: number): SlideDisplayList;
+  /** With `caret`, that empty paragraph still shows its list marker, as while typing in it. */
+  layoutSlide(
+    slideIndex: number,
+    caret?: { storyId: string; paragraph: number } | null
+  ): SlideDisplayList;
   /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
@@ -113,6 +121,39 @@ export interface PresentationHandle extends CollaborationReplica {
     end: number,
     alignment: ParagraphAlignment | null
   ): TextReceipt;
+  /** Removes the named run attributes (all an edit can set by default), so
+   *  the text inherits them again. */
+  clearTextFormatting(
+    storyId: string,
+    start: number,
+    end: number,
+    attributes?: readonly RunAttribute[]
+  ): TextReceipt;
+  /** Makes the touched paragraphs list items (`levels[level % n]` is each
+   *  level's marker) or, with `null`, plain paragraphs. */
+  setParagraphList(
+    storyId: string,
+    start: number,
+    end: number,
+    levels: readonly Bullet[] | null
+  ): TextReceipt;
+  /** Moves the touched paragraphs `delta` list levels; a marker equal to
+   *  `levels[old % n]` becomes `levels[new % n]`. */
+  changeParagraphLevel(
+    storyId: string,
+    start: number,
+    end: number,
+    delta: number,
+    levels?: readonly Bullet[] | null
+  ): TextReceipt;
+  setParagraphSpacing(
+    storyId: string,
+    start: number,
+    end: number,
+    spacing: ParagraphSpacing
+  ): TextReceipt;
+  /** A text box's vertical alignment; `null` restores the inherited one. */
+  setTextAnchor(slideId: string, shapeId: string, anchor: TextAnchorValue | null): void;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
   deleteSlide(slideId: string): SlideReceipt;
@@ -408,8 +449,12 @@ export function openPresentation(
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
     },
-    layoutSlide(slideIndex: number): SlideDisplayList {
-      return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
+    layoutSlide(slideIndex, caret): SlideDisplayList {
+      return jsonWasmCall(() =>
+        caret
+          ? renderer.layoutSlideAtCaretJson(doc, slideIndex, caret.storyId, caret.paragraph)
+          : renderer.layoutSlideJson(doc, slideIndex)
+      );
     },
     layoutSlideProfiled(slideIndex: number): ProfiledLayout {
       return jsonWasmCall(() => renderer.layoutSlideProfiledJson(doc, slideIndex));
@@ -469,6 +514,37 @@ export function openPresentation(
       return jsonWasmCall(
         () =>
           doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
+        true
+      );
+    },
+    clearTextFormatting(storyId, start, end, attributes): TextReceipt {
+      return jsonWasmCall(
+        () => doc.clearTextFormattingJson(JSON.stringify({ storyId, start, end, attributes })),
+        true
+      );
+    },
+    setParagraphList(storyId, start, end, levels): TextReceipt {
+      return jsonWasmCall(
+        () => doc.setParagraphListJson(JSON.stringify({ storyId, start, end, levels })),
+        true
+      );
+    },
+    changeParagraphLevel(storyId, start, end, delta, levels = null): TextReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.changeParagraphLevelJson(JSON.stringify({ storyId, start, end, delta, levels })),
+        true
+      );
+    },
+    setParagraphSpacing(storyId, start, end, spacing): TextReceipt {
+      return jsonWasmCall(
+        () => doc.setParagraphSpacingJson(JSON.stringify({ storyId, start, end, spacing })),
+        true
+      );
+    },
+    setTextAnchor(slideId, shapeId, anchor): void {
+      wasmCall(
+        () => doc.setTextAnchorJson(JSON.stringify({ slideId, shapeId, anchor })),
         true
       );
     },

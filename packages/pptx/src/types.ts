@@ -7,7 +7,27 @@ export interface TextStyle {
   underline?: string;
   spacingPt?: number;
   baselinePct?: number;
+  /** `a:rPr@strike`. */
+  strike?: TextStrike;
+  /** Highlight colour, `#rrggbb`. */
+  highlight?: string;
 }
+
+export type TextStrike = 'noStrike' | 'sngStrike' | 'dblStrike';
+
+/** A run attribute `clearTextFormatting` can remove. */
+export type RunAttribute =
+  | 'bold'
+  | 'italic'
+  | 'fontSize'
+  | 'color'
+  | 'fontFamily'
+  | 'underline'
+  | 'spacing'
+  | 'baseline'
+  | 'caps'
+  | 'strike'
+  | 'highlight';
 
 export type TextStylePatch = TextStyle;
 
@@ -22,6 +42,8 @@ export interface TextStyleSnapshot {
   baselinePct?: number | null;
   /** `a:rPr@cap`: how the run is cased when drawn, never in the stored text. */
   caps?: 'none' | 'small' | 'all' | null;
+  strike?: TextStrike | null;
+  highlight?: string | null;
 }
 
 export interface TextRunSnapshot {
@@ -32,6 +54,27 @@ export interface TextRunSnapshot {
 /** OOXML `a:pPr@algn` token. */
 export type ParagraphAlignment = 'l' | 'ctr' | 'r' | 'just';
 
+/** OOXML `a:bodyPr@anchor` token for a text box's vertical alignment. */
+export type TextAnchorValue = 't' | 'ctr' | 'b';
+
+/** A paragraph's list marker (`a:buChar`, `a:buAutoNum`, `a:buNone`). */
+export type Bullet =
+  | { type: 'character'; value: string }
+  | { type: 'autoNumber'; scheme: string; startAt: number; restart?: boolean }
+  | { type: 'none' };
+
+export type BulletFont = { type: 'followText' } | { type: 'typeface'; value: string };
+
+/** A line height or paragraph gap: a share of the text size (1 = single) or points. */
+export type LineSpacing = { type: 'percent'; value: number } | { type: 'points'; value: number };
+
+/** What `setParagraphSpacing` sets; omitted values stay. */
+export interface ParagraphSpacing {
+  line?: LineSpacing;
+  before?: LineSpacing;
+  after?: LineSpacing;
+}
+
 export interface ParagraphSnapshot {
   id: string;
   alignment: string | null;
@@ -40,6 +83,13 @@ export interface ParagraphSnapshot {
   /** On a split paragraph without a file paragraph of its own: the id of the
    *  file paragraph it continues, whose markup (spacing, indents) it takes. */
   propertiesFrom?: string;
+  /** Markup an edit set; absent keeps the file's. EMU. */
+  marginLeft?: number;
+  indent?: number;
+  lineSpacing?: LineSpacing;
+  spaceBefore?: LineSpacing;
+  spaceAfter?: LineSpacing;
+  bulletFont?: BulletFont;
   runs: TextRunSnapshot[];
 }
 
@@ -122,6 +172,8 @@ export interface ShapeSnapshot {
   /** Image data added to this session, retained across saves. */
   pendingMedia?: { contentType: string } | null;
   blipEffects?: BlipEffect[];
+  /** `a:bodyPr@anchor` an edit set; absent keeps the file's. */
+  textAnchor?: TextAnchorValue;
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
@@ -439,7 +491,10 @@ export interface PositionedTextRun {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strike?: boolean;
   color: string;
+  /** Painted behind the run's line box. */
+  highlight?: string;
   letterSpacingPx?: number;
   baselineOffsetPx?: number;
   glyphs: PositionedGlyph[];
@@ -464,6 +519,12 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   paragraphs: Array<{
     align?: 'left' | 'center' | 'right' | 'justify';
     level: number;
+    /** The list the paragraph is an item of, whether or not its marker shows. */
+    list?: 'bullet' | 'number';
+    /** The spacing it lays out with, wherever it comes from. */
+    lineSpacing?: LineSpacing;
+    spaceBefore?: LineSpacing;
+    spaceAfter?: LineSpacing;
     runs: Array<{
       text: string;
       fontFamily: string;

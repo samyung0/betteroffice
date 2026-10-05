@@ -796,8 +796,13 @@ fn an_edit_inside_a_linked_run_keeps_the_link() {
         .text_stories[0]
         .id
         .clone();
+    // Typed in the link's own style, as the editor types at a caret.
+    let linked = TextStyle {
+        strike: Some("sngStrike".to_owned()),
+        ..TextStyle::default()
+    };
     session
-        .insert_text(&context(), &story_id, 8, "X", &TextStyle::default())
+        .insert_text(&context(), &story_id, 8, "X", &linked)
         .unwrap();
 
     let saved = session.save().unwrap();

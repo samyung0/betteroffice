@@ -174,11 +174,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
         w: width + 8.0,
         h: size_px * 2.0,
         anchor: TextAnchor::Top,
-        paragraphs: vec![TextParagraph {
-            align: None,
-            level: 0,
-            runs: Vec::new(),
-        }],
+        paragraphs: vec![TextParagraph::default()],
         lines: vec![PositionedTextLine {
             x,
             y,
@@ -199,7 +195,9 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 bold: false,
                 italic: false,
                 underline,
+                strike: false,
                 color: "#1b2733".into(),
+                highlight: None,
                 baseline_offset_px: 0.0,
                 letter_spacing_px: 0.0,
                 glyphs,

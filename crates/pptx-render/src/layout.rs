@@ -31,9 +31,9 @@ use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
-    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, StrokeEnd,
-    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ListKind,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
+    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
@@ -189,6 +189,7 @@ impl SlideRenderer {
             deck.width_emu,
             deck.height_emu,
             slide_index,
+            None,
         )
     }
 
@@ -199,12 +200,25 @@ impl SlideRenderer {
         package: &PptxPackage,
         scope: &SlideScope,
     ) -> Result<RenderedSlide, RenderError> {
+        self.layout_scoped_slide_at_caret(package, scope, None)
+    }
+
+    /// [`Self::layout_scoped_slide`] for an editor whose caret sits in
+    /// `(story id, paragraph index)`: that paragraph shows its list marker
+    /// even while empty, as PowerPoint and Google Slides draw it while typing.
+    pub fn layout_scoped_slide_at_caret(
+        &self,
+        package: &PptxPackage,
+        scope: &SlideScope,
+        caret: Option<(&str, usize)>,
+    ) -> Result<RenderedSlide, RenderError> {
         self.layout_resolved(
             package,
             &scope.slide,
             scope.width_emu,
             scope.height_emu,
             scope.index,
+            caret,
         )
     }
 
@@ -215,6 +229,7 @@ impl SlideRenderer {
         width_emu: i64,
         height_emu: i64,
         slide_index: usize,
+        caret: Option<(&str, usize)>,
     ) -> Result<RenderedSlide, RenderError> {
         let parsed_slide = deck_slide
             .source_part_path
@@ -336,6 +351,7 @@ impl SlideRenderer {
             media_parts: None,
             chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
+            caret,
         };
         let root_space = Space::root();
         if let Some(picture) = background_picture
@@ -571,6 +587,8 @@ struct LayoutBuilder<'a> {
     chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
+    /// The editor's caret paragraph: (story id, paragraph index).
+    caret: Option<(&'a str, usize)>,
 }
 
 impl<'a> LayoutBuilder<'a> {
@@ -788,12 +806,14 @@ impl<'a> LayoutBuilder<'a> {
             master_slide: self.master,
             placeholder: shape.placeholder.as_ref(),
             style_color: shape_style_color(original),
+            anchor: shape.text_anchor.as_deref(),
         };
         let text = match shape.kind {
             ShapeKind::GraphicFrame => None,
-            ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => {
-                shape.text_stories.first().map(content_from_story)
-            }
+            ShapeKind::Shape | ShapeKind::Picture | ShapeKind::Group => shape
+                .text_stories
+                .first()
+                .map(|story| content_from_story(story, self.caret)),
         };
         let text_hit = if let Some(content) = text {
             Some(self.render_text_box(
@@ -963,6 +983,7 @@ impl<'a> LayoutBuilder<'a> {
                     master_slide: self.master,
                     placeholder: base.placeholder.as_ref(),
                     style_color: shape_style_color(Some(shape)),
+                    anchor: None,
                 },
             )?)
         } else {
@@ -1358,7 +1379,7 @@ impl<'a> LayoutBuilder<'a> {
                 let span = (cell.grid_span as usize).clamp(1, column_count - column);
                 let row_span = (cell.row_span as usize).clamp(1, row_count - row_index);
                 let content = match story {
-                    Some(story) => content_from_story(story),
+                    Some(story) => content_from_story(story, self.caret),
                     None => content_from_body(
                         &format!("{shape_id}:table:{row_index}:{column}"),
                         &cell.text,
@@ -1600,6 +1621,10 @@ impl<'a> LayoutBuilder<'a> {
             .map(|paragraph| TextParagraph {
                 align: Some(paragraph.align),
                 level: paragraph.level,
+                list: paragraph.list,
+                line_spacing: paragraph.line_spacing,
+                space_before: paragraph.space_before,
+                space_after: paragraph.space_after,
                 runs: paragraph
                     .runs
                     .iter()
@@ -1760,6 +1785,7 @@ fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<
         master_slide: None,
         placeholder: None,
         style_color: None,
+        anchor: None,
     }
 }
 
@@ -1903,6 +1929,8 @@ struct BodyCascade<'a> {
     master_slide: Option<&'a SlideMaster>,
     placeholder: Option<&'a Placeholder>,
     style_color: Option<&'a ColorValue>,
+    /// `a:bodyPr@anchor` an edit set, over every body's.
+    anchor: Option<&'a str>,
 }
 
 impl BodyCascade<'_> {
@@ -1920,8 +1948,8 @@ impl BodyCascade<'_> {
     }
 
     fn anchor(&self) -> Option<&str> {
-        self.primary
-            .and_then(|body| body.anchor.as_deref())
+        self.anchor
+            .or_else(|| self.primary.and_then(|body| body.anchor.as_deref()))
             .or_else(|| self.layout.and_then(|body| body.anchor.as_deref()))
             .or_else(|| self.master.and_then(|body| body.anchor.as_deref()))
     }
@@ -2070,6 +2098,10 @@ struct ContentParagraph {
     alignment: Option<String>,
     level: u32,
     bullet: Option<Bullet>,
+    /// Markup an edit set over the file's (indents, spacing, bullet font).
+    overrides: ParagraphProperties,
+    /// The editor's caret is in it: an empty list item still shows its marker.
+    caret: bool,
     runs: Vec<ContentRun>,
 }
 
@@ -2079,13 +2111,14 @@ struct ContentRun {
     style: TextStyle,
 }
 
-fn content_from_story(story: &StorySnapshot) -> TextContent {
+fn content_from_story(story: &StorySnapshot, caret: Option<(&str, usize)>) -> TextContent {
     TextContent {
         story_id: story.id.clone(),
         paragraphs: story
             .paragraphs
             .iter()
-            .map(|paragraph| ContentParagraph {
+            .enumerate()
+            .map(|(index, paragraph)| ContentParagraph {
                 source: paragraph.template_index(&story.id),
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
@@ -2093,6 +2126,16 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
                     .bullet_json
                     .as_deref()
                     .and_then(|json| serde_json::from_str(json).ok()),
+                overrides: ParagraphProperties {
+                    margin_left: paragraph.margin_left,
+                    indent: paragraph.indent,
+                    line_spacing: paragraph.line_spacing,
+                    space_before: paragraph.space_before,
+                    space_after: paragraph.space_after,
+                    bullet_font: paragraph.bullet_font.clone(),
+                    ..ParagraphProperties::default()
+                },
+                caret: caret == Some((story.id.as_str(), index)),
                 runs: paragraph
                     .runs
                     .iter()
@@ -2131,6 +2174,8 @@ fn content_from_body(
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet: paragraph.properties.bullet.clone(),
+                overrides: ParagraphProperties::default(),
+                caret: false,
                 runs: paragraph
                     .runs
                     .iter()
@@ -2152,6 +2197,7 @@ struct ResolvedParagraph {
     align: TextAlign,
     justify: bool,
     level: u32,
+    list: Option<ListKind>,
     margin_left_px: f32,
     margin_right_px: f32,
     line_spacing: Option<LineSpacing>,
@@ -2188,7 +2234,10 @@ struct ResolvedStyle {
     bold: bool,
     italic: bool,
     underline: bool,
+    strike: bool,
     color: String,
+    /// Highlight colour behind the run, `#rrggbb`.
+    highlight: Option<String>,
     caps: TextCaps,
 }
 
@@ -2230,7 +2279,10 @@ fn resolve_content(
     let mut numbering = AutoNumbering::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
         let mut properties = cascade.paragraph_properties(paragraph.source, index, paragraph.level);
-        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
+        merge_paragraph_properties(&mut properties, &paragraph.overrides);
+        // The paragraph's own marker is its file paragraph's unless an edit
+        // changed it, so it overrides the cascade either way.
+        if paragraph.bullet.is_some() {
             properties.bullet = paragraph.bullet.clone();
             if let Some(Bullet::AutoNumber {
                 restart, start_at, ..
@@ -2267,18 +2319,30 @@ fn resolve_content(
             .as_deref()
             .or(properties.alignment.as_deref());
         // A blank paragraph between list items is spacing, not an item:
-        // PowerPoint neither marks it nor counts it towards the next number.
-        let marker = paragraph
-            .runs
-            .iter()
-            .any(|run| !run.text.is_empty())
-            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
-            .flatten()
-            .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
+        // PowerPoint neither marks it nor counts it towards the next number,
+        // except the one being typed in, which shows the marker it would take.
+        let marker = if paragraph.runs.iter().any(|run| !run.text.is_empty()) {
+            resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
+        } else if paragraph.caret {
+            resolve_marker(
+                properties.bullet.as_ref(),
+                paragraph.level,
+                &mut numbering.clone(),
+            )
+        } else {
+            None
+        }
+        .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
+        let list = match &properties.bullet {
+            Some(Bullet::Character { value }) if !value.trim().is_empty() => Some(ListKind::Bullet),
+            Some(Bullet::AutoNumber { .. }) => Some(ListKind::Number),
+            _ => None,
+        };
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
             level: paragraph.level,
+            list,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
             margin_right_px: emu_to_px(properties.margin_right.unwrap_or_default()),
             line_spacing: properties.line_spacing,
@@ -2393,6 +2457,9 @@ fn resolve_bullet_style(
     text: &ResolvedStyle,
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
+    // PowerPoint strikes and highlights the text, not its marker.
+    style.strike = false;
+    style.highlight = None;
     if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
         let family = if family.starts_with('+') {
             resolve_theme_font_ref(Some(theme), family)
@@ -2499,7 +2566,22 @@ fn resolve_style(
             .as_deref()
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
+        strike: direct
+            .strike
+            .as_deref()
+            .or_else(|| fallback.and_then(|value| value.strike.as_deref()))
+            .is_some_and(|value| matches!(value, "sngStrike" | "dblStrike")),
         color,
+        highlight: direct
+            .highlight
+            .as_deref()
+            .filter(|color| valid_color(color))
+            .map(str::to_owned)
+            .or_else(|| {
+                fallback.and_then(|value| {
+                    resolve_color_value_to_hex_with_theme(value.highlight.as_ref(), Some(theme))
+                })
+            }),
         caps: direct
             .caps
             .or_else(|| fallback.and_then(|value| value.caps))
@@ -2668,7 +2750,9 @@ fn chart_text_primitive(
         bold,
         italic,
         underline: false,
+        strike: false,
         color: text.color.to_owned(),
+        highlight: None,
         letter_spacing_px: tracking,
         baseline_offset_px: 0.0,
         glyphs,
@@ -2695,6 +2779,7 @@ fn chart_text_primitive(
                 underline: false,
                 color: text.color.to_owned(),
             }],
+            ..TextParagraph::default()
         }],
         lines: vec![PositionedTextLine {
             x,
@@ -2895,7 +2980,9 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(style.bold));
     key.push(u8::from(style.italic));
     key.push(u8::from(style.underline));
+    key.push(u8::from(style.strike));
     key_str(key, &style.color);
+    key_opt_str(key, &style.highlight);
 }
 
 fn layout_content(
@@ -3053,7 +3140,7 @@ fn layout_paragraph(
             paragraph,
             points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
-        return Ok(vec![PositionedTextLine {
+        let mut lines = vec![PositionedTextLine {
             x,
             y,
             width: 0.0,
@@ -3066,7 +3153,10 @@ fn layout_paragraph(
                 position: paragraph.runs[0].start,
                 x,
             }],
-        }]);
+        }];
+        // Only the empty item the caret is in has a marker here.
+        prepend_bullet(fonts, paragraph, x, &mut lines, scale)?;
+        return Ok(lines);
     }
     let ranges = if stacked {
         // A hard break shapes to no glyph, so stacking it would leave a blank cell.
@@ -3181,7 +3271,9 @@ fn prepend_bullet(
     let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
         return Ok(());
     };
-    if value.trim().is_empty() || first.runs.is_empty() {
+    // A first line holding only a break draws no marker; an empty
+    // paragraph's line (no characters at all) does.
+    if value.trim().is_empty() || (first.runs.is_empty() && first.end > first.start) {
         return Ok(());
     }
     let bullet_x = (x + paragraph.indent_px).max(x - paragraph.margin_left_px.max(0.0));
@@ -3189,6 +3281,7 @@ fn prepend_bullet(
         align: paragraph.align,
         justify: false,
         level: paragraph.level,
+        list: None,
         margin_left_px: 0.0,
         margin_right_px: 0.0,
         line_spacing: None,
@@ -3522,7 +3615,9 @@ fn positioned_runs(
                 && run.bold == cluster.style.bold
                 && run.italic == cluster.style.italic
                 && run.underline == cluster.style.underline
+                && run.strike == cluster.style.strike
                 && run.color == cluster.style.color
+                && run.highlight == cluster.style.highlight
         });
         if !append {
             if let Some(previous) = output.last_mut() {
@@ -3540,7 +3635,9 @@ fn positioned_runs(
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
+                strike: cluster.style.strike,
                 color: cluster.style.color.clone(),
+                highlight: cluster.style.highlight.clone(),
                 letter_spacing_px: cluster.tracking,
                 baseline_offset_px,
                 glyphs: Vec::new(),
@@ -4261,6 +4358,12 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.underline.is_some() {
         target.underline.clone_from(&source.underline);
     }
+    if source.strike.is_some() {
+        target.strike.clone_from(&source.strike);
+    }
+    if source.highlight.is_some() {
+        target.highlight.clone_from(&source.highlight);
+    }
     if source.font_family.is_some() {
         target.font_family.clone_from(&source.font_family);
     }
@@ -4292,6 +4395,11 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         caps: properties.caps,
+        strike: properties.strike.clone(),
+        highlight: resolve_color_value_to_hex_with_theme(
+            properties.highlight.as_ref(),
+            Some(theme),
+        ),
     }
 }
 
@@ -4786,7 +4894,7 @@ fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> Stri
 
 /// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
 /// the run was seeded from.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AutoNumbering {
     numbers: [u32; 9],
     starts: [u32; 9],
@@ -5506,6 +5614,7 @@ mod tests {
             align: parse_align(Some(alignment)),
             justify: is_full_justification(Some(alignment)),
             level: 0,
+            list: None,
             margin_left_px: 0.0,
             margin_right_px: 0.0,
             line_spacing: None,
@@ -5532,6 +5641,8 @@ mod tests {
                     underline: false,
                     color: "#000000".to_owned(),
                     caps: TextCaps::None,
+                    strike: false,
+                    highlight: None,
                 },
             }],
         }
@@ -5758,6 +5869,8 @@ mod tests {
             underline: false,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
+            strike: false,
+            highlight: None,
         };
         let mut variants = vec![style.clone(); 7];
         variants[0].color = "#A99A72".to_owned();
@@ -5772,6 +5885,7 @@ mod tests {
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
+                list: None,
                 margin_left_px: 0.0,
                 margin_right_px: 0.0,
                 line_spacing: None,
@@ -5843,6 +5957,8 @@ mod tests {
             underline: true,
             color: "#A99A72".to_owned(),
             caps: TextCaps::None,
+            strike: false,
+            highlight: None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
@@ -5850,6 +5966,7 @@ mod tests {
                 align: TextAlign::Justify,
                 justify: true,
                 level: 0,
+                list: None,
                 margin_left_px: 0.0,
                 margin_right_px: 0.0,
                 line_spacing: None,
@@ -5908,12 +6025,15 @@ mod tests {
             underline: false,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
+            strike: false,
+            highlight: None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
                 align: TextAlign::Left,
                 justify: false,
                 level: 0,
+                list: None,
                 margin_left_px: 0.0,
                 margin_right_px: 0.0,
                 space_before: None,
@@ -8659,6 +8779,7 @@ mod tests {
             media_part_path: None,
             pending_media: None,
             blip_effects: Vec::new(),
+            text_anchor: None,
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),

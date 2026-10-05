@@ -12,9 +12,9 @@ use yrs::{
 
 use crate::model::{source_paragraph_index, validate_xml_text};
 use crate::{
-    CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND, PROPERTIES_FROM,
-    ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
-    TextStylePatch,
+    Bullet, BulletFont, CaretAnchor, DeckSession, EditError, EditResult, KIND, LineSpacing,
+    PARA_ID, PILCROW_KIND, PROPERTIES_FROM, ParagraphSnapshot, ParagraphSpacing, STORIES,
+    StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
 };
 
 const UNDERLINE_TYPES: [&str; 18] = [
@@ -40,8 +40,116 @@ const UNDERLINE_TYPES: [&str; 18] = [
 
 const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thaiDist"];
 
+const STRIKES: [&str; 3] = ["noStrike", "sngStrike", "dblStrike"];
+
+/// `ST_TextAutonumberScheme`.
+const AUTONUMBER_SCHEMES: [&str; 41] = [
+    "alphaLcParenBoth",
+    "alphaUcParenBoth",
+    "alphaLcParenR",
+    "alphaUcParenR",
+    "alphaLcPeriod",
+    "alphaUcPeriod",
+    "arabicParenBoth",
+    "arabicParenR",
+    "arabicPeriod",
+    "arabicPlain",
+    "romanLcParenBoth",
+    "romanUcParenBoth",
+    "romanLcParenR",
+    "romanUcParenR",
+    "romanLcPeriod",
+    "romanUcPeriod",
+    "circleNumDbPlain",
+    "circleNumWdBlackPlain",
+    "circleNumWdWhitePlain",
+    "arabicDbPeriod",
+    "arabicDbPlain",
+    "ea1ChsPeriod",
+    "ea1ChsPlain",
+    "ea1ChtPeriod",
+    "ea1ChtPlain",
+    "ea1JpnChsDbPeriod",
+    "ea1JpnKorPlain",
+    "ea1JpnKorPeriod",
+    "arabic1Minus",
+    "arabic2Minus",
+    "hebrew2Minus",
+    "thaiAlphaPeriod",
+    "thaiAlphaParenR",
+    "thaiAlphaParenBoth",
+    "thaiNumPeriod",
+    "thaiNumParenR",
+    "thaiNumParenBoth",
+    "hindiAlphaPeriod",
+    "hindiNumPeriod",
+    "hindiNumParenR",
+    "hindiAlpha1Period",
+];
+
+/// `ST_TextIndentLevelType`: `lvl` runs 0-8.
+pub(crate) const MAX_LEVEL: u32 = 8;
+/// One list level, as PowerPoint's Increase List Level shifts `marL`.
+pub(crate) const LEVEL_STEP_EMU: i64 = 457_200;
+/// The hanging indent a list edit gives its marker, as Google Slides writes.
+pub(crate) const LIST_HANG_EMU: i64 = 342_900;
+/// The face a character bullet is drawn in, as PowerPoint writes `a:buFont`.
+const BULLET_TYPEFACE: &str = "Arial";
+/// `ST_TextMargin` and `ST_TextIndent` bounds.
+const MAX_MARGIN_EMU: i64 = 51_206_400;
+/// `ST_TextSpacingPercentOrPercentString` (as a share) and `ST_TextSpacingPoint`.
+const MAX_SPACING_SHARE: f64 = 132.0;
+const MAX_SPACING_POINTS: f64 = 1_584.0;
+
+const MARGIN_LEFT: &str = "marginLeft";
+const INDENT: &str = "indent";
+const LINE_SPACING: &str = "lineSpacingJson";
+const SPACE_BEFORE: &str = "spaceBeforeJson";
+const SPACE_AFTER: &str = "spaceAfterJson";
+const BULLET_FONT: &str = "bulletFontJson";
+const BULLET: &str = "bulletJson";
+const LEVEL: &str = "level";
+
+/// The run attributes an edit can set; clearing formatting removes them all.
+const RUN_ATTRIBUTES: [&str; 11] = [
+    "bold",
+    "italic",
+    "fontSize",
+    "color",
+    "fontFamily",
+    "underline",
+    "spacing",
+    "baseline",
+    "caps",
+    "strike",
+    "highlight",
+];
+
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
+pub(crate) fn validate_text_style(style: &TextStyle) -> EditResult<()> {
+    validate_style_values(
+        style.font_family.as_deref(),
+        style.underline.as_deref(),
+        style.color.as_deref(),
+        style.font_size_pt,
+        style.spacing_pt,
+        style.baseline_pct,
+    )?;
+    validate_run_extras(style.strike.as_deref(), style.highlight.as_deref())
+}
+
+fn validate_run_extras(strike: Option<&str>, highlight: Option<&str>) -> EditResult<()> {
+    if let Some(strike) = strike
+        && !STRIKES.contains(&strike)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized strikethrough {strike:?}"
+        )));
+    }
+    validate_style_values(None, None, highlight, None, None, None)
+}
+
 pub(crate) fn validate_style_values(
     font_family: Option<&str>,
     underline: Option<&str>,
@@ -229,14 +337,7 @@ impl DeckSession {
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
-        validate_style_values(
-            style.font_family.as_deref(),
-            style.underline.as_deref(),
-            style.color.as_deref(),
-            style.font_size_pt,
-            style.spacing_pt,
-            style.baseline_pct,
-        )?;
+        validate_text_style(style)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -295,14 +396,7 @@ impl DeckSession {
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
-        validate_style_values(
-            style.font_family.as_deref(),
-            style.underline.as_deref(),
-            style.color.as_deref(),
-            style.font_size_pt,
-            style.spacing_pt,
-            style.baseline_pct,
-        )?;
+        validate_text_style(style)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -348,6 +442,7 @@ impl DeckSession {
             patch.spacing_pt,
             patch.baseline_pct,
         )?;
+        validate_run_extras(patch.strike.as_deref(), patch.highlight.as_deref())?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -391,6 +486,203 @@ impl DeckSession {
                 }
                 None => {
                     pilcrow.remove(&mut txn, "alignment");
+                }
+            }
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
+    /// Removes the run attributes `only` names (every one an edit can set
+    /// when `None`) from `[start, end)`, so the text inherits them again from
+    /// its placeholder or list style.
+    pub fn clear_text_formatting(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        only: Option<&[String]>,
+    ) -> EditResult<TextReceipt> {
+        let keys: Vec<&str> = match only {
+            Some(only) => only
+                .iter()
+                .map(|key| {
+                    RUN_ATTRIBUTES
+                        .iter()
+                        .copied()
+                        .find(|known| known == key)
+                        .ok_or_else(|| {
+                            EditError::InvalidText(format!("unknown run attribute {key:?}"))
+                        })
+                })
+                .collect::<EditResult<_>>()?,
+            None => RUN_ATTRIBUTES.to_vec(),
+        };
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        let cleared: Attrs = keys
+            .into_iter()
+            .map(|key| (Arc::from(key), Any::Null))
+            .collect();
+        for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
+            story.format(
+                &mut txn,
+                segment_start,
+                segment_end - segment_start,
+                cleared.clone(),
+            );
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
+    /// Makes every paragraph the range touches a list item, `levels[lvl % n]`
+    /// giving each level its marker, or (`None`) a plain paragraph. Markup
+    /// follows PowerPoint: a list item gets `marL`/`indent` with a hanging
+    /// marker and `a:buFont` (Arial for a character, the text's for a number);
+    /// a plain one gets `a:buNone` and no hanging indent.
+    pub fn set_paragraph_list(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        levels: Option<&[Bullet]>,
+    ) -> EditResult<TextReceipt> {
+        if let Some(levels) = levels {
+            validate_list_levels(levels)?;
+        }
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        for pilcrow in selected_pilcrows(&story, &txn, start, end) {
+            let level = pilcrow_level(&pilcrow, &txn);
+            let step = LEVEL_STEP_EMU * i64::from(level);
+            match levels {
+                Some(levels) => {
+                    let bullet = &levels[level as usize % levels.len()];
+                    let font = match bullet {
+                        Bullet::Character { .. } => {
+                            BulletFont::Typeface(BULLET_TYPEFACE.to_owned())
+                        }
+                        _ => BulletFont::FollowText,
+                    };
+                    insert_pilcrow_json(&pilcrow, &mut txn, BULLET, bullet)?;
+                    insert_pilcrow_json(&pilcrow, &mut txn, BULLET_FONT, &font)?;
+                    pilcrow.insert(&mut txn, MARGIN_LEFT, (step + LIST_HANG_EMU) as f64);
+                    pilcrow.insert(&mut txn, INDENT, -LIST_HANG_EMU as f64);
+                }
+                None => {
+                    insert_pilcrow_json(&pilcrow, &mut txn, BULLET, &Bullet::None)?;
+                    pilcrow.insert(&mut txn, MARGIN_LEFT, step as f64);
+                    pilcrow.insert(&mut txn, INDENT, 0_f64);
+                }
+            }
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
+    /// Moves every paragraph the range touches `delta` list levels (`lvl`,
+    /// 0-8), shifting an explicit `marL` (the paragraph's own or its file
+    /// paragraph's) one step per level as PowerPoint does. A paragraph whose
+    /// marker is `levels[old % n]` takes `levels[new % n]`; others keep theirs.
+    pub fn change_paragraph_level(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        delta: i32,
+        levels: Option<&[Bullet]>,
+    ) -> EditResult<TextReceipt> {
+        if let Some(levels) = levels {
+            validate_list_levels(levels)?;
+        }
+        let source = crate::deck::source_text_body(&self.package, story_id);
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        for pilcrow in selected_pilcrows(&story, &txn, start, end) {
+            let old = pilcrow_level(&pilcrow, &txn);
+            let new = (i64::from(old) + i64::from(delta)).clamp(0, i64::from(MAX_LEVEL)) as u32;
+            if new == old {
+                continue;
+            }
+            let shift = LEVEL_STEP_EMU * (i64::from(new) - i64::from(old));
+            let margin = map_number(&pilcrow, &txn, MARGIN_LEFT)
+                .map(|value| value as i64)
+                .or_else(|| {
+                    let paragraph = source_paragraph_of(&pilcrow, &txn, story_id, source)?;
+                    paragraph.properties.margin_left
+                });
+            pilcrow.insert(&mut txn, LEVEL, f64::from(new));
+            if let Some(margin) = margin {
+                let shifted = (margin + shift).clamp(0, MAX_MARGIN_EMU);
+                pilcrow.insert(&mut txn, MARGIN_LEFT, shifted as f64);
+            }
+            if let Some(levels) = levels {
+                let current = map_string(&pilcrow, &txn, BULLET)
+                    .and_then(|json| serde_json::from_str::<Bullet>(&json).ok());
+                if current.as_ref() == Some(&levels[old as usize % levels.len()]) {
+                    let next = &levels[new as usize % levels.len()];
+                    insert_pilcrow_json(&pilcrow, &mut txn, BULLET, next)?;
+                }
+            }
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
+    /// Sets the line spacing (`a:lnSpc`) and space before/after (`a:spcBef`,
+    /// `a:spcAft`) of every paragraph the range touches; `None` leaves one.
+    pub fn set_paragraph_spacing(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        spacing: &ParagraphSpacing,
+    ) -> EditResult<TextReceipt> {
+        for value in [spacing.line, spacing.before, spacing.after]
+            .into_iter()
+            .flatten()
+        {
+            validate_spacing(value)?;
+        }
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        for pilcrow in selected_pilcrows(&story, &txn, start, end) {
+            for (key, value) in [
+                (LINE_SPACING, spacing.line),
+                (SPACE_BEFORE, spacing.before),
+                (SPACE_AFTER, spacing.after),
+            ] {
+                if let Some(value) = value {
+                    insert_pilcrow_json(&pilcrow, &mut txn, key, &value)?;
                 }
             }
         }
@@ -512,11 +804,7 @@ pub(crate) fn baseline_story(
     if body.paragraphs.is_empty() {
         paragraphs.push(ParagraphSnapshot {
             id: format!("para:{story_id}:0"),
-            alignment: None,
-            level: 0,
-            bullet_json: None,
-            properties_from: None,
-            runs: Vec::new(),
+            ..ParagraphSnapshot::default()
         });
     } else {
         length = 0;
@@ -557,8 +845,8 @@ pub(crate) fn baseline_story(
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
                 bullet_json,
-                properties_from: None,
                 runs,
+                ..ParagraphSnapshot::default()
             });
         }
     }
@@ -602,9 +890,15 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
                 paragraphs.push(ParagraphSnapshot {
                     id,
                     alignment: map_string(&map, txn, "alignment"),
-                    level: map_number(&map, txn, "level").unwrap_or_default() as u32,
-                    bullet_json: map_string(&map, txn, "bulletJson"),
+                    level: map_number(&map, txn, LEVEL).unwrap_or_default() as u32,
+                    bullet_json: map_string(&map, txn, BULLET),
                     properties_from,
+                    margin_left: pilcrow_emu(&map, txn, MARGIN_LEFT, 0)?,
+                    indent: pilcrow_emu(&map, txn, INDENT, -MAX_MARGIN_EMU)?,
+                    line_spacing: pilcrow_spacing(&map, txn, LINE_SPACING)?,
+                    space_before: pilcrow_spacing(&map, txn, SPACE_BEFORE)?,
+                    space_after: pilcrow_spacing(&map, txn, SPACE_AFTER)?,
+                    bullet_font: pilcrow_bullet_font(&map, txn)?,
                     runs: std::mem::take(&mut runs),
                 });
             }
@@ -616,6 +910,164 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
         length: story.len(txn),
         paragraphs,
     })
+}
+
+/// A list edit's marker per level: characters must be short XML text, numbers
+/// an `ST_TextAutonumberScheme` with a start in PowerPoint's range.
+fn validate_list_levels(levels: &[Bullet]) -> EditResult<()> {
+    if levels.is_empty() || levels.len() > (MAX_LEVEL + 1) as usize {
+        return Err(EditError::InvalidText(format!(
+            "a list needs 1-{} level markers, got {}",
+            MAX_LEVEL + 1,
+            levels.len()
+        )));
+    }
+    for level in levels {
+        match level {
+            Bullet::Character { value } => {
+                validate_xml_text(value)?;
+                if value.trim().is_empty() || value.encode_utf16().count() > 8 {
+                    return Err(EditError::InvalidText(format!(
+                        "bullet character {value:?} must be 1-8 visible characters"
+                    )));
+                }
+            }
+            Bullet::AutoNumber {
+                scheme, start_at, ..
+            } => {
+                if !AUTONUMBER_SCHEMES.contains(&scheme.as_str()) {
+                    return Err(EditError::InvalidText(format!(
+                        "unrecognized numbering scheme {scheme:?}"
+                    )));
+                }
+                if !(1..=32_767).contains(start_at) {
+                    return Err(EditError::InvalidText(format!(
+                        "numbering start {start_at} is outside 1-32767"
+                    )));
+                }
+            }
+            Bullet::None => {
+                return Err(EditError::InvalidText(
+                    "a list level needs a marker".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_spacing(spacing: LineSpacing) -> EditResult<()> {
+    let valid = match spacing {
+        LineSpacing::Percent { value } => {
+            value.is_finite() && (0.0..=MAX_SPACING_SHARE).contains(&value)
+        }
+        LineSpacing::Points { value } => {
+            value.is_finite() && (0.0..=MAX_SPACING_POINTS).contains(&value)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(EditError::InvalidText(format!(
+            "paragraph spacing {spacing:?} is outside PowerPoint's range"
+        )))
+    }
+}
+
+fn pilcrow_level<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> u32 {
+    (map_number(pilcrow, txn, LEVEL).unwrap_or_default() as u32).min(MAX_LEVEL)
+}
+
+fn insert_pilcrow_json<T: serde::Serialize>(
+    pilcrow: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    key: &str,
+    value: &T,
+) -> EditResult<()> {
+    let json = serde_json::to_string(value).map_err(|error| EditError::Json(error.to_string()))?;
+    pilcrow.insert(txn, key, json);
+    Ok(())
+}
+
+/// The file paragraph whose markup a pilcrow's paragraph is written with.
+fn source_paragraph_of<'a, T: ReadTxn>(
+    pilcrow: &MapRef,
+    txn: &T,
+    story_id: &str,
+    source: Option<&'a TextBody>,
+) -> Option<&'a pptx_parse::TextParagraph> {
+    let id = map_string(pilcrow, txn, PARA_ID)?;
+    let index = source_paragraph_index(&id, story_id).or_else(|| {
+        source_paragraph_index(&map_string(pilcrow, txn, PROPERTIES_FROM)?, story_id)
+    })?;
+    source?.paragraphs.get(index)
+}
+
+/// An EMU value a peer wrote; out of the schema's range fails the update.
+fn pilcrow_emu<T: ReadTxn>(
+    pilcrow: &MapRef,
+    txn: &T,
+    key: &str,
+    minimum: i64,
+) -> EditResult<Option<i64>> {
+    let Some(value) = pilcrow.get(txn, key) else {
+        return Ok(None);
+    };
+    match value {
+        Out::Any(Any::Number(number))
+            if number.fract() == 0.0
+                && (minimum as f64..=MAX_MARGIN_EMU as f64).contains(&number) =>
+        {
+            Ok(Some(number as i64))
+        }
+        _ => Err(EditError::InvalidState(format!(
+            "paragraph {key} is not an EMU value in range"
+        ))),
+    }
+}
+
+fn pilcrow_spacing<T: ReadTxn>(
+    pilcrow: &MapRef,
+    txn: &T,
+    key: &str,
+) -> EditResult<Option<LineSpacing>> {
+    let Some(json) = pilcrow_json_string(pilcrow, txn, key)? else {
+        return Ok(None);
+    };
+    let spacing = serde_json::from_str::<LineSpacing>(&json)
+        .map_err(|error| EditError::InvalidState(format!("paragraph {key}: {error}")))?;
+    validate_spacing(spacing).map_err(|error| EditError::InvalidState(error.to_string()))?;
+    Ok(Some(spacing))
+}
+
+fn pilcrow_bullet_font<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> EditResult<Option<BulletFont>> {
+    let Some(json) = pilcrow_json_string(pilcrow, txn, BULLET_FONT)? else {
+        return Ok(None);
+    };
+    let font = serde_json::from_str::<BulletFont>(&json)
+        .map_err(|error| EditError::InvalidState(format!("paragraph bullet font: {error}")))?;
+    if let BulletFont::Typeface(typeface) = &font
+        && (typeface.is_empty() || typeface.len() > 256 || validate_xml_text(typeface).is_err())
+    {
+        return Err(EditError::InvalidState(
+            "paragraph bullet font is not a typeface name".to_owned(),
+        ));
+    }
+    Ok(Some(font))
+}
+
+fn pilcrow_json_string<T: ReadTxn>(
+    pilcrow: &MapRef,
+    txn: &T,
+    key: &str,
+) -> EditResult<Option<String>> {
+    match pilcrow.get(txn, key) {
+        None => Ok(None),
+        Some(Out::Any(Any::String(json))) => Ok(Some(json.to_string())),
+        Some(_) => Err(EditError::InvalidState(format!(
+            "paragraph {key} is not a string"
+        ))),
+    }
 }
 
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
@@ -820,7 +1272,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 11] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -863,6 +1315,18 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
                 .map(|caps| Any::from(caps.as_attribute()))
                 .unwrap_or(Any::Null),
         ),
+        (
+            "strike",
+            style.strike.as_deref().map(Any::from).unwrap_or(Any::Null),
+        ),
+        (
+            "highlight",
+            style
+                .highlight
+                .as_deref()
+                .map(Any::from)
+                .unwrap_or(Any::Null),
+        ),
     ]
 }
 
@@ -884,6 +1348,12 @@ fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
     );
     insert_option(&mut attrs, "spacing", patch.spacing_pt.map(Any::Number));
     insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
+    insert_option(&mut attrs, "strike", patch.strike.as_deref().map(Any::from));
+    insert_option(
+        &mut attrs,
+        "highlight",
+        patch.highlight.as_deref().map(Any::from),
+    );
     attrs
 }
 
@@ -904,6 +1374,8 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         caps: properties.caps,
+        strike: properties.strike.clone(),
+        highlight: resolve_color_value_to_hex_with_theme(properties.highlight.as_ref(), theme),
     }
 }
 
@@ -921,6 +1393,8 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
             .and_then(|attrs| any_string(attrs.get("caps")))
             .as_deref()
             .and_then(TextCaps::from_attribute),
+        strike: attrs.and_then(|attrs| any_string(attrs.get("strike"))),
+        highlight: attrs.and_then(|attrs| any_string(attrs.get("highlight"))),
     }
 }
 
