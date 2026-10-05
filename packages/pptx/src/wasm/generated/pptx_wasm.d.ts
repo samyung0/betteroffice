@@ -17,6 +17,8 @@ export class PptxDocument {
     bringShapeToFrontJson(args: string): string;
     canRedo(): boolean;
     canUndo(): boolean;
+    changeParagraphLevelJson(args: string): string;
+    clearTextFormattingJson(args: string): string;
     clearUpdateObservation(): void;
     commentsJson(): string;
     deleteSlideJson(args: string): string;
@@ -62,11 +64,14 @@ export class PptxDocument {
     setCommentPositionJson(args: string): string;
     setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
+    setParagraphListJson(args: string): string;
+    setParagraphSpacingJson(args: string): string;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
     setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
     setSlideNotesJson(args: string): string;
+    setTextAnchorJson(args: string): void;
     setUndoCaptureMode(mode: string): void;
     snapshotJson(): string;
     startUpdateObservation(): void;
@@ -88,6 +93,11 @@ export class PptxRenderer {
     hitTestJson(x: number, y: number): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
+    /**
+     * `layoutSlideJson` with the editor's caret in paragraph `paragraph` of
+     * `story_id`, whose list marker then shows even while it is empty.
+     */
+    layoutSlideAtCaretJson(document: PptxDocument, slide_index: number, story_id: string, paragraph: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
     /**
      * `layoutSlideJson` with its stages timed, returned as
@@ -117,6 +127,7 @@ export interface InitOutput {
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutSlideAtCaretJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
@@ -135,6 +146,8 @@ export interface InitOutput {
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
+    readonly pptxdocument_changeParagraphLevelJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_clearTextFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
     readonly pptxdocument_clientId: (a: number) => number;
     readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
@@ -175,11 +188,14 @@ export interface InitOutput {
     readonly pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setParagraphListJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setParagraphSpacingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setTextAnchorJson: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];

@@ -11,7 +11,7 @@ const clientWidth = Object.getOwnPropertyDescriptor(elementPrototype, 'clientWid
 // `getByTestId` here reaches the control the toolbar renders inline.
 Object.defineProperty(elementPrototype, 'clientWidth', {
   configurable: true,
-  get: () => 1_320,
+  get: () => 1_600,
 });
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 

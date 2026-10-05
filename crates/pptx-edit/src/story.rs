@@ -88,11 +88,11 @@ const AUTONUMBER_SCHEMES: [&str; 41] = [
 ];
 
 /// `ST_TextIndentLevelType`: `lvl` runs 0-8.
-pub(crate) const MAX_LEVEL: u32 = 8;
+const MAX_LEVEL: u32 = 8;
 /// One list level, as PowerPoint's Increase List Level shifts `marL`.
-pub(crate) const LEVEL_STEP_EMU: i64 = 457_200;
-/// The hanging indent a list edit gives its marker, as Google Slides writes.
-pub(crate) const LIST_HANG_EMU: i64 = 342_900;
+const LEVEL_STEP_EMU: i64 = 457_200;
+/// The marker's hanging indent, 0.375 in, as PowerPoint writes a numbered list's.
+const LIST_HANG_EMU: i64 = 342_900;
 /// The face a character bullet is drawn in, as PowerPoint writes `a:buFont`.
 const BULLET_TYPEFACE: &str = "Arial";
 /// `ST_TextMargin` and `ST_TextIndent` bounds.

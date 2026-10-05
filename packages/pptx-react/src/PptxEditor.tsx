@@ -21,7 +21,10 @@ import type {
   Proposal,
   ProposalDiffSlide,
   SlideDisplayList,
+  RunAttribute,
+  ShapeSnapshot,
   StorySnapshot,
+  TextAnchorValue,
   TextBoxPrimitive,
   TextStylePatch,
 } from '@betteroffice/pptx';
@@ -90,10 +93,24 @@ import {
   paragraphAlignmentFromSelection,
   selectionFormattingFromStory,
   storyFormattingFromStory,
+  storyTextRanges,
+  typingStyle,
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
+import {
+  BULLET_PRESETS,
+  NUMBER_PRESETS,
+  indentLevels,
+  paragraphFormatting,
+  presetLevels,
+  selectedParagraphs,
+  type ListKind,
+  type ListPresetId,
+  type ParagraphFormatting,
+} from './paragraphFormatting';
+import { DEFAULT_FONT_SIZES, LINE_SPACINGS, nextFontSize } from './components/Toolbar';
 import { shapeFormattingFromShape } from './shapeFormatting';
-import { shapeClipboard, storyClipboard, type ClipboardText } from './clipboard';
+import { joinedClipboard, shapeClipboard, storyClipboard, type ClipboardText } from './clipboard';
 import {
   caretGoalX,
   caretLineIndex,
@@ -238,6 +255,8 @@ type PointerGesture =
       pointerId: number;
       slideId: string;
       shapeId: string;
+      /** Select all's objects, dragged together. */
+      shapeIds?: string[];
       startClientX: number;
       startClientY: number;
       start: SlidePoint;
@@ -263,7 +282,7 @@ type PointerGesture =
     };
 
 interface ShapeDragPreview {
-  shapeId: string;
+  shapeIds: string[];
   delta: SlidePoint;
 }
 
@@ -355,7 +374,17 @@ const initialStyle: EffectiveTextStyle = {
   fontSizePt: 24,
   color: '#111827',
   fontFamily: 'Arial',
+  strike: null,
+  highlight: null,
+  baselinePct: null,
 };
+
+/** Google Slides' "Add space before/after paragraph". */
+const PARAGRAPH_SPACE_PT = 10;
+/** Superscript and subscript baselines, as PowerPoint writes them. */
+const SUPERSCRIPT_PCT = 30;
+const SUBSCRIPT_PCT = -25;
+const DEFAULT_LIST_PRESETS: Record<ListKind, ListPresetId> = { bullet: 'disc', number: 'decimal' };
 
 export function PptxEditor({
   i18n,
@@ -479,10 +508,20 @@ function PptxEditorContent({
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
+  /** Select all's objects; a text or single-object selection replaces it. */
+  const [multiSelection, setMultiSelection] = useState<{
+    slideId: string;
+    shapeIds: string[];
+  } | null>(null);
+  useEffect(() => {
+    if (selection || shapeSelection) setMultiSelection(null);
+  }, [selection, shapeSelection]);
+  /** The empty caret paragraph the current frame draws a marker for. */
+  const frameCaretRef = useRef<string | null>(null);
   // The input holds focus for a shape too, so a copy event reaches it.
   useEffect(() => {
-    if ((selection || shapeSelection) && document.activeElement === stageRef.current) textInputRef.current?.focus({ preventScroll: true });
-  }, [selection, shapeSelection]);
+    if ((selection || shapeSelection || multiSelection) && document.activeElement === stageRef.current) textInputRef.current?.focus({ preventScroll: true });
+  }, [selection, shapeSelection, multiSelection]);
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
@@ -575,7 +614,14 @@ function PptxEditorContent({
           if (slideIndex !== index && cached && !refreshAll) thumbnails.set(slide.id, cached);
           else if (slideIndex !== index) thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
         }
-        const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index) : null;
+        let caret = null;
+        try {
+          caret = emptyCaretParagraph(handle, selectionRef.current);
+        } catch {
+          // A selection whose story went away has no caret paragraph.
+        }
+        const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index, caret) : null;
+        frameCaretRef.current = caretKey(caret);
         if (frame) thumbnails.set(snapshot.slides[index].id, frame);
         const next = { snapshot, slideIndex: index, frame, thumbnails };
         const activeSlide = snapshot.slides[index];
@@ -589,6 +635,13 @@ function PptxEditorContent({
             ? current
             : null
         );
+        setMultiSelection((current) => {
+          if (!current || activeSlide?.id !== current.slideId) return null;
+          const shapeIds = current.shapeIds.filter((id) =>
+            activeSlide.shapes.some((shape) => shape.id === id)
+          );
+          return shapeIds.length > 0 ? { ...current, shapeIds } : null;
+        });
         const gesture = pointerGestureRef.current;
         if (
           gesture &&
@@ -635,6 +688,7 @@ function PptxEditorContent({
     setResizeDelta(null);
     setSelection(null);
     setShapeSelection(null);
+    setMultiSelection(null);
     setDragPreview(null);
     setTextBoxPreview(null);
   }, []);
@@ -1038,6 +1092,30 @@ function PptxEditorContent({
     }
   }, [model, reportError, selection]);
 
+  // An empty list item shows its marker only while the caret is in it, so the
+  // frame is laid out again when the caret enters or leaves one.
+  useEffect(() => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle || !current?.frame) return;
+    let caret = null;
+    try {
+      caret = emptyCaretParagraph(handle, selection);
+    } catch {
+      return;
+    }
+    const key = caretKey(caret);
+    if (key === frameCaretRef.current) return;
+    try {
+      frameCaretRef.current = key;
+      const next = { ...current, frame: handle.layoutSlide(current.slideIndex, caret) };
+      modelRef.current = next;
+      setModel(next);
+    } catch (value) {
+      reportError(value);
+    }
+  }, [reportError, selection]);
+
   const selectionFormatting = useMemo<SelectionFormatting>(() => {
     if (selection && selection.anchor === selection.focus) {
       return selectionFormattingFromStyle(textStyle);
@@ -1078,6 +1156,41 @@ function PptxEditorContent({
       return undefined;
     }
   }, [model, selectedShapeStoryId, selection]);
+
+  const paragraphState = useMemo<ParagraphFormatting | undefined>(() => {
+    const handle = handleRef.current;
+    const storyId = selection?.storyId ?? selectedShapeStoryId;
+    if (!handle || !storyId) return undefined;
+    try {
+      const story = handle.story(storyId);
+      const textBox = model?.frame?.primitives.find(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === storyId
+      );
+      const indices = selection
+        ? selectedParagraphs(story, selection.anchor, selection.focus)
+        : story.paragraphs.map((_, index) => index);
+      return paragraphFormatting(story, textBox, indices);
+    } catch {
+      return undefined;
+    }
+  }, [model, selectedShapeStoryId, selection]);
+
+  /** The top-level text shape whose `a:bodyPr@anchor` vertical alignment sets. */
+  const anchorTarget = useMemo(() => {
+    const slide = model?.snapshot.slides[model.slideIndex];
+    const shapeId = selection?.shapeId ?? shapeSelection?.shapeId;
+    const shape = slide?.shapes.find((candidate) => candidate.id === shapeId);
+    return slide && shape?.kind === 'shape' && shape.textStories.length > 0
+      ? { slideId: slide.id, shapeId: shape.id }
+      : null;
+  }, [model, selection, shapeSelection]);
+
+  const multiShapes = useMemo(() => {
+    const slide = model?.snapshot.slides[model.slideIndex];
+    if (!slide || !multiSelection || slide.id !== multiSelection.slideId) return [];
+    return slide.shapes.filter((shape) => multiSelection.shapeIds.includes(shape.id));
+  }, [model, multiSelection]);
 
   const slideLayouts = useMemo<SlideLayoutOption[]>(() => {
     const unique = new Set<string | null>();
@@ -1126,7 +1239,7 @@ function PptxEditorContent({
           ),
         },
         text: '',
-        style: textStyle,
+        style: typingStyle(textStyle),
       });
       const next = refreshAt(undefined, true);
       setActiveTool('select');
@@ -1358,6 +1471,35 @@ function PptxEditorContent({
       );
       const clickCount =
         repeatedClick && recentClick ? Math.min(recentClick.count + 1, 3) : 1;
+      if (
+        multiSelection &&
+        slide &&
+        shape &&
+        !readOnly &&
+        multiSelection.slideId === slide.id &&
+        multiSelection.shapeIds.includes(shape.id)
+      ) {
+        recentClickRef.current = null;
+        pointerGestureRef.current = {
+          kind: 'shape',
+          pointerId: event.pointerId,
+          slideId: slide.id,
+          shapeId: shape.id,
+          shapeIds: multiSelection.shapeIds,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          start: point,
+          last: point,
+          dragThreshold: 4,
+          clickCount: 1,
+          dragging: false,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        stageRef.current?.focus();
+        event.preventDefault();
+        return;
+      }
+      setMultiSelection(null);
       const hitLocation =
         hit?.kind === 'text'
           ? textLocationAtPoint(current.frame, hit.shapeId, hit.storyId, point)
@@ -1552,7 +1694,7 @@ function PptxEditorContent({
       }
       if (gesture.dragging) {
         setDragPreview({
-          shapeId: gesture.shapeId,
+          shapeIds: gesture.shapeIds ?? [gesture.shapeId],
           delta: { x: point.x - gesture.start.x, y: point.y - gesture.start.y },
         });
       }
@@ -1620,6 +1762,19 @@ function PptxEditorContent({
       return;
     }
     if (gesture.kind !== 'shape') return;
+    if (gesture.shapeIds) {
+      // A click selects that object alone; a drag moves them all.
+      if (!gesture.dragging) {
+        setShapeSelection({ slideId: gesture.slideId, shapeId: gesture.shapeId });
+        return;
+      }
+      moveShapes(gesture.slideId, gesture.shapeIds, {
+        x: gesture.last.x - gesture.start.x,
+        y: gesture.last.y - gesture.start.y,
+      });
+      event.preventDefault();
+      return;
+    }
     if (!gesture.dragging) {
       recentClickRef.current = {
         slideId: gesture.slideId,
@@ -1678,7 +1833,7 @@ function PptxEditorContent({
     try {
       const start = Math.min(current.anchor, current.focus);
       const end = Math.max(current.anchor, current.focus);
-      const receipt = handle.replaceText(current.storyId, start, end, text.replace(/\r\n?/g, '\n'), textStyle);
+      const receipt = handle.replaceText(current.storyId, start, end, text.replace(/\r\n?/g, '\n'), typingStyle(textStyle));
       commit({ ...current, anchor: receipt.end, focus: receipt.end });
     } catch (value) {
       reportError(value);
@@ -1698,7 +1853,9 @@ function PptxEditorContent({
             Math.min(selection.anchor, selection.focus),
             Math.max(selection.anchor, selection.focus)
           )
-        : selectedShape && shapeClipboard(selectedShape);
+        : multiShapes.length > 0
+          ? joinedClipboard(multiShapes.map(shapeClipboard))
+          : selectedShape && shapeClipboard(selectedShape);
       return copied?.text ? copied : null;
     } catch (value) {
       reportError(value);
@@ -1732,6 +1889,15 @@ function PptxEditorContent({
       pointerGestureRef.current = null;
       resizeRef.current = null;
       setResizeDelta(null);
+      setMultiSelection(null);
+      // As Google Slides: Esc leaves the text box with the box selected, so
+      // Tab leaves the editor again.
+      const slide = modelRef.current?.snapshot.slides[modelRef.current.slideIndex];
+      const editedShape = selection && slide ? findTopLevelShape(slide, selection.shapeId) : null;
+      if (slide && editedShape) {
+        setSelection(null);
+        setShapeSelection({ slideId: slide.id, shapeId: editedShape.id });
+      }
       event.preventDefault();
       return;
     }
@@ -1746,15 +1912,26 @@ function PptxEditorContent({
       return;
     }
     if (canvasReview.reviewing) return;
+    if (modifier && !event.shiftKey && !event.altKey && event.code === 'KeyA') {
+      event.preventDefault();
+      selectAll();
+      return;
+    }
     // Delete or Backspace on a selected object (not text being edited) deletes it.
     if ((event.key === 'Delete' || event.key === 'Backspace') && !modifier && !selection) {
-      if (!readOnly && shapeSelection) {
+      if (!readOnly && (shapeSelection || multiSelection)) {
         event.preventDefault();
         deleteShape();
       }
       return;
     }
     if (!selection && !selectedShapeStoryId) return;
+    const shortcut = readOnly ? null : textShortcut(event);
+    if (shortcut) {
+      event.preventDefault();
+      shortcut();
+      return;
+    }
     if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
       applyFormatting({
@@ -1798,6 +1975,36 @@ function PptxEditorContent({
         return;
       }
       if (readOnly) return;
+      if (event.key === 'Tab' && !modifier && !event.altKey) {
+        event.preventDefault();
+        tabKey(selection, event.shiftKey);
+        return;
+      }
+      // Google Slides: Enter on an empty list item leaves the list (a nested
+      // one first steps out a level); Backspace at an item's start removes
+      // its marker before it joins anything.
+      if (start === end && (event.key === 'Enter' || event.key === 'Backspace')) {
+        const item = listItemAt(selection.storyId, start);
+        if (
+          item &&
+          (event.key === 'Enter' ? item.range.start === item.range.end : start === item.range.start)
+        ) {
+          event.preventDefault();
+          if (event.key === 'Enter' && item.level > 0) {
+            handle.changeParagraphLevel(
+              selection.storyId,
+              start,
+              start,
+              -1,
+              indentLevels(item.story, [item.index])
+            );
+          } else {
+            handle.setParagraphList(selection.storyId, start, start, null);
+          }
+          commit({ ...selection, anchor: start, focus: start });
+          return;
+        }
+      }
       // replaceText, unlike deleteText, joins the paragraphs a range crosses.
       if (event.key === 'Backspace') {
         event.preventDefault();
@@ -1836,6 +2043,57 @@ function PptxEditorContent({
     } catch (value) {
       reportError(value);
     }
+  };
+
+  /** Google Slides' text shortcuts beyond bold, italic and underline. */
+  const textShortcut = (event: KeyboardEvent<HTMLDivElement>): (() => void) | null => {
+    const modifier = event.metaKey || event.ctrlKey;
+    const { altKey: alt, code, key, shiftKey: shift } = event;
+    if (modifier && shift && !alt && code === 'Digit8') return () => applyList('bullet');
+    if (modifier && shift && !alt && code === 'Digit7') return () => applyList('number');
+    if (modifier && !shift && !alt && key === ']') return () => indentParagraphs(1);
+    if (modifier && !shift && !alt && key === '[') return () => indentParagraphs(-1);
+    if (modifier && !shift && !alt && key === '.') return () => toggleScript('super');
+    if (modifier && !shift && !alt && key === ',') return () => toggleScript('sub');
+    if (modifier && !shift && !alt && key === '\\') return () => clearFormatting();
+    if ((alt && shift && !modifier && code === 'Digit5') || (modifier && shift && !alt && code === 'KeyX')) {
+      return () => formatSelection('strikethrough');
+    }
+    if (modifier && shift && !alt && code === 'Period') return () => stepFontSize(1);
+    if (modifier && shift && !alt && code === 'Comma') return () => stepFontSize(-1);
+    return null;
+  };
+
+  /** The list item `position` is in, with its paragraph's range and level. */
+  const listItemAt = (storyId: string, position: number) => {
+    const handle = handleRef.current;
+    if (!handle) return null;
+    const story = handle.story(storyId);
+    const ranges = storyTextRanges(story);
+    const index = ranges.findIndex((range) => position >= range.start && position <= range.end);
+    const textBox = modelRef.current?.frame?.primitives.find(
+      (primitive): primitive is TextBoxPrimitive =>
+        primitive.kind === 'textBox' && primitive.storyId === storyId
+    );
+    if (index < 0 || !textBox?.paragraphs[index]?.list) return null;
+    return { story, index, range: ranges[index], level: story.paragraphs[index]?.level ?? 0 };
+  };
+
+  /** Tab at a list item's start, or over several paragraphs, changes their
+   *  level; elsewhere it types a tab. Shift+Tab steps back out. */
+  const tabKey = (current: PptxTextSelection, outdent: boolean) => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    const start = Math.min(current.anchor, current.focus);
+    const end = Math.max(current.anchor, current.focus);
+    const story = handle.story(current.storyId);
+    const several = selectedParagraphs(story, start, end).length > 1;
+    const item = start === end ? listItemAt(current.storyId, start) : null;
+    if (outdent || several || (item && item.range.start === start)) {
+      indentParagraphs(outdent ? -1 : 1);
+      return;
+    }
+    insertSlideText('\t');
   };
 
   const applyFormatting = (patch: TextStylePatch) => {
@@ -1951,6 +2209,145 @@ function PptxEditorContent({
     }
   };
 
+  /** Removes run attributes (all an edit sets by default) from the selected
+   *  text or the selected shape's; at a caret only the typing style changes. */
+  const clearFormatting = (attributes?: RunAttribute[]) => {
+    const handle = handleRef.current;
+    if (!handle || readOnly) return;
+    try {
+      if (selection) {
+        if (selection.anchor === selection.focus) {
+          if (attributes) {
+            setTextStyle((current) => ({
+              ...current,
+              ...(attributes.includes('strike') ? { strike: null } : {}),
+              ...(attributes.includes('highlight') ? { highlight: null } : {}),
+              ...(attributes.includes('baseline') ? { baselinePct: null } : {}),
+            }));
+          }
+          return;
+        }
+        handle.clearTextFormatting(
+          selection.storyId,
+          Math.min(selection.anchor, selection.focus),
+          Math.max(selection.anchor, selection.focus),
+          attributes
+        );
+      } else if (selectedShapeStoryId) {
+        const story = handle.story(selectedShapeStoryId);
+        handle.clearTextFormatting(story.id, 0, story.length, attributes);
+      } else {
+        return;
+      }
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  /** The text range paragraph edits apply to: the selection, or a selected shape's whole text. */
+  const paragraphRange = (): { storyId: string; start: number; end: number } | null => {
+    const handle = handleRef.current;
+    if (selection) {
+      return {
+        storyId: selection.storyId,
+        start: Math.min(selection.anchor, selection.focus),
+        end: Math.max(selection.anchor, selection.focus),
+      };
+    }
+    if (!handle || !selectedShapeStoryId) return null;
+    return { storyId: selectedShapeStoryId, start: 0, end: handle.story(selectedShapeStoryId).length };
+  };
+
+  const editParagraphs = (
+    edit: (handle: PresentationHandle, range: { storyId: string; start: number; end: number }) => void
+  ) => {
+    const handle = handleRef.current;
+    if (!handle || readOnly) return;
+    try {
+      const range = paragraphRange();
+      if (!range) return;
+      edit(handle, range);
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  /** A style makes the paragraphs that list; without one the kind toggles, as
+   *  Google Slides' list buttons. */
+  const applyList = (kind: ListKind, preset?: ListPresetId) =>
+    editParagraphs((handle, range) => {
+      const off = !preset && paragraphState?.list === kind;
+      handle.setParagraphList(
+        range.storyId,
+        range.start,
+        range.end,
+        off ? null : presetLevels(preset ?? DEFAULT_LIST_PRESETS[kind])
+      );
+    });
+
+  const indentParagraphs = (delta: 1 | -1) =>
+    editParagraphs((handle, range) => {
+      const story = handle.story(range.storyId);
+      handle.changeParagraphLevel(
+        range.storyId,
+        range.start,
+        range.end,
+        delta,
+        indentLevels(story, selectedParagraphs(story, range.start, range.end))
+      );
+    });
+
+  const setLineSpacing = (value: string) => {
+    const share = Number(value);
+    if (!LINE_SPACINGS.some((spacing) => spacing.value === value)) return;
+    editParagraphs((handle, range) =>
+      handle.setParagraphSpacing(range.storyId, range.start, range.end, {
+        line: { type: 'percent', value: share },
+      })
+    );
+  };
+
+  /** Google Slides' Add/Remove space before or after paragraph. */
+  const toggleParagraphSpace = (side: 'before' | 'after') => {
+    const present = side === 'before' ? paragraphState?.spaceBefore : paragraphState?.spaceAfter;
+    const space = { type: 'points', value: present ? 0 : PARAGRAPH_SPACE_PT } as const;
+    editParagraphs((handle, range) =>
+      handle.setParagraphSpacing(
+        range.storyId,
+        range.start,
+        range.end,
+        side === 'before' ? { before: space } : { after: space }
+      )
+    );
+  };
+
+  const setVerticalAlignment = (anchor: TextAnchorValue) => {
+    const handle = handleRef.current;
+    if (!handle || !anchorTarget || readOnly) return;
+    try {
+      handle.setTextAnchor(anchorTarget.slideId, anchorTarget.shapeId, anchor);
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const toggleScript = (script: 'super' | 'sub') => {
+    if (selectionFormatting.script === script) clearFormatting(['baseline']);
+    else applyFormatting({ baselinePct: script === 'super' ? SUPERSCRIPT_PCT : SUBSCRIPT_PCT });
+  };
+
+  const stepFontSize = (direction: 1 | -1) =>
+    applyFormatting({
+      fontSizePt: nextFontSize(
+        selectionFormatting.fontSize ?? textStyle.fontSizePt,
+        DEFAULT_FONT_SIZES,
+        direction
+      ),
+    });
+
   const formatSelection = (action: FormattingAction) => {
     if (action === 'bold') {
       applyFormatting({ bold: !selectionFormatting.bold });
@@ -1958,14 +2355,33 @@ function PptxEditorContent({
       applyFormatting({ italic: !selectionFormatting.italic });
     } else if (action === 'underline') {
       applyFormatting({ underline: selectionFormatting.underline ? 'none' : 'sng' });
+    } else if (action === 'strikethrough') {
+      applyFormatting({ strike: selectionFormatting.strike ? 'noStrike' : 'sngStrike' });
+    } else if (action === 'clearFormatting') {
+      clearFormatting();
     } else if (action.type === 'fontFamily') {
       applyFormatting({ fontFamily: action.value });
     } else if (action.type === 'fontSize') {
       applyFormatting({ fontSizePt: action.value });
     } else if (action.type === 'textColor') {
       applyFormatting({ color: action.value });
+    } else if (action.type === 'highlight') {
+      if (action.value) applyFormatting({ highlight: action.value });
+      else clearFormatting(['highlight']);
     } else if (action.type === 'align') {
       applyAlignment(action.value);
+    } else if (action.type === 'verticalAlign') {
+      setVerticalAlignment(action.value);
+    } else if (action.type === 'list') {
+      applyList(action.kind, action.preset);
+    } else if (action.type === 'indent') {
+      indentParagraphs(action.delta);
+    } else if (action.type === 'lineSpacing') {
+      setLineSpacing(action.value);
+    } else if (action.type === 'spaceBefore') {
+      toggleParagraphSpace('before');
+    } else if (action.type === 'spaceAfter') {
+      toggleParagraphSpace('after');
     }
   };
 
@@ -2231,6 +2647,7 @@ function PptxEditorContent({
     !canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null);
   const shapeActive = !canvasReview.reviewing && selectedShape?.kind === 'shape';
   const objectActive = !canvasReview.reviewing && Boolean(selectedShape);
+  const objectsActive = !canvasReview.reviewing && (Boolean(selectedShape) || multiShapes.length > 0);
   const editable = Boolean(model) && !readOnly && !canvasReview.reviewing;
 
   const changeTool = (tool: PptxEditorTool) => {
@@ -2275,16 +2692,145 @@ function PptxEditorContent({
     }
   };
 
+  /** Runs several edits as one undo step. */
+  const asOneStep = (handle: PresentationHandle, edits: () => void) => {
+    handle.setUndoCaptureMode('manual');
+    try {
+      edits();
+    } finally {
+      handle.setUndoCaptureMode('auto');
+    }
+  };
+
   const deleteShape = () => {
     const handle = handleRef.current;
-    if (!handle || !shapeSelection || readOnly) return;
+    if (!handle || readOnly) return;
     try {
-      handle.removeShape(shapeSelection.slideId, shapeSelection.shapeId);
+      if (multiSelection) {
+        const { slideId, shapeIds } = multiSelection;
+        asOneStep(handle, () => {
+          for (const shapeId of shapeIds) handle.removeShape(slideId, shapeId);
+        });
+      } else if (shapeSelection) {
+        handle.removeShape(shapeSelection.slideId, shapeSelection.shapeId);
+      } else {
+        return;
+      }
       clearSelection();
       refreshAt(undefined, true);
     } catch (value) {
       reportError(value);
     }
+  };
+
+  /** Moves the slide's `shapeIds` by `delta` frame pixels each, in one step. */
+  const moveShapes = (slideId: string, shapeIds: readonly string[], delta: SlidePoint) => {
+    const current = modelRef.current;
+    const frame = current?.frame;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    if (!current || !frame || slide?.id !== slideId) return;
+    placeShapes(
+      slide.shapes
+        .filter((shape) => shapeIds.includes(shape.id) && canMoveShape(shape))
+        .map((shape) => ({ shape, ...movedShapePosition(current.snapshot, frame, shape, delta) }))
+    );
+  };
+
+  /** Puts shapes of the current slide at EMU positions, as one undo step. */
+  const placeShapes = (places: ReadonlyArray<{ shape: ShapeSnapshot; x: number; y: number }>) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    if (!handle || !slide || readOnly) return;
+    const moved = places.filter(({ shape, x, y }) => x !== shape.x || y !== shape.y);
+    if (moved.length === 0) return;
+    try {
+      asOneStep(handle, () => {
+        for (const { shape, x, y } of moved) handle.moveShape(slide.id, shape.id, x, y);
+      });
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  /** Edit › Select all: the text box's whole text while typing, else every
+   *  object on the slide. */
+  const selectAll = () => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle || !current) return;
+    try {
+      if (selection) {
+        const story = handle.story(selection.storyId);
+        setSelection({ ...selection, anchor: 0, focus: Math.max(0, story.length - 1), focusLine: undefined });
+        return;
+      }
+      const slide = current.snapshot.slides[current.slideIndex];
+      const shapes = slide?.shapes.filter((shape) => !shape.hidden) ?? [];
+      if (!slide || shapes.length === 0) return;
+      if (shapes.length === 1) {
+        setShapeSelection({ slideId: slide.id, shapeId: shapes[0].id });
+        return;
+      }
+      setShapeSelection(null);
+      setMultiSelection({ slideId: slide.id, shapeIds: shapes.map((shape) => shape.id) });
+      stageRef.current?.focus();
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  /** Arrange › Align, Distribute and Center on page, on the objects' own
+   *  rectangles. One object aligns to the slide; several to the box around them. */
+  const arrangeShapes = (
+    kind: 'align' | 'distribute' | 'centerOnPage',
+    value: string
+  ): boolean => {
+    const current = modelRef.current;
+    if (!handleRef.current || !current || readOnly) return false;
+    const targets = (multiShapes.length > 0 ? multiShapes : selectedShape ? [selectedShape] : []).filter(
+      canMoveShape
+    );
+    if (targets.length === 0 || (kind === 'distribute' && targets.length < 3)) return false;
+    const horizontal = ['left', 'center', 'right', 'horizontal'].includes(value);
+    const start = (shape: ShapeSnapshot) => (horizontal ? shape.x : shape.y);
+    const size = (shape: ShapeSnapshot) => (horizontal ? shape.width : shape.height);
+    const from = Math.min(...targets.map(start));
+    const to = Math.max(...targets.map((shape) => start(shape) + size(shape)));
+    const page = horizontal ? current.snapshot.widthEmu : current.snapshot.heightEmu;
+    let offsets: number[];
+    if (kind === 'align') {
+      const [low, high] = targets.length === 1 ? [0, page] : [from, to];
+      offsets = targets.map((shape) =>
+        value === 'left' || value === 'top'
+          ? low - start(shape)
+          : value === 'right' || value === 'bottom'
+            ? high - start(shape) - size(shape)
+            : (low + high - size(shape)) / 2 - start(shape)
+      );
+    } else if (kind === 'centerOnPage') {
+      offsets = targets.map(() => (page - (from + to)) / 2);
+    } else {
+      const sorted = [...targets].sort((a, b) => start(a) - start(b));
+      const gap = (to - from - sorted.reduce((sum, shape) => sum + size(shape), 0)) / (sorted.length - 1);
+      let cursor = from;
+      const at = new Map<ShapeSnapshot, number>();
+      for (const shape of sorted) {
+        at.set(shape, cursor - start(shape));
+        cursor += size(shape) + gap;
+      }
+      offsets = targets.map((shape) => at.get(shape) ?? 0);
+    }
+    placeShapes(
+      targets.map((shape, index) => {
+        const offset = Math.round(offsets[index]);
+        return horizontal
+          ? { shape, x: shape.x + offset, y: shape.y }
+          : { shape, x: shape.x, y: shape.y + offset };
+      })
+    );
+    return true;
   };
 
   const toggleSpeakerNotes = () => {
@@ -2300,6 +2846,16 @@ function PptxEditorContent({
     'format.alignRight': 'r',
     'format.alignJustify': 'just',
   } as const satisfies Partial<Record<PptxCommandId, ParagraphAlignment>>;
+  const anchorCommands = {
+    'format.alignTop': 't',
+    'format.alignMiddle': 'ctr',
+    'format.alignBottom': 'b',
+  } as const satisfies Partial<Record<PptxCommandId, TextAnchorValue>>;
+  const ARRANGE_VALUES = {
+    'arrange.align': ['left', 'center', 'right', 'top', 'middle', 'bottom'],
+    'arrange.distribute': ['horizontal', 'vertical'],
+    'arrange.centerOnPage': ['horizontal', 'vertical'],
+  } as const;
   const arrangeCommands = {
     'arrange.bringToFront': 'front',
     'arrange.bringForward': 'forward',
@@ -2311,7 +2867,9 @@ function PptxEditorContent({
     'file.exportPng': Boolean(model?.frame),
     'edit.undo': editable && historyState.canUndo,
     'edit.redo': editable && historyState.canRedo,
-    'edit.delete': editable && objectActive && selection === null,
+    // Paused editing keeps it, so content can be copied before Reload.
+    'edit.selectAll': Boolean(model?.frame) && !canvasReview.reviewing,
+    'edit.delete': editable && objectsActive && selection === null,
     'view.present': slideCount > 0,
     'view.zoom': Boolean(model),
     'view.speakerNotes': Boolean(model),
@@ -2328,15 +2886,34 @@ function PptxEditorContent({
     'format.bold': editable && textActive,
     'format.italic': editable && textActive,
     'format.underline': editable && textActive,
+    'format.strikethrough': editable && textActive,
+    'format.superscript': editable && textActive,
+    'format.subscript': editable && textActive,
+    'format.increaseFontSize': editable && textActive,
+    'format.decreaseFontSize': editable && textActive,
     'format.alignLeft': editable && textActive,
     'format.alignCenter': editable && textActive,
     'format.alignRight': editable && textActive,
     'format.alignJustify': editable && textActive,
+    'format.alignTop': editable && textActive && anchorTarget !== null,
+    'format.alignMiddle': editable && textActive && anchorTarget !== null,
+    'format.alignBottom': editable && textActive && anchorTarget !== null,
+    'format.increaseIndent': editable && textActive && paragraphState?.canIndent !== false,
+    'format.decreaseIndent': editable && textActive && Boolean(paragraphState?.canOutdent),
+    'format.lineSpacing': editable && textActive,
+    'format.spaceBefore': editable && textActive,
+    'format.spaceAfter': editable && textActive,
+    'format.bulletedList': editable && textActive,
+    'format.numberedList': editable && textActive,
+    'format.clearFormatting': editable && textActive,
     'format.borderWeight': editable && shapeActive,
     'arrange.bringToFront': editable && objectActive,
     'arrange.bringForward': editable && objectActive,
     'arrange.sendBackward': editable && objectActive,
     'arrange.sendToBack': editable && objectActive,
+    'arrange.align': editable && objectsActive && selection === null,
+    'arrange.distribute': editable && multiShapes.length >= 3,
+    'arrange.centerOnPage': editable && objectsActive && selection === null,
   };
 
   insertImageRef.current = (bytes, name) =>
@@ -2350,6 +2927,7 @@ function PptxEditorContent({
     else if (id === 'file.exportPng') exportPng();
     else if (id === 'edit.undo') history('undo');
     else if (id === 'edit.redo') history('redo');
+    else if (id === 'edit.selectAll') selectAll();
     else if (id === 'edit.delete') deleteShape();
     else if (id === 'view.present') startPresenting();
     else if (id === 'view.speakerNotes') toggleSpeakerNotes();
@@ -2375,8 +2953,34 @@ function PptxEditorContent({
     else if (id === 'slide.moveToEnd') moveSlide(lastSlide);
     else if (id === 'format.bold' || id === 'format.italic' || id === 'format.underline')
       formatSelection(id === 'format.bold' ? 'bold' : id === 'format.italic' ? 'italic' : 'underline');
+    else if (id === 'format.strikethrough') formatSelection('strikethrough');
+    else if (id === 'format.superscript') toggleScript('super');
+    else if (id === 'format.subscript') toggleScript('sub');
+    else if (id === 'format.increaseFontSize') stepFontSize(1);
+    else if (id === 'format.decreaseFontSize') stepFontSize(-1);
+    else if (id === 'format.clearFormatting') formatSelection('clearFormatting');
     else if (id in alignCommands)
       formatSelection({ type: 'align', value: alignCommands[id as keyof typeof alignCommands] });
+    else if (id in anchorCommands)
+      setVerticalAlignment(anchorCommands[id as keyof typeof anchorCommands]);
+    else if (id === 'format.increaseIndent') indentParagraphs(1);
+    else if (id === 'format.decreaseIndent') indentParagraphs(-1);
+    else if (id === 'format.lineSpacing') {
+      if (!LINE_SPACINGS.some((spacing) => spacing.value === value)) return false;
+      setLineSpacing(value as string);
+    } else if (id === 'format.spaceBefore') toggleParagraphSpace('before');
+    else if (id === 'format.spaceAfter') toggleParagraphSpace('after');
+    else if (id === 'format.bulletedList' || id === 'format.numberedList') {
+      const kind = id === 'format.bulletedList' ? 'bullet' : 'number';
+      const presets = kind === 'bullet' ? BULLET_PRESETS : NUMBER_PRESETS;
+      if (value !== undefined && !presets.some((preset) => preset.id === value)) return false;
+      applyList(kind, value as ListPresetId | undefined);
+    } else if (id in ARRANGE_VALUES) {
+      const kind = id.slice('arrange.'.length) as 'align' | 'distribute' | 'centerOnPage';
+      const allowed: readonly string[] = ARRANGE_VALUES[id as keyof typeof ARRANGE_VALUES];
+      if (!value || !allowed.includes(value)) return false;
+      return arrangeShapes(kind, value);
+    }
     else if (id === 'format.borderWeight') {
       const width = value === '' ? null : Number(value);
       if (width !== null && !(Number.isFinite(width) && width > 0)) return false;
@@ -2395,9 +2999,20 @@ function PptxEditorContent({
         ((id === 'format.bold' && selectionFormatting.bold) ||
           (id === 'format.italic' && selectionFormatting.italic) ||
           (id === 'format.underline' && selectionFormatting.underline) ||
+          (id === 'format.strikethrough' && selectionFormatting.strike) ||
+          (id === 'format.superscript' && selectionFormatting.script === 'super') ||
+          (id === 'format.subscript' && selectionFormatting.script === 'sub') ||
+          (id === 'format.bulletedList' && paragraphState?.list === 'bullet') ||
+          (id === 'format.numberedList' && paragraphState?.list === 'number') ||
+          (id === 'format.spaceBefore' && paragraphState?.spaceBefore) ||
+          (id === 'format.spaceAfter' && paragraphState?.spaceAfter) ||
+          (id in anchorCommands &&
+            anchorCommands[id as keyof typeof anchorCommands] === paragraphState?.anchor) ||
           (id in alignCommands &&
             alignCommands[id as keyof typeof alignCommands] === selectionAlignment)))
     ),
+    lineSpacing: textActive ? (paragraphState?.lineSpacing ?? null) : null,
+    listStyle: textActive ? (paragraphState?.listPreset ?? null) : null,
     zoom: zoom === 'fit' ? 'fit' : String(zoom),
     borderWeight: shapeActive
       ? selectedShapeFormatting.strokeWidthPt == null
@@ -2416,7 +3031,9 @@ function PptxEditorContent({
   }, [commandStateKey]);
 
   const shapeDragDelta =
-    dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
+    dragPreview && shapeSelection && dragPreview.shapeIds.includes(shapeSelection.shapeId)
+      ? dragPreview.delta
+      : null;
   const resizingHandle = resizeRef.current?.handle;
   const resizePreview =
     model?.frame && selectedShape && resizeDelta && resizingHandle
@@ -2428,6 +3045,7 @@ function PptxEditorContent({
           resizeDelta
         )
       : null;
+  const multiBoxes = model?.frame ? shapeBoxes(model.snapshot, model.frame, multiShapes) : [];
   const selectionBox = selectedShapeBounds
     ? resizeDelta && resizingHandle
       ? resizePreview ?? selectedShapeBounds
@@ -2451,6 +3069,10 @@ function PptxEditorContent({
       <div style={singleRowToolbar ? styles.singleRowShell : styles.toolbarShell}>
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
+          // Vertical alignment is a text box's, so a table cell has none.
+          currentParagraph={
+            paragraphState && { ...paragraphState, anchor: anchorTarget ? paragraphState.anchor : undefined }
+          }
           textSelectionActive={textActive}
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
@@ -2614,7 +3236,7 @@ function PptxEditorContent({
           onKeyDown={keyDown}
           onFocus={(event) => {
             setStageFocused(true);
-            if (event.target === event.currentTarget && (selectionRef.current || shapeSelection)) textInputRef.current?.focus({ preventScroll: true });
+            if (event.target === event.currentTarget && (selectionRef.current || shapeSelection || multiSelection)) textInputRef.current?.focus({ preventScroll: true });
           }}
           onBlur={() => setStageFocused(false)}
         >
@@ -2735,6 +3357,23 @@ function PptxEditorContent({
                     +{remoteShapePresence.overflow} selections
                   </span>
                 ) : null}
+                {multiBoxes.map(({ shapeId, bounds }) => {
+                  const delta = dragPreview?.shapeIds.includes(shapeId) ? dragPreview.delta : null;
+                  return (
+                    <span
+                      key={shapeId}
+                      data-testid="pptx-multi-selection"
+                      style={{
+                        ...styles.shapeSelection,
+                        left: (bounds.x + (delta?.x ?? 0)) * scale,
+                        top: (bounds.y + (delta?.y ?? 0)) * scale,
+                        width: Math.max(1, bounds.width * scale),
+                        height: Math.max(1, bounds.height * scale),
+                      }}
+                      aria-hidden="true"
+                    />
+                  );
+                })}
                 {selectionBox ? (
                   <>
                     <span
@@ -3138,10 +3777,44 @@ function selectionFormattingFromStyle(style: EffectiveTextStyle): SelectionForma
     bold: style.bold,
     italic: style.italic,
     underline: style.underline !== 'none',
+    strike: style.strike === 'sngStrike' || style.strike === 'dblStrike',
+    script: !style.baselinePct ? null : style.baselinePct > 0 ? 'super' : 'sub',
     fontSize: style.fontSizePt,
     textColor: style.color,
+    highlight: style.highlight,
     fontFamily: style.fontFamily,
   };
+}
+
+/** The paragraph the caret is in when that paragraph is empty: the one layout
+ *  draws a list marker for while it would otherwise show none. */
+function emptyCaretParagraph(
+  handle: PresentationHandle,
+  selection: PptxTextSelection | null
+): { storyId: string; paragraph: number } | null {
+  if (!selection || selection.anchor !== selection.focus) return null;
+  const ranges = storyTextRanges(handle.story(selection.storyId));
+  const paragraph = ranges.findIndex(
+    (range) => selection.focus >= range.start && selection.focus <= range.end
+  );
+  return paragraph >= 0 && ranges[paragraph].start === ranges[paragraph].end
+    ? { storyId: selection.storyId, paragraph }
+    : null;
+}
+
+function shapeBoxes(
+  deck: DeckSnapshot,
+  frame: SlideDisplayList,
+  shapes: readonly ShapeSnapshot[]
+): Array<{ shapeId: string; bounds: FrameBounds }> {
+  return shapes.flatMap((shape) => {
+    const bounds = frameBoundsForShape(deck, frame, shape);
+    return bounds ? [{ shapeId: shape.id, bounds }] : [];
+  });
+}
+
+function caretKey(caret: { storyId: string; paragraph: number } | null): string | null {
+  return caret ? `${caret.storyId}\u0000${caret.paragraph}` : null;
 }
 
 async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<FontFace[]> {

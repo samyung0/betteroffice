@@ -1,8 +1,16 @@
 import { Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import type { ParagraphAlignment } from '@betteroffice/pptx';
+import type { ParagraphAlignment, TextAnchorValue } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { useTranslation } from '../i18n';
+import {
+  BULLET_PRESETS,
+  NUMBER_PRESETS,
+  presetLabel,
+  type ListKind,
+  type ListPresetId,
+  type ParagraphFormatting,
+} from '../paragraphFormatting';
 import { EditorToolbarContext } from './EditorToolbarContext';
 import { ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
@@ -15,6 +23,7 @@ import {
   ToolbarGroup,
   ToolbarMenuItem,
   ToolbarMenuLabel,
+  ToolbarMenuSeparator,
   ToolbarSeparator,
   toolbarColors,
 } from './ui/ToolbarPrimitives';
@@ -49,7 +58,12 @@ export interface SelectionFormatting {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strike?: boolean;
+  /** Superscript or subscript; null for neither, undefined for mixed. */
+  script?: 'super' | 'sub' | null;
   textColor?: string;
+  /** null: no highlight; undefined: mixed. */
+  highlight?: string | null;
   align?: ParagraphAlignment;
 }
 
@@ -57,10 +71,20 @@ export type FormattingAction =
   | 'bold'
   | 'italic'
   | 'underline'
+  | 'strikethrough'
+  | 'clearFormatting'
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
   | { type: 'textColor'; value: string }
-  | { type: 'align'; value: ParagraphAlignment };
+  | { type: 'highlight'; value: string | null }
+  | { type: 'align'; value: ParagraphAlignment }
+  | { type: 'verticalAlign'; value: TextAnchorValue }
+  /** Without a style, toggles the list kind. */
+  | { type: 'list'; kind: ListKind; preset?: ListPresetId }
+  | { type: 'indent'; delta: 1 | -1 }
+  | { type: 'lineSpacing'; value: string }
+  | { type: 'spaceBefore' }
+  | { type: 'spaceAfter' };
 
 export interface ShapeFormatting {
   geometry?: string;
@@ -86,6 +110,8 @@ export interface SlideLayoutOption {
 
 export interface ToolbarProps {
   currentFormatting?: SelectionFormatting;
+  /** The touched paragraphs' lists, spacing and the text box's anchor. */
+  currentParagraph?: ParagraphFormatting;
   textSelectionActive?: boolean;
   onFormat?: (action: FormattingAction) => void;
   currentShapeFormatting?: ShapeFormatting;
@@ -141,7 +167,24 @@ const DEFAULT_FONT_FAMILIES = [
   'Times New Roman',
   'Verdana',
 ] as const;
-const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
+export const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
+const VERTICAL_ALIGNMENTS = [
+  { value: 't', icon: 'alignTop', labelKey: 'toolbar.align.top', testId: 'top' },
+  { value: 'ctr', icon: 'alignMiddle', labelKey: 'toolbar.align.middle', testId: 'middle' },
+  { value: 'b', icon: 'alignBottom', labelKey: 'toolbar.align.bottom', testId: 'bottom' },
+] as const satisfies ReadonlyArray<{
+  value: TextAnchorValue;
+  icon: ToolbarIconName;
+  labelKey: TranslationKey;
+  testId: string;
+}>;
+/** Google Slides' line spacings, as shares of single. */
+export const LINE_SPACINGS = [
+  { value: '1', labelKey: 'toolbar.lineSpacing.single' },
+  { value: '1.15', label: '1.15' },
+  { value: '1.5', label: '1.5' },
+  { value: '2', labelKey: 'toolbar.lineSpacing.double' },
+] as const satisfies ReadonlyArray<{ value: string; labelKey?: TranslationKey; label?: string }>;
 const ALIGNMENTS = [
   { value: 'l', icon: 'alignLeft', labelKey: 'toolbar.align.left', testId: 'left' },
   { value: 'ctr', icon: 'alignCenter', labelKey: 'toolbar.align.center', testId: 'center' },
@@ -190,7 +233,7 @@ function EdgeFade({ side, visible }: { side: 'start' | 'end'; visible: boolean }
   );
 }
 
-function nextFontSize(value: number, sizes: readonly number[], direction: -1 | 1): number {
+export function nextFontSize(value: number, sizes: readonly number[], direction: -1 | 1): number {
   if (direction > 0) return sizes.find((size) => size > value) ?? value + 1;
   return [...sizes].reverse().find((size) => size < value) ?? Math.max(1, value - 1);
 }
@@ -209,6 +252,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const { t } = useTranslation();
   const {
     currentFormatting = {},
+    currentParagraph,
     textSelectionActive = false,
     onFormat,
     currentShapeFormatting = {},
@@ -619,6 +663,17 @@ export function Toolbar(explicitProps: ToolbarProps) {
         onChange={(value) => apply({ type: 'textColor', value })}
         testId="pptx-text-color"
       />
+      <ColorPicker
+        value={currentFormatting.highlight ?? '#fde047'}
+        label={t('toolbar.highlightColor')}
+        clearLabel={t('toolbar.noHighlight')}
+        icon="highlight"
+        none={!currentFormatting.highlight}
+        disabled={!formattingEnabled}
+        onChange={(value) => apply({ type: 'highlight', value })}
+        onClear={() => apply({ type: 'highlight', value: null })}
+        testId="pptx-highlight-color"
+      />
     </>
   );
 
@@ -670,9 +725,148 @@ export function Toolbar(explicitProps: ToolbarProps) {
               <ToolbarIcon name={alignment.icon} />
             </ToolbarButton>
           ))}
+          {/* Google Slides' align popover holds the text box's vertical
+              alignment too, after the horizontal one. */}
+          <ToolbarSeparator style={{ width: 'auto', height: 1, margin: 0 }} />
+          {VERTICAL_ALIGNMENTS.map((alignment) => (
+            <ToolbarButton
+              key={alignment.value}
+              title={t(alignment.labelKey)}
+              active={currentParagraph?.anchor === alignment.value}
+              disabled={!currentParagraph?.anchor}
+              onClick={() => {
+                apply({ type: 'verticalAlign', value: alignment.value });
+                close();
+              }}
+              testId={`pptx-align-${alignment.testId}`}
+              inMenu
+            >
+              <ToolbarIcon name={alignment.icon} />
+            </ToolbarButton>
+          ))}
         </div>
       )}
     </ToolbarDropdown>
+  );
+
+  const lineSpacingDropdown = (
+    <ToolbarDropdown
+      title={t('toolbar.lineSpacing.label')}
+      disabled={!formattingEnabled}
+      menuWidth={240}
+      testId="pptx-line-spacing"
+      trigger={<ToolbarIcon name="lineSpacing" />}
+    >
+      {(close) => (
+        <>
+          {LINE_SPACINGS.map((spacing) => (
+            <ToolbarMenuItem
+              key={spacing.value}
+              label={'labelKey' in spacing ? t(spacing.labelKey) : spacing.label}
+              selected={currentParagraph?.lineSpacing === spacing.value}
+              onClick={() => apply({ type: 'lineSpacing', value: spacing.value })}
+              close={close}
+            />
+          ))}
+          <ToolbarMenuSeparator />
+          <ToolbarMenuItem
+            label={t(
+              currentParagraph?.spaceBefore
+                ? 'toolbar.lineSpacing.removeSpaceBefore'
+                : 'toolbar.lineSpacing.addSpaceBefore'
+            )}
+            onClick={() => apply({ type: 'spaceBefore' })}
+            close={close}
+          />
+          <ToolbarMenuItem
+            label={t(
+              currentParagraph?.spaceAfter
+                ? 'toolbar.lineSpacing.removeSpaceAfter'
+                : 'toolbar.lineSpacing.addSpaceAfter'
+            )}
+            onClick={() => apply({ type: 'spaceAfter' })}
+            close={close}
+          />
+        </>
+      )}
+    </ToolbarDropdown>
+  );
+
+  const listButton = (kind: ListKind) => {
+    const bullets = kind === 'bullet';
+    const presets = bullets ? BULLET_PRESETS : NUMBER_PRESETS;
+    const label = t(bullets ? 'toolbar.bulletedList' : 'toolbar.numberedList');
+    return (
+      <>
+        <ToolbarButton
+          title={label}
+          active={currentParagraph?.list === kind}
+          disabled={!formattingEnabled}
+          onClick={() => apply({ type: 'list', kind })}
+          testId={`pptx-${bullets ? 'bulleted' : 'numbered'}-list`}
+        >
+          <ToolbarIcon name={bullets ? 'bulletedList' : 'numberedList'} />
+        </ToolbarButton>
+        <ToolbarDropdown
+          title={t(bullets ? 'toolbar.bulletStyles' : 'toolbar.numberingStyles')}
+          disabled={!formattingEnabled}
+          menuWidth={150}
+          testId={`pptx-${bullets ? 'bulleted' : 'numbered'}-list-styles`}
+          style={{ minWidth: 16, width: 16, padding: 0 }}
+          trigger={<ToolbarIcon name="chevronDown" size={13} />}
+        >
+          {(close) => (
+            <>
+              {presets.map((preset) => (
+                <ToolbarMenuItem
+                  key={preset.id}
+                  label={presetLabel(preset.id)}
+                  selected={
+                    currentParagraph?.list === kind && currentParagraph.listPreset === preset.id
+                  }
+                  onClick={() => apply({ type: 'list', kind, preset: preset.id })}
+                  close={close}
+                />
+              ))}
+            </>
+          )}
+        </ToolbarDropdown>
+      </>
+    );
+  };
+
+  const listButtons = (
+    <>
+      {listButton('bullet')}
+      {listButton('number')}
+      <ToolbarButton
+        title={t('toolbar.decreaseIndent')}
+        disabled={!formattingEnabled || !currentParagraph?.canOutdent}
+        onClick={() => apply({ type: 'indent', delta: -1 })}
+        testId="pptx-decrease-indent"
+      >
+        <ToolbarIcon name="indentDecrease" />
+      </ToolbarButton>
+      <ToolbarButton
+        title={t('toolbar.increaseIndent')}
+        disabled={!formattingEnabled || currentParagraph?.canIndent === false}
+        onClick={() => apply({ type: 'indent', delta: 1 })}
+        testId="pptx-increase-indent"
+      >
+        <ToolbarIcon name="indentIncrease" />
+      </ToolbarButton>
+    </>
+  );
+
+  const clearButton = (
+    <ToolbarButton
+      title={t('toolbar.clearFormatting')}
+      disabled={!formattingEnabled}
+      onClick={() => apply('clearFormatting')}
+      testId="pptx-clear-formatting"
+    >
+      <ToolbarIcon name="clearFormatting" />
+    </ToolbarButton>
   );
 
   const shapeControls = (
@@ -825,7 +1019,18 @@ export function Toolbar(explicitProps: ToolbarProps) {
           ),
         },
       textActive && { key: 'text', label: t('toolbar.groups.text'), node: textButtons },
-      textActive && { key: 'align', label: t('toolbar.groups.alignment'), node: alignDropdown },
+      textActive && {
+        key: 'align',
+        label: t('toolbar.groups.alignment'),
+        node: (
+          <>
+            {alignDropdown}
+            {lineSpacingDropdown}
+          </>
+        ),
+      },
+      textActive && { key: 'lists', label: t('toolbar.groups.lists'), node: listButtons },
+      textActive && { key: 'clear', label: t('toolbar.clearFormatting'), node: clearButton },
       shapeActive && { key: 'shape', label: t('toolbar.groups.shape'), node: shapeControls },
       Boolean(children) && { key: 'custom', label: t('toolbar.more'), node: children },
     ];
@@ -924,7 +1129,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
     {
       key: 'text',
-      width: 133,
+      width: 166,
       node: (
         <>
           <ToolbarSeparator />
@@ -934,11 +1139,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
     {
       key: 'align',
-      width: 126,
+      width: 159,
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.alignment')}>{alignButtons}</ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.alignment')}>
+            {alignButtons}
+            {lineSpacingDropdown}
+          </ToolbarGroup>
         </>
       ),
     },
@@ -957,6 +1165,30 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
   ];
 
+  // The rail keeps its first sections inline; lists and clear formatting
+  // overflow into More before them.
+  sections.push(
+    {
+      key: 'lists',
+      width: 145,
+      node: (
+        <>
+          <ToolbarSeparator />
+          <ToolbarGroup label={t('toolbar.groups.lists')}>{listButtons}</ToolbarGroup>
+        </>
+      ),
+    },
+    {
+      key: 'clear',
+      width: 44,
+      node: (
+        <>
+          <ToolbarSeparator />
+          <ToolbarGroup label={t('toolbar.clearFormatting')}>{clearButton}</ToolbarGroup>
+        </>
+      ),
+    }
+  );
   if (children) sections.push({ key: 'custom', width: 40, node: children });
 
   const availableWidth = Math.max(0, rootWidth - 48);

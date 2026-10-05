@@ -13,6 +13,14 @@ export {
   type PptxCommandId,
   type PptxCommandState,
 } from './commands';
+export {
+  BULLET_PRESETS,
+  NUMBER_PRESETS,
+  presetLabel,
+  type BulletPresetId,
+  type ListPresetId,
+  type NumberPresetId,
+} from './paragraphFormatting';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
   Toolbar,

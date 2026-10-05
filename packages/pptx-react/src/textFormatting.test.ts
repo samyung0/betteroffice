@@ -6,15 +6,20 @@ import {
   selectionFormattingFromStory,
   storyFormattingFromStory,
   storyTextRanges,
+  typingStyle,
 } from './textFormatting';
+import type { EffectiveTextStyle } from './textFormatting';
 
-const fallback = {
+const fallback: EffectiveTextStyle = {
   bold: false,
   italic: false,
   underline: 'none',
   fontSizePt: 24,
   color: '#111827',
   fontFamily: 'Arial',
+  strike: null,
+  highlight: null,
+  baselinePct: null,
 };
 
 describe('pptx text formatting', () => {
@@ -24,8 +29,11 @@ describe('pptx text formatting', () => {
       bold: true,
       italic: false,
       underline: true,
+      strike: false,
+      script: null,
       fontSize: 28,
       textColor: '#325ee6',
+      highlight: null,
       fontFamily: 'Aptos',
     });
   });
@@ -42,9 +50,48 @@ describe('pptx text formatting', () => {
       bold: undefined,
       italic: false,
       underline: undefined,
+      strike: false,
+      script: null,
       fontSize: undefined,
       textColor: undefined,
+      highlight: null,
       fontFamily: undefined,
+    });
+  });
+
+  it('reads strikethrough, highlight and script, and types with them', () => {
+    const marked = story();
+    marked.paragraphs[0].runs[1].style = {
+      ...marked.paragraphs[0].runs[1].style,
+      strike: 'sngStrike',
+      highlight: '#fde047',
+      baselinePct: 30,
+    };
+    expect(selectionFormattingFromStory(marked, 7, 7, fallback)).toMatchObject({
+      strike: true,
+      script: 'super',
+      highlight: '#fde047',
+    });
+    // Over the plain and the marked run, the values are mixed.
+    expect(selectionFormattingFromStory(marked, 0, 10, fallback)).toMatchObject({
+      strike: undefined,
+      script: undefined,
+      highlight: undefined,
+    });
+    const caret = effectiveStyleFromSelection(marked, 7, 7, fallback);
+    expect(typingStyle(caret)).toMatchObject({
+      strike: 'sngStrike',
+      highlight: '#fde047',
+      baselinePct: 30,
+    });
+    // Unset attributes stay out of the style typed text is written with.
+    expect(typingStyle(fallback)).toEqual({
+      bold: false,
+      italic: false,
+      underline: 'none',
+      fontSizePt: 24,
+      color: '#111827',
+      fontFamily: 'Arial',
     });
   });
 

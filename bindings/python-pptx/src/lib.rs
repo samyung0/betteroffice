@@ -205,6 +205,8 @@ fn text_style(
         spacing_pt: None,
         baseline_pct: None,
         caps: None,
+        strike: None,
+        highlight: None,
     }
 }
 
@@ -218,6 +220,8 @@ fn text_style_patch(style: TextStyle) -> TextStylePatch {
         underline: style.underline,
         spacing_pt: style.spacing_pt,
         baseline_pct: style.baseline_pct,
+        strike: style.strike,
+        highlight: style.highlight,
     }
 }
 

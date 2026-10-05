@@ -13,6 +13,27 @@
     "italic": null,
     "fontSize": null,
     "textColor": null,
+    "highlightColor": null,
+    "noHighlight": null,
+    "strikethrough": null,
+    "superscript": null,
+    "subscript": null,
+    "bulletedList": null,
+    "numberedList": null,
+    "bulletStyles": null,
+    "numberingStyles": null,
+    "decreaseIndent": null,
+    "increaseIndent": null,
+    "clearFormatting": null,
+    "lineSpacing": {
+      "label": null,
+      "single": null,
+      "double": null,
+      "addSpaceBefore": null,
+      "removeSpaceBefore": null,
+      "addSpaceAfter": null,
+      "removeSpaceAfter": null
+    },
     "slidesLabel": null,
     "addSlide": null,
     "deleteSlide": null,
@@ -27,13 +48,17 @@
       "font": null,
       "text": null,
       "shape": null,
-      "alignment": "Alignement"
+      "alignment": "Alignement",
+      "lists": null
     },
     "align": {
       "left": "Aligner à gauche",
       "center": "Centrer",
       "right": "Aligner à droite",
-      "justify": "Justifier"
+      "justify": "Justifier",
+      "top": null,
+      "middle": null,
+      "bottom": null
     },
     "newSlide": null,
     "newSlideWithLayout": null,

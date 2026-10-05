@@ -23,10 +23,20 @@ export const TOOLBAR_ICON_NAMES = [
   'italic',
   'underline',
   'textColor',
+  'highlight',
   'alignLeft',
   'alignCenter',
   'alignRight',
   'alignJustify',
+  'alignTop',
+  'alignMiddle',
+  'alignBottom',
+  'lineSpacing',
+  'bulletedList',
+  'numberedList',
+  'indentDecrease',
+  'indentIncrease',
+  'clearFormatting',
   'more',
   'chevronDown',
   'remove',
@@ -195,6 +205,33 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       {name === 'alignCenter' && <path d="M4 6h16M7 10h10M4 14h16M7 18h10" />}
       {name === 'alignRight' && <path d="M4 6h16M10 10h10M4 14h16M10 18h10" />}
       {name === 'alignJustify' && <path d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
+      {name === 'highlight' && (
+        <>
+          <path d="m8 14 7-9 3 2.5-6 9.5Z" />
+          <path d="m8 14-1.5 3h3.5l2-1" />
+          <path d="M5 20h14" strokeWidth="3" />
+        </>
+      )}
+      {name === 'alignTop' && <path d="M4 4h16M12 20V8m-4 4 4-4 4 4" />}
+      {name === 'alignMiddle' && <path d="M4 12h16M12 3v5m-3-2 3 2 3-2M12 21v-5m-3 2 3-2 3 2" />}
+      {name === 'alignBottom' && <path d="M4 20h16M12 4v12m-4-4 4 4 4-4" />}
+      {name === 'lineSpacing' && (
+        <path d="M11 6h9M11 12h9M11 18h9M6 5v14M3.5 7.5 6 5l2.5 2.5M3.5 16.5 6 19l2.5-2.5" />
+      )}
+      {name === 'bulletedList' && (
+        <>
+          <path d="M9 6h11M9 12h11M9 18h11" />
+          <circle cx="4.5" cy="6" r="1" fill="currentColor" />
+          <circle cx="4.5" cy="12" r="1" fill="currentColor" />
+          <circle cx="4.5" cy="18" r="1" fill="currentColor" />
+        </>
+      )}
+      {name === 'numberedList' && (
+        <path d="M10 6h10M10 12h10M10 18h10M4 4.5 5.5 4v4M4 10.5a1.5 1.5 0 0 1 3 0c0 1.5-3 2-3 3.5h3M4 16h3l-1.5 1.5a1.5 1.5 0 1 1-1.5 2" />
+      )}
+      {name === 'indentDecrease' && <path d="M4 5h16M11 10h9M11 14h9M4 19h16M7 9.5 4.5 12 7 14.5" />}
+      {name === 'indentIncrease' && <path d="M4 5h16M11 10h9M11 14h9M4 19h16M4.5 9.5 7 12l-2.5 2.5" />}
+      {name === 'clearFormatting' && <path d="M5 6h12M11 6l-3 13M15 13l5 5m0-5-5 5" />}
       {name === 'more' && (
         <>
           <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />

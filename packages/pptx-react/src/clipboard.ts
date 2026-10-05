@@ -41,6 +41,15 @@ export function shapeClipboard(shape: ShapeSnapshot): ClipboardText {
   };
 }
 
+/** Several objects' text, one after another as their shapes' lines. */
+export function joinedClipboard(parts: ClipboardText[]): ClipboardText {
+  const kept = parts.filter((part) => part.text);
+  return {
+    text: kept.map((part) => part.text).join('\n'),
+    html: kept.map((part) => part.html).join(''),
+  };
+}
+
 function shapeStories(shape: ShapeSnapshot): StorySnapshot[] {
   return shape.hidden ? [] : [...shape.textStories, ...shape.children.flatMap(shapeStories)];
 }

@@ -13,6 +13,27 @@
     "italic": "Italic",
     "fontSize": "Font size",
     "textColor": "Text color",
+    "highlightColor": "Highlight color",
+    "noHighlight": "None",
+    "strikethrough": "Strikethrough",
+    "superscript": "Superscript",
+    "subscript": "Subscript",
+    "bulletedList": "Bulleted list",
+    "numberedList": "Numbered list",
+    "bulletStyles": "Bullet styles",
+    "numberingStyles": "Numbering styles",
+    "decreaseIndent": "Decrease indent",
+    "increaseIndent": "Increase indent",
+    "clearFormatting": "Clear formatting",
+    "lineSpacing": {
+      "label": "Line & paragraph spacing",
+      "single": "Single",
+      "double": "Double",
+      "addSpaceBefore": "Add space before paragraph",
+      "removeSpaceBefore": "Remove space before paragraph",
+      "addSpaceAfter": "Add space after paragraph",
+      "removeSpaceAfter": "Remove space after paragraph"
+    },
     "slidesLabel": "Slides",
     "addSlide": "Add slide",
     "deleteSlide": "Delete slide",
@@ -28,13 +49,17 @@
       "font": "Font",
       "text": "Text formatting",
       "shape": "Shape formatting",
-      "alignment": "Alignment"
+      "alignment": "Alignment",
+      "lists": "Lists"
     },
     "align": {
       "left": "Align Left",
       "center": "Center",
       "right": "Align Right",
-      "justify": "Justify"
+      "justify": "Justify",
+      "top": "Top",
+      "middle": "Middle",
+      "bottom": "Bottom"
     },
     "newSlide": "New slide",
     "newSlideWithLayout": "New slide with layout",

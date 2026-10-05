@@ -2,6 +2,8 @@ import type {
   ParagraphAlignment,
   StorySnapshot,
   TextBoxPrimitive,
+  TextStrike,
+  TextStyle,
   TextStyleSnapshot,
 } from '@betteroffice/pptx';
 import type { SelectionFormatting } from './components/Toolbar';
@@ -13,6 +15,21 @@ export interface EffectiveTextStyle {
   fontSizePt: number;
   color: string;
   fontFamily: string;
+  /** null: the run sets none. */
+  strike: TextStrike | null;
+  highlight: string | null;
+  baselinePct: number | null;
+}
+
+/** The style typed text takes: `style` without the attributes it leaves unset. */
+export function typingStyle(style: EffectiveTextStyle): TextStyle {
+  const { strike, highlight, baselinePct, ...rest } = style;
+  return {
+    ...rest,
+    ...(strike ? { strike } : {}),
+    ...(highlight ? { highlight } : {}),
+    ...(baselinePct ? { baselinePct } : {}),
+  };
 }
 
 interface StyledSpan {
@@ -29,12 +46,18 @@ export function selectionFormattingFromStory(
 ): SelectionFormatting {
   const styles = selectedStyles(story, anchor, focus, fallback);
   const underline = commonValue(styles, 'underline');
+  const strike = commonValue(styles, 'strike');
+  const baseline = commonValue(styles, 'baselinePct');
   return {
     bold: commonValue(styles, 'bold'),
     italic: commonValue(styles, 'italic'),
     underline: underline === undefined ? undefined : underline !== 'none',
+    strike: strike === undefined ? undefined : strike === 'sngStrike' || strike === 'dblStrike',
+    script:
+      baseline === undefined ? undefined : !baseline ? null : baseline > 0 ? 'super' : 'sub',
     fontSize: commonValue(styles, 'fontSizePt'),
     textColor: commonValue(styles, 'color'),
+    highlight: commonValue(styles, 'highlight'),
     fontFamily: commonValue(styles, 'fontFamily'),
   };
 }
@@ -130,6 +153,10 @@ export function effectiveStyleFromSelection(
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
+    // Typing continues the run's strike, highlight and script, as PowerPoint.
+    strike: commonValue(selectedStyles(story, anchor, focus, fallback), 'strike') ?? null,
+    highlight: formatting.highlight ?? null,
+    baselinePct: commonValue(selectedStyles(story, anchor, focus, fallback), 'baselinePct') ?? null,
   };
 }
 
@@ -188,6 +215,9 @@ function resolveTextStyle(
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,
+    strike: style.strike ?? fallback.strike,
+    highlight: style.highlight ?? fallback.highlight,
+    baselinePct: style.baselinePct ?? fallback.baselinePct,
   };
 }
 

@@ -13,6 +13,27 @@
     "italic": "倾斜",
     "fontSize": "字号",
     "textColor": "字体颜色",
+    "highlightColor": "突出显示颜色",
+    "noHighlight": "无",
+    "strikethrough": "删除线",
+    "superscript": "上标",
+    "subscript": "下标",
+    "bulletedList": "项目符号列表",
+    "numberedList": "编号列表",
+    "bulletStyles": "项目符号样式",
+    "numberingStyles": "编号样式",
+    "decreaseIndent": "减少缩进",
+    "increaseIndent": "增加缩进",
+    "clearFormatting": "清除格式",
+    "lineSpacing": {
+      "label": "行距和段落间距",
+      "single": "单倍",
+      "double": "双倍",
+      "addSpaceBefore": "增加段前间距",
+      "removeSpaceBefore": "移除段前间距",
+      "addSpaceAfter": "增加段后间距",
+      "removeSpaceAfter": "移除段后间距"
+    },
     "slidesLabel": "幻灯片",
     "addSlide": "添加幻灯片",
     "deleteSlide": "删除幻灯片",
@@ -27,13 +48,17 @@
       "font": "字体",
       "text": "文本格式",
       "shape": "形状格式",
-      "alignment": "对齐"
+      "alignment": "对齐",
+      "lists": "列表"
     },
     "align": {
       "left": "左对齐",
       "center": "居中",
       "right": "右对齐",
-      "justify": "两端对齐"
+      "justify": "两端对齐",
+      "top": "顶部",
+      "middle": "中间",
+      "bottom": "底部"
     },
     "newSlide": "新建幻灯片",
     "newSlideWithLayout": "使用版式新建幻灯片",
