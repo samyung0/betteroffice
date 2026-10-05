@@ -366,8 +366,9 @@ fn cell_preferred_px(cell: &crate::types::TableCell, parent_width: f64) -> Optio
     )
 }
 
-/// What Word's AutoFit Contents leaves: no fixed layout and no preferred
-/// width on the table or any cell, so Word sizes every column from content.
+/// What Word's AutoFit Contents leaves: no fixed layout, no preferred table
+/// width and every cell's `w:tcW` explicitly `auto`, so Word sizes every
+/// column from content. (Cells that state no width at all keep the grid.)
 pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
     !table_block.rows.is_empty()
         && !fixed_layout(table_block)
@@ -383,7 +384,10 @@ pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
             .rows
             .iter()
             .flat_map(|row| &row.cells)
-            .all(|cell| cell_preferred_px(cell, content_width).is_none())
+            .all(|cell| {
+                cell.width_type.as_deref() == Some("auto")
+                    && cell_preferred_px(cell, content_width).is_none()
+            })
 }
 
 /// A `w:noWrap` cell whose text is one unbreakable line (ECMA-376 §17.4.30):
