@@ -1,5 +1,6 @@
 import { createHash, randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import * as Y from "yjs";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { yrsToDocument } from "../packages/docx/src/yrs/yrsToDocument";
 import { preloadEditWasm } from "../packages/docx/src/wasm/edit";
@@ -156,9 +157,13 @@ interface Session {
   exportBytes(determinism: ExportDeterminism): Promise<Uint8Array>;
   /** XLSX only: net effects read off the overrides. */
   effects?(): NetEffect[];
+  /** XLSX only: apply a later state of the same document (see replicas below). */
+  advance?(state: Uint8Array): void;
   dispose(): void;
 }
 const initialized = new Map<OfficeFormat | "opc", Promise<void>>();
+/** The XLSX engine's linear memory, where replicas live (officeReplicaStats). */
+let xlsxMemory: WebAssembly.Memory | undefined;
 const assetPaths = {
   docx: "./office-runtime/docx.wasm",
   parse: "./office-runtime/parse.wasm",
@@ -183,7 +188,9 @@ function initialize(format: OfficeFormat | "opc"): Promise<void> {
       } else if (format === "opc")
         await preloadOpcWasm(await bytesAt(assetPaths.opc));
       else if (format === "xlsx")
-        await initXlsx({ module_or_path: await bytesAt(assetPaths.xlsx) });
+        xlsxMemory = (
+          await initXlsx({ module_or_path: await bytesAt(assetPaths.xlsx) })
+        ).memory;
       else await initPptx({ module_or_path: await bytesAt(assetPaths.pptx) });
     })();
     initialized.set(format, ready);
@@ -848,11 +855,11 @@ function a1(cell: string): { row: number; col: number; address: string } {
     throw new OfficeEditError("invalid_input", "cell must be an A1 address");
   return { row: row - 1, col: col - 1, address: `${letters}${row}` };
 }
-async function open(
+function assertCheckpoint(
   format: OfficeFormat,
   baseBytes: Uint8Array,
   checkpoint?: OfficeCheckpoint
-): Promise<Session> {
+) {
   if (!["docx", "xlsx", "pptx"].includes(format))
     throw new TypeError("Unsupported Office format");
   if (!(baseBytes instanceof Uint8Array) || !baseBytes.length)
@@ -868,6 +875,13 @@ async function open(
     throw new Error(
       "Office checkpoint does not match the exact base package and schema"
     );
+}
+async function open(
+  format: OfficeFormat,
+  baseBytes: Uint8Array,
+  checkpoint?: OfficeCheckpoint
+): Promise<Session> {
+  assertCheckpoint(format, baseBytes, checkpoint);
   await initialize(format);
   const clientId = randomInt(1, 0x1fffffffffff);
   if (format === "docx") {
@@ -1060,6 +1074,9 @@ async function open(
         exportBytes: async (determinism) =>
           doc.saveBytesAt(Date.parse(determinism.now) / 86_400_000 + 25569),
         effects: () => JSON.parse(doc.pendingEffectsJson()) as NetEffect[],
+        advance: (state) => {
+          doc.applyUpdateJson(state);
+        },
         dispose: () => doc.free(),
       };
     } catch (error) {
@@ -1136,6 +1153,258 @@ async function open(
 }
 function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return Uint8Array.from(bytes).buffer;
+}
+
+/*
+ * Replicas: an XLSX room's opened source with its last state applied, kept
+ * between calls so a save's pending effects do not reopen the workbook. An
+ * open parses and recalculates the whole workbook, which was most of the
+ * engine worker's time in the 2026-10-05 capacity run.
+ *
+ * A replica only ever holds open(base) plus the states applied to it, and it
+ * is reused only for a state that contains everything already applied (every
+ * struct and every deletion). That later state is applied as an update, so
+ * the replica then holds exactly open(base) + that state, as a fresh open
+ * would. A state that does not contain it (a discarded save, a reload from an
+ * older checkpoint) reopens instead. Only xlsxPendingEffects takes a room;
+ * edits, inspection, exports and rebases always open their own session. A
+ * call that fails drops its room's replica. Under the budget, a new replica
+ * pushes out the least recently used ones only once they have been idle for
+ * REPLICA_IDLE_MS; otherwise it is not kept.
+ *
+ * DOCX and PPTX keep none. A DOCX open is a small part of its baseline next
+ * to the projection. A PPTX replica saved about 0.3 s per save of the 24 MB
+ * deck on the production box while holding about 90 MB, and under a shared
+ * budget PPTX replicas pushed out the XLSX ones, which save about 6 s each.
+ */
+interface Replica {
+  baseSha256: string;
+  session: Session;
+  applied: AppliedState;
+  bytes: number;
+  /** performance.now() of its last use. */
+  usedAt: number;
+}
+/** What a state holds: struct ranges per client and the deletions. */
+interface AppliedState {
+  ranges: Map<number, Array<[number, number]>>;
+  deletes: Y.DeleteSet;
+}
+// Map order is recency: the first entry is the least recently used.
+const replicas = new Map<string, Replica>();
+let replicaBudget = 0;
+let replicaBytes = 0;
+const replicaCounts = { hits: 0, misses: 0, evictions: 0 };
+/**
+ * WASM heap an XLSX replica holds per byte of its unzipped package, measured
+ * as linear memory growth per replica kept (2026-10-05, the pinned engine):
+ * 15.6× for course-guide.xlsx and 19.6× for the 16,000-row gradebook,
+ * rounded up.
+ */
+const XLSX_HEAP_PER_UNZIPPED_BYTE = 20;
+/**
+ * How long a replica must have gone unused before a new one may push it
+ * out. A room being edited saves every 30 s at most (Capy's longest source
+ * save debounce) plus its wait in the engine queue, so a replica idle this
+ * long belongs to a room nobody edits, or to a worker already saturated.
+ * Without it, rooms that save in turn and need more than the budget push
+ * out each replica just before its next use and every save misses (measured
+ * at 30 rooms: no hits at all).
+ */
+const REPLICA_IDLE_MS = 120_000;
+
+/**
+ * Turns replicas on with a budget in estimated WASM heap bytes (0 turns them
+ * off and drops every replica). The host picks the budget; there is none by
+ * default.
+ */
+export function configureOfficeReplicas(budgetBytes: number) {
+  if (!Number.isSafeInteger(budgetBytes) || budgetBytes < 0)
+    throw new TypeError("Expected a nonnegative replica budget in bytes");
+  replicaBudget = budgetBytes;
+  evictReplicas();
+}
+/** Drops a room's replica (the room unloaded). */
+export function dropOfficeReplica(room: string) {
+  const replica = replicas.get(room);
+  if (!replica) return;
+  replicas.delete(room);
+  replicaBytes -= replica.bytes;
+  replica.session.dispose();
+}
+export function officeReplicaStats() {
+  return {
+    replicas: replicas.size,
+    replicaBytes,
+    ...replicaCounts,
+    wasmBytes: xlsxMemory?.buffer.byteLength ?? 0,
+  };
+}
+/**
+ * Drops least recently used replicas until `needed` more bytes fit; with
+ * `idleMs`, only those unused for that long. Returns whether they fit.
+ */
+function evictReplicas(needed = 0, idleMs?: number) {
+  const now = performance.now();
+  for (const [room, replica] of replicas) {
+    if (replicaBytes + needed <= replicaBudget) break;
+    if (idleMs !== undefined && now - replica.usedAt < idleMs) break;
+    dropOfficeReplica(room);
+    replicaCounts.evictions += 1;
+  }
+  return replicaBytes + needed <= replicaBudget;
+}
+
+/** Sum of the ZIP entries' uncompressed sizes; undefined for ZIP64 or a damaged directory. */
+function unzippedBytes(bytes: Uint8Array): number | undefined {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // The end-of-central-directory record: 22 bytes plus a comment of up to 64 KiB.
+  for (
+    let end = bytes.length - 22;
+    end >= Math.max(0, bytes.length - 22 - 0xffff);
+    end--
+  ) {
+    if (view.getUint32(end, true) !== 0x06054b50) continue;
+    const count = view.getUint16(end + 10, true);
+    let at = view.getUint32(end + 16, true);
+    if (count === 0xffff || at === 0xffffffff) return undefined;
+    let total = 0;
+    for (let index = 0; index < count; index++) {
+      if (at + 46 > bytes.length || view.getUint32(at, true) !== 0x02014b50)
+        return undefined;
+      const size = view.getUint32(at + 24, true);
+      if (size === 0xffffffff) return undefined;
+      total += size;
+      at +=
+        46 +
+        view.getUint16(at + 28, true) +
+        view.getUint16(at + 30, true) +
+        view.getUint16(at + 32, true);
+    }
+    return total;
+  }
+  return undefined;
+}
+
+function appliedState(state: Uint8Array): AppliedState {
+  const { structs, ds } = Y.decodeUpdate(state);
+  const found = new Map<number, Array<[number, number]>>();
+  for (const struct of structs) {
+    // A skip is a gap in a merged update, not content.
+    if (struct instanceof Y.Skip) continue;
+    const { client, clock } = struct.id;
+    const list = found.get(client) ?? [];
+    list.push([clock, clock + struct.length]);
+    found.set(client, list);
+  }
+  // Sorted, adjacent ranges joined.
+  const ranges = new Map<number, Array<[number, number]>>();
+  for (const [client, list] of found) {
+    list.sort((a, b) => a[0] - b[0]);
+    const joined: Array<[number, number]> = [];
+    for (const [start, end] of list) {
+      const last = joined[joined.length - 1];
+      if (last && last[1] >= start) last[1] = Math.max(last[1], end);
+      else joined.push([start, end]);
+    }
+    ranges.set(client, joined);
+  }
+  return { ranges, deletes: ds };
+}
+/** Whether `next` holds every struct and every deletion of `held`. */
+function holds(next: AppliedState, held: AppliedState) {
+  for (const [client, ranges] of held.ranges) {
+    const available = next.ranges.get(client) ?? [];
+    let index = 0;
+    for (const [start, end] of ranges) {
+      while (index < available.length && available[index][1] < end) index++;
+      if (index === available.length || available[index][0] > start)
+        return false;
+    }
+  }
+  return Y.equalDeleteSets(
+    next.deletes,
+    Y.mergeDeleteSets([next.deletes, held.deletes])
+  );
+}
+
+/**
+ * Runs a read-only `read` on `room`'s XLSX replica, advanced to the
+ * checkpoint, or on a fresh session when the room has none that this state
+ * holds. Without a room or with replicas off it opens and disposes a session.
+ */
+async function readXlsx<T>(
+  baseBytes: Uint8Array,
+  checkpoint: OfficeCheckpoint,
+  room: string | undefined,
+  read: (session: Session) => T
+): Promise<T> {
+  const format = "xlsx";
+  if (!room || !replicaBudget) {
+    const session = await open(format, baseBytes, checkpoint);
+    try {
+      return read(session);
+    } finally {
+      session.dispose();
+    }
+  }
+  const applied = appliedState(checkpoint.state);
+  let replica = replicas.get(room);
+  if (
+    replica &&
+    (replica.baseSha256 !== checkpoint.baseSha256 ||
+      !holds(applied, replica.applied))
+  ) {
+    dropOfficeReplica(room);
+    replica = undefined;
+  }
+  try {
+    if (replica) {
+      assertCheckpoint(format, baseBytes, checkpoint);
+      // The same state again (a retried save) has nothing to apply.
+      if (!holds(replica.applied, applied))
+        replica.session.advance!(checkpoint.state);
+      replica.applied = applied;
+      replica.usedAt = performance.now();
+      replicas.delete(room);
+      replicas.set(room, replica);
+      replicaCounts.hits += 1;
+    } else {
+      const session = await open(format, baseBytes, checkpoint);
+      const unzipped = unzippedBytes(baseBytes);
+      const bytes =
+        unzipped === undefined
+          ? undefined
+          : Math.ceil(unzipped * XLSX_HEAP_PER_UNZIPPED_BYTE);
+      replicaCounts.misses += 1;
+      // Not kept: a package whose size is unknown, or one that does not fit
+      // without pushing out replicas still in use.
+      if (
+        bytes === undefined ||
+        bytes > replicaBudget ||
+        !evictReplicas(bytes, REPLICA_IDLE_MS)
+      ) {
+        try {
+          return read(session);
+        } finally {
+          session.dispose();
+        }
+      }
+      replica = {
+        baseSha256: checkpoint.baseSha256,
+        session,
+        applied,
+        bytes,
+        usedAt: performance.now(),
+      };
+      replicas.set(room, replica);
+      replicaBytes += replica.bytes;
+    }
+    return read(replica.session);
+  } catch (error) {
+    if (replica && replicas.get(room) === replica) dropOfficeReplica(room);
+    throw error;
+  }
 }
 export async function seedOffice(
   format: OfficeFormat,
@@ -1563,16 +1832,12 @@ async function assertDocxRestorations(
 /** Pending XLSX effects against the base, read off the checkpoint's overrides; XLSX keeps no stored baseline. */
 export async function xlsxPendingEffects(
   baseBytes: Uint8Array,
-  checkpoint: OfficeCheckpoint
+  checkpoint: OfficeCheckpoint,
+  room?: string
 ): Promise<NetEffect[]> {
   if (checkpoint.format !== "xlsx")
     throw new TypeError("Expected an XLSX checkpoint");
-  const session = await open("xlsx", baseBytes, checkpoint);
-  try {
-    return session.effects!();
-  } finally {
-    session.dispose();
-  }
+  return readXlsx(baseBytes, checkpoint, room, (session) => session.effects!());
 }
 
 export async function resolveAsset(

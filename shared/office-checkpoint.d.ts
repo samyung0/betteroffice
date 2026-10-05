@@ -84,11 +84,33 @@ export declare function compare(
   fromCheckpoint: OfficeCheckpoint,
   toCheckpoint: OfficeCheckpoint
 ): Promise<NetEffect[]>;
-/** Pending XLSX effects read off the checkpoint's overrides; XLSX keeps no stored baseline. */
+/**
+ * Pending XLSX effects read off the checkpoint's overrides; XLSX keeps no
+ * stored baseline. With a room (and replicas configured) the call reuses that
+ * room's replica when this state holds everything it applied.
+ */
 export declare function xlsxPendingEffects(
   baseBytes: Uint8Array,
-  checkpoint: OfficeCheckpoint
+  checkpoint: OfficeCheckpoint,
+  room?: string
 ): Promise<NetEffect[]>;
+/**
+ * Keeps an XLSX replica per room within a budget of estimated WASM heap
+ * bytes; 0 (the initial value) keeps none. A new replica pushes out least
+ * recently used ones only once they have been idle for 2 minutes.
+ */
+export declare function configureOfficeReplicas(budgetBytes: number): void;
+/** Drops a room's replica. */
+export declare function dropOfficeReplica(room: string): void;
+export declare function officeReplicaStats(): {
+  replicas: number;
+  replicaBytes: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  /** The XLSX engine's linear memory. */
+  wasmBytes: number;
+};
 export declare function resolveAsset(
   baseBytes: Uint8Array,
   checkpoint: OfficeCheckpoint,
