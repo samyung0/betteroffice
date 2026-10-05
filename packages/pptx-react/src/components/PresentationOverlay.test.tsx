@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation, type SlideDisplayList } from '@betteroffice/pptx/viewer';
 import { PresentationOverlay, type PresentationSource } from './PresentationOverlay';
+import { DRAWN_ICON_NAMES, IconSetContext, type IconSet } from './ui/ToolbarIcon';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -130,6 +131,37 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
   view.unmount();
   expect(document.activeElement).toBe(focusTarget);
   focusTarget.remove();
+});
+
+it("draws the host's icons for its controls", () => {
+  const icons = Object.fromEntries(
+    DRAWN_ICON_NAMES.map((name) => [
+      name,
+      function HostIcon() {
+        return <i data-host-icon={name} />;
+      },
+    ])
+  ) as unknown as IconSet;
+  const view = render(
+    <IconSetContext.Provider value={icons}>
+      <PresentationOverlay
+        handle={{ layoutSlide: () => ({ ...frame(''), primitives: [] }) }}
+        slideCount={2}
+        startIndex={0}
+        resolveImage={() => null}
+        label="Presentation"
+        counterLabel={(current, total) => `${current} / ${total}`}
+        exitLabel="Exit"
+        previousLabel="Previous"
+        nextLabel="Next"
+        onExit={() => {}}
+        onError={() => {}}
+      />
+    </IconSetContext.Provider>
+  );
+  expect(view.container.querySelector('svg')).toBeNull();
+  for (const name of DRAWN_ICON_NAMES)
+    expect(view.container.querySelector(`[data-host-icon="${name}"]`)).not.toBeNull();
 });
 
 it('presents a deck through the viewer handle', async () => {

@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import type { ComponentType, CSSProperties } from 'react';
+import type { ComponentType, CSSProperties, ReactNode } from 'react';
 
 /** Every name `ToolbarIcon` draws. */
 export const TOOLBAR_ICON_NAMES = [
@@ -42,11 +42,37 @@ export interface IconProps {
   style?: CSSProperties;
 }
 
-/** A host's replacement for every toolbar icon. */
-export type IconSet = Record<ToolbarIconName, ComponentType<IconProps>>;
+/** The presenter's controls, which it otherwise draws itself. */
+export const DRAWN_ICON_NAMES = [
+  'presentationExit',
+  'presentationPrevious',
+  'presentationNext',
+] as const;
 
-/** Provided by `PptxEditor`'s `icons` prop; null keeps the built-in drawings. */
+export type DrawnIconName = (typeof DRAWN_ICON_NAMES)[number];
+
+/** A host's replacement for every toolbar icon and drawn glyph. */
+export type IconSet = Record<ToolbarIconName | DrawnIconName, ComponentType<IconProps>>;
+
+/**
+ * Provided by `PptxEditor`'s `icons` prop, or by a viewer around
+ * `PresentationOverlay`; null keeps the built-in drawings.
+ */
 export const IconSetContext = createContext<IconSet | null>(null);
+
+/** The host set's `name` when there is one, else the built-in drawing. */
+export function DrawnIcon({
+  name,
+  size,
+  children,
+}: {
+  name: DrawnIconName;
+  size: number;
+  children: ReactNode;
+}) {
+  const HostIcon = useContext(IconSetContext)?.[name];
+  return HostIcon ? <HostIcon size={size} /> : children;
+}
 
 export interface ToolbarIconProps {
   name: ToolbarIconName;

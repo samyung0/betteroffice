@@ -29,6 +29,7 @@ export {
   type EditorToolbarProps,
 } from './components/EditorToolbarContext';
 export {
+  DRAWN_ICON_NAMES,
   TOOLBAR_ICON_NAMES,
   type IconProps,
   type IconSet,

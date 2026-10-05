@@ -7,6 +7,7 @@ export interface PresentationSource {
 }
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import { DrawnIcon } from './ui/ToolbarIcon';
 
 export function PresentationOverlay({
   handle,
@@ -177,17 +178,19 @@ export function PresentationOverlay({
           title={exitLabel}
           style={styles.presentationExit}
         >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
-          >
-            <path d="M6 6 18 18M18 6 6 18" />
-          </svg>
+          <DrawnIcon name="presentationExit" size={16}>
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path d="M6 6 18 18M18 6 6 18" />
+            </svg>
+          </DrawnIcon>
         </button>
         <div style={styles.presentationControls}>
           <button
@@ -197,17 +200,19 @@ export function PresentationOverlay({
             aria-label={previousLabel}
             style={styles.presentationNavButton}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              aria-hidden="true"
-            >
-              <path d="m15 6-6 6 6 6" />
-            </svg>
+            <DrawnIcon name="presentationPrevious" size={14}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                aria-hidden="true"
+              >
+                <path d="m15 6-6 6 6 6" />
+              </svg>
+            </DrawnIcon>
           </button>
           <span style={styles.presentationCounter} aria-live="polite">
             {counterLabel(index + 1, slideCount)}
@@ -219,17 +224,19 @@ export function PresentationOverlay({
             aria-label={nextLabel}
             style={styles.presentationNavButton}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              aria-hidden="true"
-            >
-              <path d="m9 6 6 6-6 6" />
-            </svg>
+            <DrawnIcon name="presentationNext" size={14}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.4"
+                aria-hidden="true"
+              >
+                <path d="m9 6 6 6-6 6" />
+              </svg>
+            </DrawnIcon>
           </button>
         </div>
       </dialog>
