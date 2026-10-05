@@ -2407,27 +2407,28 @@ function listKey(
  */
 const sessionListRenderings = new WeakMap<YrsSession, SeedSources['lists']>();
 
-/** Walks the base as {@link collectBaseStories} does, recording each cell's table formatting. */
-function collectSeedSources(session: YrsSession, document: Document): SeedSources {
+const cellFormattings = new WeakMap<Document, Map<string, ParagraphFormatting>>();
+
+/**
+ * The table style's paragraph formatting for each cell story the seed makes
+ * from `document`, firstRow and banding included, as the seed folds it in
+ * under the paragraph's style. Story ids follow {@link collectBaseStories}.
+ */
+export function cellParagraphFormatting(document: Document): Map<string, ParagraphFormatting> {
+  const cached = cellFormattings.get(document);
+  if (cached) return cached;
   const styles = document.package.styles ? createStyleResolver(document.package.styles) : null;
-  let lists = sessionListRenderings.get(session);
-  if (!lists) sessionListRenderings.set(session, (lists = new Map()));
-  const sources: SeedSources = { styles, cells: new Map(), lists };
+  const cells = new Map<string, ParagraphFormatting>();
   const visit = (
     storyId: string,
     blocks: readonly BlockContent[],
     cell: ParagraphFormatting | undefined
   ): void => {
-    if (cell) sources.cells.set(storyId, cell);
+    if (cell) cells.set(storyId, cell);
     let tableIndex = 0;
     let sdtIndex = 0;
     for (const block of blocks) {
-      if (block.type === 'paragraph') {
-        const numPr = block.formatting?.numPr;
-        if (block.formatting && numPr && block.listRendering) {
-          sources.lists.set(listKey(block.formatting, numPr), block.listRendering);
-        }
-      } else if (block.type === 'blockSdt') {
+      if (block.type === 'blockSdt') {
         visit(`${storyId}:sdt${sdtIndex++}`, block.content, cell);
       } else if (block.type === 'table') {
         const currentTableIndex = tableIndex++;
@@ -2455,7 +2456,30 @@ function collectSeedSources(session: YrsSession, document: Document): SeedSource
   for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content, undefined);
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content, undefined);
   for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content, undefined);
-  return sources;
+  cellFormattings.set(document, cells);
+  return cells;
+}
+
+function collectSeedSources(
+  session: YrsSession,
+  document: Document,
+  stories: Map<string, readonly BlockContent[]>
+): SeedSources {
+  let lists = sessionListRenderings.get(session);
+  if (!lists) sessionListRenderings.set(session, (lists = new Map()));
+  for (const blocks of stories.values()) {
+    for (const block of blocks) {
+      const numPr = block.type === 'paragraph' ? block.formatting?.numPr : undefined;
+      if (block.type === 'paragraph' && block.formatting && numPr && block.listRendering) {
+        lists.set(listKey(block.formatting, numPr), block.listRendering);
+      }
+    }
+  }
+  return {
+    styles: document.package.styles ? createStyleResolver(document.package.styles) : null,
+    cells: cellParagraphFormatting(document),
+    lists,
+  };
 }
 
 function commentRanges(
@@ -2619,7 +2643,7 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(base);
     this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
     this.baseStories = collectBaseStories(base);
-    this.seedSources = collectSeedSources(session, base);
+    this.seedSources = collectSeedSources(session, base, this.baseStories);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
     this.memo = sessionProjectionMemo(session);

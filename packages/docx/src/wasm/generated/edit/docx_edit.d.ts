@@ -95,11 +95,12 @@ export class EditSession {
     apply_local_update(update: Uint8Array): void;
     /**
      * Writes `style_id` as the `pStyle` of every paragraph intersecting
-     * `[start, end)` and resets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to
-     * the host-resolved `values_json` (an object of the style's paragraph
-     * values), clearing the keys it leaves out. Run marks are the host's to
-     * apply. In suggesting mode the property change is recorded as a
-     * `pPrChange` revision.
+     * `[start, end)` and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to the
+     * host-resolved `values_json` (an object of the style's paragraph values),
+     * a key it leaves out to an explicit null, so two peers applying different
+     * styles converge on one style's values. Run marks are the host's to apply.
+     * In suggesting mode the property change is recorded as a `pPrChange`
+     * revision.
      */
     apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, values_json: string, author_name?: string | null, author_date?: string | null): void;
     /**

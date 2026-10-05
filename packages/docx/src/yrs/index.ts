@@ -41,7 +41,7 @@ export {
 } from './residentCaret';
 export { documentToYrs, styleParagraphValues } from './documentToYrs';
 export { explicitParagraphAttrs } from './paragraphSeed';
-export { yrsToDocument } from './yrsToDocument';
+export { cellParagraphFormatting, yrsToDocument } from './yrsToDocument';
 export { projectYrsComments, commentSharedId, commentNumericId } from './comments';
 
 export interface YrsCommentInfo {

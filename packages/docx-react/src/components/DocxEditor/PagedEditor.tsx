@@ -67,6 +67,7 @@ import type {
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
   projectYrsComments,
+  cellParagraphFormatting,
   commentSharedId,
   styleParagraphValues,
   yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
@@ -114,6 +115,7 @@ import {
   currentYrsToolbarSelection,
   setSelectedParagraphAttrs,
   storedYrsToolbarFormatting,
+  type ParagraphStyleValues,
   withStoredYrsFormatting,
   type YrsToolbarSelection,
 } from './yrsToolbar';
@@ -513,6 +515,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
     } = props;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
+    const paragraphStyleValues = useCallback<ParagraphStyleValues>(
+      (styleId, story) =>
+        styleParagraphValues(
+          yrsStyleResolver,
+          styleId,
+          document ? cellParagraphFormatting(document).get(story) : undefined
+        ),
+      [document, yrsStyleResolver]
+    );
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
     const getScrollContainer = useCallback((): HTMLDivElement | null => {
@@ -948,7 +959,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             yrsCore.session.applyParagraphStyle(
               selection.range,
               action.value,
-              styleParagraphValues(yrsStyleResolver, action.value),
+              paragraphStyleValues(action.value, selection.range.story),
               structuralAuthor
             );
             if (selection.context.hasSelection) {
@@ -975,7 +986,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             yrsCore.session,
             map,
             action,
-            yrsStyleResolver,
+            paragraphStyleValues,
             structuralAuthor
           );
           if (!changed) return false;
@@ -1062,7 +1073,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 session,
                 selection,
                 () => command.attrs,
-                yrsStyleResolver,
+                paragraphStyleValues,
                 structuralAuthor
               );
             } else {
@@ -1070,14 +1081,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 session,
                 selection,
                 ({ tabs }) => {
+                  // Stops ops stored before the seed's shape say `pos`.
                   const kept = Array.isArray(tabs)
-                    ? (tabs as YrsParagraphTabStop[]).filter(
-                        (tab) => tab.position !== command.positionTwips
+                    ? (tabs as Array<YrsParagraphTabStop & { pos?: number }>).filter(
+                        (tab) => (tab.position ?? tab.pos) !== command.positionTwips
                       )
                     : [];
                   return { tabs: kept.length > 0 ? kept : null };
                 },
-                yrsStyleResolver,
+                paragraphStyleValues,
                 structuralAuthor
               );
             }
@@ -1800,9 +1812,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           displayPositionToLoc={yrsDisplayPositionToLoc}
           resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
-          nextParagraphStyle={(styleId) => {
+          nextParagraphStyle={(styleId, story) => {
             const next = yrsStyleResolver?.getNextStyleId(styleId);
-            return next ? { styleId: next, values: styleParagraphValues(yrsStyleResolver, next) } : null;
+            return next ? { styleId: next, values: paragraphStyleValues(next, story) } : null;
           }}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
           resolveDisplayListQueries={

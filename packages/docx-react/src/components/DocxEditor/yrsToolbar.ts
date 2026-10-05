@@ -6,12 +6,7 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import {
-  compareYrsLocs,
-  explicitParagraphAttrs,
-  styleParagraphValues,
-} from '@betteroffice/docx/yrs';
-import type { StyleResolver } from '@betteroffice/docx/styles';
+import { compareYrsLocs, explicitParagraphAttrs } from '@betteroffice/docx/yrs';
 import type { FormattingAction } from '../Toolbar';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
@@ -108,6 +103,15 @@ function forEachSelectedParagraph(
 }
 
 /**
+ * A paragraph style's values for a paragraph in `story`: `styleParagraphValues`
+ * with the table-style paragraph formatting of the cell the story is.
+ */
+export type ParagraphStyleValues = (
+  styleId: string | null,
+  story: string
+) => Readonly<Record<string, unknown>>;
+
+/**
  * Sets paragraph properties on each selected paragraph, a cleared property its
  * style sets stored explicitly (`explicitParagraphAttrs`).
  */
@@ -115,14 +119,14 @@ export function setSelectedParagraphAttrs(
   session: YrsSession,
   selection: YrsToolbarSelection,
   attrs: (properties: Record<string, unknown>) => YrsParagraphAttrs,
-  styles: StyleResolver | null,
+  styleValues: ParagraphStyleValues,
   suggesting?: YrsAuthor
 ): void {
   forEachSelectedParagraph(session, selection, (range, properties) => {
     const styleId = typeof properties.pStyle === 'string' ? properties.pStyle : null;
     session.setParagraphAttrs(
       range,
-      explicitParagraphAttrs(attrs(properties), styleParagraphValues(styles, styleId)),
+      explicitParagraphAttrs(attrs(properties), styleValues(styleId, range.story)),
       suggesting
     );
   });
@@ -159,7 +163,7 @@ function changeIndent(
   session: YrsSession,
   selection: YrsToolbarSelection,
   direction: 'indent' | 'outdent',
-  styles: StyleResolver | null,
+  styleValues: ParagraphStyleValues,
   suggesting?: YrsAuthor
 ): void {
   const startRange = paragraphRange(selection.range.story, selection.context.paraId);
@@ -202,7 +206,7 @@ function changeIndent(
       const next = direction === 'indent' ? current + 720 : Math.max(0, current - 720);
       return { indentLeft: next > 0 ? next : null };
     },
-    styles,
+    styleValues,
     suggesting
   );
 }
@@ -316,7 +320,7 @@ export function applyYrsToolbarFormatting(
   session: YrsSession,
   map: YrsInputPositionMap,
   action: FormattingAction,
-  styles: StyleResolver | null,
+  styleValues: ParagraphStyleValues,
   suggesting?: YrsAuthor
 ): boolean {
   const selection = currentYrsToolbarSelection(session, map);
@@ -349,7 +353,7 @@ export function applyYrsToolbarFormatting(
     return true;
   }
   if (action === 'indent' || action === 'outdent') {
-    changeIndent(session, selection, action, styles, suggesting);
+    changeIndent(session, selection, action, styleValues, suggesting);
     return true;
   }
   if (action === 'setRtl' || action === 'setLtr') {
@@ -370,12 +374,7 @@ export function applyYrsToolbarFormatting(
       );
       return true;
     case 'applyStyle':
-      session.applyParagraphStyle(
-        range,
-        action.value,
-        styleParagraphValues(styles, action.value),
-        suggesting
-      );
+      session.applyParagraphStyle(range, action.value, styleValues(action.value, range.story), suggesting);
       return true;
     case 'fontFamily':
       if (isCollapsed(range)) return false;

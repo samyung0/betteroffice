@@ -3,18 +3,19 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsInputPositionMap, createYrsSession } from '@betteroffice/docx/yrs';
+import { createYrsInputPositionMap, createYrsSession, styleParagraphValues } from '@betteroffice/docx/yrs';
 import { applyYrsToolbarFormatting } from './yrsToolbar';
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
 
-const styles = createStyleResolver({
+const resolver = createStyleResolver({
   docDefaults: { pPr: { spaceAfter: 160 } },
   styles: [
     { styleId: 'Normal', type: 'paragraph', default: true },
     { styleId: 'ListParagraph', type: 'paragraph', pPr: { indentLeft: 720, contextualSpacing: true } },
   ],
 });
+const styles = (styleId: string | null) => styleParagraphValues(resolver, styleId);
 
 test('outdent stores 0 where the style indents, and applying a style writes its paragraph values', async () => {
   await preloadEditWasm(new Uint8Array(readFileSync(WASM)));

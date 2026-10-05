@@ -115,9 +115,11 @@ export function explicitParagraphAttrs(
   }
   if ('tabs' in attrs) {
     const kept = attrs.tabs ?? [];
+    // A stop ops stored before they took the seed's shape says `pos`.
+    const at = (tab: YrsParagraphTabStop & { pos?: number }) => tab.position ?? tab.pos;
     const styleTabs = Array.isArray(style.tabs) ? (style.tabs as YrsParagraphTabStop[]) : [];
     const cleared = styleTabs
-      .filter((stop) => stop.alignment !== 'clear' && !kept.some((tab) => tab.position === stop.position))
+      .filter((stop) => stop.alignment !== 'clear' && !kept.some((tab) => at(tab) === stop.position))
       .map((stop): YrsParagraphTabStop => ({ position: stop.position, alignment: 'clear' }));
     result.tabs = kept.length + cleared.length > 0 ? [...kept, ...cleared] : null;
   }

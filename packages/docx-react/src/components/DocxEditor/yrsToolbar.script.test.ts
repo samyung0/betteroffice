@@ -24,11 +24,11 @@ test('the toolbar toggles superscript and subscript on the selection, each repla
       return { superscript: !!run?.superscript, subscript: !!run?.subscript };
     };
 
-    expect(applyYrsToolbarFormatting(session, map, 'superscript', null)).toBe(true);
+    expect(applyYrsToolbarFormatting(session, map, 'superscript', () => ({}))).toBe(true);
     expect(x()).toEqual({ superscript: true, subscript: false });
-    applyYrsToolbarFormatting(session, map, 'subscript', null);
+    applyYrsToolbarFormatting(session, map, 'subscript', () => ({}));
     expect(x()).toEqual({ superscript: false, subscript: true });
-    applyYrsToolbarFormatting(session, map, 'subscript', null);
+    applyYrsToolbarFormatting(session, map, 'subscript', () => ({}));
     expect(x()).toEqual({ superscript: false, subscript: false });
   } finally {
     session.destroy();

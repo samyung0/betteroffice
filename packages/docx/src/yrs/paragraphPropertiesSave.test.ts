@@ -11,7 +11,7 @@ import { createStyleResolver } from '../styles';
 import { styleParagraphValues } from './documentToYrs';
 import { createYrsSession, type YrsParagraphAttrs, type YrsParagraphTabStop, type YrsSession } from './index';
 import { explicitParagraphAttrs } from './paragraphSeed';
-import { yrsToDocument } from './yrsToDocument';
+import { cellParagraphFormatting, yrsToDocument } from './yrsToDocument';
 
 // Word reads the saved file; the oracle is that reopening it (a publication
 // reseeds from the saved bytes) shows what the editor showed before the save.
@@ -60,7 +60,7 @@ const NUMBERING =
   '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>' +
   '</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
 
-function fixture(): Uint8Array<ArrayBuffer> {
+function fixture(body = BODY, styles = STYLES): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -90,9 +90,9 @@ function fixture(): Uint8Array<ArrayBuffer> {
   );
   parts.set(
     'word/document.xml',
-    toBytes(`<w:document xmlns:w="${W}"><w:body>${BODY}<w:sectPr/></w:body></w:document>`)
+    toBytes(`<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr/></w:body></w:document>`)
   );
-  parts.set('word/styles.xml', toBytes(STYLES));
+  parts.set('word/styles.xml', toBytes(styles));
   parts.set('word/numbering.xml', toBytes(NUMBERING));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
@@ -449,6 +449,179 @@ describe('paragraph properties on save', () => {
     } finally {
       left.destroy();
       right.destroy();
+    }
+  });
+});
+
+// Word's built-in looks: Title and Intense Quote have borders, Header tabs at
+// 4680/9360, TOC 1 a dot-leader tab; Grid is Table Grid's spacing with a
+// centred header row.
+const WORD_STYLES =
+  `<w:styles xmlns:w="${W}"><w:docDefaults><w:pPrDefault><w:pPr>` +
+  '<w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>' +
+  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:keepNext/><w:spacing w:before="240" w:after="0"/><w:outlineLvl w:val="0"/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:pBdr><w:bottom w:val="single" w:sz="8" w:space="4" w:color="4F81BD"/></w:pBdr>' +
+  '<w:spacing w:after="300" w:line="240" w:lineRule="auto"/><w:contextualSpacing/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="IntenseQuote"><w:name w:val="Intense Quote"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="4" w:color="4F81BD"/></w:pBdr>' +
+  '<w:shd w:val="clear" w:color="auto" w:fill="EEF3FA"/><w:spacing w:before="200" w:after="280"/><w:ind w:left="936" w:right="936"/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Header"><w:name w:val="header"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs>' +
+  '<w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs><w:spacing w:after="100"/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="RtlPara"><w:name w:val="RTL Paragraph"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:bidi/><w:snapToGrid w:val="0"/><w:autoSpaceDE w:val="0"/></w:pPr></w:style>' +
+  '<w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/>' +
+  '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>' +
+  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style></w:styles>';
+
+const WORD_LOOKS = ['Title', 'IntenseQuote', 'Header', 'TOC1', 'RtlPara'] as const;
+const styled = (styleId: string, text: string) =>
+  `<w:p><w:pPr><w:pStyle w:val="${styleId}"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const plain = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+const gridCell = (text: string) =>
+  `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${plain(text)}</w:tc>`;
+const WORD_BODY = [
+  ...WORD_LOOKS.map((styleId) => styled(styleId, styleId)),
+  ...WORD_LOOKS.map((styleId) => plain(`to ${styleId}`)),
+  plain('Contested'),
+  '<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/>' +
+    '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>' +
+    `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${gridCell('Head')}</w:tr><w:tr>${gridCell('Body')}</w:tr></w:tbl>`,
+  plain('Tail'),
+].join('');
+
+describe('applying a style', () => {
+  beforeAll(() =>
+    preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))))
+  );
+
+  /** What the editor's style picker does: the style's values with the cell's table style. */
+  const applyStyle = (session: YrsSession, source: Document, story: string, index: number, styleId: string) => {
+    const { paraId } = session.paragraphs(story)[index]!;
+    const values = styleParagraphValues(
+      createStyleResolver(source.package.styles),
+      styleId,
+      cellParagraphFormatting(source).get(story)
+    );
+    session.applyParagraphStyle({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, styleId, values);
+  };
+  const stories = (session: YrsSession) =>
+    session.storyIds().filter((id) => id === 'body' || id.startsWith('body:t')).sort();
+  const shownStories = (session: YrsSession) => stories(session).map((story) => shown(session, story));
+
+  it('takes and leaves Word’s borders, tabs and right-to-left with the style alone', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82001 });
+    const fresh = await createYrsSession({ clientId: 82002 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      fresh.seedFromDocx(bytes);
+      WORD_LOOKS.forEach((styleId, index) => {
+        applyStyle(session, source, 'body', index, 'Normal');
+        applyStyle(session, source, 'body', WORD_LOOKS.length + index, styleId);
+      });
+      const editor = shown(session, 'body');
+      const seeded = shown(fresh, 'body');
+      // Restyled paragraphs show what a paragraph seeded with the new style shows.
+      WORD_LOOKS.forEach((_, index) => {
+        expect(editor[index]).toEqual({ ...seeded[WORD_LOOKS.length + index], pStyle: 'Normal' });
+        expect(editor[WORD_LOOKS.length + index]).toEqual(seeded[index]);
+      });
+      expect(editor[0]!.borders).toBeUndefined();
+      expect(editor[WORD_LOOKS.length + 3]).toMatchObject({ tabs: [{ position: 9350, alignment: 'right', leader: 'dot' }] });
+      expect(editor[WORD_LOOKS.length + 4]).toMatchObject({ bidi: true, snapToGrid: false, autoSpaceDE: false });
+      reopened = await reopen(await save(session, source), 82003);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+      const after = paragraphs(reopened.document);
+      WORD_LOOKS.forEach((styleId, index) => {
+        expect(after[index]!.formatting).toEqual({ styleId: 'Normal' });
+        expect(after[WORD_LOOKS.length + index]!.formatting).toEqual({ styleId });
+      });
+    } finally {
+      session.destroy();
+      fresh.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('keeps a table style’s spacing and header-row alignment in a cell', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82004 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      const before = shownStories(session);
+      const [head, body] = stories(session).filter((id) => id !== 'body');
+      applyStyle(session, source, head!, 0, 'Normal');
+      applyStyle(session, source, body!, 0, 'Normal');
+      const editor = shownStories(session);
+      expect(editor).toEqual(before.map((story, index) => (index === 0 ? story : [{ ...story[0], pStyle: 'Normal' }])));
+      expect(editor[1]![0]).toMatchObject({ alignment: 'center', spaceAfter: 0, lineSpacing: 240 });
+      expect(editor[2]![0]).toMatchObject({ spaceAfter: 0, lineSpacing: 240 });
+      reopened = await reopen(await save(session, source), 82005);
+      expect(shownStories(reopened.session)).toEqual(editor);
+      const cells = paragraphs(reopened.document).slice(WORD_LOOKS.length * 2 + 1, WORD_LOOKS.length * 2 + 3);
+      expect(cells.map((paragraph) => paragraph.formatting)).toEqual([{ styleId: 'Normal' }, { styleId: 'Normal' }]);
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('converges on one style’s values when two peers apply different styles', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const left = await createYrsSession({ clientId: 82006 });
+    const right = await createYrsSession({ clientId: 82007 });
+    const alone = await createYrsSession({ clientId: 82008 });
+    const contested = WORD_LOOKS.length * 2;
+    try {
+      left.seedFromDocx(bytes);
+      right.applyUpdate(left.encodeStateAsUpdate());
+      alone.applyUpdate(left.encodeStateAsUpdate());
+      applyStyle(left, source, 'body', contested, 'Heading1');
+      applyStyle(right, source, 'body', contested, 'IntenseQuote');
+      left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
+      right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
+      const merged = shown(left, 'body')[contested]!;
+      expect(shown(right, 'body')[contested]).toEqual(merged);
+      applyStyle(alone, source, 'body', contested, merged.pStyle as string);
+      expect(merged).toEqual(shown(alone, 'body')[contested]);
+    } finally {
+      left.destroy();
+      right.destroy();
+      alone.destroy();
+    }
+  });
+
+  it('removes a tab stop the ruler holds in the old shape', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82009 });
+    try {
+      session.seedFromDocx(bytes);
+      // A Header paragraph whose stops an older op stored as {pos, val}; the ruler drops 4680.
+      const { paraId } = session.paragraphs('body')[2]!;
+      session.setParagraphAttr(paraId, 'tabs', [{ pos: 4680, val: 'center' }, { pos: 9360, val: 'right' }]);
+      const style = styleParagraphValues(createStyleResolver(source.package.styles), 'Header');
+      session.setParagraphAttrs(
+        { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+        explicitParagraphAttrs({ tabs: [{ pos: 9360, val: 'right' }] as never }, style)
+      );
+      expect(session.paragraphs('body')[2]!.properties.tabs).toEqual([
+        { position: 9360, alignment: 'right' },
+        { position: 4680, alignment: 'clear' },
+      ]);
+    } finally {
+      session.destroy();
     }
   });
 });

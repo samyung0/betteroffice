@@ -1007,11 +1007,16 @@ function runBoundary(
 
 /**
  * The paragraph values applying `styleId` gives a paragraph: what the seed
- * gives one carrying only that style.
+ * gives one carrying only that style, in a table cell with that cell's
+ * table-style paragraph formatting (`cellParagraphFormatting`).
  */
-export function styleParagraphValues(styles: StyleResolver | null, styleId: string | null): Attrs {
+export function styleParagraphValues(
+  styles: StyleResolver | null,
+  styleId: string | null,
+  tableParagraphFormatting?: ParagraphFormatting
+): Attrs {
   const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined }, content: [] };
-  return paragraphAttrs(paragraph, styles, [], undefined);
+  return paragraphAttrs(paragraph, styles, [], undefined, tableParagraphFormatting);
 }
 
 function paragraphAttrs(

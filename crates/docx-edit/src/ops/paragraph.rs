@@ -41,10 +41,11 @@ use crate::{
     revision_value, story_ref,
 };
 
-/// The paragraph attributes a style definition owns. Applying a style resets
-/// every one of them to the style's value, or clears it when the style has
-/// none — an attribute here is never left over from the previous style.
-pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
+/// The paragraph attributes a style definition owns: every pPr property the
+/// seed resolves from a style. Applying a style resets every one of them to the
+/// style's value, or clears it when the style has none — an attribute here is
+/// never left over from the previous style.
+pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 27] = [
     "alignment",
     "spaceBefore",
     "spaceBeforeLines",
@@ -64,6 +65,13 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
     "widowControl",
     "pageBreakBefore",
     "outlineLevel",
+    "borders",
+    "shading",
+    "tabs",
+    "bidi",
+    "snapToGrid",
+    "autoSpaceDE",
+    "autoSpaceDN",
     "defaultTextFormatting",
 ];
 
@@ -175,7 +183,9 @@ pub struct ParaAttrDelta {
     /// The paragraph-mark run defaults (`defaultTextFormatting`), as an opaque attr map.
     pub default_text_formatting: Patch<BTreeMap<String, Any>>,
     /// Every paragraph property without a typed field above, written as given;
-    /// `None` clears the key. Schema-managed identity keys are rejected.
+    /// `None` clears the key and `Some(Any::Null)` writes an explicit null, which
+    /// readers treat as unset but which wins over a concurrent write as a value
+    /// does. Schema-managed identity keys are rejected.
     pub other: BTreeMap<String, Option<Any>>,
 }
 
@@ -1205,7 +1215,12 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
         },
     );
     for (key, value) in &delta.other {
-        set_or_remove(txn, map, key, value.clone());
+        match value {
+            Some(Any::Null) => {
+                map.insert(txn, key.clone(), Any::Null);
+            }
+            _ => set_or_remove(txn, map, key, value.clone()),
+        }
     }
 }
 

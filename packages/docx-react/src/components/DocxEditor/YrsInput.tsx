@@ -95,9 +95,10 @@ export interface YrsInputProps {
   displayPositionToLoc(position: number, story?: string): YrsLoc | null;
   resolveDisplayTarget?(position: number): { story: string; displayPosition: number } | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
-  /** The style (`w:next`) and its paragraph values for the paragraph Enter opens after one styled `styleId`. */
+  /** The style (`w:next`) and its paragraph values for the paragraph Enter opens in `story` after one styled `styleId`. */
   nextParagraphStyle?(
-    styleId: string | null
+    styleId: string | null,
+    story: string
   ): { styleId: string; values: Readonly<Record<string, unknown>> } | null;
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
@@ -636,7 +637,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         currentParagraph &&
         current.offset === currentParagraph.text.length &&
         receipt.secondParaId !== current.paraId
-          ? (nextParagraphStyle?.(currentStyleId) ?? null)
+          ? (nextParagraphStyle?.(currentStyleId, current.story) ?? null)
           : null;
       if (nextStyle) {
         session.applyParagraphStyle(

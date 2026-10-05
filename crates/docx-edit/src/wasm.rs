@@ -578,12 +578,15 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
                 let stop = value
                     .as_object()
                     .ok_or_else(|| js_err("each paragraph tab must be an object"))?;
+                // Stops ops stored before they took the seed's shape say `pos` and `val`.
                 let pos = stop
                     .get("position")
+                    .or_else(|| stop.get("pos"))
                     .and_then(Value::as_f64)
                     .ok_or_else(|| js_err("a paragraph tab requires numeric \"position\""))?;
                 let alignment = stop
                     .get("alignment")
+                    .or_else(|| stop.get("val"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| js_err("a paragraph tab requires string \"alignment\""))?;
                 let leader =
@@ -2895,11 +2898,12 @@ impl EditSession {
     }
 
     /// Writes `style_id` as the `pStyle` of every paragraph intersecting
-    /// `[start, end)` and resets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to
-    /// the host-resolved `values_json` (an object of the style's paragraph
-    /// values), clearing the keys it leaves out. Run marks are the host's to
-    /// apply. In suggesting mode the property change is recorded as a
-    /// `pPrChange` revision.
+    /// `[start, end)` and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to the
+    /// host-resolved `values_json` (an object of the style's paragraph values),
+    /// a key it leaves out to an explicit null, so two peers applying different
+    /// styles converge on one style's values. Run marks are the host's to apply.
+    /// In suggesting mode the property change is recorded as a `pPrChange`
+    /// revision.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -2926,10 +2930,10 @@ impl EditSession {
             .insert("pStyle".to_owned(), Some(Any::from(style_id)));
         for key in STYLE_CONTROLLED_PARA_ATTRS {
             let value = match values.get(key) {
-                Some(value) if !value.is_null() => Some(json_to_any(value)?),
-                _ => None,
+                Some(value) => json_to_any(value)?,
+                None => Any::Null,
             };
-            delta.other.insert(key.to_owned(), value);
+            delta.other.insert(key.to_owned(), Some(value));
         }
         let ctx = edit_ctx(author_name, author_date)?;
         self.engine
@@ -3666,6 +3670,19 @@ impl EditSession {
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn paragraph_attr_delta_reads_tab_stops_in_the_old_shape() {
+        let delta = parse_para_attr_delta(r#"{"tabs":[{"pos":2000,"val":"right"}]}"#).unwrap();
+        assert_eq!(
+            delta.tabs,
+            Patch::Set(vec![TabStop {
+                pos: 2000.0,
+                alignment: "right".into(),
+                leader: None,
+            }])
+        );
+    }
 
     #[test]
     fn paragraph_attr_delta_reads_the_ruler_hanging_flag_as_a_boolean() {

@@ -2,6 +2,7 @@ import { useImperativeHandle } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import {
+  cellParagraphFormatting,
   styleParagraphValues,
   type YrsInlineFormatDelta,
   type YrsLoc,
@@ -286,7 +287,11 @@ export function useDocxEditorRefApi({
         session.applyParagraphStyle(
           range,
           options.styleId,
-          styleParagraphValues(resolver, options.styleId)
+          styleParagraphValues(
+            resolver,
+            options.styleId,
+            currentDocument ? cellParagraphFormatting(currentDocument).get(range.story) : undefined
+          )
         );
         editor.syncYrsInputState(true);
         return true;
