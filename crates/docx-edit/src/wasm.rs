@@ -177,7 +177,8 @@ fn toc_layout(json: &str) -> Result<crate::TocLayout, JsValue> {
         pages,
         tab_twips: value["tabTwips"]
             .as_u64()
-            .ok_or_else(|| js_err("table of contents layout needs tabTwips"))? as u32,
+            .ok_or_else(|| js_err("table of contents layout needs tabTwips"))?
+            as u32,
         empty_text: value["emptyText"]
             .as_str()
             .ok_or_else(|| js_err("table of contents layout needs emptyText"))?
@@ -3222,7 +3223,9 @@ impl EditSession {
             .doc()
             .update_toc(&ctx, at.as_ref(), &layout)
             .map_err(js_err)?;
-        Ok(receipt.as_ref().map_or_else(|| "null".to_owned(), toc_receipt))
+        Ok(receipt
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), toc_receipt))
     }
 
     /// The body headings a table of contents lists, as

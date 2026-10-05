@@ -90,9 +90,7 @@ fn paragraphs<T: ReadTxn>(txn: &T, story: &TextRef) -> Vec<Para> {
             ChunkKind::Embed(map) => {
                 let kind = map.as_ref().and_then(|map| map_string(map, txn, KIND_KEY));
                 if node_start.is_none()
-                    && kind
-                        .as_deref()
-                        .is_some_and(crate::segments::is_block_embed)
+                    && kind.as_deref().is_some_and(crate::segments::is_block_embed)
                 {
                     continue;
                 }
@@ -125,7 +123,11 @@ fn number(value: Option<&Any>) -> Option<f64> {
 /// The outline level (0-based) the saved paragraph has: its own, else its
 /// style's. A seeded paragraph's own is its source formatting's; the stored
 /// `outlineLevel` merged the style's in at seed and goes stale on a style change.
-fn outline_level<T: ReadTxn>(txn: &T, map: &MapRef, package: Option<&PackageContext>) -> Option<u8> {
+fn outline_level<T: ReadTxn>(
+    txn: &T,
+    map: &MapRef,
+    package: Option<&PackageContext>,
+) -> Option<u8> {
     let own = match map.get(txn, "_originalFormatting") {
         Some(Out::Any(Any::Map(original))) => number(original.get("outlineLevel")),
         _ => match map.get(txn, "outlineLevel") {
@@ -183,7 +185,11 @@ fn text_element(text: &str) -> String {
     let preserve = text.starts_with(' ') || text.ends_with(' ') || text.contains("  ");
     format!(
         "<w:t{}>{}</w:t>",
-        if preserve { r#" xml:space="preserve""# } else { "" },
+        if preserve {
+            r#" xml:space="preserve""#
+        } else {
+            ""
+        },
         escape(text)
     )
 }
@@ -276,7 +282,10 @@ fn toc_xml(
         };
         let content = format!("<w:r>{}</w:r>{number}", text_element(entry.text));
         let content = if flags.links {
-            format!(r#"<w:hyperlink w:anchor="{}">{content}</w:hyperlink>"#, entry.bookmark)
+            format!(
+                r#"<w:hyperlink w:anchor="{}">{content}</w:hyperlink>"#,
+                entry.bookmark
+            )
         } else {
             content
         };
@@ -432,13 +441,12 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, BODY)?;
         let paras = paragraphs(&txn, &story);
-        let last = paras
-            .iter()
-            .find(|para| para.pilcrow >= field.end)
-            .ok_or(OpError::ExpectedPilcrow {
+        let last = paras.iter().find(|para| para.pilcrow >= field.end).ok_or(
+            OpError::ExpectedPilcrow {
                 story: BODY.to_owned(),
                 index: field.end,
-            })?;
+            },
+        )?;
         // The field's paragraphs go whole; text after its end stays in the
         // last one's own paragraph, now first after the new entries.
         let (remove_to, kept) = if field.end == last.pilcrow {
@@ -455,8 +463,14 @@ impl EditingDoc {
             let pilcrow = pilcrow - (remove_to - field.start);
             renumber_fields(&mut txn, &story, field.start, pilcrow, -1);
         }
-        self.write_toc(&mut txn, &story, field.start, &field.instruction_code(), layout)
-            .map(Some)
+        self.write_toc(
+            &mut txn,
+            &story,
+            field.start,
+            &field.instruction_code(),
+            layout,
+        )
+        .map(Some)
     }
 
     /// Writes a TOC's paragraphs at `index` (a paragraph's content start)
@@ -532,10 +546,12 @@ impl EditingDoc {
         }
         let existing_ids: HashSet<String> = paras.iter().map(|para| para.id.clone()).collect();
         let para_ids: Vec<String> = (0..listed.len().max(1))
-            .map(|_| loop {
-                let id = format!("{:08X}", hash31(&self.next_id()));
-                if !existing_ids.contains(&id) && id != "00000000" {
-                    return id;
+            .map(|_| {
+                loop {
+                    let id = format!("{:08X}", hash31(&self.next_id()));
+                    if !existing_ids.contains(&id) && id != "00000000" {
+                        return id;
+                    }
                 }
             })
             .collect();
@@ -566,7 +582,11 @@ impl EditingDoc {
         let shifted = ops
             .into_iter()
             .map(|op| match op {
-                RawOp::Insert { index: at, text, attrs } => RawOp::Insert {
+                RawOp::Insert {
+                    index: at,
+                    text,
+                    attrs,
+                } => RawOp::Insert {
                     index: at + index,
                     text,
                     attrs,
@@ -711,7 +731,9 @@ mod tests {
         let ppr = style.map_or(String::new(), |style| {
             format!(r#"<w:pPr><w:pStyle w:val="{style}"/></w:pPr>"#)
         });
-        format!(r#"<w:p w14:paraId="{id}">{ppr}<w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#)
+        format!(
+            r#"<w:p w14:paraId="{id}">{ppr}<w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+        )
     }
 
     /// An empty first paragraph, then H1 Introduction, text, H2 Background,
@@ -811,7 +833,9 @@ mod tests {
         let json = |value: &Any| {
             let mut text = String::new();
             value.to_json(&mut text);
-            serde_json::from_str::<serde_json::Value>(&text).unwrap().to_string()
+            serde_json::from_str::<serde_json::Value>(&text)
+                .unwrap()
+                .to_string()
         };
         doc.story_segments(BODY)
             .unwrap()
@@ -871,8 +895,18 @@ mod tests {
     #[test]
     fn word_markup_for_two_entries() {
         let entries = [
-            Entry { bookmark: "_Toc1", level: 1, text: "A & B", page: "1" },
-            Entry { bookmark: "_Toc2", level: 2, text: "C", page: "ii" },
+            Entry {
+                bookmark: "_Toc1",
+                level: 1,
+                text: "A & B",
+                page: "1",
+            },
+            Entry {
+                bookmark: "_Toc2",
+                level: 2,
+                text: "C",
+                page: "ii",
+            },
         ];
         let ids = ["0000000A".to_owned(), "0000000B".to_owned()];
         let xml = toc_xml(TOC_INSTRUCTION, &entries, &ids, 9350, "", None);
@@ -927,12 +961,19 @@ mod tests {
             let run = body[at..].find("<w:r>").unwrap() + at;
             let close = body[at..].find("</w:p>").unwrap() + at;
             body.insert_str(close, &format!(r#"<w:bookmarkEnd w:id="{id}"/>"#));
-            body.insert_str(run, &format!(r#"<w:bookmarkStart w:id="{id}" w:name="{name}"/>"#));
+            body.insert_str(
+                run,
+                &format!(r#"<w:bookmarkStart w:id="{id}" w:name="{name}"/>"#),
+            );
         }
         package(&format!("{toc}{body}"), toc_styles)
     }
 
-    fn toc_markup(doc: &EditingDoc, toc_styles: bool, entries: &[(&str, u8, &str, &str)]) -> String {
+    fn toc_markup(
+        doc: &EditingDoc,
+        toc_styles: bool,
+        entries: &[(&str, u8, &str, &str)],
+    ) -> String {
         let marks = toc_bookmarks(doc);
         let ids: Vec<String> = doc
             .paragraphs(BODY)
@@ -1013,7 +1054,10 @@ mod tests {
     /// Insert in a paragraph with text before the caret splits it there.
     #[test]
     fn insert_mid_paragraph_takes_its_own_paragraphs() {
-        let bytes = package(&format!("{}{}", p("20000001", None, "Hello world"), body()), false);
+        let bytes = package(
+            &format!("{}{}", p("20000001", None, "Hello world"), body()),
+            false,
+        );
         let doc = open(&bytes, 13);
         let at = index_of(&doc, "world");
         doc.insert_toc(&ctx(), Position::new(BODY, at), &layout(&PAGES))
@@ -1057,10 +1101,15 @@ mod tests {
         )
         .unwrap();
         let caret = Position::new(BODY, index_of(&doc, "Some text"));
-        assert!(doc
-            .update_toc(&ctx(), Some(&caret), &layout(&[("10000002", "3"), ("10000004", "4"), ("10000006", "5")]))
+        assert!(
+            doc.update_toc(
+                &ctx(),
+                Some(&caret),
+                &layout(&[("10000002", "3"), ("10000004", "4"), ("10000006", "5")])
+            )
             .unwrap()
-            .is_some());
+            .is_some()
+        );
         assert_eq!(
             named(&doc),
             r#"Introduction	<[PAGEREF _Toc10000002 \h|3][TOC \o "1-3" \h \z \u|]¶Context	[PAGEREF _Toc10000004 \h|4]¶Details	[PAGEREF _Toc10000006 \h|5]¶¶Introduction¶Some text.¶Context¶Deep¶Details¶"#
@@ -1074,7 +1123,8 @@ mod tests {
     #[test]
     fn update_keeps_the_field_code() {
         let fld = |kind: &str| format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#);
-        let code = r#"<w:r><w:instrText xml:space="preserve"> TOC \o "1-2" \h \z \u </w:instrText></w:r>"#;
+        let code =
+            r#"<w:r><w:instrText xml:space="preserve"> TOC \o "1-2" \h \z \u </w:instrText></w:r>"#;
         let entry = |bm: &str, text: &str| {
             format!(
                 r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t>{text}</w:t></w:r><w:r><w:tab/></w:r>{}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{}<w:r><w:t>9</w:t></w:r>{}</w:hyperlink>"#,
@@ -1097,7 +1147,11 @@ mod tests {
             p("10000006", Some("Heading3"), "Details"),
         );
         let doc = open(&package(&format!("{toc}{headings}"), false), 16);
-        assert!(doc.update_toc(&ctx(), None, &layout(&PAGES)).unwrap().is_some());
+        assert!(
+            doc.update_toc(&ctx(), None, &layout(&PAGES))
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             named(&doc),
             r#"Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-2" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶after¶Introduction¶Background¶Details¶"#
@@ -1129,19 +1183,23 @@ mod tests {
                     .unwrap();
             } else {
                 let at = index_of(&b, "Some text.") + 10;
-                b.split_paragraph(&ctx(), Position::new(BODY, at), None).unwrap();
-                b.insert_text(&ctx(), Position::new(BODY, at + 1), "Method", Default::default())
+                b.split_paragraph(&ctx(), Position::new(BODY, at), None)
                     .unwrap();
-                let id = b.paragraphs(BODY).unwrap()[5].para_id.clone();
-                b.set_paragraph_attrs(
+                b.insert_text(
                     &ctx(),
-                    &crate::ParaSelector::One(id),
-                    &{
-                        let mut delta = crate::ParaAttrDelta::default();
-                        delta.other.insert("pStyle".to_owned(), Some(Any::from("Heading2")));
-                        delta
-                    },
+                    Position::new(BODY, at + 1),
+                    "Method",
+                    Default::default(),
                 )
+                .unwrap();
+                let id = b.paragraphs(BODY).unwrap()[5].para_id.clone();
+                b.set_paragraph_attrs(&ctx(), &crate::ParaSelector::One(id), &{
+                    let mut delta = crate::ParaAttrDelta::default();
+                    delta
+                        .other
+                        .insert("pStyle".to_owned(), Some(Any::from("Heading2")));
+                    delta
+                })
                 .unwrap();
             }
             a.update_toc(&ctx(), None, &layout(&PAGES)).unwrap();
@@ -1153,7 +1211,10 @@ mod tests {
                 assert!(text.contains("Details	[PAGEREF"), "{text}");
             } else {
                 assert!(text.contains("Some text.¶Method¶Background"), "{text}");
-                assert!(!text[..text.find("¶¶").unwrap()].contains("Method"), "{text}");
+                assert!(
+                    !text[..text.find("¶¶").unwrap()].contains("Method"),
+                    "{text}"
+                );
             }
             assert_eq!(a.toc_fields(BODY).unwrap().len(), 1);
         }
@@ -1162,7 +1223,10 @@ mod tests {
     /// Insert, and Update, are one Undo step.
     #[test]
     fn undo_restores_in_one_step() {
-        let bytes = package(&format!("{}{}", p("20000001", None, "Hello world"), body()), false);
+        let bytes = package(
+            &format!("{}{}", p("20000001", None, "Hello world"), body()),
+            false,
+        );
         let doc = open(&bytes, 31);
         let before = units(&doc);
         let mut undo = doc.undo_manager();
@@ -1171,7 +1235,8 @@ mod tests {
             .unwrap();
         undo.add_undo_barrier();
         let inserted = units(&doc);
-        doc.update_toc(&ctx(), None, &layout(&[("10000002", "7")])).unwrap();
+        doc.update_toc(&ctx(), None, &layout(&[("10000002", "7")]))
+            .unwrap();
         assert!(undo.undo());
         assert_eq!(units(&doc), inserted);
         assert!(undo.undo());

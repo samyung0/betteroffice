@@ -207,9 +207,11 @@ export function HostMenus({
         ? [item('insert-watermark', t('toolbar.watermark'), { edits: true })]
         : []),
       ...(breaks.length ? [separator, submenu('insert-break', t('toolbar.break'), breaks)] : []),
-      ...(ctx.onInsertTOC ? [item('insert-toc', t('toolbar.tableOfContents'))] : []),
+      ...(ctx.onInsertTOC
+        ? [item('insert-toc', t('toolbar.tableOfContents'), { edits: true })]
+        : []),
       ...(ctx.onUpdateTOC
-        ? [item('update-toc', t('hostMenus.updateTableOfContents'))]
+        ? [item('update-toc', t('hostMenus.updateTableOfContents'), { edits: true })]
         : []),
     ];
     const spacing = formatting.lineSpacing ?? 240;

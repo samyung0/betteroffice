@@ -343,7 +343,9 @@ test('Insert offers table of contents, and its update while the document has one
     onEditAction: mock(() => {}),
     onInsertImageFile: mock(() => {}),
     onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
     showComments: false,
+    showRuler: false,
   };
   const onInsertTOC = mock(() => {});
   const onUpdateTOC = mock(() => {});

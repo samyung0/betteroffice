@@ -407,6 +407,14 @@ export class EditSession {
      */
     insert_text(story: string, para_id: string, offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**
+     * Inserts Word's table of contents at `(story, para_id, offset)` (body
+     * only). `layout_json` is `{"pages":{paraId:label},"tabTwips":number,
+     * "emptyText":string}`: each heading's page as its page shows it, the
+     * entries' right tab and the result when no heading qualifies. Returns
+     * `{"firstParaId","nextParaId"}`: the TOC's first paragraph and the one after it.
+     */
+    insert_toc(story: string, para_id: string, offset: number, layout_json: string): string;
+    /**
      * Inserts a watermark embed at `(story, para_id, offset)`, its payload
      * taken verbatim from the `watermark_json` object. Always a plain local
      * edit. Errors when the JSON is not an object.
@@ -848,6 +856,15 @@ export class EditSession {
      */
     story_tables(story: string): string;
     /**
+     * How many TOC fields the body holds.
+     */
+    toc_count(): number;
+    /**
+     * The body headings a table of contents lists, as
+     * `[{"paraId","level","text"}]`.
+     */
+    toc_headings(): string;
+    /**
      * Applies one run mark over `[start, end)`. `mark_json`:
      * `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
      * {"type":"fontFamily"|"color","value":string} |
@@ -874,6 +891,12 @@ export class EditSession {
      * Current undo grouping policy.
      */
     undo_capture_mode(): string;
+    /**
+     * Rebuilds the table of contents holding `(story, para_id, offset)`,
+     * else the body's first (see [`Self::insert_toc`] for `layout_json` and
+     * the result). Returns `null` when the body has none.
+     */
+    update_toc(story: string, para_id: string, offset: number, layout_json: string): string;
     /**
      * Lowers one story to a `LayoutBlock[]` JSON array — the block, run and
      * table vocabulary the layout engine consumes. `env_json` supplies the
@@ -1086,6 +1109,7 @@ export interface InitOutput {
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_insert_table: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly editsession_insert_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1146,10 +1170,13 @@ export interface InitOutput {
     readonly editsession_story_object_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_tables: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_toc_count: (a: number) => [number, number, number];
+    readonly editsession_toc_headings: (a: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
+    readonly editsession_update_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
