@@ -300,7 +300,12 @@ export function DocxEditorPagedArea({
     setPartSelection(null);
   }
 
-  useEscapeKey(partEditTarget != null, () => setPartEditTarget(null));
+  // Escape may come from the band's Options button, which unmounts with it:
+  // the document input takes the focus back.
+  useEscapeKey(partEditTarget != null, () => {
+    setPartEditTarget(null);
+    pagedEditorRef.current?.focus();
+  });
 
   // UI chrome is independent of renderer readiness and always portals onto
   // the positioned editor-content host.
