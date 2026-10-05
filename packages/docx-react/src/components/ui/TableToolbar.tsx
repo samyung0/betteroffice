@@ -61,19 +61,12 @@ export type TableAction =
       margins: { top?: number; bottom?: number; left?: number; right?: number };
     }
   | { type: 'cellTextDirection'; direction: string | null }
-  | { type: 'toggleNoWrap' }
+  | { type: 'wrapText'; wrap: boolean }
   | { type: 'rowHeight'; height: number | null; rule?: 'auto' | 'atLeast' | 'exact' }
-  | { type: 'toggleHeaderRow' }
+  | { type: 'pinHeaderRow'; pinned: boolean }
   | { type: 'distributeColumns' }
   | { type: 'autoFitContents' }
-  | {
-      type: 'tableProperties';
-      props: {
-        width?: number | null;
-        widthType?: string | null;
-        justification?: 'left' | 'center' | 'right' | null;
-      };
-    }
+  | { type: 'tableAlignment'; alignment: 'left' | 'center' | 'right' }
   | { type: 'openTableProperties' }
   | { type: 'applyTableStyle'; styleId: string };
 

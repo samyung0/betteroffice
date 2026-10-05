@@ -1324,6 +1324,20 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               });
             } else if (command.type === 'tableCellShading') {
               session.setCellShading(target.range, command.color);
+            } else if (command.type === 'tableCellVerticalAlign') {
+              session.setCellTextFormat(target.range, { verticalAlign: command.align });
+            } else if (command.type === 'tableWrapText') {
+              session.setCellTextFormat(target.range, { noWrap: !command.wrap });
+            } else if (command.type === 'tableAlignment') {
+              session.setTableAlignment(table, command.alignment);
+            } else if (command.type === 'tableHeaderRow') {
+              // Google Docs: pin every row down to the selection's last; unpin them all.
+              const last = Math.max(target.range.anchor.row, target.range.head.row);
+              session.setHeaderRows(table, command.pinned ? last + 1 : 0);
+            } else if (command.type === 'tableDistributeColumns') {
+              session.distributeColumns(target.range);
+            } else if (command.type === 'tableAutofit') {
+              session.autofitTable(table);
             } else {
               const range = yrsTableSelectionRange(session, target.focused, command.target);
               if (!range) return false;

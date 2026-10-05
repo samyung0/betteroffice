@@ -296,6 +296,7 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
   textDirection?: TableCellFormatting['textDirection'];
   borders?: TableCellFormatting['borders'];
   margins?: { top?: number; bottom?: number; left?: number; right?: number };
+  noWrap?: boolean;
   _originalFormatting?: TableCellFormatting;
   _originalResolvedFill?: string;
   cellMarker?:
@@ -340,6 +341,7 @@ export function tableCellAttrsToFormatting(
     if (attrs.textDirection !== (orig.textDirection || undefined)) {
       result.textDirection = attrs.textDirection || undefined;
     }
+    if (!!attrs.noWrap !== !!orig.noWrap) result.noWrap = attrs.noWrap || undefined;
     return result;
   }
 
@@ -351,7 +353,8 @@ export function tableCellAttrsToFormatting(
     attrs.backgroundColor ||
     attrs.borders ||
     attrs.margins ||
-    attrs.textDirection;
+    attrs.textDirection ||
+    attrs.noWrap;
   if (!hasFormatting) return undefined;
   return {
     gridSpan: attrs.colspan > 1 ? attrs.colspan : undefined,
@@ -367,6 +370,7 @@ export function tableCellAttrsToFormatting(
     shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
     borders: attrs.borders,
     margins: attrs.margins ? cellMargins(attrs.margins) : undefined,
+    noWrap: attrs.noWrap || undefined,
   };
 }
 

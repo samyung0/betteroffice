@@ -104,6 +104,18 @@ export function useTableDialogs({
             color: { rgb: action.color.replace(/^#/, '') },
           };
           applyBorders(action.side === 'all' ? allBorders(border) : { [action.side]: border });
+        } else if (action.type === 'cellVerticalAlign') {
+          apply({ type: 'tableCellVerticalAlign', align: action.align });
+        } else if (action.type === 'wrapText') {
+          apply({ type: 'tableWrapText', wrap: action.wrap });
+        } else if (action.type === 'tableAlignment') {
+          apply({ type: 'tableAlignment', alignment: action.alignment });
+        } else if (action.type === 'pinHeaderRow') {
+          apply({ type: 'tableHeaderRow', pinned: action.pinned });
+        } else if (action.type === 'distributeColumns') {
+          apply({ type: 'tableDistributeColumns' });
+        } else if (action.type === 'autoFitContents') {
+          apply({ type: 'tableAutofit' });
         } else if (action.type === 'openTableProperties') {
           setTablePropsOpen(true);
         } else if (action.type === 'applyTableStyle') {

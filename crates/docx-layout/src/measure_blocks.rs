@@ -1707,7 +1707,8 @@ fn widen_for_unbreakable_cells(
         .into_iter()
         .filter(|entry| entry.col_span == 1 && entry.column_index < widths.len())
         .collect();
-    let cell_at = |row: usize, index: usize| table.rows.get(row).and_then(|row| row.cells.get(index));
+    let cell_at =
+        |row: usize, index: usize| table.rows.get(row).and_then(|row| row.cells.get(index));
     if !grid.iter().any(|entry| {
         cell_at(entry.row_index, entry.cell_index).is_some_and(|cell| unbreakable_cell(table, cell))
     }) {

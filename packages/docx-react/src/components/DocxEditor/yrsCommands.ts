@@ -63,6 +63,12 @@ export type YrsEditorCommand =
   | { type: 'tableMergeCells' }
   | { type: 'tableSplitCell'; rows?: number; columns?: number }
   | { type: 'tableCellShading'; color: string | null }
+  | { type: 'tableCellVerticalAlign'; align: 'top' | 'center' | 'bottom' }
+  | { type: 'tableWrapText'; wrap: boolean }
+  | { type: 'tableAlignment'; alignment: 'left' | 'center' | 'right' }
+  | { type: 'tableHeaderRow'; pinned: boolean }
+  | { type: 'tableDistributeColumns' }
+  | { type: 'tableAutofit' }
   | {
       type: 'tableProperties';
       properties: {
@@ -311,6 +317,7 @@ interface TablePayloadCell {
 }
 
 interface TablePayloadRow {
+  trPr?: Record<string, unknown>;
   cells: TablePayloadCell[];
 }
 
@@ -502,12 +509,18 @@ export function currentYrsTableContext(session: YrsSession): TableContextInfo | 
     : undefined;
   const justification = payload.tblPr?.justification;
   const backgroundColor = focusedCell?.tcPr?.backgroundColor;
+  const verticalAlign = focusedCell?.tcPr?.verticalAlign;
   return {
     isInTable: true,
     table:
       typeof justification === 'string'
         ? { attrs: { justification } }
         : undefined,
+    tableAlignment:
+      justification === 'center' ? 'center' : justification === 'right' || justification === 'end' ? 'right' : 'left',
+    verticalAlign: verticalAlign === 'center' || verticalAlign === 'bottom' ? verticalAlign : 'top',
+    wrapText: focusedCell?.tcPr?.noWrap !== true,
+    headerRow: payload.rows[target.focused.row]?.trPr?.isHeader === true,
     rowIndex: target.focused.row,
     columnIndex: target.focused.column,
     rowCount: payload.rows.length,

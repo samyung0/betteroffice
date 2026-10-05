@@ -425,7 +425,11 @@ pub fn widen_unbreakable_columns(
     let mut merged = vec![false; widths.len()];
     for cell in resolve_cell_grid(table_block) {
         if cell.col_span > 1 {
-            for slot in merged.iter_mut().skip(cell.column_index).take(cell.col_span) {
+            for slot in merged
+                .iter_mut()
+                .skip(cell.column_index)
+                .take(cell.col_span)
+            {
                 *slot = true;
             }
         }

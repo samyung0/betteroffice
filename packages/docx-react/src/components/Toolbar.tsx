@@ -258,6 +258,10 @@ export interface ToolbarProps {
     hasMultiCellSelection?: boolean;
     cellBorderColor?: ColorValue;
     cellBackgroundColor?: string;
+    tableAlignment?: 'left' | 'center' | 'right';
+    verticalAlign?: 'top' | 'center' | 'bottom';
+    wrapText?: boolean;
+    headerRow?: boolean;
   } | null;
   /** Callback when a table action is triggered */
   onTableAction?: (action: TableAction) => void;

@@ -1,9 +1,9 @@
 /**
  * TableMoreDropdown - Compact dropdown for less-used table actions
  *
- * Contains: delete row/column/table, vertical alignment, header row,
- * distribute columns, auto-fit, table alignment, cell margins,
- * text direction, no-wrap, row height, table properties.
+ * Contains: insert, merge/split, vertical and table alignment, header row,
+ * wrap text, distribute columns, auto-fit, select, delete and table
+ * properties.
  */
 
 import { useState, useCallback } from 'react';
@@ -25,7 +25,10 @@ export interface TableMoreDropdownProps {
     columnCount?: number;
     canSplitCell?: boolean;
     hasMultiCellSelection?: boolean;
-    table?: { attrs?: { justification?: string } };
+    tableAlignment?: 'left' | 'center' | 'right';
+    verticalAlign?: 'top' | 'center' | 'bottom';
+    wrapText?: boolean;
+    headerRow?: boolean;
   } | null;
 }
 
@@ -47,6 +50,19 @@ const separatorStyles: CSSProperties = {
   height: 1,
   backgroundColor: 'var(--doc-border)',
   margin: '4px 0',
+};
+
+const labelStyles: CSSProperties = {
+  padding: '6px 14px 2px',
+  fontSize: 11,
+  fontWeight: 500,
+  color: 'var(--doc-text-muted)',
+};
+
+const checkStyles: CSSProperties = {
+  position: 'absolute',
+  right: 14,
+  display: 'flex',
 };
 
 export function TableMoreDropdown({
@@ -77,17 +93,21 @@ export function TableMoreDropdown({
     icon: string,
     label: string,
     action: TableAction,
-    opts?: { danger?: boolean; itemDisabled?: boolean }
+    opts?: { danger?: boolean; itemDisabled?: boolean; checked?: boolean }
   ) => {
     const isItemDisabled = disabled || opts?.itemDisabled;
+    const checkable = opts?.checked !== undefined;
     return (
       <button
         key={id}
         type="button"
-        role="menuitem"
+        role={checkable ? 'menuitemcheckbox' : 'menuitem'}
+        aria-checked={checkable ? opts?.checked : undefined}
+        data-testid={`table-menu-${id}`}
         className="docx-popover-item"
         style={{
           ...menuItemStyles,
+          position: 'relative',
           backgroundColor:
             hoveredItem === id && !isItemDisabled ? 'var(--doc-bg-hover)' : 'transparent',
           color: isItemDisabled
@@ -108,9 +128,24 @@ export function TableMoreDropdown({
           className={opts?.danger && !isItemDisabled ? 'text-destructive' : ''}
         />
         <span style={{ flex: 1 }}>{label}</span>
+        {opts?.checked && (
+          <span className="docx-popover-check" style={checkStyles}>
+            <MaterialSymbol name="check" size={16} />
+          </span>
+        )}
       </button>
     );
   };
+  const label = (text: string) => (
+    <div className="docx-popover-label" style={labelStyles}>
+      {text}
+    </div>
+  );
+  const separator = (
+    <div className="docx-popover-separator" style={separatorStyles} role="separator" />
+  );
+  const verticalAlign = tableContext?.verticalAlign ?? 'top';
+  const tableAlignment = tableContext?.tableAlignment ?? 'left';
 
   const button = (
     <Button
@@ -161,7 +196,7 @@ export function TableMoreDropdown({
           {menuItem('addColumnLeft', 'add', t('table.insertColumnLeft'), 'addColumnLeft')}
           {menuItem('addColumnRight', 'add', t('table.insertColumnRight'), 'addColumnRight')}
 
-          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
+          {separator}
 
           {/* Merge/Split */}
           {menuItem('mergeCells', 'call_merge', t('table.mergeCells'), 'mergeCells', {
@@ -171,12 +206,62 @@ export function TableMoreDropdown({
             itemDisabled: !tableContext?.canSplitCell,
           })}
 
-          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
+          {separator}
+
+          {label(t('tableAdvanced.verticalAlignment'))}
+          {(
+            [
+              ['top', 'vertical_align_top', 'tableAdvanced.top'],
+              ['center', 'vertical_align_center', 'tableAdvanced.middle'],
+              ['bottom', 'vertical_align_bottom', 'tableAdvanced.bottom'],
+            ] as const
+          ).map(([align, icon, key]) =>
+            menuItem(`vertical-${align}`, icon, t(key), { type: 'cellVerticalAlign', align }, {
+              checked: verticalAlign === align,
+            })
+          )}
+          {label(t('tableAdvanced.tableAlignment'))}
+          {(
+            [
+              ['left', 'format_align_left', 'hostMenus.left'],
+              ['center', 'format_align_center', 'hostMenus.center'],
+              ['right', 'format_align_right', 'hostMenus.right'],
+            ] as const
+          ).map(([alignment, icon, key]) =>
+            menuItem(`align-${alignment}`, icon, t(key), { type: 'tableAlignment', alignment }, {
+              checked: tableAlignment === alignment,
+            })
+          )}
+
+          {separator}
+
+          {menuItem(
+            'header-row',
+            'table_rows',
+            t('tableAdvanced.pinHeaderRow'),
+            { type: 'pinHeaderRow', pinned: !tableContext?.headerRow },
+            { checked: !!tableContext?.headerRow }
+          )}
+          {menuItem(
+            'wrap-text',
+            'wrap_text',
+            t('tableAdvanced.wrapText'),
+            { type: 'wrapText', wrap: tableContext?.wrapText === false },
+            { checked: tableContext?.wrapText !== false }
+          )}
+          {menuItem('distribute', 'view_column', t('tableAdvanced.distributeColumns'), {
+            type: 'distributeColumns',
+          })}
+          {menuItem('autofit', 'fit_width', t('tableAdvanced.autoFit'), {
+            type: 'autoFitContents',
+          })}
+
+          {separator}
 
           {/* Select */}
           {menuItem('selectTable', 'select_all', t('table.selectTable'), 'selectTable')}
 
-          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
+          {separator}
 
           {/* Delete actions */}
           {menuItem('deleteRow', 'delete', t('table.deleteRow'), 'deleteRow', {
@@ -191,7 +276,7 @@ export function TableMoreDropdown({
             danger: true,
           })}
 
-          <div className="docx-popover-separator" style={separatorStyles} role="separator" />
+          {separator}
 
           {menuItem('properties', 'settings', t('tableAdvanced.tableProperties'), {
             type: 'openTableProperties',

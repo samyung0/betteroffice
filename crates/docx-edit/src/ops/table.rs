@@ -2852,7 +2852,10 @@ mod tests {
                 .map(|(block, measure)| MeasuredBlock { block, measure })
                 .collect(),
             options: LayoutOptions {
-                page_size: Some(Size { w: 816.0, h: 1056.0 }),
+                page_size: Some(Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
                 margins: Some(PageMargins {
                     top: 96.0,
                     right: 108.0,
@@ -2874,7 +2877,11 @@ mod tests {
         let docx_layout::types::BlockExtent::Table(table) = &input.measured[0].measure else {
             panic!("expected a measured table");
         };
-        table.column_widths.iter().map(|width| width.round()).collect()
+        table
+            .column_widths
+            .iter()
+            .map(|width| width.round())
+            .collect()
     }
 
     /// `(page, x, baseline)` of every text run reading `text`.
@@ -2886,14 +2893,17 @@ mod tests {
             .iter()
             .enumerate()
             .flat_map(|(page, display)| {
-                display.primitives.iter().filter_map(move |primitive| match primitive {
-                    Primitive::Text(run) if run.text.trim() == text => Some((
-                        page,
-                        run.x.as_f64().unwrap(),
-                        run.baseline_y.as_f64().unwrap(),
-                    )),
-                    _ => None,
-                })
+                display
+                    .primitives
+                    .iter()
+                    .filter_map(move |primitive| match primitive {
+                        Primitive::Text(run) if run.text.trim() == text => Some((
+                            page,
+                            run.x.as_f64().unwrap(),
+                            run.baseline_y.as_f64().unwrap(),
+                        )),
+                        _ => None,
+                    })
             })
             .collect()
     }
@@ -2905,13 +2915,15 @@ mod tests {
         doc.set_table_width(&direct(), &table(), 4320.0).unwrap();
         let before = table_value(&doc);
         let left = runs(&doc, "A")[0].1;
-        doc.set_table_alignment(&direct(), &table(), "center").unwrap();
+        doc.set_table_alignment(&direct(), &table(), "center")
+            .unwrap();
         let after = table_value(&doc);
         assert_eq!(after.0["justification"], "center");
         assert_eq!((&after.1, &after.2), (&before.1, &before.2));
         // A 288px table on a 600px column moves right by half the difference.
         assert_eq!((runs(&doc, "A")[0].1 - left).round(), 156.0);
-        doc.set_table_alignment(&direct(), &table(), "right").unwrap();
+        doc.set_table_alignment(&direct(), &table(), "right")
+            .unwrap();
         assert_eq!((runs(&doc, "A")[0].1 - left).round(), 312.0);
         assert!(
             doc.set_table_alignment(&direct(), &table(), "middle")
@@ -2961,7 +2973,8 @@ mod tests {
     #[test]
     fn distribute_columns_evens_the_selected_columns_and_keeps_their_total() {
         let doc = inserted(&direct(), 2, 3);
-        doc.set_column_width(&direct(), &cell(0, 0), 1001.0).unwrap();
+        doc.set_column_width(&direct(), &cell(0, 0), 1001.0)
+            .unwrap();
         doc.distribute_columns(&direct(), &TableRange::new(cell(0, 0), cell(1, 1)))
             .unwrap();
         let (_, grid, rows) = table_value(&doc);
@@ -2971,7 +2984,9 @@ mod tests {
 
         // One cell distributes the whole table; a merged cell takes its span.
         let merged = inserted(&direct(), 2, 3);
-        merged.set_column_width(&direct(), &cell(0, 2), 1000.0).unwrap();
+        merged
+            .set_column_width(&direct(), &cell(0, 2), 1000.0)
+            .unwrap();
         merged
             .merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 1)))
             .unwrap();
@@ -2982,7 +2997,11 @@ mod tests {
         assert_eq!(grid, serde_json::json!([2414, 2413, 2413]));
         assert_eq!(rows[0]["cells"][0]["tcPr"]["width"], 4827);
         let widths = column_widths(&merged);
-        assert_eq!(widths, vec![208.0, 208.0, 208.0], "the table keeps its 9360 twips");
+        assert_eq!(
+            widths,
+            vec![208.0, 208.0, 208.0],
+            "the table keeps its 9360 twips"
+        );
     }
 
     #[test]
@@ -2993,7 +3012,10 @@ mod tests {
         assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
         doc.autofit_table(&direct(), &table()).unwrap();
         let (tbl_pr, _, rows) = table_value(&doc);
-        assert_eq!((tbl_pr["width"].clone(), tbl_pr["widthType"].clone()), (serde_json::json!(0), serde_json::json!("auto")));
+        assert_eq!(
+            (tbl_pr["width"].clone(), tbl_pr["widthType"].clone()),
+            (serde_json::json!(0), serde_json::json!("auto"))
+        );
         assert!(tbl_pr.get("tableLayout").is_none());
         for row in rows.as_array().unwrap() {
             for cell in row["cells"].as_array().unwrap() {
@@ -3044,14 +3066,15 @@ mod tests {
         assert_eq!(baselines.len(), 1, "the heading stays on one line");
         no_wrap(Any::Bool(false));
         assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
-
     }
 
     #[test]
     fn table_menu_ops_keep_a_peer_s_typing_and_alignment_survives_a_row_insert() {
         let left = inserted(&direct(), 2, 2);
         let right = EditingDoc::new(75);
-        right.apply_update_v1(&left.encode_state_as_update_v1()).unwrap();
+        right
+            .apply_update_v1(&left.encode_state_as_update_v1())
+            .unwrap();
         let sync = |a: &EditingDoc, b: &EditingDoc| {
             a.apply_update_v1(&b.encode_diff_v1(&a.encode_state_vector_v1()).unwrap())
                 .unwrap();
@@ -3059,7 +3082,8 @@ mod tests {
                 .unwrap();
         };
         type_in(&right, 0, 0, "typed");
-        left.set_table_alignment(&direct(), &table(), "center").unwrap();
+        left.set_table_alignment(&direct(), &table(), "center")
+            .unwrap();
         left.set_header_rows(&direct(), &table(), 1).unwrap();
         left.distribute_columns(&direct(), &whole(2, 2)).unwrap();
         left.set_cell_text_format(
@@ -3074,12 +3098,16 @@ mod tests {
         left.autofit_table(&direct(), &table()).unwrap();
         sync(&left, &right);
         assert_eq!(table_value(&left), table_value(&right));
-        assert_eq!(project_story(&right, "body:t0:r0c0").unwrap(), project_story(&left, "body:t0:r0c0").unwrap());
+        assert_eq!(
+            project_story(&right, "body:t0:r0c0").unwrap(),
+            project_story(&left, "body:t0:r0c0").unwrap()
+        );
         assert!(runs(&left, "typed").len() == 1 && runs(&right, "typed").len() == 1);
 
         // Alignment and a peer's row insert touch different fields.
         right.insert_row(&direct(), &cell(1, 0), true).unwrap();
-        left.set_table_alignment(&direct(), &table(), "right").unwrap();
+        left.set_table_alignment(&direct(), &table(), "right")
+            .unwrap();
         sync(&left, &right);
         assert_eq!(table_value(&left), table_value(&right));
         let (tbl_pr, _, rows) = table_value(&left);

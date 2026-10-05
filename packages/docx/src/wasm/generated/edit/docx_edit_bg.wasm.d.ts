@@ -17,6 +17,7 @@ export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: num
 export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_autofit_table: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_can_redo: (a: number) => number;
@@ -39,6 +40,7 @@ export const editsession_display_hit_test_regions_json: (a: number, b: number, c
 export const editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_distribute_columns: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
@@ -98,12 +100,14 @@ export const editsession_set_cell_text_format: (a: number, b: number, c: number,
 export const editsession_set_column_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+export const editsession_set_header_rows: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_media_json: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+export const editsession_set_table_alignment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
 export const editsession_set_update_observer: (a: number, b: any) => [number, number];

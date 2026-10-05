@@ -41,4 +41,12 @@ export interface TableContextInfo {
   canSplitCell?: boolean;
   cellBorderColor?: ColorValue;
   cellBackgroundColor?: string;
+  /** The table's alignment on the page (`w:jc`; `start`/absent read as left). */
+  tableAlignment?: 'left' | 'center' | 'right';
+  /** The caret cell's vertical alignment (absent reads as top). */
+  verticalAlign?: 'top' | 'center' | 'bottom';
+  /** False when the caret cell has `w:noWrap`. */
+  wrapText?: boolean;
+  /** The caret's row repeats as a header row. */
+  headerRow?: boolean;
 }

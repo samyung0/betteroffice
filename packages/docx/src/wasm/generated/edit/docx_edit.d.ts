@@ -150,6 +150,11 @@ export class EditSession {
      */
     apply_update_with_inference(update: Uint8Array): string;
     /**
+     * Word's AutoFit Contents on the table `table_json` ([`TableLocator`]).
+     * Always a plain local edit.
+     */
+    autofit_table(table_json: string): string;
+    /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
      * frame the caller currently holds; pass `0` for the first frame. A
@@ -290,6 +295,12 @@ export class EditSession {
      * no display list is resident.
      */
     display_vertical_move_json(position: number, direction: string, goal_x: number): string;
+    /**
+     * Makes the columns the [`TableRange`] `range_json` spans equal (every
+     * column when it spans one), keeping their total. Always a plain local
+     * edit.
+     */
+    distribute_columns(range_json: string): string;
     /**
      * Pops the oldest queued transaction, in arrival order. Byte 0 is `1`
      * when the transaction had no local origin and `0` otherwise; the rest is
@@ -719,6 +730,12 @@ export class EditSession {
      */
     set_content_control_value_at(story: string, para_id: string, offset: number, value_json: string): void;
     /**
+     * Makes the first `count` rows of the table `table_json`
+     * ([`TableLocator`]) its repeated header rows; `0` unpins them. Always a
+     * plain local edit.
+     */
+    set_header_rows(table_json: string, count: number): string;
+    /**
      * Sets or clears the hyperlink attribute over `[start, end)`.
      * `hyperlink_json` is `{"href", "tooltip"?, "rId"?}` or `null` to unlink.
      * The attribute is protected: ordinary formatting ops cannot write or
@@ -773,6 +790,11 @@ export class EditSession {
      * with text inserted at it.
      */
     set_selection(story: string, anchor_para: string, anchor_offset: number, head_para: string, head_offset: number): void;
+    /**
+     * Aligns the table `table_json` ([`TableLocator`]) `left`, `center` or
+     * `right` on the page. Always a plain local edit.
+     */
+    set_table_alignment(table_json: string, alignment: string): string;
     /**
      * Sets the preferred width, in twips, of the table `table_json`
      * ([`TableLocator`]) names. Always a plain local edit. Errors unless
@@ -1072,6 +1094,7 @@ export interface InitOutput {
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_autofit_table: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
@@ -1094,6 +1117,7 @@ export interface InitOutput {
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_distribute_columns: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
@@ -1153,12 +1177,14 @@ export interface InitOutput {
     readonly editsession_set_column_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_set_header_rows: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_set_image_geometry: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_media_json: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_paragraph_attr: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_set_paragraph_attrs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_set_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
+    readonly editsession_set_table_alignment: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_table_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_set_undo_capture_mode: (a: number, b: number, c: number) => [number, number];
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];

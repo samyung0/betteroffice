@@ -506,3 +506,95 @@ test('View › Show ruler ticks while the rulers show and toggles them, also rea
   reported.run('show-ruler');
   expect(actions.onToggleRuler).toHaveBeenCalledTimes(1);
 });
+
+test('Format › Table holds the six table items with their state and runs them', () => {
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
+    showComments: false,
+    showRuler: false,
+  };
+  const onTableAction = mock((_action: unknown) => {});
+  const tableContext = {
+    isInTable: true,
+    tableAlignment: 'center' as const,
+    verticalAlign: 'bottom' as const,
+    wrapText: false,
+    headerRow: true,
+  };
+  const menusFor = (disabled: boolean) => {
+    let model: DocxMenuModel | null = null;
+    render(
+      <EditorToolbar
+        singleRow
+        hostMenus
+        zoom={1}
+        disabled={disabled}
+        tableContext={tableContext}
+        onTableAction={onTableAction}
+      >
+        <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+      </EditorToolbar>
+    );
+    const reported = model as DocxMenuModel | null;
+    if (!reported) throw new Error('no menus');
+    const format = reported.menus.find((menu) => menu.id === 'format')?.items ?? [];
+    const table = format.find((entry) => entry.kind === 'submenu' && entry.id === 'format-table');
+    if (table?.kind !== 'submenu') throw new Error('no Format › Table');
+    const flat = (entries: HostMenuEntry[]): HostMenuEntry[] =>
+      entries.flatMap((entry) => (entry.kind === 'submenu' ? flat(entry.items) : [entry]));
+    const items = new Map(
+      flat(table.items).flatMap((entry) => (entry.kind === 'item' ? [[entry.id, entry] as const] : []))
+    );
+    return { reported, items, label: table.label };
+  };
+
+  const { reported, items, label } = menusFor(false);
+  expect(label).toBe(en.hostMenus.table);
+  expect([...items.keys()]).toEqual([
+    'table-valign:top',
+    'table-valign:center',
+    'table-valign:bottom',
+    'table-align:left',
+    'table-align:center',
+    'table-align:right',
+    'table-header-row',
+    'table-wrap-text',
+    'table-distribute',
+    'table-autofit',
+    'table-properties',
+  ]);
+  const checked = [...items.values()].filter((item) => item.kind === 'item' && item.checked);
+  expect(checked.map((item) => item.kind === 'item' && item.id)).toEqual([
+    'table-valign:bottom',
+    'table-align:center',
+    'table-header-row',
+  ]);
+  for (const item of items.values()) expect(item.kind === 'item' && item.edits).toBe(true);
+
+  reported.run('table-valign:center');
+  reported.run('table-align:right');
+  reported.run('table-header-row');
+  reported.run('table-wrap-text');
+  reported.run('table-distribute');
+  reported.run('table-autofit');
+  expect(onTableAction.mock.calls.map(([action]) => action)).toEqual([
+    { type: 'cellVerticalAlign', align: 'center' },
+    { type: 'tableAlignment', alignment: 'right' },
+    { type: 'pinHeaderRow', pinned: false },
+    { type: 'wrapText', wrap: true },
+    { type: 'distributeColumns' },
+    { type: 'autoFitContents' },
+  ]);
+
+  cleanup();
+  onTableAction.mockClear();
+  const paused = menusFor(true);
+  for (const item of paused.items.values()) expect(item.kind === 'item' && item.disabled).toBe(true);
+  paused.reported.run('table-autofit');
+  paused.reported.run('table-align:left');
+  expect(onTableAction).not.toHaveBeenCalled();
+});

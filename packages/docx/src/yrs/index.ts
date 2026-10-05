@@ -928,6 +928,14 @@ export interface YrsSession extends CollaborationReplica {
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
+  /** Aligns the table on the page (`w:jc`). */
+  setTableAlignment(table: YrsTableLoc, alignment: 'left' | 'center' | 'right'): YrsTableReceipt;
+  /** Makes the first `count` rows the repeated header rows; `0` unpins them. */
+  setHeaderRows(table: YrsTableLoc, count: number): YrsTableReceipt;
+  /** Evens the columns `range` spans (every column when it spans one), keeping their total. */
+  distributeColumns(range: YrsTableRange): YrsTableReceipt;
+  /** Word's AutoFit Contents: drops every preferred width so content sizes the columns. */
+  autofitTable(table: YrsTableLoc): YrsTableReceipt;
   /**
    * Inserts paragraph-break-free text. Suggesting mode mints a revision. Text
    * meant ahead of the tables or breaks that open a paragraph slot lands
@@ -1720,6 +1728,39 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
           markReceiptStories(
             JSON.parse(session.set_table_width(JSON.stringify(table), widthTwips)) as YrsTableReceipt
           )
+      );
+    },
+    setTableAlignment: (table, alignment) => {
+      ensureUndo(table.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_table_alignment(JSON.stringify(table), alignment)) as YrsTableReceipt
+          )
+      );
+    },
+    setHeaderRows: (table, count) => {
+      ensureUndo(table.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_header_rows(JSON.stringify(table), count)) as YrsTableReceipt
+          )
+      );
+    },
+    distributeColumns: (range) => {
+      ensureUndo(range.anchor.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.distribute_columns(JSON.stringify(range))) as YrsTableReceipt
+          )
+      );
+    },
+    autofitTable: (table) => {
+      ensureUndo(table.story);
+      return mutate(
+        () => markReceiptStories(JSON.parse(session.autofit_table(JSON.stringify(table))) as YrsTableReceipt)
       );
     },
     insertText: (at, text, suggesting) => {

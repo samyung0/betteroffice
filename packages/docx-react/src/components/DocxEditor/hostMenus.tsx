@@ -104,6 +104,7 @@ export function HostMenus({
   latest.current = { actions, ctx };
   const formatting = ctx.currentFormatting ?? {};
   const disabled = ctx.disabled ?? false;
+  const table = ctx.tableContext;
 
   const menus = useMemo((): HostMenu[] => {
     const key = shortcutFormatter();
@@ -266,8 +267,54 @@ export function HostMenus({
         item('ltr', t('hostMenus.leftToRight'), { edits: true, checked: !formatting.bidi }),
         item('rtl', t('hostMenus.rightToLeft'), { edits: true, checked: !!formatting.bidi }),
       ]),
-      ...(ctx.tableContext?.isInTable && ctx.onTableAction
-        ? [separator, item('table-properties', t('hostMenus.tableProperties'), { edits: true })]
+      ...(table?.isInTable && ctx.onTableAction
+        ? [
+            separator,
+            // Google Docs' Format › Table, with Word's alignment, wrap and auto-fit.
+            submenu('format-table', t('hostMenus.table'), [
+              submenu('table-vertical-align', t('tableAdvanced.verticalAlignment'), [
+                item('table-valign:top', t('tableAdvanced.top'), {
+                  edits: true,
+                  checked: (table.verticalAlign ?? 'top') === 'top',
+                }),
+                item('table-valign:center', t('tableAdvanced.middle'), {
+                  edits: true,
+                  checked: table.verticalAlign === 'center',
+                }),
+                item('table-valign:bottom', t('tableAdvanced.bottom'), {
+                  edits: true,
+                  checked: table.verticalAlign === 'bottom',
+                }),
+              ]),
+              submenu('table-alignment', t('tableAdvanced.tableAlignment'), [
+                item('table-align:left', t('hostMenus.left'), {
+                  edits: true,
+                  checked: (table.tableAlignment ?? 'left') === 'left',
+                }),
+                item('table-align:center', t('hostMenus.center'), {
+                  edits: true,
+                  checked: table.tableAlignment === 'center',
+                }),
+                item('table-align:right', t('hostMenus.right'), {
+                  edits: true,
+                  checked: table.tableAlignment === 'right',
+                }),
+              ]),
+              separator,
+              item('table-header-row', t('tableAdvanced.pinHeaderRow'), {
+                edits: true,
+                checked: !!table.headerRow,
+              }),
+              item('table-wrap-text', t('tableAdvanced.wrapText'), {
+                edits: true,
+                checked: table.wrapText !== false,
+              }),
+              item('table-distribute', t('tableAdvanced.distributeColumns'), { edits: true }),
+              item('table-autofit', t('tableAdvanced.autoFit'), { edits: true }),
+              separator,
+              item('table-properties', t('hostMenus.tableProperties'), { edits: true }),
+            ]),
+          ]
         : []),
       ...(ctx.imageContext && ctx.onOpenImageProperties
         ? [separator, item('image-options', t('hostMenus.imageOptions'), { edits: true })]
@@ -301,7 +348,7 @@ export function HostMenus({
     ctx.onInsertTOC,
     ctx.onUpdateTOC,
     ctx.documentStyles,
-    ctx.tableContext?.isInTable,
+    table,
     ctx.onTableAction,
     ctx.imageContext,
     ctx.onOpenImageProperties,
@@ -325,6 +372,10 @@ export function HostMenus({
       // Formatting returns focus to the page; dialogs and pickers keep theirs.
       const format: NonNullable<typeof c.onFormat> = (action) => {
         c.onFormat?.(action);
+        requestAnimationFrame(() => c.onRefocusEditor?.());
+      };
+      const tableAction: NonNullable<typeof c.onTableAction> = (action) => {
+        c.onTableAction?.(action);
         requestAnimationFrame(() => c.onRefocusEditor?.());
       };
       switch (command) {
@@ -416,6 +467,30 @@ export function HostMenus({
           return;
         case 'table-properties':
           c.onTableAction?.({ type: 'openTableProperties' });
+          return;
+        case 'table-valign':
+          tableAction({
+            type: 'cellVerticalAlign',
+            align: argument as 'top' | 'center' | 'bottom',
+          });
+          return;
+        case 'table-align':
+          tableAction({
+            type: 'tableAlignment',
+            alignment: argument as 'left' | 'center' | 'right',
+          });
+          return;
+        case 'table-header-row':
+          tableAction({ type: 'pinHeaderRow', pinned: !c.tableContext?.headerRow });
+          return;
+        case 'table-wrap-text':
+          tableAction({ type: 'wrapText', wrap: c.tableContext?.wrapText === false });
+          return;
+        case 'table-distribute':
+          tableAction({ type: 'distributeColumns' });
+          return;
+        case 'table-autofit':
+          tableAction({ type: 'autoFitContents' });
           return;
         case 'image-options':
           c.onOpenImageProperties?.();
