@@ -1281,9 +1281,15 @@ mod tests {
         let inserted = units(&doc);
         doc.update_toc(&ctx(), None, &layout(&[("10000002", "7")]))
             .unwrap();
+        let fields = doc.toc_fields(BODY).unwrap();
         assert!(undo.undo());
         assert_eq!(units(&doc), inserted);
         assert!(undo.undo());
         assert_eq!(units(&doc), before);
+        assert!(doc.toc_fields(BODY).unwrap().is_empty());
+        // Redo brings back the field with its end where it was.
+        assert!(undo.redo());
+        assert!(undo.redo());
+        assert_eq!(doc.toc_fields(BODY).unwrap(), fields);
     }
 }
