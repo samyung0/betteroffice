@@ -57,9 +57,9 @@ test('the selection reports its highlight as it reports its colour', async () =>
     };
 
     session.setSelection(at(0), at(3));
-    applyYrsToolbarFormatting(session, map, { type: 'highlightColor', value: 'FFFF00' });
+    applyYrsToolbarFormatting(session, map, { type: 'highlightColor', value: 'FFFF00' }, () => ({}));
     session.setSelection(at(4), at(7));
-    applyYrsToolbarFormatting(session, map, { type: 'highlightColor', value: 'F4CCCC' });
+    applyYrsToolbarFormatting(session, map, { type: 'highlightColor', value: 'F4CCCC' }, () => ({}));
 
     // Word's palette colours come back as their names, any other colour as its hex.
     expect(highlight(0, 3)).toBe('yellow');
