@@ -20,6 +20,7 @@ import {
   moveFrom,
   moveTo,
   none,
+  open,
   orders,
   p,
   peers,
@@ -353,11 +354,37 @@ const enterTwiceJoin: Edit = (s, st) => {
   s.splitParagraph({ story: st, paraId: secondParaId, offset: 2 });
   s.deleteAt({ story: st, paraId: secondParaId, offset: 0 }, "backward");
 };
-// A nested complex field after the link Enter splits: both halves stay in the field.
+// A nested complex field after the link Enter splits: both halves stay in the field. Review F5 (decided
+// 2026-10-05): a tracked deletion after the split point keeps its text position.
 const NESTED_AFTER: Record<string, string> = {
+  "[REF|L(AA)-{d}yy]": holder(field(`${link(run("AA"))}${del(deleted("d"))}${run("yy")}`, " REF a \\h ")),
+  "[REF|L(AA)[PAGE|7]-{d}yy]": holder(field(`${link(run("AA"))}${field(run("7"), " PAGE ")}${del(deleted("d"))}${run("yy")}`, " REF a \\h ")),
   "[REF|L(AA)[PAGE|7]yy]": holder(field(`${link(run("AA"))}${field(run("7"), " PAGE ")}${run("yy")}`, " REF a \\h ")),
   "[REF|xL(AA)[PAGE|7]L(BB)]": holder(field(`${run("x")}${link(run("AA"))}${field(run("7"), " PAGE ")}${link(run("BB"), "other")}`, " REF a \\h ")),
 };
+
+// Review F3 (accepted 2026-10-05): after two peers each delete half a link, Undo brings the text back without its
+// link; rows record it for one and both peers' Undo, also for a link outside any field.
+const PLAIN_LINK = p(P, `${run("a ")}${link(run("AA"))}${run(" b")}`);
+const peersUndo =
+  (a: Edit, b: Edit, both: boolean): Edit =>
+  async (s, st, base) => {
+    const peer = await open(base!, s.encodeState());
+    await a(s, st, base);
+    await b(peer, st, base);
+    const sync = () => {
+      const [toPeer, toSession] = [s.encodeStateAsUpdate(peer.encodeStateVector()), peer.encodeStateAsUpdate(s.encodeStateVector())];
+      s.applyUpdate(toSession);
+      peer.applyUpdate(toPeer);
+    };
+    sync();
+    sync();
+    s.undo();
+    if (both) peer.undo();
+    sync();
+    sync();
+    peer.destroy();
+  };
 
 function rows(): Row[] {
   const out: Row[] = [];
@@ -443,6 +470,15 @@ function rows(): Row[] {
     push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
     push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes", null,
       both(peers(dropUnits(1, 2), dropUnits(2, 3)), undo), dropUnits(2, 3));
+    push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, both Undo", null,
+      peersUndo(dropUnits(1, 2), dropUnits(2, 3), true), none);
+    push(where, PLAIN_LINK, "plain L(AA) | each peer deletes half the link, one Undoes", null,
+      peersUndo(dropUnits(2, 3), dropUnits(3, 4), false), dropUnits(3, 4));
+    push(where, PLAIN_LINK, "plain L(AA) | each peer deletes half the link, both Undo", null, peersUndo(dropUnits(2, 3), dropUnits(3, 4), true), none);
+    // Review F6 (accepted 2026-10-05): Enter racing a peer's delete of the whole field may bring the field back.
+    for (const name of ["[REF|L(AA)[PAGE|7]yy]"])
+      push(where, NESTED_AFTER[name]!, `${name} | Enter in 1st while a peer deletes the field`, null, peers(enterInAA, dropUnits(2, 5)));
+    push(where, REFRESHED["[REF|xL(AA)yy]"]!, "[REF|xL(AA)yy] | Enter in 1st while a peer deletes the field", null, peers(enterInAA, dropUnits(2, 5)));
     for (const [name, xml] of Object.entries(REJOIN_TAILS)) {
       push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join`, null, enterTwiceJoin);
       push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join, Undo`, null, both(enterTwiceJoin, undo));
