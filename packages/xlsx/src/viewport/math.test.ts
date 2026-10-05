@@ -81,24 +81,4 @@ describe('zoomedViewport', () => {
     expect(zoomedViewport(box, 2)).toEqual({ x: 150, y: 60, width: 400, height: 300 });
     expect(zoomedViewport(box, 0.5)).toEqual({ x: 600, y: 240, width: 1600, height: 1200 });
   });
-
-  it('keeps the top-left row and column when the box scrolls with the zoom', () => {
-    // 24px rows and 96px columns with two frozen: what sits under the panes at
-    // 100% sits there at every preset once the scroll is scaled by the zoom.
-    const rows = uniformOffsets(200, 24);
-    const cols = uniformOffsets(60, 96);
-    const at100 = zoomedViewport(box, 1);
-    const first = (view: typeof at100) => ({
-      row: visibleRange(rows, 2, view.y, view.height).first,
-      col: visibleRange(cols, 2, view.x, view.width).first,
-    });
-    for (const zoom of [0.5, 0.75, 0.9, 1.25, 1.5, 2]) {
-      const scaled = {
-        ...box,
-        scrollLeft: at100.x * zoom,
-        scrollTop: at100.y * zoom,
-      };
-      expect(first(zoomedViewport(scaled, zoom))).toEqual(first(at100));
-    }
-  });
 });

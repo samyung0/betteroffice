@@ -586,14 +586,6 @@ function XlsxEditorContent({
     if (scroll) zoomAnchorRef.current = zoomedViewport(scroll, zoomRef.current);
     setZoom(next);
   }, []);
-  useLayoutEffect(() => {
-    const scroll = scrollRef.current;
-    const anchor = zoomAnchorRef.current;
-    zoomAnchorRef.current = null;
-    if (!scroll || !anchor) return;
-    scroll.scrollLeft = anchor.x * zoom;
-    scroll.scrollTop = anchor.y * zoom;
-  }, [zoom]);
   const [revision, setRevision] = useState(0);
   const revisionRef = useRef(revision);
   revisionRef.current = revision;
@@ -1011,6 +1003,18 @@ function XlsxEditorContent({
       onFirstPaintRef.current?.();
     }
   }, [activeSheet, t, zoom]);
+
+  // a zoom change: the anchor goes back under the top-left corner, and the
+  // frame is drawn at the new zoom before the overlays reach the screen.
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const anchor = zoomAnchorRef.current;
+    zoomAnchorRef.current = null;
+    if (!scroll || !anchor) return;
+    scroll.scrollLeft = anchor.x * zoom;
+    scroll.scrollTop = anchor.y * zoom;
+    doPaint();
+  }, [zoom, doPaint]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
   // workbook, active sheet, or a mutation (revision) changes the pixels.
