@@ -58,9 +58,9 @@ Without `onSave`, File > Save downloads the edited bytes.
 
 Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
 `author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`,
-`showRuler`, `showZoomControl`, `showHiddenText`, `i18n`, `measurementFontProvider`. The `ref`
-exposes the full editor API (selection, formatting, find/replace, comments,
-revisions).
+`showRuler` (with `onShowRulerChange` for View › Show ruler), `showZoomControl`,
+`showHiddenText`, `i18n`, `measurementFontProvider`. The `ref` exposes the full
+editor API (selection, formatting, find/replace, comments, revisions).
 
 Vanished (hidden) text stays out of the layout by default; pass
 `showHiddenText` to reveal it with normal wrapping.

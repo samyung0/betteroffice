@@ -276,9 +276,8 @@ export function DocxEditorShell({
                   <OutlineToggleButton
                     onClick={onToggleOutline}
                     // Aligns with the page top: toolbar + horizontal ruler row
-                    // (22 ruler + 8 py-1 padding) + PagedEditor viewport
-                    // padding-top (24) + pages container padding (24).
-                    topPx={toolbarHeight + (showRuler ? 30 : 0) + 48}
+                    // (22 ruler + 8 py-1 padding) + the canvas pages' padding.
+                    topPx={toolbarHeight + (showRuler ? 30 : 0) + CANVAS_PAGES_PADDING_PX}
                     scrollLeft={editorScrollLeft}
                     leftOffset={OUTLINE_BUTTON_LEFT_OFFSET + (showVerticalRuler ? RULER_WIDTH : 0)}
                   />
