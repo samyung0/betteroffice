@@ -59,6 +59,36 @@ pub struct TocField {
     pub start: u32,
     pub end: u32,
     pub instruction: String,
+    /// Built from headings ([`from_headings`]): Update rebuilds only these.
+    pub headings: bool,
+}
+
+impl TocField {
+    fn holds(&self, index: u32) -> bool {
+        self.start <= index && index <= self.end
+    }
+}
+
+/// Whether a TOC field code lists headings only: switches among `\o \h \z
+/// \u \n \w \x \p`. A Table of Figures (`\c`, `\a`) or a code listing
+/// styles, fields or bookmarks (`\t`, `\f`, `\l`, `\b`) is left alone.
+fn from_headings(instruction: &str) -> bool {
+    let mut quoted = false;
+    let mut chars = instruction.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\\' if !quoted => {
+                if let Some(switch) = chars.next()
+                    && !"ohzunwxp".contains(switch.to_ascii_lowercase())
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 /// One paragraph of a story, read in a transaction.
@@ -284,7 +314,7 @@ fn toc_xml(
         let content = if flags.links {
             format!(
                 r#"<w:hyperlink w:anchor="{}">{content}</w:hyperlink>"#,
-                entry.bookmark
+                escape(entry.bookmark)
             )
         } else {
             content
@@ -345,10 +375,12 @@ fn fields<T: ReadTxn>(txn: &T, story: &TextRef, story_id: &str) -> Vec<TocField>
                 .map_or(chunk.end(), |(at, _)| *at),
             None => chunk.end(),
         };
+        let instruction = map_string(map, txn, "instruction").unwrap_or_default();
         result.push(TocField {
             start,
             end: end.max(chunk.end()),
-            instruction: map_string(map, txn, "instruction").unwrap_or_default(),
+            headings: from_headings(&instruction),
+            instruction,
         });
     }
     result
@@ -382,6 +414,24 @@ impl EditingDoc {
         if at.story != BODY {
             return Err(OpError::NotTopLevel);
         }
+        // Inside a table of contents: Word asks to replace it, Yes by default.
+        // One that lists more than headings keeps its place after the new one.
+        let mut at = at;
+        if let Some(field) = self
+            .toc_fields(BODY)?
+            .into_iter()
+            .find(|field| field.holds(at.index))
+        {
+            if field.headings {
+                return self
+                    .update_toc(ctx, Some(&at), layout)?
+                    .ok_or(OpError::ExpectedPilcrow {
+                        story: BODY.to_owned(),
+                        index: at.index,
+                    });
+            }
+            at.index = field.start;
+        }
         let para = self
             .segment_index(BODY)?
             .para_at(at.index)
@@ -399,29 +449,32 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, BODY)?;
         self.write_toc(&mut txn, &story, index, TOC_INSTRUCTION, layout)
+            .map(|(receipt, _)| receipt)
     }
 
     /// Rebuilds the TOC holding `at`, else the body's first, from the
-    /// current headings and `layout`, keeping its field code: Word's
-    /// "Update entire table", so edits made inside it are replaced. Returns
-    /// `None` when the body has no TOC. A first paragraph with text before
-    /// the field is split there first.
+    /// current headings and `layout`, keeping its field code: Word's "Update
+    /// entire table", so edits made inside it are replaced. Only a table built
+    /// from headings ([`from_headings`]) is rebuilt; with the caret in another
+    /// one, or no table, nothing changes and `None` comes back. A first
+    /// paragraph with text before the field is split there first. The new
+    /// entries are written in front of the old table before it is removed,
+    /// so two peers updating at once each leave a whole table.
     pub fn update_toc(
         &self,
         ctx: &EditCtx,
         at: Option<&Position>,
         layout: &TocLayout,
     ) -> OpResult<Option<TocReceipt>> {
-        let pick = |doc: &Self| -> OpResult<Option<TocField>> {
-            let found = doc.toc_fields(BODY)?;
-            let inside = at.filter(|at| at.story == BODY).and_then(|at| {
-                found
-                    .iter()
-                    .find(|field| field.start <= at.index && at.index <= field.end)
-            });
-            Ok(inside.or(found.first()).cloned())
+        let found = self.toc_fields(BODY)?;
+        let picked = match at
+            .filter(|at| at.story == BODY)
+            .and_then(|at| found.iter().find(|field| field.holds(at.index)))
+        {
+            Some(field) => Some(field).filter(|field| field.headings),
+            None => found.iter().find(|field| field.headings),
         };
-        let Some(field) = pick(self)? else {
+        let Some(field) = picked.cloned() else {
             return Ok(None);
         };
         let head = self
@@ -446,40 +499,64 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, BODY)?;
         let paras = paragraphs(&txn, &story);
-        let last = paras.iter().find(|para| para.pilcrow >= field.end).ok_or(
-            OpError::ExpectedPilcrow {
+        let last = paras
+            .iter()
+            .position(|para| para.pilcrow >= field.end)
+            .ok_or(OpError::ExpectedPilcrow {
                 story: BODY.to_owned(),
                 index: field.end,
-            },
-        )?;
-        // The field's paragraphs go whole; text after its end stays in the
-        // last one's own paragraph, now first after the new entries. An end
-        // that opened that paragraph (Word's shape) ran ahead of its fields in
-        // the saved paragraph; one later in it is left unnumbered.
-        let (remove_to, kept) = if field.end == last.pilcrow {
-            (last.pilcrow + 1, None)
-        } else {
-            (
-                field.end,
-                (field.end == last.node_start).then_some(last.pilcrow),
+            })?;
+        let end_para = &paras[last];
+        // An end that opens its paragraph (Word's shape) leaves that paragraph,
+        // and the section it may end, in place; its saved paragraph loses the
+        // end run ahead of its fields. An end at a paragraph's mark takes the
+        // paragraph with it unless that mark ends a section. An end anywhere
+        // else leaves the rest of its paragraph, its fields unnumbered.
+        let ends_section = |map: &MapRef| {
+            ["sectPr", "sectionBreakType"].iter().any(
+                |key| matches!(map.get(&txn, key), Some(Out::Any(value)) if value != Any::Null),
             )
         };
-        for continuation in fields_continuations(&txn, &story, field.start, field.end) {
-            remove_field_markers(&mut txn, &continuation);
+        let (remove_to, renumber) = if field.end == end_para.node_start {
+            (field.end, true)
+        } else if field.end == end_para.pilcrow && !ends_section(&end_para.map) {
+            (end_para.pilcrow + 1, false)
+        } else {
+            (field.end, false)
+        };
+        let next = if remove_to > end_para.pilcrow {
+            paras.get(last + 1)
+        } else {
+            Some(end_para)
         }
-        story.remove_range(&mut txn, field.start, remove_to - field.start);
-        if let Some(pilcrow) = kept {
-            let pilcrow = pilcrow - (remove_to - field.start);
-            renumber_fields(&mut txn, &story, field.start, pilcrow, -1);
-        }
-        self.write_toc(
+        .map(|para| para.id.clone());
+        let continuations = fields_continuations(&txn, &story, field.start, field.end);
+        let (receipt, written) = self.write_toc(
             &mut txn,
             &story,
             field.start,
             &field.instruction_code(),
             layout,
-        )
-        .map(Some)
+        )?;
+        for continuation in continuations {
+            remove_field_markers(&mut txn, &continuation);
+        }
+        let removed = remove_to - field.start;
+        story.remove_range(&mut txn, field.start + written, removed);
+        if renumber {
+            let start = field.start + written;
+            renumber_fields(
+                &mut txn,
+                &story,
+                start,
+                end_para.pilcrow + written - removed,
+                -1,
+            );
+        }
+        Ok(Some(TocReceipt {
+            next_para_id: next.unwrap_or(receipt.next_para_id),
+            ..receipt
+        }))
     }
 
     /// Writes a TOC's paragraphs at `index` (a paragraph's content start)
@@ -491,7 +568,7 @@ impl EditingDoc {
         index: u32,
         instruction: &str,
         layout: &TocLayout,
-    ) -> OpResult<TocReceipt> {
+    ) -> OpResult<(TocReceipt, u32)> {
         let package = self.package();
         let package = package.as_deref();
         let flags = switches(instruction);
@@ -626,11 +703,15 @@ impl EditingDoc {
                 story: BODY.to_owned(),
                 index,
             })?;
+        let before = story.len(txn);
         crate::raw::apply_raw_ops_to_story(txn, BODY, shifted, false)?;
-        Ok(TocReceipt {
-            first_para_id: para_ids[0].clone(),
-            next_para_id,
-        })
+        Ok((
+            TocReceipt {
+                first_para_id: para_ids[0].clone(),
+                next_para_id,
+            },
+            story.len(txn) - before,
+        ))
     }
 }
 
@@ -1055,6 +1136,7 @@ mod tests {
                     start: 0,
                     end: index_of(&doc, "Details\t") + 9,
                     instruction: r#"TOC \o "1-3" \h \z \u"#.to_owned(),
+                    headings: true,
                 }]
             );
         }
@@ -1201,6 +1283,177 @@ mod tests {
             r#"Contents	¶Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-3" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶Details	[PAGEREF _Toc10000006 \h|4]¶¶Introduction¶Some text.¶Background¶Deep¶Details¶"#
         );
         assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
+    }
+
+    const FLD: fn(&str) -> String =
+        |kind| format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#);
+
+    /// Word's TOC on its own roman-numbered page: the end opens the
+    /// paragraph that breaks the section. Update keeps that paragraph.
+    #[test]
+    fn update_keeps_the_section_break_its_end_paragraph_carries() {
+        let entry = |bm: &str, text: &str| {
+            format!(
+                r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t>{text}</w:t></w:r><w:r><w:tab/></w:r>{}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{}<w:r><w:t>i</w:t></w:r>{}</w:hyperlink>"#,
+                FLD("begin"),
+                FLD("separate"),
+                FLD("end")
+            )
+        };
+        let toc = format!(
+            r#"<w:p w14:paraId="30000001">{}<w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r>{}{}</w:p><w:p w14:paraId="30000002">{}</w:p><w:p w14:paraId="30000003"><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgNumType w:fmt="lowerRoman"/></w:sectPr></w:pPr>{}</w:p>"#,
+            FLD("begin"),
+            FLD("separate"),
+            entry("_Toc1", "Old one"),
+            entry("_Toc2", "Old two"),
+            FLD("end"),
+        );
+        let doc = open(&package(&format!("{toc}{}", body()), false), 18);
+        assert!(
+            doc.update_toc(&ctx(), None, &layout(&PAGES))
+                .unwrap()
+                .is_some()
+        );
+        assert!(named(&doc).starts_with(
+            r#"Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-3" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶Details	[PAGEREF _Toc10000006 \h|4]¶¶¶Introduction"#
+        ));
+        let section = doc
+            .paragraphs(BODY)
+            .unwrap()
+            .into_iter()
+            .find(|para| para.para_id == "30000003")
+            .expect("the section's paragraph stays");
+        assert!(section.properties.contains_key("sectPr"));
+        assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
+    }
+
+    /// Two peers updating at once each write a whole table in front of the
+    /// old one (either client order); a further Update rebuilds one of them
+    /// and leaves the other as it is.
+    #[test]
+    fn two_peers_updating_at_once_leave_two_whole_tables() {
+        let bytes = package(&body(), false);
+        let one = r#"Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-3" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶Details	[PAGEREF _Toc10000006 \h|4]¶"#;
+        for (first, second) in [(41, 42), (44, 43)] {
+            let a = open(&bytes, first);
+            a.insert_toc(&ctx(), Position::new(BODY, 0), &layout(&PAGES))
+                .unwrap();
+            let b = open(&bytes, second);
+            sync(&a, &b);
+            a.update_toc(&ctx(), None, &layout(&PAGES)).unwrap();
+            b.update_toc(&ctx(), None, &layout(&PAGES)).unwrap();
+            sync(&a, &b);
+            assert_eq!(canonical(&a), canonical(&b));
+            assert_eq!(
+                named(&a),
+                format!("{one}{one}¶Introduction¶Some text.¶Background¶Deep¶Details¶")
+            );
+            assert_eq!(a.toc_fields(BODY).unwrap().len(), 2);
+            a.update_toc(&ctx(), None, &layout(&PAGES)).unwrap();
+            assert_eq!(
+                named(&a),
+                format!("{one}{one}¶Introduction¶Some text.¶Background¶Deep¶Details¶")
+            );
+            assert_eq!(a.toc_fields(BODY).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn heading_tables_are_those_with_heading_switches_only() {
+        for code in [
+            r#"TOC \o "1-3" \h \z \u"#,
+            r#"TOC \o \n "2-3" \p "-" \w \x"#,
+        ] {
+            assert!(from_headings(code), "{code}");
+        }
+        for code in [
+            r#"TOC \h \z \c "Figure""#,
+            r#"TOC \h \z \t "Heading 1,1""#,
+            r#"TOC \a "Table""#,
+            r#"TOC \f \l "1-2""#,
+            r#"TOC \b chapter"#,
+        ] {
+            assert!(!from_headings(code), "{code}");
+        }
+        // A switch letter inside a quoted argument is the argument's.
+        assert!(from_headings(r#"TOC \o "1-3" \p "\c""#));
+    }
+
+    /// A Table of Figures is neither updated nor nested into: Update does
+    /// nothing with the caret in it or as the only table, and Insert there
+    /// puts the new table in front of it.
+    #[test]
+    fn a_table_of_figures_is_left_alone() {
+        let figures = format!(
+            r#"<w:p w14:paraId="40000001">{}<w:r><w:instrText xml:space="preserve"> TOC \h \z \c "Figure" </w:instrText></w:r>{}<w:r><w:t>Figure 1</w:t></w:r>{}</w:p>"#,
+            FLD("begin"),
+            FLD("separate"),
+            FLD("end"),
+        );
+        let doc = open(&package(&format!("{figures}{}", body()), false), 19);
+        let before = units(&doc);
+        assert!(!doc.toc_fields(BODY).unwrap()[0].headings);
+        assert_eq!(doc.update_toc(&ctx(), None, &layout(&PAGES)).unwrap(), None);
+        let inside = Position::new(BODY, doc.toc_fields(BODY).unwrap()[0].start);
+        assert_eq!(
+            doc.update_toc(&ctx(), Some(&inside), &layout(&PAGES))
+                .unwrap(),
+            None
+        );
+        assert_eq!(units(&doc), before);
+        doc.insert_toc(&ctx(), inside, &layout(&PAGES)).unwrap();
+        let fields = doc.toc_fields(BODY).unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.headings)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert!(fields[0].end < fields[1].start);
+        // With a heading table elsewhere, the caret in the figures still updates nothing.
+        let inside = Position::new(BODY, fields[1].start);
+        assert_eq!(
+            doc.update_toc(&ctx(), Some(&inside), &layout(&PAGES))
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Insert with the caret inside a table of contents updates that table.
+    #[test]
+    fn insert_inside_a_table_updates_it() {
+        let doc = open(&package(&body(), false), 20);
+        doc.insert_toc(&ctx(), Position::new(BODY, 0), &layout(&PAGES))
+            .unwrap();
+        let inside = Position::new(BODY, index_of(&doc, "Background") + 4);
+        doc.insert_toc(
+            &ctx(),
+            inside,
+            &layout(&[("10000002", "5"), ("10000004", "6"), ("10000006", "7")]),
+        )
+        .unwrap();
+        assert_eq!(
+            named(&doc),
+            r#"Introduction	<[PAGEREF _Toc10000002 \h|5][TOC \o "1-3" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|6]¶Details	[PAGEREF _Toc10000006 \h|7]¶¶Introduction¶Some text.¶Background¶Deep¶Details¶"#
+        );
+        assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
+    }
+
+    /// A reused bookmark name holding markup characters stays one name.
+    #[test]
+    fn a_bookmark_name_with_markup_characters_links() {
+        let marked = r#"<w:p w14:paraId="10000002"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="7" w:name="_Toc&amp;&quot;&lt;x"/><w:r><w:t>Introduction</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p>"#;
+        let source = body().replace(&p("10000002", Some("Heading1"), "Introduction"), marked);
+        let doc = open(&package(&source, false), 21);
+        doc.insert_toc(&ctx(), Position::new(BODY, 0), &layout(&PAGES))
+            .unwrap();
+        let first = &doc.story_segments(BODY).unwrap()[0];
+        let Some(Any::Map(link)) = first.attributes.get("hyperlink") else {
+            panic!("the first entry is a link");
+        };
+        assert_eq!(link.get("href"), Some(&Any::from("#_Toc&\"<x")));
+        assert!(units(&doc).contains(r#"[PAGEREF _Toc&"<x \h|2]"#));
     }
 
     fn sync(a: &EditingDoc, b: &EditingDoc) {

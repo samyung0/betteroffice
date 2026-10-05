@@ -63,15 +63,26 @@ const headingStyle = (n: number) =>
   `<w:style w:type="paragraph" w:styleId="Heading${n}"><w:name w:val="heading ${n}"/><w:pPr><w:outlineLvl w:val="${n - 1}"/></w:pPr></w:style>`;
 
 /** An empty first paragraph, three headings (the third after a page break) and a level 4 one. */
-function source(): Uint8Array {
-  const body = [
+const HEADINGS = [
+  p('10000001', ''),
+  p('10000002', 'Introduction', 'Heading1'),
+  p('10000003', 'Some text.'),
+  p('10000004', 'Background', 'Heading2'),
+  p('10000005', 'Deep', 'Heading4'),
+  p('10000006', 'Details', 'Heading3', '<w:r><w:br w:type="page"/></w:r>'),
+].join('');
+
+/** `fillers` text paragraphs after an empty first one, then the heading Introduction. */
+const filled = (fillers: number) =>
+  [
     p('10000001', ''),
+    ...Array.from({ length: fillers }, (_, index) =>
+      p(`2${index.toString(16).padStart(7, '0')}`, `Filler ${index}`)
+    ),
     p('10000002', 'Introduction', 'Heading1'),
-    p('10000003', 'Some text.'),
-    p('10000004', 'Background', 'Heading2'),
-    p('10000005', 'Deep', 'Heading4'),
-    p('10000006', 'Details', 'Heading3', '<w:r><w:br w:type="page"/></w:r>'),
   ].join('');
+
+function source(body = HEADINGS): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   for (const [name, xml] of [
     [
@@ -236,6 +247,41 @@ test('Update table of contents rebuilds the entries after a heading is renamed',
   const { saved } = await documentXml(session);
   const reopened = await open(saved, 7104);
   expect(reopened.storySegments('body')).toEqual(session.storySegments('body'));
+});
+
+test('the second pass reads the page a heading the table pushed on starts', async () => {
+  // How many fillers the first page holds; the heading then takes the last one's line.
+  const probe = await open(source(filled(80)), 7105);
+  const measured = (await editor(probe)).current?.getLayout();
+  const fillers =
+    measured?.pages[0]!.fragments.filter(
+      (fragment) =>
+        fragment.kind === 'paragraph' && String(fragment.blockId).startsWith('2')
+    ).length ?? 0;
+  expect(fillers).toBeGreaterThan(10);
+  cleanup();
+
+  const session = await open(source(filled(fillers - 1)), 7106);
+  const ref = await editor(session);
+  const pageOf = (paraId: string) =>
+    ref.current
+      ?.getLayout()
+      ?.pages.find((page) =>
+        page.fragments.some((fragment) => fragment.blockId === paraId)
+      )?.number;
+  expect(pageOf('10000002')).toBe(1);
+  session.setSelection({ story: 'body', paraId: '10000001', offset: 0 });
+  expect(command(ref, false)).toBe(true);
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  // The table's line moved the heading on: its entry reads the new page.
+  expect(pageOf('10000002')).toBe(2);
+  expect(units(session)).toStartWith(
+    'Introduction\t[PAGEREF _TocN \\h|2][TOC \\o "1-3" \\h \\z \\u|]¶'
+  );
+  expect(session.undo()).toBe(true);
+  expect(units(session)).not.toContain('TOC');
 });
 
 test('a heading without a fragment takes the page before it, and the tab the text width', () => {

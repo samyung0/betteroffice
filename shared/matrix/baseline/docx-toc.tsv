@@ -1,1 +1,4 @@
-# docx-toc: 34 rows, ids e2e39b7e415179dd; rows not listed are exact
+# docx-toc: 47 rows, ids 170e6c40c51808d9; rows not listed are exact
+peers | update while updating | cap<setup+edit	exact+text
+peers | update while updating | edit<cap<tail	exact+text
+peers | update while updating | setup<cap<edit	exact+text

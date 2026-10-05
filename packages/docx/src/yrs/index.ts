@@ -1015,13 +1015,19 @@ export interface YrsSession extends CollaborationReplica {
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
-  /** Inserts Word's table of contents at a body location; text before it is split off. */
+  /**
+   * Inserts Word's table of contents at a body location; text before it is split off. Inside a
+   * table of contents it updates that table instead.
+   */
   insertTableOfContents(at: YrsLoc, layout: YrsTocLayout): YrsTocReceipt;
-  /** Rebuilds the table of contents holding `at`, else the body's first; null when there is none. */
+  /**
+   * Rebuilds the heading table of contents holding `at`, else the body's first; null when there
+   * is none or `at` lies in one that lists more than headings (a Table of Figures).
+   */
   updateTableOfContents(at: YrsLoc | null, layout: YrsTocLayout): YrsTocReceipt | null;
   /** The body headings a table of contents lists. */
   tableOfContentsHeadings(): YrsTocHeading[];
-  /** How many tables of contents the body holds. */
+  /** How many tables of contents built from headings (the ones Update rebuilds) the body holds. */
   tableOfContentsCount(): number;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;

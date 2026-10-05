@@ -3243,9 +3243,11 @@ impl EditSession {
         .to_string())
     }
 
-    /// How many TOC fields the body holds.
+    /// How many tables of contents built from headings the body holds: the
+    /// ones Update rebuilds.
     pub fn toc_count(&self) -> Result<u32, JsValue> {
-        Ok(self.engine.doc().toc_fields("body").map_err(js_err)?.len() as u32)
+        let fields = self.engine.doc().toc_fields("body").map_err(js_err)?;
+        Ok(fields.iter().filter(|field| field.headings).count() as u32)
     }
 
     /// Inserts a watermark embed at `(story, para_id, offset)`, its payload

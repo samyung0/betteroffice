@@ -856,7 +856,8 @@ export class EditSession {
      */
     story_tables(story: string): string;
     /**
-     * How many TOC fields the body holds.
+     * How many tables of contents built from headings the body holds: the
+     * ones Update rebuilds.
      */
     toc_count(): number;
     /**

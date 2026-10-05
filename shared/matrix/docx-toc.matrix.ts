@@ -1,5 +1,7 @@
 // Insert and Update table of contents (docx-toc track, 2026-10-06): inserting one in an empty paragraph and mid
-// paragraph, updating Insert's and Word's own, editing an entry or a heading after it, and two peers.
+// paragraph, updating Insert's and Word's own, editing an entry or a heading after it, and two peers; review 1:
+// a Word TOC whose end paragraph breaks its section (H1), two peers updating at once (M1), a Table of Figures (M2),
+// Insert inside a TOC (L1).
 import type { YrsSession, YrsTocLayout } from "../../packages/docx/src/yrs";
 import { both, docx, field, instr, link, locate, main, orders, p, peers, run, bm, type Edit, type Row } from "./lib";
 
@@ -36,6 +38,17 @@ const CONTENTS = [
   HEADINGS,
 ].join("");
 
+// Word's TOC on its own roman-numbered page: the end alone in the paragraph that breaks the section (review H1).
+const SECTION = [
+  p("30000001", `${fc("begin")}${instr(' TOC \\o "1-3" \\h \\z \\u ')}${fc("separate")}${entry("Old one", 1)}`, `<w:pStyle w:val="TOC1"/>`),
+  p("30000002", entry("Old two", 2), `<w:pStyle w:val="TOC2"/>`),
+  p("30000003", fc("end"), `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgNumType w:fmt="lowerRoman"/></w:sectPr>`),
+  HEADINGS,
+].join("");
+
+// A Table of Figures (`\c`) before the headings (review M2): Update leaves it alone.
+const FIGURES = `${p("40000001", `${fc("begin")}${instr(' TOC \\h \\z \\c "Figure" ')}${fc("separate")}${run("Figure 1")}${fc("end")}`)}${EMPTY}`;
+
 const layout: YrsTocLayout = {
   pages: { "10000002": "1", "10000004": "2", "10000006": "ii" },
   tabTwips: 9350,
@@ -67,11 +80,16 @@ const EDITS: Record<string, Edit> = {
   "type in a heading": (s, st) => void s.insertText({ story: st, paraId: headingAt(s, st, "Details"), offset: 7 }, "Z"),
 };
 
+/** Insert with the caret inside the table's second entry: Word replaces the table (review L1). */
+const insertInside: Edit = (s, st) => void s.insertTableOfContents(at(s, st, "Background", 4), layout);
+
 function rows(): Row[] {
   const out: Row[] = [];
-  const push = (xml: string, id: string, setup: Edit | null, edit: Edit) => {
+  const push = (xml: string, id: string, setup: Edit | null, edit: Edit, same?: Edit) => {
     const bytes = docx("body", xml);
-    for (const o of orders(id, setup, edit)) out.push({ id: o.id, bytes, where: "body", before: o.before, after: o.after });
+    const oracles = same ? orders(id, setup, same) : undefined;
+    for (const [index, o] of orders(id, setup, edit).entries())
+      out.push({ id: o.id, bytes, where: "body", before: o.before, after: o.after, ...(oracles ? { same: oracles[index]! } : {}) });
   };
   push(EMPTY, "insert in an empty paragraph", null, insert);
   push(MID, "insert mid paragraph", null, insertMid);
@@ -83,6 +101,12 @@ function rows(): Row[] {
   push(EMPTY, "peers | update while renaming", insert, peers(update, rename));
   push(EMPTY, "peers | update while adding a heading", insert, peers(update, addHeading));
   push(EMPTY, "peers | insert while renaming", null, peers(insert, rename));
+  push(SECTION, "update Word's own ending in a section break", null, update);
+  // Accepted with the concurrent-join class: each peer's table stays whole, so there are two (`text` against one).
+  push(EMPTY, "peers | update while updating", insert, peers(update, update), update);
+  push(FIGURES, "update with a table of figures only", null, update);
+  push(FIGURES, "update with a table of figures and one of headings", insert, update);
+  push(EMPTY, "insert inside a table", insert, insertInside);
   return out;
 }
 
