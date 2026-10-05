@@ -402,6 +402,13 @@ describe('text layer over a laid-out document', () => {
     );
   });
 
+  test('copies the text around a page or column break inside a paragraph once, in order', async () => {
+    for (const kind of ['page', 'column']) {
+      const body = p(`${t('Aa')}<w:r><w:br w:type="${kind}"/></w:r>${t('Bb')}`) + p(t('Cc'));
+      expect(await copied(p(t('Lead')) + body)).toBe('Lead\nAa\nBb\nCc');
+    }
+  });
+
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');
     const text = await copied(
