@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
+export const __wbg_xlsxeffectsreader_free: (a: number, b: number) => void;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -12,6 +13,7 @@ export const xlsxdocument_captureFormatJson: (a: number, b: number, c: number) =
 export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_checkpointCellsJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_checkpointProjectionJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_clearUpdateObservation: (a: number) => void;
 export const xlsxdocument_clientId: (a: number) => number;
@@ -50,6 +52,8 @@ export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number,
 export const xlsxdocument_startUpdateObservation: (a: number) => [number, number];
 export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_version: () => [number, number];
+export const xlsxeffectsreader_new: (a: number, b: number, c: number) => [number, number, number];
+export const xlsxeffectsreader_pendingEffectsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

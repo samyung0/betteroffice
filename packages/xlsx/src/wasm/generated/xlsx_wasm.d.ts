@@ -31,6 +31,10 @@ export class XlsxDocument {
      * the chart under a viewport-local point, or `null`.
      */
     chartAtPointJson(args: string): string;
+    /**
+     * `checkpointProjectionJson` without formats, layout, images or defined names.
+     */
+    checkpointCellsJson(): string;
     checkpointProjectionJson(): string;
     /**
      * Stop observation and discard queued events.
@@ -140,11 +144,27 @@ export class XlsxDocument {
     readonly clientId: number;
 }
 
+/**
+ * A source workbook opened only to read the pending effects of checkpoint
+ * states against it, without applying them or recalculating.
+ */
+export class XlsxEffectsReader {
+    free(): void;
+    [Symbol.dispose](): void;
+    constructor(bytes: Uint8Array, client_id: number);
+    /**
+     * `pendingEffectsJson` of a fresh replica after `applyUpdateJson(state)`;
+     * undefined when that apply would merge `state` rather than adopt it.
+     */
+    pendingEffectsJson(state: Uint8Array): string | undefined;
+}
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
+    readonly __wbg_xlsxeffectsreader_free: (a: number, b: number) => void;
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -155,6 +175,7 @@ export interface InitOutput {
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_checkpointCellsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_checkpointProjectionJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
@@ -193,6 +214,8 @@ export interface InitOutput {
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
+    readonly xlsxeffectsreader_new: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxeffectsreader_pendingEffectsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

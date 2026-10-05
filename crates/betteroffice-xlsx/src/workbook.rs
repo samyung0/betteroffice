@@ -329,6 +329,15 @@ impl Workbook {
         Self::open_internal(bytes, false, None)
     }
 
+    /// A replica for [`Self::pending_effects_of_state_json`] only: without
+    /// the dependency graph, the recalculation or the opened projection of an
+    /// editing replica, since the effects read each state's own projection.
+    pub fn open_collaborative_for_effects(bytes: &[u8], client_id: u64) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
+        workbook.model = WorkbookModel::default();
+        Ok(workbook)
+    }
+
     /// Opens a replica. `client_id` must be unique among connected peers.
     ///
     /// Replicas must use the byte-identical original source package.
@@ -592,13 +601,12 @@ impl Workbook {
         let candidate = match self.authority.snapshot_replacement(update) {
             SnapshotAdoption::NotApplicable => return Ok(false),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
-            SnapshotAdoption::Replacement(candidate) => *candidate,
+            SnapshotAdoption::Replacement(adopted) => *adopted,
         };
-        let structure = candidate.structure().map_err(authority_error)?;
+        let (candidate, mut model, structure) = candidate;
         if !candidate.supports_structure() && !structure.describes_same_workbook(&frozen) {
             return Err(Error::CollaborativeStructureChanged);
         }
-        let mut model = candidate.materialize().map_err(authority_error)?;
         self.retain_array_formulas(&mut model);
         self.gate_incoming(&model, &structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
@@ -993,6 +1001,54 @@ impl Workbook {
             .pending_effects(&self.model)
             .map_err(authority_error)?;
         serde_json::to_string(&effects)
+            .map_err(|error| Error::CollaborativeState(error.to_string()))
+    }
+
+    /// [`Self::pending_effects_json`] after `apply_update_v1(state)` on this
+    /// freshly opened replica, without adopting `state` and without the
+    /// recalculation, which reaches the effects only through spilled values.
+    /// The state goes through the same checks as on that apply. `None` when
+    /// that apply would not adopt `state` as a whole document (it is not one,
+    /// or this replica is not fresh), so the caller applies it instead.
+    pub fn pending_effects_of_state_json(
+        &self,
+        state: &[u8],
+        options: CalculationOptions,
+    ) -> Result<Option<String>> {
+        let WorkbookMode::Collaborative { structure: frozen } = &self.mode else {
+            return Err(Error::NotCollaborative);
+        };
+        validate_collaboration_size(state)?;
+        // Only an older schema's apply keeps array ranges from the opened
+        // projection.
+        if !self.authority.supports_structure() {
+            return Ok(None);
+        }
+        let candidate = match self.authority.snapshot_replacement(state) {
+            SnapshotAdoption::NotApplicable => return Ok(None),
+            SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
+            SnapshotAdoption::Replacement(adopted) => *adopted,
+        };
+        let (candidate, mut model, structure) = candidate;
+        if !candidate.supports_structure() && !structure.describes_same_workbook(frozen) {
+            return Err(Error::CollaborativeStructureChanged);
+        }
+        self.gate_incoming(&model, &structure)
+            .map_err(|error| Error::CollaborativeState(error.to_string()))?;
+        validate_collaboration_state(
+            candidate.encode_state_as_update_v1().len(),
+            candidate.state_vector_entries(),
+        )?;
+        if model
+            .sheets
+            .iter()
+            .any(|sheet| sheet.array_formulas().next().is_some())
+        {
+            rebuild_and_recalc_all(&mut model, options.now_serial);
+        }
+        let effects = candidate.pending_effects(&model).map_err(authority_error)?;
+        serde_json::to_string(&effects)
+            .map(Some)
             .map_err(|error| Error::CollaborativeState(error.to_string()))
     }
 

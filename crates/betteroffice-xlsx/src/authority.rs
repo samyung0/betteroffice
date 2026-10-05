@@ -363,7 +363,8 @@ pub(crate) enum SnapshotAdoption {
     NotApplicable,
     /// A whole document this replica cannot take on.
     Incompatible(String),
-    Replacement(Box<WorkbookAuthority>),
+    /// The document with its strict projection.
+    Replacement(Box<(WorkbookAuthority, WorkbookModel, WorkbookStructure)>),
 }
 
 pub(crate) struct StagedUpdate {
@@ -724,10 +725,19 @@ impl WorkbookAuthority {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
-        if !candidate.is_whole_document() {
+        // A current-schema document is whole when it projects, and that
+        // projection is the strict one: no upgrade writes to it.
+        let projected = if candidate.schema_version().ok() == Some(stable::VERSION) {
+            match stable::materialize(&candidate.doc.transact(), &candidate.base) {
+                Ok(projected) => Some(projected),
+                Err(_) => return SnapshotAdoption::NotApplicable,
+            }
+        } else if candidate.is_whole_document() {
+            None
+        } else {
             return SnapshotAdoption::NotApplicable;
-        }
-        if self.supports_structure() && candidate.schema_version().ok() != Some(stable::VERSION) {
+        };
+        if self.supports_structure() && projected.is_none() {
             return SnapshotAdoption::Incompatible(
                 "incoming workbook schema does not match this session".into(),
             );
@@ -735,9 +745,11 @@ impl WorkbookAuthority {
         if let Err(error) = candidate.upgrade_schema() {
             return SnapshotAdoption::Incompatible(error);
         }
-        match candidate.strict_materialize() {
+        match projected.map_or_else(|| candidate.strict_materialize(), Ok) {
             Err(error) => SnapshotAdoption::Incompatible(error),
-            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
+            Ok((model, structure)) => {
+                SnapshotAdoption::Replacement(Box::new((candidate, model, structure)))
+            }
         }
     }
 
@@ -4061,12 +4073,14 @@ mod legacy_tests {
         let legacy = WorkbookAuthority::legacy_with_client_id(&model, 11).unwrap();
         model.styles.indexed_colors = vec!["#123456".into(); 64];
         let current = WorkbookAuthority::legacy_with_client_id(&model, 12).unwrap();
-        let SnapshotAdoption::Replacement(mut restored) =
+        let SnapshotAdoption::Replacement(adopted) =
             current.snapshot_replacement(&legacy.encode_state_as_update_v1())
         else {
             panic!("legacy snapshot should retain the source palette");
         };
+        let (mut restored, projected, _) = *adopted;
         assert_eq!(restored.materialize().unwrap(), model);
+        assert_eq!(projected, model);
         let mut other_model = model.clone();
         other_model.styles.indexed_colors[2] = "#abcdef".into();
         let other = WorkbookAuthority::legacy_with_client_id(&other_model, 13).unwrap();
@@ -4092,11 +4106,13 @@ mod legacy_tests {
             other.snapshot_replacement(&restored_snapshot),
             SnapshotAdoption::Incompatible(_)
         ));
-        let SnapshotAdoption::Replacement(same_palette) =
+        let SnapshotAdoption::Replacement(adopted) =
             current.snapshot_replacement(&restored_snapshot)
         else {
             panic!("restored snapshots should match the source palette");
         };
+        let (same_palette, projected, _) = *adopted;
+        assert_eq!(projected, same_palette.materialize().unwrap());
         assert_eq!(
             same_palette.materialize().unwrap(),
             restored.materialize().unwrap()

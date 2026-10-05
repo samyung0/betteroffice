@@ -58,56 +58,77 @@ async function xlsxStates(bytes: Uint8Array) {
   return { seeded, states };
 }
 
-test("XLSX saves after the first reuse the room's replica, with the uncached effects", async () => {
+/** What a save read before readers: a fresh replica applies the state. */
+function applied(bytes: Uint8Array, state: Uint8Array) {
+  const doc = XlsxDocument.openCollaborative(bytes, 7002);
+  try {
+    doc.applyUpdateJson(state);
+    return JSON.parse(doc.pendingEffectsJson());
+  } finally {
+    doc.free();
+  }
+}
+
+test("XLSX saves after the first reuse the room's replica, with the effects an apply reads", async () => {
   const bytes = await fixture("sample.xlsx");
   const { states } = await xlsxStates(bytes);
-  const uncached = [];
+  const expected = states.map((state) => applied(bytes, state.state));
+  expect(expected[1].length).toBeGreaterThan(expected[0].length);
+  const uncached: unknown[] = [];
   for (const state of states) uncached.push(await xlsxPendingEffects(bytes, state));
-  expect(uncached[1].length).toBeGreaterThan(uncached[0].length);
+  expect(uncached).toEqual(expected);
   configureOfficeReplicas(1 << 30);
-  const cached = [];
+  const cached: unknown[] = [];
   const counts = await counted(async () => {
     for (const state of states)
       cached.push(await xlsxPendingEffects(bytes, state, ROOM));
   });
-  expect(cached).toEqual(uncached);
+  expect(cached).toEqual(expected);
   expect(counts).toEqual({ hits: 3, misses: 1, evictions: 0 });
-  // The same state again applies nothing and reads the same effects.
-  expect(await xlsxPendingEffects(bytes, states[3], ROOM)).toEqual(uncached[3]);
+  expect(await xlsxPendingEffects(bytes, states[3], ROOM)).toEqual(expected[3]);
 });
 
-test("a state that lacks what the replica applied reopens, so a discarded save never leaks", async () => {
+test("a replica never holds a state, so an older one reads its own effects", async () => {
   const bytes = await fixture("sample.xlsx");
   const { states } = await xlsxStates(bytes);
-  configureOfficeReplicas(1 << 30);
-  await xlsxPendingEffects(bytes, states[2], ROOM);
-  // The room reloaded from an older checkpoint: the later edits are gone.
-  const reloaded = await counted(async () =>
-    expect(await xlsxPendingEffects(bytes, states[0], ROOM)).toEqual(
-      await xlsxPendingEffects(bytes, states[0])
-    )
-  );
-  expect(reloaded).toMatchObject({ hits: 0, misses: 1 });
-});
-
-test("an Undo that adds no struct still counts: the state before it does not hold the replica", async () => {
-  const bytes = await fixture("sample.xlsx");
-  const { states } = await xlsxStates(bytes);
-  // Undoing the formatting only deletes, so only the delete sets tell the two states apart.
+  // Undoing the formatting only deletes: equal state vectors, other effects.
   expect(Y.encodeStateVectorFromUpdate(states[3].state)).toEqual(
     Y.encodeStateVectorFromUpdate(states[2].state)
   );
   configureOfficeReplicas(1 << 30);
   await xlsxPendingEffects(bytes, states[3], ROOM);
-  const back = await counted(async () =>
-    expect(await xlsxPendingEffects(bytes, states[2], ROOM)).toEqual(
-      await xlsxPendingEffects(bytes, states[2])
-    )
-  );
-  expect(back).toMatchObject({ hits: 0, misses: 1 });
+  const back = await counted(async () => {
+    // The room reloaded from older checkpoints: the later edits are gone.
+    for (const index of [2, 0])
+      expect(await xlsxPendingEffects(bytes, states[index], ROOM)).toEqual(
+        applied(bytes, states[index].state)
+      );
+  });
+  expect(back).toEqual({ hits: 2, misses: 0, evictions: 0 });
 });
 
-test("edits and exports never touch a replica, and the replica stays the state it applied", async () => {
+test("a state that is not a whole workbook is applied, with or without a room", async () => {
+  const bytes = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", bytes);
+  const doc = XlsxDocument.openCollaborative(bytes, 7003);
+  let delta: Uint8Array;
+  try {
+    doc.applyUpdateJson(seeded.state);
+    const before = doc.encodeStateVector();
+    doc.editCellJson(JSON.stringify({ sheet: 0, row: 0, col: 0, input: "delta" }));
+    delta = doc.encodeDiff(before);
+  } finally {
+    doc.free();
+  }
+  const expected = applied(bytes, delta);
+  expect(expected.length).toBe(1);
+  const tail = { ...seeded, state: delta };
+  expect(await xlsxPendingEffects(bytes, tail)).toEqual(expected);
+  configureOfficeReplicas(1 << 30);
+  expect(await xlsxPendingEffects(bytes, tail, ROOM)).toEqual(expected);
+});
+
+test("edits and exports never touch a replica", async () => {
   const bytes = await fixture("sample.xlsx");
   const { states } = await xlsxStates(bytes);
   configureOfficeReplicas(1 << 30);

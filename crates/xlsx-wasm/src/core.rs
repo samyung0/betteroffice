@@ -8,6 +8,77 @@ use betteroffice_xlsx::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Projection<'a> {
+    sheets: Vec<ProjectedSheet<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defined_names: Option<&'a Vec<betteroffice_xlsx::DefinedName>>,
+}
+
+#[derive(Serialize)]
+struct ProjectedSheet<'a> {
+    id: &'a str,
+    name: &'a str,
+    cells: ProjectedCells<'a>,
+    #[serde(flatten)]
+    layout: Option<ProjectedLayout<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<ProjectedImage>>,
+}
+
+#[derive(Serialize)]
+struct ProjectedImage {
+    id: String,
+    part: String,
+    anchor: betteroffice_xlsx::ChartAnchor,
+    bytes: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedLayout<'a> {
+    freeze_pane: &'a Option<betteroffice_xlsx::FreezePane>,
+    hyperlinks: &'a Vec<betteroffice_xlsx::Hyperlink>,
+    merges: &'a Vec<CellRange>,
+    col_widths: &'a std::collections::BTreeMap<betteroffice_xlsx::ColId, f64>,
+    row_heights: &'a std::collections::BTreeMap<betteroffice_xlsx::RowId, f64>,
+    charts: &'a Vec<betteroffice_xlsx::SheetChart>,
+}
+
+/// A sheet's cells in model order, one identity each; `styles` adds formats.
+struct ProjectedCells<'a> {
+    sheet: &'a betteroffice_xlsx::Sheet,
+    ids: &'a [String],
+    styles: Option<&'a betteroffice_xlsx::Stylesheet>,
+}
+
+impl Serialize for ProjectedCells<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct ProjectedCell<'a, F> {
+            id: &'a str,
+            address: String,
+            value: &'a betteroffice_xlsx::CellValue,
+            formula: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            format: Option<F>,
+        }
+        serializer.collect_seq(
+            self.sheet
+                .iter_cells()
+                .zip(self.ids)
+                .map(|((at, cell), id)| ProjectedCell {
+                    id,
+                    address: at.to_a1(),
+                    value: &cell.value,
+                    formula: &cell.formula,
+                    format: self.styles.map(|styles| styles.cell_format(cell.style)),
+                }),
+        )
+    }
+}
+
 pub struct Session {
     workbook: Workbook,
 }
@@ -414,33 +485,78 @@ impl Session {
         self.workbook.save().map_err(|error| error.to_string())
     }
 
+    /// Every sheet with its cells, formats, layout and images, and the
+    /// defined names: the semantic baseline of a checkpoint.
     pub fn checkpoint_projection_json(&self) -> Result<String, String> {
+        self.projection_json(true)
+    }
+
+    /// Sheet ids and names with each cell's id, address, value and formula.
+    pub fn checkpoint_cells_json(&self) -> Result<String, String> {
+        self.projection_json(false)
+    }
+
+    /// Serialized straight from the model: a `serde_json::Value` per cell held
+    /// the whole workbook's formats at once and grew the engine's memory to
+    /// about 1.9 GiB on a 16,000-row workbook.
+    fn projection_json(&self, full: bool) -> Result<String, String> {
         let sheet_ids = self.sheet_info()?.sheet_ids;
         let model = self.workbook.model();
-        let mut identities = self
+        let identities = self
             .workbook
             .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
                 sheet
                     .iter_cells()
                     .map(move |(at, _)| (SheetId(index as u32), at))
             }))
-            .map_err(|error| error.to_string())?
-            .into_iter();
-        let sheets: Vec<_> = model.sheets.iter().enumerate().map(|(index, sheet)| -> Result<_, String> {
-            let cells: Vec<_> = sheet.iter_cells().map(|(at, cell)| serde_json::json!({
-                "id": identities.next().expect("one identity per projected cell"),
-                "address": at.to_a1(), "value": cell.value, "formula": cell.formula,
-                "format": model.styles.cell_format(cell.style)
-            })).collect();
-            let images = self.workbook.embedded_images(SheetId(index as u32)).map_err(|error| error.to_string())?.into_iter().map(|image| serde_json::json!({"id": image.id, "part": image.part, "anchor": image.anchor, "bytes": image.bytes})).collect::<Vec<_>>();
-            Ok(serde_json::json!({"id": sheet_ids[index], "name": sheet.name,
-                "cells": cells, "freezePane": sheet.freeze_pane, "hyperlinks": sheet.hyperlinks,
-                "merges": sheet.merges, "colWidths": sheet.col_widths,
-                "rowHeights": sheet.row_heights, "charts": sheet.charts, "images": images}))
-        }).collect::<Result<_, _>>()?;
-        serde_json::to_string(
-            &serde_json::json!({"sheets": sheets, "definedNames": model.defined_names}),
-        )
+            .map_err(|error| error.to_string())?;
+        let mut offset = 0;
+        let mut sheets = Vec::with_capacity(model.sheets.len());
+        for (index, sheet) in model.sheets.iter().enumerate() {
+            let count = sheet.iter_cells().count();
+            let images = if full {
+                let images = self
+                    .workbook
+                    .embedded_images(SheetId(index as u32))
+                    .map_err(|error| error.to_string())?;
+                Some(
+                    images
+                        .into_iter()
+                        .map(|image| ProjectedImage {
+                            id: image.id,
+                            part: image.part,
+                            anchor: image.anchor,
+                            bytes: image.bytes,
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
+            sheets.push(ProjectedSheet {
+                id: &sheet_ids[index],
+                name: &sheet.name,
+                cells: ProjectedCells {
+                    sheet,
+                    ids: &identities[offset..offset + count],
+                    styles: full.then_some(&model.styles),
+                },
+                layout: full.then_some(ProjectedLayout {
+                    freeze_pane: &sheet.freeze_pane,
+                    hyperlinks: &sheet.hyperlinks,
+                    merges: &sheet.merges,
+                    col_widths: &sheet.col_widths,
+                    row_heights: &sheet.row_heights,
+                    charts: &sheet.charts,
+                }),
+                images,
+            });
+            offset += count;
+        }
+        serde_json::to_string(&Projection {
+            sheets,
+            defined_names: full.then_some(&model.defined_names),
+        })
         .map_err(|error| error.to_string())
     }
 
@@ -1616,6 +1732,71 @@ mod tests {
                 .contains("schema")
         );
         assert_eq!(target.encode_state_as_update(), target_state);
+    }
+
+    /// The `serde_json::Value` projection the streamed one replaced.
+    fn value_projection(session: &Session) -> serde_json::Value {
+        let sheet_ids = session.sheet_info().unwrap().sheet_ids;
+        let model = session.workbook.model();
+        let mut identities = session
+            .workbook
+            .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
+                sheet
+                    .iter_cells()
+                    .map(move |(at, _)| (SheetId(index as u32), at))
+            }))
+            .unwrap()
+            .into_iter();
+        let sheets: Vec<_> = model.sheets.iter().enumerate().map(|(index, sheet)| {
+            let cells: Vec<_> = sheet.iter_cells().map(|(at, cell)| serde_json::json!({
+                "id": identities.next().unwrap(),
+                "address": at.to_a1(), "value": cell.value, "formula": cell.formula,
+                "format": model.styles.cell_format(cell.style)
+            })).collect();
+            let images = session.workbook.embedded_images(SheetId(index as u32)).unwrap().into_iter().map(|image| serde_json::json!({"id": image.id, "part": image.part, "anchor": image.anchor, "bytes": image.bytes})).collect::<Vec<_>>();
+            serde_json::json!({"id": sheet_ids[index], "name": sheet.name,
+                "cells": cells, "freezePane": sheet.freeze_pane, "hyperlinks": sheet.hyperlinks,
+                "merges": sheet.merges, "colWidths": sheet.col_widths,
+                "rowHeights": sheet.row_heights, "charts": sheet.charts, "images": images})
+        }).collect();
+        serde_json::json!({"sheets": sheets, "definedNames": model.defined_names})
+    }
+
+    #[test]
+    fn streamed_projections_hold_what_the_value_projection_held() {
+        let showcase = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/demo/public/showcase.xlsx"
+        ))
+        .unwrap();
+        for bytes in [sample_xlsx(), showcase] {
+            let mut session = Session::open_collaborative(&bytes, 4101, None).unwrap();
+            session
+                .apply_ops_json(
+                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                    None,
+                )
+                .unwrap();
+            session
+                .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"=1+2"}"#, None)
+                .unwrap();
+            let expected = value_projection(&session);
+            let full: serde_json::Value =
+                serde_json::from_str(&session.checkpoint_projection_json().unwrap()).unwrap();
+            assert_eq!(full, expected);
+            let mut cells = expected;
+            cells.as_object_mut().unwrap().remove("definedNames");
+            for sheet in cells["sheets"].as_array_mut().unwrap() {
+                let sheet = sheet.as_object_mut().unwrap();
+                sheet.retain(|key, _| ["id", "name", "cells"].contains(&key.as_str()));
+                for cell in sheet["cells"].as_array_mut().unwrap() {
+                    cell.as_object_mut().unwrap().remove("format");
+                }
+            }
+            let lean: serde_json::Value =
+                serde_json::from_str(&session.checkpoint_cells_json().unwrap()).unwrap();
+            assert_eq!(lean, cells);
+        }
     }
 
     #[cfg(feature = "raster")]

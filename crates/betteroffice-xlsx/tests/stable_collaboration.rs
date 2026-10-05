@@ -1503,3 +1503,141 @@ fn pending_effects_come_from_the_overrides() {
     }
     assert!(effects(&book).is_empty());
 }
+
+/// Each state's effects read beside a reader equal those after a fresh
+/// replica applies it, byte for byte.
+fn assert_reader_matches_apply(source: &[u8], states: &[Vec<u8>]) {
+    let options = CalculationOptions::default();
+    let reader = Workbook::open_collaborative_for_effects(source, 3051).unwrap();
+    for state in states {
+        let mut fresh = Workbook::open_collaborative_recalculated(source, 3052, options).unwrap();
+        fresh.apply_update_v1(state, options).unwrap();
+        assert_eq!(
+            reader
+                .pending_effects_of_state_json(state, options)
+                .unwrap(),
+            Some(fresh.pending_effects_json().unwrap())
+        );
+    }
+}
+
+#[test]
+fn effects_read_beside_the_source_equal_the_applied_ones() {
+    let options = CalculationOptions::default();
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 3053).unwrap();
+    let mut states = vec![book.encode_state_as_update_v1()];
+    let mut take = |book: &Workbook| states.push(book.encode_state_as_update_v1());
+    book.edit_cell(SheetId(0), at("A1"), "15", options).unwrap();
+    book.edit_cell(SheetId(0), at("C1"), "=A1+A2", options)
+        .unwrap();
+    take(&book);
+    apply(
+        &mut book,
+        Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::new(at("A1"), at("B2")),
+            patch: StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    );
+    apply(
+        &mut book,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+    );
+    take(&book);
+    apply(
+        &mut book,
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 3,
+            count: 1,
+        },
+    );
+    apply(
+        &mut book,
+        Op::RenameSheet {
+            sheet: SheetId(1),
+            name: "Totals".into(),
+        },
+    );
+    book.edit_cell(SheetId(0), at("A3"), "", options).unwrap();
+    take(&book);
+    book.undo(options).unwrap();
+    take(&book);
+    assert_reader_matches_apply(&source, &states);
+}
+
+#[test]
+fn effects_read_beside_a_spilling_source_equal_the_applied_ones() {
+    let options = CalculationOptions::default();
+    let mut model = base();
+    let data = &mut model.sheets[0];
+    data.set_cell(
+        at("C1"),
+        Cell {
+            formula: Some("A1:A2*2".into()),
+            value: CellValue::Number { value: 20.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_cell(
+        at("C2"),
+        Cell {
+            value: CellValue::Number { value: 40.0 },
+            ..Cell::default()
+        },
+    );
+    data.set_array_formula(at("C1"), CellRange::new(at("C1"), at("C2")));
+    let source = Workbook::from_model(model).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative_recalculated(&source, 3054, options).unwrap();
+    // A value typed inside the spill and a source input the spill reads.
+    book.edit_cell(SheetId(0), at("C2"), "typed", options)
+        .unwrap();
+    let typed = book.encode_state_as_update_v1();
+    book.edit_cell(SheetId(0), at("A2"), "7", options).unwrap();
+    book.edit_cell(SheetId(0), at("C2"), "", options).unwrap();
+    assert_reader_matches_apply(&source, &[typed, book.encode_state_as_update_v1()]);
+}
+
+#[test]
+fn a_reader_leaves_what_it_would_not_adopt_whole_to_an_apply() {
+    let options = CalculationOptions::default();
+    let source = Workbook::from_model(base()).unwrap().save().unwrap();
+    let mut book = Workbook::open_collaborative(&source, 3055).unwrap();
+    let before = book.encode_state_vector_v1();
+    book.edit_cell(SheetId(0), at("A1"), "15", options).unwrap();
+    let delta = book.encode_diff_v1(&before).unwrap();
+    let reader = Workbook::open_collaborative_for_effects(&source, 3056).unwrap();
+    assert_eq!(
+        reader
+            .pending_effects_of_state_json(&delta, options)
+            .unwrap(),
+        None
+    );
+    // A state for another source fails as its apply does, or is left to it.
+    let other = {
+        let mut model = base();
+        model.sheets[0].name = "Other".into();
+        Workbook::from_model(model).unwrap().save().unwrap()
+    };
+    let state = Workbook::open_collaborative(&other, 3057)
+        .unwrap()
+        .encode_state_as_update_v1();
+    let mut fresh = Workbook::open_collaborative_recalculated(&source, 3058, options).unwrap();
+    let applied = fresh
+        .apply_update_v1(&state, options)
+        .unwrap_err()
+        .to_string();
+    match reader.pending_effects_of_state_json(&state, options) {
+        Ok(None) => {}
+        Err(error) => assert_eq!(error.to_string(), applied),
+        Ok(Some(effects)) => panic!("read effects of a foreign state: {effects}"),
+    }
+}

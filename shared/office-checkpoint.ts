@@ -1,6 +1,5 @@
 import { createHash, randomInt } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import * as Y from "yjs";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { yrsToDocument } from "../packages/docx/src/yrs/yrsToDocument";
 import { preloadEditWasm } from "../packages/docx/src/wasm/edit";
@@ -20,6 +19,7 @@ import {
 } from "./office-rebase";
 import initXlsx, {
   XlsxDocument,
+  XlsxEffectsReader,
 } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
 import initPptx, {
   PptxDocument,
@@ -157,8 +157,6 @@ interface Session {
   exportBytes(determinism: ExportDeterminism): Promise<Uint8Array>;
   /** XLSX only: net effects read off the overrides. */
   effects?(): NetEffect[];
-  /** XLSX only: apply a later state of the same document (see replicas below). */
-  advance?(state: Uint8Array): void;
   dispose(): void;
 }
 const initialized = new Map<OfficeFormat | "opc", Promise<void>>();
@@ -818,20 +816,28 @@ function pptxParagraph(
     );
   return { storyId, paragraph };
 }
-function xlsxCellValue(cell: XlsxProjection["sheets"][number]["cells"][number]) {
+/** The projection's sheets with their cells only (checkpointCellsJson). */
+interface XlsxCells {
+  sheets: Array<{
+    id: string;
+    name: string;
+    cells: Array<Omit<XlsxProjection["sheets"][number]["cells"][number], "format">>;
+  }>;
+}
+function xlsxCellValue(cell: XlsxCells["sheets"][number]["cells"][number]) {
   if (cell.formula !== null) return `=${cell.formula}`;
   if (cell.value.kind === "empty" || cell.value.value === undefined) return "";
   return typeof cell.value.value === "string"
     ? cell.value.value
     : canonical(cell.value.value);
 }
-function xlsxProjection(doc: XlsxDocument): XlsxProjection {
-  return JSON.parse(doc.checkpointProjectionJson()) as XlsxProjection;
+function xlsxCells(doc: XlsxDocument): XlsxCells {
+  return JSON.parse(doc.checkpointCellsJson()) as XlsxCells;
 }
 function xlsxSheet(
-  projection: XlsxProjection,
+  projection: XlsxCells,
   sheet: string
-): { index: number; sheet: XlsxProjection["sheets"][number] } {
+): { index: number; sheet: XlsxCells["sheets"][number] } {
   const wanted = sheet.trim().toLowerCase();
   const index = projection.sheets.findIndex(
     (item, position) =>
@@ -991,14 +997,14 @@ async function open(
     try {
       if (checkpoint) doc.applyUpdateJson(checkpoint.state);
       const cellAt = (
-        sheet: XlsxProjection["sheets"][number],
+        sheet: XlsxCells["sheets"][number],
         address: string
       ) => sheet.cells.find((cell) => cell.address === address);
       return {
         state: () => doc.encodeStateAsUpdate(),
         entries: () => xlsxEntries(doc),
         editable: () =>
-          xlsxProjection(doc).sheets.flatMap((sheet) =>
+          xlsxCells(doc).sheets.flatMap((sheet) =>
             sheet.cells.map((cell) => ({
               id: cell.id,
               label: `${sheet.name}!${cell.address}`,
@@ -1012,7 +1018,7 @@ async function open(
               "unsupported_operation",
               "XLSX sources support set_cell only"
             );
-          const { index, sheet } = xlsxSheet(xlsxProjection(doc), command.sheet);
+          const { index, sheet } = xlsxSheet(xlsxCells(doc), command.sheet);
           const { row, col, address } = a1(command.cell);
           const at = JSON.stringify({ sheet: index, row, col });
           const readInput = () =>
@@ -1040,7 +1046,7 @@ async function open(
               "the workbook rejected this cell value"
             );
           const cell =
-            before ?? cellAt(xlsxSheet(xlsxProjection(doc), sheet.id).sheet, address);
+            before ?? cellAt(xlsxSheet(xlsxCells(doc), sheet.id).sheet, address);
           if (!cell) throw new Error("edited cell is missing from the projection");
           return {
             id: cell.id,
@@ -1061,7 +1067,7 @@ async function open(
               "target_id is not an XLSX cell"
             );
           const sheetId = id.slice(0, marker);
-          if (!xlsxProjection(doc).sheets.some((item) => item.id === sheetId))
+          if (!xlsxCells(doc).sheets.some((item) => item.id === sheetId))
             throw new OfficeEditError(
               "unavailable_target",
               "the sheet is no longer in the workbook"
@@ -1074,9 +1080,6 @@ async function open(
         exportBytes: async (determinism) =>
           doc.saveBytesAt(Date.parse(determinism.now) / 86_400_000 + 25569),
         effects: () => JSON.parse(doc.pendingEffectsJson()) as NetEffect[],
-        advance: (state) => {
-          doc.applyUpdateJson(state);
-        },
         dispose: () => doc.free(),
       };
     } catch (error) {
@@ -1156,39 +1159,27 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 /*
- * Replicas: an XLSX room's opened source with its last state applied, kept
- * between calls so a save's pending effects do not reopen the workbook. An
- * open parses and recalculates the whole workbook, which was most of the
- * engine worker's time in the 2026-10-05 capacity run.
- *
- * A replica only ever holds open(base) plus the states applied to it, and it
- * is reused only for a state that contains everything already applied (every
- * struct and every deletion). That later state is applied as an update, so
- * the replica then holds exactly open(base) + that state, as a fresh open
- * would. A state that does not contain it (a discarded save, a reload from an
- * older checkpoint) reopens instead. Only xlsxPendingEffects takes a room;
- * edits, inspection, exports and rebases always open their own session. A
- * call that fails drops its room's replica. Under the budget, a new replica
- * pushes out the least recently used ones only once they have been idle for
+ * Replicas: an XLSX room's source opened for reading pending effects
+ * (XlsxEffectsReader), kept between saves so a save does not reopen the
+ * workbook. The reader never applies a state: each save's state is checked
+ * and projected beside it, so a replica stays the opened source and serves
+ * any state of its base. Only xlsxPendingEffects takes a room; edits,
+ * inspection, exports and rebases always open their own session. A call that
+ * fails drops its room's replica. Under the budget, a new replica pushes out
+ * the least recently used ones only once they have been idle for
  * REPLICA_IDLE_MS; otherwise it is not kept.
  *
  * DOCX and PPTX keep none. A DOCX open is a small part of its baseline next
  * to the projection. A PPTX replica saved about 0.3 s per save of the 24 MB
  * deck on the production box while holding about 90 MB, and under a shared
- * budget PPTX replicas pushed out the XLSX ones, which save about 6 s each.
+ * budget PPTX replicas pushed out the XLSX ones.
  */
 interface Replica {
   baseSha256: string;
-  session: Session;
-  applied: AppliedState;
+  reader: XlsxEffectsReader;
   bytes: number;
   /** performance.now() of its last use. */
   usedAt: number;
-}
-/** What a state holds: struct ranges per client and the deletions. */
-interface AppliedState {
-  ranges: Map<number, Array<[number, number]>>;
-  deletes: Y.DeleteSet;
 }
 // Map order is recency: the first entry is the least recently used.
 const replicas = new Map<string, Replica>();
@@ -1197,11 +1188,11 @@ let replicaBytes = 0;
 const replicaCounts = { hits: 0, misses: 0, evictions: 0 };
 /**
  * WASM heap an XLSX replica holds per byte of its unzipped package, measured
- * as linear memory growth per replica kept (2026-10-05, the pinned engine):
- * 15.6× for course-guide.xlsx and 19.6× for the 16,000-row gradebook,
- * rounded up.
+ * as linear memory growth per reader kept (2026-10-05): 11-12× for
+ * course-guide.xlsx and 15.2× for the 16,000-row gradebook, rounded up. An
+ * editing replica held 15.6× and 19.6×.
  */
-const XLSX_HEAP_PER_UNZIPPED_BYTE = 20;
+const XLSX_HEAP_PER_UNZIPPED_BYTE = 16;
 /**
  * How long a replica must have gone unused before a new one may push it
  * out. A room being edited saves every 30 s at most (Capy's longest source
@@ -1230,7 +1221,7 @@ export function dropOfficeReplica(room: string) {
   if (!replica) return;
   replicas.delete(room);
   replicaBytes -= replica.bytes;
-  replica.session.dispose();
+  replica.reader.free();
 }
 export function officeReplicaStats() {
   return {
@@ -1286,124 +1277,74 @@ function unzippedBytes(bytes: Uint8Array): number | undefined {
   return undefined;
 }
 
-function appliedState(state: Uint8Array): AppliedState {
-  const { structs, ds } = Y.decodeUpdate(state);
-  const found = new Map<number, Array<[number, number]>>();
-  for (const struct of structs) {
-    // A skip is a gap in a merged update, not content.
-    if (struct instanceof Y.Skip) continue;
-    const { client, clock } = struct.id;
-    const list = found.get(client) ?? [];
-    list.push([clock, clock + struct.length]);
-    found.set(client, list);
-  }
-  // Sorted, adjacent ranges joined.
-  const ranges = new Map<number, Array<[number, number]>>();
-  for (const [client, list] of found) {
-    list.sort((a, b) => a[0] - b[0]);
-    const joined: Array<[number, number]> = [];
-    for (const [start, end] of list) {
-      const last = joined[joined.length - 1];
-      if (last && last[1] >= start) last[1] = Math.max(last[1], end);
-      else joined.push([start, end]);
-    }
-    ranges.set(client, joined);
-  }
-  return { ranges, deletes: ds };
-}
-/** Whether `next` holds every struct and every deletion of `held`. */
-function holds(next: AppliedState, held: AppliedState) {
-  for (const [client, ranges] of held.ranges) {
-    const available = next.ranges.get(client) ?? [];
-    let index = 0;
-    for (const [start, end] of ranges) {
-      while (index < available.length && available[index][1] < end) index++;
-      if (index === available.length || available[index][0] > start)
-        return false;
-    }
-  }
-  return Y.equalDeleteSets(
-    next.deletes,
-    Y.mergeDeleteSets([next.deletes, held.deletes])
-  );
-}
-
 /**
- * Runs a read-only `read` on `room`'s XLSX replica, advanced to the
- * checkpoint, or on a fresh session when the room has none that this state
- * holds. Without a room or with replicas off it opens and disposes a session.
+ * `room`'s replica for this base, opened on a miss and kept when it fits
+ * without pushing out replicas still in use; undefined when not kept.
  */
-async function readXlsx<T>(
+function roomReplica(
+  room: string,
+  baseBytes: Uint8Array,
+  baseSha256: string
+): Replica | undefined {
+  const held = replicas.get(room);
+  if (held?.baseSha256 === baseSha256) {
+    held.usedAt = performance.now();
+    replicas.delete(room);
+    replicas.set(room, held);
+    replicaCounts.hits += 1;
+    return held;
+  }
+  if (held) dropOfficeReplica(room);
+  replicaCounts.misses += 1;
+  const unzipped = unzippedBytes(baseBytes);
+  if (unzipped === undefined) return undefined;
+  const bytes = Math.ceil(unzipped * XLSX_HEAP_PER_UNZIPPED_BYTE);
+  if (bytes > replicaBudget || !evictReplicas(bytes, REPLICA_IDLE_MS))
+    return undefined;
+  const replica = {
+    baseSha256,
+    reader: new XlsxEffectsReader(baseBytes, randomInt(1, 0x1fffffffffff)),
+    bytes,
+    usedAt: performance.now(),
+  };
+  replicas.set(room, replica);
+  replicaBytes += bytes;
+  return replica;
+}
+/**
+ * The checkpoint's effects off `room`'s replica, or off a reader opened for
+ * this call. A state the reader would not adopt whole is applied to a fresh
+ * session, as an editor would.
+ */
+async function readXlsxEffects(
   baseBytes: Uint8Array,
   checkpoint: OfficeCheckpoint,
-  room: string | undefined,
-  read: (session: Session) => T
-): Promise<T> {
-  const format = "xlsx";
-  if (!room || !replicaBudget) {
-    const session = await open(format, baseBytes, checkpoint);
-    try {
-      return read(session);
-    } finally {
-      session.dispose();
-    }
-  }
-  const applied = appliedState(checkpoint.state);
-  let replica = replicas.get(room);
-  if (
-    replica &&
-    (replica.baseSha256 !== checkpoint.baseSha256 ||
-      !holds(applied, replica.applied))
-  ) {
-    dropOfficeReplica(room);
-    replica = undefined;
-  }
+  room: string | undefined
+): Promise<NetEffect[]> {
+  assertCheckpoint("xlsx", baseBytes, checkpoint);
+  await initialize("xlsx");
+  const replica =
+    room && replicaBudget
+      ? roomReplica(room, baseBytes, checkpoint.baseSha256)
+      : undefined;
+  const reader =
+    replica?.reader ??
+    new XlsxEffectsReader(baseBytes, randomInt(1, 0x1fffffffffff));
+  let effects: string | undefined;
   try {
-    if (replica) {
-      assertCheckpoint(format, baseBytes, checkpoint);
-      // The same state again (a retried save) has nothing to apply.
-      if (!holds(replica.applied, applied))
-        replica.session.advance!(checkpoint.state);
-      replica.applied = applied;
-      replica.usedAt = performance.now();
-      replicas.delete(room);
-      replicas.set(room, replica);
-      replicaCounts.hits += 1;
-    } else {
-      const session = await open(format, baseBytes, checkpoint);
-      const unzipped = unzippedBytes(baseBytes);
-      const bytes =
-        unzipped === undefined
-          ? undefined
-          : Math.ceil(unzipped * XLSX_HEAP_PER_UNZIPPED_BYTE);
-      replicaCounts.misses += 1;
-      // Not kept: a package whose size is unknown, or one that does not fit
-      // without pushing out replicas still in use.
-      if (
-        bytes === undefined ||
-        bytes > replicaBudget ||
-        !evictReplicas(bytes, REPLICA_IDLE_MS)
-      ) {
-        try {
-          return read(session);
-        } finally {
-          session.dispose();
-        }
-      }
-      replica = {
-        baseSha256: checkpoint.baseSha256,
-        session,
-        applied,
-        bytes,
-        usedAt: performance.now(),
-      };
-      replicas.set(room, replica);
-      replicaBytes += replica.bytes;
-    }
-    return read(replica.session);
+    effects = reader.pendingEffectsJson(checkpoint.state);
   } catch (error) {
-    if (replica && replicas.get(room) === replica) dropOfficeReplica(room);
+    if (replica) dropOfficeReplica(room!);
     throw error;
+  } finally {
+    if (!replica) reader.free();
+  }
+  if (effects !== undefined) return JSON.parse(effects) as NetEffect[];
+  const session = await open("xlsx", baseBytes, checkpoint);
+  try {
+    return session.effects!();
+  } finally {
+    session.dispose();
   }
 }
 export async function seedOffice(
@@ -1837,7 +1778,7 @@ export async function xlsxPendingEffects(
 ): Promise<NetEffect[]> {
   if (checkpoint.format !== "xlsx")
     throw new TypeError("Expected an XLSX checkpoint");
-  return readXlsx(baseBytes, checkpoint, room, (session) => session.effects!());
+  return readXlsxEffects(baseBytes, checkpoint, room);
 }
 
 export async function resolveAsset(

@@ -268,6 +268,14 @@ impl XlsxDocument {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// `checkpointProjectionJson` without formats, layout, images or defined names.
+    #[wasm_bindgen(js_name = checkpointCellsJson)]
+    pub fn checkpoint_cells_json(&self) -> Result<String, JsValue> {
+        self.session
+            .checkpoint_cells_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Net effects of the edits against the source package, as a JSON array.
     #[wasm_bindgen(js_name = pendingEffectsJson)]
     pub fn pending_effects_json(&self) -> Result<String, JsValue> {
@@ -474,6 +482,40 @@ impl XlsxDocument {
     /// crate version string.
     pub fn version() -> String {
         Session::version().to_string()
+    }
+}
+
+/// A source workbook opened only to read the pending effects of checkpoint
+/// states against it, without applying them or recalculating.
+#[wasm_bindgen]
+pub struct XlsxEffectsReader {
+    workbook: betteroffice_xlsx::Workbook,
+}
+
+#[wasm_bindgen]
+impl XlsxEffectsReader {
+    #[wasm_bindgen(constructor)]
+    pub fn new(bytes: &[u8], client_id: f64) -> Result<XlsxEffectsReader, JsValue> {
+        betteroffice_xlsx::Workbook::open_collaborative_for_effects(
+            bytes,
+            parse_client_id(client_id)?,
+        )
+        .map(|workbook| XlsxEffectsReader { workbook })
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// `pendingEffectsJson` of a fresh replica after `applyUpdateJson(state)`;
+    /// undefined when that apply would merge `state` rather than adopt it.
+    #[wasm_bindgen(js_name = pendingEffectsJson)]
+    pub fn pending_effects_json(&self, state: &[u8]) -> Result<Option<String>, JsValue> {
+        self.workbook
+            .pending_effects_of_state_json(
+                state,
+                betteroffice_xlsx::CalculationOptions {
+                    now_serial: now_serial(),
+                },
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 }
 
