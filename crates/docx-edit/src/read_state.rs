@@ -34,6 +34,28 @@ impl TriState {
     }
 }
 
+/// A unit's highlight in one form, so the same colour compares equal however it
+/// is stored: a seeded run holds the colour (`yellow`, `#FCE7F3`), a toolbar
+/// edit `{color}` (`yellow`, `FCE7F3`). A hex loses its `#` and is uppercased.
+fn highlight_value(value: Option<&Any>) -> Option<Any> {
+    let color = match value? {
+        Any::String(color) => color.as_ref(),
+        Any::Map(map) => match map.get("color")? {
+            Any::String(color) => color.as_ref(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let hex = color.trim_start_matches('#');
+    Some(Any::from(
+        if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            hex.to_ascii_uppercase()
+        } else {
+            color.to_owned()
+        },
+    ))
+}
+
 /// Uniform-or-mixed aggregation of one attribute value across text units.
 enum ValueAgg {
     /// No text unit seen yet.
@@ -266,7 +288,7 @@ impl EditingDoc {
             font_family.fold(chunk.attrs.get("fontFamily"));
             font_size.fold(chunk.attrs.get("fontSize"));
             color.fold(chunk.attrs.get("textColor"));
-            highlight.fold(chunk.attrs.get("highlight"));
+            highlight.fold(highlight_value(chunk.attrs.get("highlight")).as_ref());
         }
 
         let map_field = |value: Option<&Any>, key: &str| match value {
@@ -322,13 +344,9 @@ impl EditingDoc {
             font_family,
             font_size,
             color,
-            // Seeded runs hold the colour itself, a toolbar edit `{color}`.
             highlight: match highlight.uniform() {
                 Some(Any::String(highlight)) => Some(highlight.to_string()),
-                value => match map_field(value, "color") {
-                    Some(Any::String(highlight)) => Some(highlight.to_string()),
-                    _ => None,
-                },
+                _ => None,
             },
             para_id,
             style_id: prop_string("pStyle"),
