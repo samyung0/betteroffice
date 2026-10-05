@@ -1901,18 +1901,18 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
-    if (!readOnly && modifier && (event.key === 'z' || event.key === 'Z')) {
+    if (!readOnly && modifier && isLetterKey(event, 'z')) {
       event.preventDefault();
       history(event.shiftKey ? 'redo' : 'undo');
       return;
     }
-    if (modifier && (event.key === 's' || event.key === 'S')) {
+    if (modifier && isLetterKey(event, 's')) {
       event.preventDefault();
       if (!event.repeat) void save();
       return;
     }
     if (canvasReview.reviewing) return;
-    if (modifier && !event.shiftKey && !event.altKey && (event.key === 'a' || event.key === 'A')) {
+    if (modifier && !event.shiftKey && !event.altKey && isLetterKey(event, 'a')) {
       event.preventDefault();
       selectAll();
       return;
@@ -1932,21 +1932,21 @@ function PptxEditorContent({
       shortcut();
       return;
     }
-    if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
+    if (!readOnly && modifier && isLetterKey(event, 'b')) {
       event.preventDefault();
       applyFormatting({
         bold: selection ? !textStyle.bold : !selectionFormatting.bold,
       });
       return;
     }
-    if (!readOnly && modifier && (event.key === 'i' || event.key === 'I')) {
+    if (!readOnly && modifier && isLetterKey(event, 'i')) {
       event.preventDefault();
       applyFormatting({
         italic: selection ? !textStyle.italic : !selectionFormatting.italic,
       });
       return;
     }
-    if (!readOnly && modifier && (event.key === 'u' || event.key === 'U')) {
+    if (!readOnly && modifier && isLetterKey(event, 'u')) {
       event.preventDefault();
       applyFormatting({
         underline: selection
@@ -2059,7 +2059,7 @@ function PptxEditorContent({
     if (modifier && !shift && !alt && key === '\\') return () => clearFormatting();
     if (
       (alt && shift && !modifier && code === 'Digit5') ||
-      (modifier && shift && !alt && (key === 'x' || key === 'X'))
+      (modifier && shift && !alt && isLetterKey(event, 'x'))
     ) {
       return () => formatSelection('strikethrough');
     }
@@ -3073,7 +3073,7 @@ function PptxEditorContent({
   return (
     <div ref={rootRef} className={className} style={styles.root}
       onKeyDownCapture={(event) => {
-        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && isLetterKey(event, 's')) {
           event.preventDefault();
           event.stopPropagation();
           if (!event.repeat) void save();
@@ -3825,6 +3825,15 @@ function shapeBoxes(
     const bounds = frameBoundsForShape(deck, frame, shape);
     return bounds ? [{ shapeId: shape.id, bounds }] : [];
   });
+}
+
+/** Whether a key event types `letter` (lower case): by the typed key on a
+ *  Latin layout (AZERTY's A is the A key), else by the physical key, so a
+ *  Russian Ctrl+A ('ф') still selects all. */
+export function isLetterKey(event: { key: string; code: string }, letter: string): boolean {
+  return /^[a-z]$/i.test(event.key)
+    ? event.key.toLowerCase() === letter
+    : event.code === `Key${letter.toUpperCase()}`;
 }
 
 /** A table cell's story, `story:<shape>:table:<row>:<cell>`. */

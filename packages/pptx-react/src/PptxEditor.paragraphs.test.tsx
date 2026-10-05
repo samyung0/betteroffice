@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import type { PptxCommandState } from './commands';
 import type { PptxEditorApi } from './PptxEditor';
-import { PptxEditor } from './PptxEditor';
+import { isLetterKey, PptxEditor } from './PptxEditor';
 
 const root = resolve(import.meta.dir, '../../..');
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -331,6 +331,33 @@ describe('PptxEditor list styles on existing list items', () => {
     });
     expect(handled).toBe(false);
     expect(JSON.stringify(api.handle.story(cell.id))).toBe(before);
+    expect(errors).toEqual([]);
+  }, 60_000);
+});
+
+describe('PptxEditor letter shortcuts', () => {
+  it('match the typed Latin letter, else the physical key', () => {
+    // AZERTY: the A key types 'q', so Ctrl+A is the key that types 'a'.
+    expect(isLetterKey({ key: 'q', code: 'KeyA' }, 'a')).toBe(false);
+    expect(isLetterKey({ key: 'a', code: 'KeyQ' }, 'a')).toBe(true);
+    expect(isLetterKey({ key: 'X', code: 'KeyX' }, 'x')).toBe(true);
+    // Russian: Ctrl+A types 'ф' on the A key.
+    expect(isLetterKey({ key: 'ф', code: 'KeyA' }, 'a')).toBe(true);
+    expect(isLetterKey({ key: 'ф', code: 'KeyB' }, 'a')).toBe(false);
+  });
+
+  it('selects all objects and toggles bold from a Russian layout', async () => {
+    const { caret, errors, story, view } = await open();
+    act(() => {
+      fireEvent.keyDown(view.getByRole('application'), { key: 'ф', code: 'KeyA', ctrlKey: true });
+    });
+    expect(view.getAllByTestId('pptx-multi-selection').length).toBeGreaterThan(1);
+    caret(0, 6);
+    const bold = story().paragraphs[0].runs[0].style.bold;
+    act(() => {
+      fireEvent.keyDown(view.getByTestId('pptx-text-input'), { key: 'и', code: 'KeyB', ctrlKey: true });
+    });
+    expect(story().paragraphs[0].runs[0].style.bold).toBe(!bold);
     expect(errors).toEqual([]);
   }, 60_000);
 });

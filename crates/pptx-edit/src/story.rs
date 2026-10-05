@@ -1398,7 +1398,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         font_size_pt: properties.font_size_pt,
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
-        // Values outside the schema's lists are not modelled; an edited run drops them.
+        // Values outside the schema's lists are not modelled; a run in an edited paragraph drops them.
         underline: properties
             .underline
             .clone()
