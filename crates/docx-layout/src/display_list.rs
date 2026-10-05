@@ -1645,9 +1645,23 @@ struct TabRunIn {
 }
 
 #[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 struct PositionalTabIn {
     #[serde(default)]
+    alignment: Option<String>,
+    #[serde(default)]
+    relative_to: Option<String>,
+    #[serde(default)]
     leader: Option<String>,
+}
+
+impl PositionalTabIn {
+    /// Measured as a positional tab only with both attributes known
+    /// (`ooxml-text` `PositionalTab::parse`); otherwise it is an ordinary tab.
+    fn measured(&self) -> bool {
+        matches!(self.alignment.as_deref(), Some("left" | "center" | "right"))
+            && matches!(self.relative_to.as_deref(), Some("margin" | "indent"))
+    }
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -6290,8 +6304,10 @@ fn emit_line(
                     .and_then(|leader| leader.glyph.as_deref())
                     .map(|_| "shaped".to_string())
                     .or_else(|| match &run.ptab {
-                        Some(ptab) => ptab.leader.clone().filter(|leader| leader != "none"),
-                        None => tab_leader_for(attrs, pen_x - geom.frag_x),
+                        Some(ptab) if ptab.measured() => {
+                            ptab.leader.clone().filter(|leader| leader != "none")
+                        }
+                        _ => tab_leader_for(attrs, pen_x - geom.frag_x),
                     });
                 if let Some(leader) = leader {
                     emit_tab_leader(

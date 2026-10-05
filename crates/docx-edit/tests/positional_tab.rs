@@ -29,7 +29,7 @@ fn p(inner: &str, ppr: &str) -> String {
 }
 
 fn document(header: &str, body: &str) -> Vec<u8> {
-    const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
     let sect = r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:cols w:space="720"/></w:sectPr>"#;
     let parts = [
         ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#.to_owned()),
@@ -227,5 +227,56 @@ fn a_passed_position_is_found_on_the_next_line() {
         end(&prims, "Only right"),
         RIGHT,
         "right tab at the line start",
+    );
+}
+
+#[test]
+fn a_tab_missing_an_attribute_stays_an_ordinary_tab_with_the_stops_leader() {
+    // A 3in stop with a dot leader; the ptab has no alignment.
+    let tab = format!(r#"<w:r>{RPR}<w:ptab w:relativeTo="margin" w:leader="none"/></w:r>"#);
+    let body = p(
+        &format!("{}{tab}{}", r("A"), r("Stop")),
+        r#"<w:tabs><w:tab w:val="left" w:pos="4320" w:leader="dot"/></w:tabs>"#,
+    );
+    let prims = page("", &body);
+    near(x(&prims, "Stop"), LEFT + 288.0, "text at the tab stop");
+    let leader = prims
+        .iter()
+        .find(|p| p["kind"] == "decoration" && p["dotted"] == true)
+        .expect("the stop's dot leader");
+    near(
+        leader["x"].as_f64().unwrap() + leader["w"].as_f64().unwrap(),
+        LEFT + 288.0,
+        "leader end",
+    );
+}
+
+#[test]
+fn text_boxes_and_inline_content_controls_lay_it_out() {
+    // A 2in text box at the margin with no insets: its text runs from 96 to 288 px.
+    let text_box = format!(
+        r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1828800" cy="457200"/><wp:wrapNone/><wp:docPr id="7" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p>{}{}{}{}</w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+        ptab("center", "margin", "none"),
+        r("Boxed"),
+        ptab("right", "margin", "none"),
+        r("Edge")
+    );
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="5"/></w:sdtPr><w:sdtContent>{}{}</w:sdtContent></w:sdt>"#,
+        ptab("right", "margin", "none"),
+        r("Controlled")
+    );
+    let body = p(&text_box, "") + &p(&format!("{}{control}", r("A")), "");
+    let prims = page("", &body);
+    near(
+        mid(&prims, "Boxed"),
+        (96.0 + 288.0) / 2.0,
+        "centred in the box",
+    );
+    near(end(&prims, "Edge"), 288.0, "right edge of the box");
+    near(
+        end(&prims, "Controlled"),
+        RIGHT,
+        "right tab in a content control",
     );
 }
