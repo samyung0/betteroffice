@@ -275,7 +275,9 @@ test('host menus describe the editor and run their commands', () => {
     onFindReplace: mock(() => {}),
     onInsertImageFile: mock(() => {}),
     onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
     showComments: false,
+    showRuler: false,
   };
   let model: DocxMenuModel | null = null;
   render(
@@ -341,7 +343,9 @@ test('host menus list the first 40 paragraph styles and refuse a disabled item',
     onEditAction: mock(() => {}),
     onInsertImageFile: mock(() => {}),
     onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
     showComments: false,
+    showRuler: false,
   };
   const documentStyles = Array.from({ length: 50 }, (_, index) => ({
     styleId: `Style${index}`,
@@ -381,7 +385,9 @@ test("a read-only editor's host menus say which items edit and keep the others u
     onFindReplace: mock(() => {}),
     onInsertImageFile: mock(() => {}),
     onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
     showComments: false,
+    showRuler: false,
   };
   let model: DocxMenuModel | null = null;
   render(
@@ -405,7 +411,7 @@ test("a read-only editor's host menus say which items edit and keep the others u
   const items = flat(reported.menus.flatMap((menu) => menu.items)).flatMap((entry) =>
     entry.kind === 'item' ? [entry] : []
   );
-  const reads = ['select-all', 'find-replace', 'show-comments'];
+  const reads = ['select-all', 'find-replace', 'show-comments', 'show-ruler'];
   for (const item of items) {
     expect(item.edits, item.id).toBe(!reads.includes(item.id) && !item.id.startsWith('zoom:'));
     expect(!!item.disabled, item.id).toBe(item.edits);
@@ -420,4 +426,34 @@ test("a read-only editor's host menus say which items edit and keep the others u
   reported.run('undo');
   reported.run('delete');
   expect(actions.onEditAction).toHaveBeenCalledTimes(1);
+});
+
+test('View › Show ruler ticks while the rulers show and toggles them, also read-only', () => {
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    onToggleRuler: mock(() => {}),
+    showComments: false,
+    showRuler: true,
+  };
+  let model: DocxMenuModel | null = null;
+  render(
+    <EditorToolbar singleRow hostMenus zoom={1} disabled onToggleOutline={() => {}}>
+      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+    </EditorToolbar>
+  );
+  const reported = model as DocxMenuModel | null;
+  if (!reported) throw new Error('no menus');
+  const view = reported.menus.find((menu) => menu.id === 'view')?.items ?? [];
+  // Google Docs' order: the ruler first, then the outline.
+  expect(view.slice(0, 2).map((entry) => entry.kind === 'item' && entry.id)).toEqual([
+    'show-ruler',
+    'show-outline',
+  ]);
+  expect(view[0]).toMatchObject({ checked: true, edits: false, label: en.hostMenus.showRuler });
+  expect(view[0]?.kind === 'item' && view[0].disabled).toBeFalsy();
+  reported.run('show-ruler');
+  expect(actions.onToggleRuler).toHaveBeenCalledTimes(1);
 });

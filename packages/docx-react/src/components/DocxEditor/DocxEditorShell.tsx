@@ -1,6 +1,9 @@
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 import type { SectionProperties, TabStop } from '@betteroffice/docx/types/document';
-import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
+import {
+  CANVAS_PAGES_PADDING_PX,
+  type TrackedChangesResult,
+} from '@betteroffice/docx/layout/render';
 import { LocaleProvider } from '../../i18n';
 import { cn } from '../../lib/utils';
 import { IconSetContext, type IconSet } from '../ui/Icons';
@@ -83,7 +86,7 @@ export function DocxEditorShell({
   mainContentStyle,
   editorContainerStyle,
   showRuler,
-  readOnlyProp,
+  showVerticalRuler,
   showOutline,
   showOutlineButton,
   sidebarOpen,
@@ -118,7 +121,7 @@ export function DocxEditorShell({
   mainContentStyle: CSSProperties;
   editorContainerStyle: CSSProperties;
   showRuler: boolean;
-  readOnlyProp: boolean | undefined;
+  showVerticalRuler: boolean;
   showOutline: boolean;
   showOutlineButton: boolean;
   sidebarOpen: boolean;
@@ -190,7 +193,8 @@ export function DocxEditorShell({
                         transition: 'padding 0.2s ease',
                       }}
                     >
-                      <HorizontalRuler {...horizontalRulerProps} />
+                      {/* Never shrunk: centred like the pages, it overflows as they do. */}
+                      <HorizontalRuler {...horizontalRulerProps} style={{ flexShrink: 0 }} />
                     </div>
                   )}
                   <div
@@ -214,7 +218,7 @@ export function DocxEditorShell({
                     >
                       {/* Vertical ruler — sits at the editor content's left
                           edge so it scrolls horizontally with the page. */}
-                      {showRuler && !readOnlyProp && (
+                      {showVerticalRuler && (
                         <div
                           style={{
                             position: 'absolute',
@@ -222,9 +226,8 @@ export function DocxEditorShell({
                             top: 0,
                             // Above the inline HF editor so it stays readable on horizontal scroll.
                             zIndex: Z_INDEX.ruler,
-                            // Must match `.paged-editor__pages` padding-top
-                            // (24 viewport + 24 pages container) in editor.css.
-                            paddingTop: 48,
+                            // The first page's top, below the canvas pages' padding.
+                            paddingTop: CANVAS_PAGES_PADDING_PX,
                           }}
                         >
                           <VerticalRuler {...verticalRulerProps} />
@@ -265,7 +268,7 @@ export function DocxEditorShell({
                 {showOutline && (
                   <DocumentOutline
                     {...outlineProps}
-                    leftOffset={OUTLINE_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
+                    leftOffset={OUTLINE_LEFT_OFFSET + (showVerticalRuler ? RULER_WIDTH : 0)}
                   />
                 )}
 
@@ -277,7 +280,7 @@ export function DocxEditorShell({
                     // padding-top (24) + pages container padding (24).
                     topPx={toolbarHeight + (showRuler ? 30 : 0) + 48}
                     scrollLeft={editorScrollLeft}
-                    leftOffset={OUTLINE_BUTTON_LEFT_OFFSET + (showRuler ? RULER_WIDTH : 0)}
+                    leftOffset={OUTLINE_BUTTON_LEFT_OFFSET + (showVerticalRuler ? RULER_WIDTH : 0)}
                   />
                 )}
               </div>

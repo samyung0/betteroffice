@@ -896,6 +896,7 @@
     "selectAll": "全选",
     "delete": "删除",
     "findReplace": "查找和替换",
+    "showRuler": "显示标尺",
     "showOutline": "显示文档大纲",
     "showComments": "显示评论",
     "zoom": "缩放",

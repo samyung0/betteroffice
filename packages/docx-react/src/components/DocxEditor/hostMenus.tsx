@@ -46,6 +46,8 @@ export interface HostMenuActions {
   onInsertImageFile: (file: File) => void;
   showComments: boolean;
   onToggleComments: () => void;
+  showRuler: boolean;
+  onToggleRuler: () => void;
 }
 
 const ZOOMS = [50, 75, 90, 100, 125, 150, 200];
@@ -155,7 +157,9 @@ export function HostMenus({
         : []),
     ];
     const zoom = Math.round((ctx.zoom ?? 1) * 100);
+    // Google Docs' order: ruler, outline, then comments.
     const view: HostMenuEntry[] = [
+      item('show-ruler', t('hostMenus.showRuler'), { edits: false, checked: actions.showRuler }),
       ...(ctx.onToggleOutline
         ? [
             item('show-outline', t('hostMenus.showOutline'), {
@@ -295,6 +299,7 @@ export function HostMenus({
     ctx.onOpenImageProperties,
     actions.onFindReplace,
     actions.showComments,
+    actions.showRuler,
     formatting.lineSpacing,
     formatting.styleId,
     formatting.bidi,
@@ -343,6 +348,9 @@ export function HostMenus({
           return;
         case 'show-comments':
           act.onToggleComments();
+          return;
+        case 'show-ruler':
+          act.onToggleRuler();
           return;
         case 'zoom':
           c.onZoomChange?.(Number(argument) / 100);

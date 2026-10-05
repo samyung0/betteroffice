@@ -241,7 +241,7 @@ function VerticalTick({ tick }: { tick: VerticalTickData }): React.ReactElement 
     transform: 'translateY(-50%)',
     fontSize: '9px',
     color: RULER_TEXT_COLOR,
-    fontFamily: 'sans-serif',
+    fontFamily: 'inherit',
     whiteSpace: 'nowrap',
   };
 

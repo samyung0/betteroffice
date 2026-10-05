@@ -178,8 +178,13 @@ export interface DocxEditorProps {
   showMarginGuides?: boolean;
   /** Color for margin guides (default: '#c0c0c0') */
   marginGuideColor?: string;
-  /** Whether to show horizontal ruler (default: false) */
+  /**
+   * Whether to show the rulers; controlled when given, else View › Show ruler
+   * toggles them (default: hidden).
+   */
   showRuler?: boolean;
+  /** View › Show ruler changed the rulers' visibility. */
+  onShowRulerChange?: (visible: boolean) => void;
   /** Unit for ruler display (default: 'inch') */
   rulerUnit?: 'inch' | 'cm';
   /** Initial zoom level (default: 1.0) */
@@ -620,7 +625,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showFontSizePicker = true,
     showMarginGuides: _showMarginGuides = false,
     marginGuideColor: _marginGuideColor,
-    showRuler = false,
+    showRuler: showRulerProp,
+    onShowRulerChange,
     rulerUnit = 'inch',
     initialZoom = 1.0,
     showHiddenText = false,
@@ -694,6 +700,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Controlled by `commentsSidebarOpen` when provided, else editor-owned; the
   // setter routes through `onCommentsSidebarOpenChange`. See useControllableBoolean.
+  const [showRuler, setShowRuler] = useControllableBoolean(showRulerProp, onShowRulerChange);
   const [showCommentsSidebar, setShowCommentsSidebar] = useControllableBoolean(
     commentsSidebarOpen,
     onCommentsSidebarOpenChange
@@ -1321,6 +1328,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         setShowCommentsSidebar((visible) => !visible);
         setExpandedSidebarItem(null);
       },
+      showRuler,
+      onToggleRuler: () => setShowRuler((visible) => !visible),
     }),
     [
       handleContextMenuAction,
@@ -1328,6 +1337,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       openReplace,
       showCommentsSidebar,
       setShowCommentsSidebar,
+      showRuler,
+      setShowRuler,
     ]
   );
 
@@ -1677,6 +1688,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [trackedChanges]);
 
   const sidebarOpen = allSidebarItems.length > 0;
+  // A host drawing the menus keeps the rulers while read-only, as the toolbar.
+  const showVerticalRuler = showRuler && (!readOnlyProp || !!onMenus);
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const floatingOutlineButton = showOutlineButton && !singleRowToolbar;
@@ -1690,7 +1703,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           : 20) +
     // The outline toggle/panel inset past the vertical ruler when it's shown,
     // so the page must clear that extra width too.
-    (showRuler && (showOutline || floatingOutlineButton) ? RULER_WIDTH : 0);
+    (showVerticalRuler && (showOutline || floatingOutlineButton) ? RULER_WIDTH : 0);
   // Reserve against the WIDEST page in the doc, not the portrait default: pages
   // center via `alignItems:center`, so a landscape section (wider than
   // DEFAULT_PAGE_WIDTH) gets a smaller side margin and, with the old default,
@@ -1896,7 +1909,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         mainContentStyle={mainContentStyle}
         editorContainerStyle={editorContainerStyle}
         showRuler={showRuler}
-        readOnlyProp={readOnlyProp}
+        showVerticalRuler={showVerticalRuler}
         showOutline={showOutline}
         showOutlineButton={floatingOutlineButton}
         sidebarOpen={sidebarOpen}

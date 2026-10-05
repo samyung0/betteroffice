@@ -55,7 +55,8 @@ const TWIPS_PER_CM = 567;
 const RULER_HEIGHT = 22;
 const RULER_TEXT_COLOR = 'var(--doc-text-muted)';
 const RULER_TICK_COLOR = 'var(--doc-text-subtle)';
-const MARGIN_ZONE_COLOR = 'var(--doc-shadow-subtle)';
+// A host can tint the margin zones to its theme.
+const MARGIN_ZONE_COLOR = 'var(--doc-ruler-margin, var(--doc-shadow-subtle))';
 const INDENT_COLOR = 'var(--doc-primary)';
 const INDENT_HOVER_COLOR = 'var(--doc-primary-hover)';
 const INDENT_ACTIVE_COLOR = 'var(--doc-primary-hover)';
@@ -242,7 +243,7 @@ export function HorizontalRuler({
           width: formatPx(leftMarginPx),
           height: RULER_HEIGHT,
           backgroundColor: MARGIN_ZONE_COLOR,
-          borderRight: '1px solid var(--doc-shadow-subtle)',
+          borderRight: `1px solid ${MARGIN_ZONE_COLOR}`,
           cursor: editable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
@@ -258,7 +259,7 @@ export function HorizontalRuler({
           width: formatPx(rightMarginPx),
           height: RULER_HEIGHT,
           backgroundColor: MARGIN_ZONE_COLOR,
-          borderLeft: '1px solid var(--doc-shadow-subtle)',
+          borderLeft: `1px solid ${MARGIN_ZONE_COLOR}`,
           cursor: editable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
@@ -267,8 +268,8 @@ export function HorizontalRuler({
         }
       />
 
-      {/* Tick marks */}
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+      {/* Tick marks, drawn over the margin zones (an opaque tint would hide them) */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}>
         {ticks.map((tick, i) => (
           <RulerTick key={i} tick={tick} />
         ))}
@@ -371,7 +372,7 @@ function RulerTick({ tick }: { tick: TickData }): React.ReactElement {
             transform: 'translateX(-50%)',
             fontSize: '9px',
             color: RULER_TEXT_COLOR,
-            fontFamily: 'sans-serif',
+            fontFamily: 'inherit',
             whiteSpace: 'nowrap',
           }}
         >
@@ -482,7 +483,7 @@ function DragTooltip({
         backgroundColor: 'var(--doc-text)',
         color: 'var(--doc-on-primary)',
         fontSize: '10px',
-        fontFamily: 'sans-serif',
+        fontFamily: 'inherit',
         padding: '2px 6px',
         borderRadius: 3,
         whiteSpace: 'nowrap',
