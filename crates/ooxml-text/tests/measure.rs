@@ -2663,6 +2663,55 @@ fn tab_content_x_includes_float_left_offset() {
     );
 }
 
+// Ordinary tabs beside a left float keep the advances they had before
+// positional tabs, bit for bit: the pen is summed in the same order. The
+// expected bits were recorded on capy-ci 71e61f59.
+#[test]
+fn tabs_beside_a_left_float_keep_their_advances_bit_for_bit() {
+    let cases = [
+        (37.3, 11.7, 13.37, "ab"),
+        (50.17, -6.3, 7.77, "xyz q"),
+        (12.9, 3.1, 21.123, "W"),
+        (61.7, 0.0, 9.91, "0 0"),
+        (24.4, 17.3, 3.3, "tab"),
+        (0.0, 7.7, 33.33, "a"),
+    ];
+    let advances: Vec<u32> = cases
+        .iter()
+        .map(|&(left, first_line, float_left, text)| {
+            let input = json!({
+                "block": {
+                    "kind": "paragraph",
+                    "runs": [{ "kind": "text", "text": text }, { "kind": "tab" }, { "kind": "text", "text": "0" }],
+                    "attrs": { "indent": { "left": left, "firstLine": first_line } }
+                },
+                "maxWidth": 400.0,
+                "fontChains": { "liberation sans|0|0": [0] },
+                "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" },
+                "floatingZones": [{ "leftMargin": float_left, "rightMargin": 0.0, "topY": 0.0, "bottomY": 40.0 }],
+                "paragraphYOffset": 0.0,
+                "authoritativeShaping": true
+            });
+            let v: Value =
+                serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                    .unwrap();
+            let tab = v["lines"][0]["runAdvances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|advance| advance["runIndex"] == 1)
+                .unwrap();
+            (tab["advance"].as_f64().unwrap() as f32).to_bits()
+        })
+        .collect();
+    assert_eq!(
+        advances,
+        [
+            1098732672, 1088455968, 1110383116, 1074361792, 1105596416, 1110985031
+        ]
+    );
+}
+
 // 33. first-line indent + list-marker inline width + zone compose: all
 // three subtract from the first line's width (marker footprint = tab stop
 // at 48px − markerStart 12px = 36px; see list-marker tests)

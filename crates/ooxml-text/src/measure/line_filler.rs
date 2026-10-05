@@ -551,13 +551,14 @@ impl Filler<'_> {
     }
 
     /// The pen in content-area coordinates, where tab stops are measured.
+    /// Summed in this order so ordinary tab widths stay bit for bit as they were.
     fn content_x(&self) -> f32 {
         let first_line_offset = if self.lines.is_empty() {
             self.p.first_line_offset_px
         } else {
             0.0
         };
-        self.p.indent_left_px + first_line_offset + self.cur.width + self.cur.left_offset
+        self.p.indent_left_px + first_line_offset + (self.cur.width + self.cur.left_offset)
     }
 
     fn tab_width(&self, following: f32) -> tabs::TabAdvance {
