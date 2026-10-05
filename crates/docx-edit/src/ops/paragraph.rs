@@ -134,7 +134,8 @@ pub enum ParaSelector {
 }
 
 /// One tab stop; `pos` is in twips, `alignment` is the `w:tab` val (`left`, `center`, `right`,
-/// `decimal`, `bar`), `leader` the optional leader character name.
+/// `decimal`, `bar`, `clear`), `leader` the optional leader character name. Stored in the
+/// seed's shape (`position`, `alignment`, `leader`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabStop {
     pub pos: f64,
@@ -145,8 +146,8 @@ pub struct TabStop {
 impl TabStop {
     fn to_any(&self) -> Any {
         let mut map = HashMap::from([
-            ("pos".into(), Any::Number(self.pos)),
-            ("val".into(), Any::from(self.alignment.as_str())),
+            ("position".into(), Any::Number(self.pos)),
+            ("alignment".into(), Any::from(self.alignment.as_str())),
         ]);
         if let Some(leader) = &self.leader {
             map.insert("leader".into(), Any::from(leader.as_str()));
@@ -168,7 +169,7 @@ pub struct ParaAttrDelta {
     pub indent_left: Patch<f64>,
     pub indent_right: Patch<f64>,
     pub indent_first_line: Patch<f64>,
-    pub hanging_indent: Patch<f64>,
+    pub hanging_indent: Patch<bool>,
     pub bidi: Patch<bool>,
     pub tabs: Patch<Vec<TabStop>>,
     /// The paragraph-mark run defaults (`defaultTextFormatting`), as an opaque attr map.
@@ -1184,7 +1185,7 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
         Any::Number(*v)
     });
     apply(txn, map, "hangingIndent", &delta.hanging_indent, |v| {
-        Any::Number(*v)
+        Any::Bool(*v)
     });
     apply(txn, map, "bidi", &delta.bidi, |v| Any::Bool(*v));
     apply(txn, map, TABS, &delta.tabs, |stops| {
@@ -1264,7 +1265,8 @@ fn existing_pos(stop: &Any) -> Option<f64> {
     let Any::Map(map) = stop else {
         return None;
     };
-    match map.get("pos") {
+    // Stops written before ops stored the seed's shape carry `pos`.
+    match map.get("position").or_else(|| map.get("pos")) {
         Some(Any::Number(pos)) => Some(*pos),
         Some(Any::BigInt(pos)) => Some(*pos as f64),
         _ => None,

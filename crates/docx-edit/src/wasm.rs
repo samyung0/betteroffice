@@ -679,7 +679,7 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         indent_left: number_patch("indentLeft")?,
         indent_right: number_patch("indentRight")?,
         indent_first_line: number_patch("indentFirstLine")?,
-        hanging_indent: number_patch("hangingIndent")?,
+        hanging_indent: bool_patch("hangingIndent")?,
         bidi: bool_patch("bidi")?,
         tabs,
         default_text_formatting,
@@ -3652,6 +3652,14 @@ impl EditSession {
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn paragraph_attr_delta_reads_the_ruler_hanging_flag_as_a_boolean() {
+        let delta =
+            parse_para_attr_delta(r#"{"indentFirstLine":360,"hangingIndent":true}"#).unwrap();
+        assert_eq!(delta.hanging_indent, Patch::Set(true));
+        assert_eq!(delta.indent_first_line, Patch::Set(360.0));
+    }
 
     #[test]
     fn seeded_docx_retains_original_images_for_materialization_and_save() {
