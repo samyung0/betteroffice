@@ -10,7 +10,7 @@ import type { Document, Run } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createStyleResolver } from '../styles';
 import { documentToYrs, styleParagraphValues } from './documentToYrs';
-import { createYrsSession } from './index';
+import { applyStyleValues, createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -77,9 +77,10 @@ for (const seeder of ['projected', 'native']) {
       const firstPara = session.paragraphs('body')[0]!.paraId;
       const firstRange = { story: 'body', start: { paraId: firstPara, offset: 0 }, end: { paraId: firstPara, offset: 9 } };
       const styles = createStyleResolver(parsed.package.styles);
-      session.applyParagraphStyle(firstRange, 'Body', styleParagraphValues(styles, 'Body'));
+      const values = (styleId: string | null) => styleParagraphValues(styles, styleId);
+      applyStyleValues(session, firstRange, 'Body', values);
       expect((session.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]?.color).toBe('#0000FF');
-      session.applyParagraphStyle(firstRange, '10', styleParagraphValues(styles, '10'));
+      applyStyleValues(session, firstRange, '10', values);
       expect((session.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]).not.toHaveProperty('color');
       const first = session.storySegments('body')[0]!;
       expect(first.attributes.textColor).toMatchObject({ inheritedHyperlink: true });

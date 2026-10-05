@@ -2,8 +2,7 @@ import { useImperativeHandle } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import {
-  cellParagraphFormatting,
-  styleParagraphValues,
+  applyStyleValues,
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsParagraph,
@@ -284,15 +283,7 @@ export function useDocxEditorRefApi({
           ? getCachedStyleResolver(currentDocument.package.styles)
           : null;
         if (resolver && !resolver.hasParagraphStyle(options.styleId)) return false;
-        session.applyParagraphStyle(
-          range,
-          options.styleId,
-          styleParagraphValues(
-            resolver,
-            options.styleId,
-            currentDocument ? cellParagraphFormatting(currentDocument).get(range.story) : undefined
-          )
-        );
+        applyStyleValues(session, range, options.styleId, editor.paragraphStyleValues);
         editor.syncYrsInputState(true);
         return true;
       },

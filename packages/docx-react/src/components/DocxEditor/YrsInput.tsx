@@ -12,7 +12,9 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  applyStyleValues,
   sameYrsSelection,
+  type ParagraphStyleValues,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -95,11 +97,10 @@ export interface YrsInputProps {
   displayPositionToLoc(position: number, story?: string): YrsLoc | null;
   resolveDisplayTarget?(position: number): { story: string; displayPosition: number } | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
-  /** The style (`w:next`) and its paragraph values for the paragraph Enter opens in `story` after one styled `styleId`. */
-  nextParagraphStyle?(
-    styleId: string | null,
-    story: string
-  ): { styleId: string; values: Readonly<Record<string, unknown>> } | null;
+  /** The style (`w:next`) of the paragraph Enter opens after one styled `styleId`. */
+  nextParagraphStyle?(styleId: string | null): string | null;
+  /** A paragraph style's values in a story, as applying it in the editor writes them. */
+  paragraphStyleValues?: ParagraphStyleValues;
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
   displayListFrameEpoch?: number | null;
@@ -212,6 +213,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     resolveDisplayTarget,
     locToDisplayPosition,
     nextParagraphStyle,
+    paragraphStyleValues,
     displayListQueries,
     resolveDisplayListQueries,
     displayListFrameEpoch = null,
@@ -633,21 +635,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           : null;
       // Enter before a table or break inserts a paragraph ahead of the caret's
       // own, which keeps its id and must keep its style.
-      const nextStyle =
+      const nextStyleId =
         currentParagraph &&
         current.offset === currentParagraph.text.length &&
         receipt.secondParaId !== current.paraId
-          ? (nextParagraphStyle?.(currentStyleId, current.story) ?? null)
+          ? (nextParagraphStyle?.(currentStyleId) ?? null)
           : null;
-      if (nextStyle) {
-        session.applyParagraphStyle(
+      if (nextStyleId && paragraphStyleValues) {
+        applyStyleValues(
+          session,
           {
             story: current.story,
             start: { paraId: receipt.secondParaId, offset: 0 },
             end: { paraId: receipt.secondParaId, offset: 0 },
           },
-          nextStyle.styleId,
-          nextStyle.values
+          nextStyleId,
+          paragraphStyleValues
         );
       } else if (currentParagraph?.text && inheritedStored) {
         storedFormattingByParagraphRef.current.set(
@@ -669,6 +672,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ensureSelection,
     finishMutation,
     nextParagraphStyle,
+    paragraphStyleValues,
     readOnly,
     session,
     suggestingAuthor,

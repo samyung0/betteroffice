@@ -53,7 +53,7 @@ import type {
 } from '../types/document';
 import type { YrsSession } from './index';
 import { seededParagraphProperties } from './paragraphSeed';
-import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import { enclosingCellStory, tablePayloadCellFormatting } from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
 
 type Attrs = Record<string, unknown>;
@@ -2376,8 +2376,6 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
 /** What a seed resolved paragraph properties from besides the paragraph's own pPr. */
 interface SeedSources {
   styles: StyleResolver | null;
-  /** The table style's paragraph formatting for each seeded cell story. */
-  cells: Map<string, ParagraphFormatting>;
   /** List renderings by {@link listKey}. */
   lists: Map<string, NonNullable<Paragraph['listRendering']>>;
 }
@@ -2407,59 +2405,6 @@ function listKey(
  */
 const sessionListRenderings = new WeakMap<YrsSession, SeedSources['lists']>();
 
-const cellFormattings = new WeakMap<Document, Map<string, ParagraphFormatting>>();
-
-/**
- * The table style's paragraph formatting for each cell story the seed makes
- * from `document`, firstRow and banding included, as the seed folds it in
- * under the paragraph's style. Story ids follow {@link collectBaseStories}.
- */
-export function cellParagraphFormatting(document: Document): Map<string, ParagraphFormatting> {
-  const cached = cellFormattings.get(document);
-  if (cached) return cached;
-  const styles = document.package.styles ? createStyleResolver(document.package.styles) : null;
-  const cells = new Map<string, ParagraphFormatting>();
-  const visit = (
-    storyId: string,
-    blocks: readonly BlockContent[],
-    cell: ParagraphFormatting | undefined
-  ): void => {
-    if (cell) cells.set(storyId, cell);
-    let tableIndex = 0;
-    let sdtIndex = 0;
-    for (const block of blocks) {
-      if (block.type === 'blockSdt') {
-        visit(`${storyId}:sdt${sdtIndex++}`, block.content, cell);
-      } else if (block.type === 'table') {
-        const currentTableIndex = tableIndex++;
-        const defaultStyle = styles?.getDefaultTableStyle();
-        const styleId = block.formatting?.styleId ?? defaultStyle?.styleId;
-        const style = (styleId ? styles?.getStyle(styleId) : undefined) ?? defaultStyle;
-        const columns = tableColumnCount(block);
-        block.rows.forEach((row, rowIndex) => {
-          let column = 0;
-          row.cells.forEach((tableCell, cellIndex) => {
-            const start = column;
-            column += tableCell.formatting?.gridSpan ?? 1;
-            visit(
-              `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex}`,
-              tableCell.content,
-              tableCellParagraphFormatting(block, style, rowIndex, start, column, columns)
-            );
-          });
-        });
-      }
-    }
-  };
-  visit('body', document.package.document.content, undefined);
-  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content, undefined);
-  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content, undefined);
-  for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content, undefined);
-  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content, undefined);
-  cellFormattings.set(document, cells);
-  return cells;
-}
-
 function collectSeedSources(
   session: YrsSession,
   document: Document,
@@ -2477,7 +2422,6 @@ function collectSeedSources(
   }
   return {
     styles: document.package.styles ? createStyleResolver(document.package.styles) : null,
-    cells: cellParagraphFormatting(document),
     lists,
   };
 }
@@ -2623,6 +2567,8 @@ class SaveContext {
   private readonly paraIds: Set<number>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly seedSources: SeedSources;
+  /** Table-style paragraph formatting per cell story, from each table as the walk reaches it. */
+  private readonly cellFormatting = new Map<string, ParagraphFormatting>();
   private readonly stylePprs = new Map<string, ParagraphFormatting | undefined>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
@@ -2671,7 +2617,7 @@ class SaveContext {
 
   /** The paragraph properties the seed gave a paragraph with the editor's style and list. */
   private seededProperties(storyId: string, attrs: ParagraphSaveAttrs): Attrs {
-    const { styles, cells, lists } = this.seedSources;
+    const { styles, lists } = this.seedSources;
     const formatting: ParagraphFormatting = {
       ...attrs._originalFormatting,
       styleId: attrs.styleId ?? undefined,
@@ -2679,8 +2625,9 @@ class SaveContext {
     const listRendering = attrs.numPr ? lists.get(listKey(formatting, attrs.numPr)) : undefined;
     let stylePpr: ParagraphFormatting | undefined | null = null;
     if (styles) {
-      const cell = cells.get(storyId);
-      const key = `${cell ? storyId : ''}|${formatting.styleId ?? ''}`;
+      const cellStory = enclosingCellStory(storyId);
+      const cell = cellStory ? this.cellFormatting.get(cellStory) : undefined;
+      const key = `${cell ? cellStory : ''}|${formatting.styleId ?? ''}`;
       if (!this.stylePprs.has(key)) {
         this.stylePprs.set(key, styles.resolveParagraphStyle(formatting.styleId, cell).paragraphFormatting);
       }
@@ -3095,6 +3042,9 @@ class SaveContext {
       let projectedEmbed: ParagraphContent | BlockContent | null = null;
       if (segment.embedKind === 'table') {
         const payload = segment.payload as TablePayload;
+        for (const [cell, formatting] of tablePayloadCellFormatting(payload, this.seedSources.styles)) {
+          this.cellFormatting.set(cell, formatting);
+        }
         const inputs = [segment.attributes, payload] as const;
         const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
         const key = `T${firstCell?.story ?? ''}`;

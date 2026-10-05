@@ -557,7 +557,10 @@ fn merge_font_family(target: Option<&Value>, source: &Value) -> Value {
     Value::Object(result)
 }
 
-fn merge_text_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
+pub(crate) fn merge_text_formatting(
+    target: Option<&Value>,
+    source: Option<&Value>,
+) -> Option<Value> {
     let target_object = object(target);
     let source_object = object(source);
     if source_object.is_none() {

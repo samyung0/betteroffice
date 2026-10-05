@@ -94,15 +94,12 @@ export class EditSession {
      */
     apply_local_update(update: Uint8Array): void;
     /**
-     * Writes `style_id` as the `pStyle` of every paragraph intersecting
-     * `[start, end)` and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to the
-     * host-resolved `values_json` (an object of the style's paragraph values),
-     * a key it leaves out to an explicit null, so two peers applying different
-     * styles converge on one style's values. Run marks are the host's to apply.
-     * In suggesting mode the property change is recorded as a `pPrChange`
-     * revision.
+     * Applies a paragraph style to every paragraph intersecting `[start, end)`
+     * with the host-resolved `values_json` (an object of the style's paragraph
+     * values) and `previous_json` (such objects per style id the paragraphs
+     * carry now, `""` for none); see [`EditingDoc::apply_paragraph_style`].
      */
-    apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, values_json: string, author_name?: string | null, author_date?: string | null): void;
+    apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, values_json: string, previous_json: string, author_name?: string | null, author_date?: string | null): void;
     /**
      * Applies a batch of raw story mutations in ONE transaction. Unlike every
      * other op here these carry no user intent: indices are story-global
@@ -1032,7 +1029,7 @@ export interface InitOutput {
     readonly editsession_apply_input_profile_json: (a: number) => [number, number];
     readonly editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
-    readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number];
+    readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];

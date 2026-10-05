@@ -66,6 +66,8 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
 import {
+  applyStyleValues,
+  type ParagraphStyleValues,
   projectYrsComments,
   cellParagraphFormatting,
   commentSharedId,
@@ -115,7 +117,6 @@ import {
   currentYrsToolbarSelection,
   setSelectedParagraphAttrs,
   storedYrsToolbarFormatting,
-  type ParagraphStyleValues,
   withStoredYrsFormatting,
   type YrsToolbarSelection,
 } from './yrsToolbar';
@@ -377,6 +378,8 @@ export interface PagedEditorRef {
   displayPositionToYrsLoc(position: number): YrsLoc | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
+  /** A paragraph style's values for a paragraph in `story`, as applying it in the editor writes them. */
+  paragraphStyleValues: ParagraphStyleValues;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput(): Promise<void>;
   /** Paragraph-local stored inline formatting for the current yrs caret. */
@@ -515,14 +518,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
     } = props;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
+    const { session: yrsCoreSession, sourceNumbering } = yrsCore;
     const paragraphStyleValues = useCallback<ParagraphStyleValues>(
       (styleId, story) =>
-        styleParagraphValues(
-          yrsStyleResolver,
-          styleId,
-          document ? cellParagraphFormatting(document).get(story) : undefined
-        ),
-      [document, yrsStyleResolver]
+        styleParagraphValues(yrsStyleResolver, styleId, {
+          cell: yrsCoreSession
+            ? cellParagraphFormatting(yrsCoreSession, yrsStyleResolver, story)
+            : undefined,
+          numbering: sourceNumbering(),
+        }),
+      [sourceNumbering, yrsCoreSession, yrsStyleResolver]
     );
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
@@ -956,10 +961,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           ) {
             const resolved = yrsStyleResolver.resolveParagraphStyle(action.value);
             const delta = yrsDeltaForTextFormatting(resolved.runFormatting);
-            yrsCore.session.applyParagraphStyle(
+            applyStyleValues(
+              yrsCore.session,
               selection.range,
               action.value,
-              paragraphStyleValues(action.value, selection.range.story),
+              paragraphStyleValues,
               structuralAuthor
             );
             if (selection.context.hasSelection) {
@@ -1752,6 +1758,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
+      paragraphStyleValues,
       displayPositionToYrsLoc: (position) => {
         const target = getYrsPositionProjection('body')?.targetAt(position);
         return target ? yrsCore.displayPositionToLoc(target.displayPosition, target.story) : null;
@@ -1812,10 +1819,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           displayPositionToLoc={yrsDisplayPositionToLoc}
           resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
-          nextParagraphStyle={(styleId, story) => {
-            const next = yrsStyleResolver?.getNextStyleId(styleId);
-            return next ? { styleId: next, values: paragraphStyleValues(next, story) } : null;
-          }}
+          nextParagraphStyle={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
+          paragraphStyleValues={paragraphStyleValues}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
           resolveDisplayListQueries={
             activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined

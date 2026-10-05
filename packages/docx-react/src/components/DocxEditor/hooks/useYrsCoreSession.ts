@@ -5,6 +5,7 @@ import type {
   Endnote,
   Footnote,
   HeaderFooter,
+  NumberingDefinitions,
   Section,
 } from '@betteroffice/docx/types/document';
 import type {
@@ -27,6 +28,8 @@ export interface YrsCoreSession {
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
   documentFromYrs(baseDocument?: Document | null): Document | null;
+  /** The source package's numbering definitions, which the held host document lacks. */
+  sourceNumbering(): NumberingDefinitions | undefined;
   publishDirectInput(storyId?: string): void;
 }
 
@@ -340,6 +343,12 @@ export function useYrsCoreSession(
     projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
   }, []);
 
+  const sourceNumbering = useCallback((): NumberingDefinitions | undefined => {
+    const live = sessionRef.current;
+    if (live) warmCompatibilityBase(live, compatibilityBaseRef);
+    return compatibilityBaseRef.current?.package.numbering;
+  }, []);
+
   return {
     session,
     storyBlocks,
@@ -348,6 +357,7 @@ export function useYrsCoreSession(
     displayPositionToLoc,
     locToDisplayPosition,
     documentFromYrs,
+    sourceNumbering,
     publishDirectInput,
   };
 }

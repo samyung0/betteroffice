@@ -57,9 +57,8 @@ use crate::segments::{Seg, SegKind};
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, STYLE_CONTROLLED_PARA_ATTRS, SeedParagraph, SegmentContent,
-    SimpleFormat, StoryRange, TabStop, TableLocator, TableRange, TriState, UndoCaptureMode,
-    UndoSession, story_ref,
+    Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
+    TableLocator, TableRange, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -2897,13 +2896,10 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Writes `style_id` as the `pStyle` of every paragraph intersecting
-    /// `[start, end)` and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key to the
-    /// host-resolved `values_json` (an object of the style's paragraph values),
-    /// a key it leaves out to an explicit null, so two peers applying different
-    /// styles converge on one style's values. Run marks are the host's to apply.
-    /// In suggesting mode the property change is recorded as a `pPrChange`
-    /// revision.
+    /// Applies a paragraph style to every paragraph intersecting `[start, end)`
+    /// with the host-resolved `values_json` (an object of the style's paragraph
+    /// values) and `previous_json` (such objects per style id the paragraphs
+    /// carry now, `""` for none); see [`EditingDoc::apply_paragraph_style`].
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -2914,31 +2910,33 @@ impl EditSession {
         end_offset: u32,
         style_id: &str,
         values_json: &str,
+        previous_json: &str,
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> Result<(), JsValue> {
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
-        let values: Value = serde_json::from_str(values_json).map_err(js_err)?;
-        let values = values
+        let object = |value: &Value| -> Result<BTreeMap<String, Any>, JsValue> {
+            value
+                .as_object()
+                .ok_or_else(|| js_err("paragraph style values must be an object"))?
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), json_to_any(value)?)))
+                .collect()
+        };
+        let values = object(&serde_json::from_str(values_json).map_err(js_err)?)?;
+        let previous: Value = serde_json::from_str(previous_json).map_err(js_err)?;
+        let previous = previous
             .as_object()
-            .ok_or_else(|| js_err("paragraph style values must be an object"))?;
-        let mut delta = ParaAttrDelta::default();
-        delta
-            .other
-            .insert("pStyle".to_owned(), Some(Any::from(style_id)));
-        for key in STYLE_CONTROLLED_PARA_ATTRS {
-            let value = match values.get(key) {
-                Some(value) => json_to_any(value)?,
-                None => Any::Null,
-            };
-            delta.other.insert(key.to_owned(), Some(value));
-        }
+            .ok_or_else(|| js_err("previous style values must be an object"))?
+            .iter()
+            .map(|(style, values)| Ok((style.clone(), object(values)?)))
+            .collect::<Result<BTreeMap<_, _>, JsValue>>()?;
         let ctx = edit_ctx(author_name, author_date)?;
         self.engine
             .doc()
-            .set_paragraph_attrs(&ctx, &selector, &delta)
+            .apply_paragraph_style(&ctx, &selector, style_id, &values, &previous)
             .map(|_| ())
             .map_err(js_err)
     }

@@ -91,7 +91,7 @@ pub use format::{
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
     INDENT_STEP_TWIPS, MergeDirection, ParaAttrDelta, ParaSelector, ResolvedStyleProjection,
-    STYLE_CONTROLLED_MARKS, STYLE_CONTROLLED_PARA_ATTRS, TabStop,
+    STYLE_CONTROLLED_PARA_ATTRS, STYLE_NUMBERING_ATTRS, TabStop,
 };
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};

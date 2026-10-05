@@ -6,7 +6,12 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import { compareYrsLocs, explicitParagraphAttrs } from '@betteroffice/docx/yrs';
+import {
+  applyStyleValues,
+  compareYrsLocs,
+  explicitParagraphAttrs,
+  type ParagraphStyleValues,
+} from '@betteroffice/docx/yrs';
 import type { FormattingAction } from '../Toolbar';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
@@ -103,15 +108,6 @@ function forEachSelectedParagraph(
 }
 
 /**
- * A paragraph style's values for a paragraph in `story`: `styleParagraphValues`
- * with the table-style paragraph formatting of the cell the story is.
- */
-export type ParagraphStyleValues = (
-  styleId: string | null,
-  story: string
-) => Readonly<Record<string, unknown>>;
-
-/**
  * Sets paragraph properties on each selected paragraph, a cleared property its
  * style sets stored explicitly (`explicitParagraphAttrs`).
  */
@@ -124,9 +120,10 @@ export function setSelectedParagraphAttrs(
 ): void {
   forEachSelectedParagraph(session, selection, (range, properties) => {
     const styleId = typeof properties.pStyle === 'string' ? properties.pStyle : null;
+    const numbered = !!paragraphNumPr(properties.numPr)?.numId;
     session.setParagraphAttrs(
       range,
-      explicitParagraphAttrs(attrs(properties), styleValues(styleId, range.story)),
+      explicitParagraphAttrs(attrs(properties), styleValues(styleId, range.story), numbered),
       suggesting
     );
   });
@@ -374,7 +371,7 @@ export function applyYrsToolbarFormatting(
       );
       return true;
     case 'applyStyle':
-      session.applyParagraphStyle(range, action.value, styleValues(action.value, range.story), suggesting);
+      applyStyleValues(session, range, action.value, styleValues, suggesting);
       return true;
     case 'fontFamily':
       if (isCollapsed(range)) return false;

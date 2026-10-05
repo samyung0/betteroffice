@@ -1,5 +1,11 @@
 import type { Paragraph, ParagraphFormatting } from '../types/document';
-import type { YrsParagraphAttrs, YrsParagraphTabStop } from './index';
+import type {
+  YrsAuthor,
+  YrsParagraphAttrs,
+  YrsParagraphTabStop,
+  YrsSession,
+  YrsStoryRange,
+} from './index';
 
 type Attrs = Record<string, unknown>;
 
@@ -99,19 +105,30 @@ export function seededParagraphProperties(
 
 /**
  * `attrs` as an editor operation stores them: a property cleared that the
- * paragraph's style sets (`style`, from `styleParagraphValues`) becomes 0 or
+ * paragraph's style sets (`style`, from `styleParagraphValues`), or the left
+ * indent of a `numbered` paragraph (its list level sets one), becomes 0 or
  * false, and a style tab stop left out becomes a `clear` stop, so the
- * paragraph shows, saves and reopens without the style's value.
+ * paragraph shows, saves and reopens without the inherited value. A list
+ * level's first line is not cleared: Word, and the seed, let it win over a
+ * zero one.
  */
 export function explicitParagraphAttrs(
   attrs: YrsParagraphAttrs,
-  style: Readonly<Record<string, unknown>>
+  style: Readonly<Record<string, unknown>>,
+  numbered = false
 ): YrsParagraphAttrs {
   const result: Record<string, unknown> = { ...attrs };
   for (const [key, value] of Object.entries(attrs)) {
     if (value !== null || key === 'tabs') continue;
-    if (typeof style[key] === 'number' && style[key] !== 0) result[key] = 0;
-    else if (style[key] === true) result[key] = false;
+    const off =
+      numbered && key === 'indentLeft'
+        ? 0
+        : typeof style[key] === 'number' && style[key] !== 0
+          ? 0
+          : style[key] === true
+            ? false
+            : undefined;
+    if (off !== undefined) result[key] = off;
   }
   if ('tabs' in attrs) {
     const kept = attrs.tabs ?? [];
@@ -124,4 +141,36 @@ export function explicitParagraphAttrs(
     result.tabs = kept.length + cleared.length > 0 ? [...kept, ...cleared] : null;
   }
   return result as YrsParagraphAttrs;
+}
+
+/**
+ * A paragraph style's values for a paragraph in `story`: `styleParagraphValues`
+ * with that story's cell context (`cellParagraphFormatting`) and the package's numbering.
+ */
+export type ParagraphStyleValues = (
+  styleId: string | null,
+  story: string
+) => Readonly<Record<string, unknown>>;
+
+/**
+ * Applies a paragraph style over the range as the editor does: the style's
+ * values, given with those of the styles its paragraphs carry now, so a
+ * paragraph's direct formatting stays.
+ */
+export function applyStyleValues(
+  session: YrsSession,
+  range: YrsStoryRange,
+  styleId: string,
+  styleValues: ParagraphStyleValues,
+  suggesting?: YrsAuthor
+): void {
+  const paragraphs = session.paragraphs(range.story);
+  const first = paragraphs.findIndex((paragraph) => paragraph.paraId === range.start.paraId);
+  const last = paragraphs.findIndex((paragraph) => paragraph.paraId === range.end.paraId);
+  const previous: Record<string, Readonly<Record<string, unknown>>> = {};
+  for (const { properties } of paragraphs.slice(first, last + 1)) {
+    const current = typeof properties.pStyle === 'string' ? properties.pStyle : '';
+    previous[current] ??= styleValues(current || null, range.story);
+  }
+  session.applyParagraphStyle(range, styleId, styleValues(styleId, range.story), previous, suggesting);
 }

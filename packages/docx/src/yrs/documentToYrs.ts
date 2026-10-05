@@ -5,6 +5,7 @@
 import { isRawXml } from '../types/content/rawXml';
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
+import { computeListRendering, getCachedNumberingMap } from '../docx/numberingParser';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {
@@ -17,6 +18,7 @@ import type {
   Image,
   InlineSdt,
   MathEquation,
+  NumberingDefinitions,
   Paragraph,
   ParagraphFormatting,
   ParagraphContent,
@@ -1005,18 +1007,39 @@ function runBoundary(
   };
 }
 
+/** Where a style is applied: the cell's table-style paragraph formatting, the package's numbering. */
+export interface StyleValueContext {
+  /** From `cellParagraphFormatting`, for a paragraph in a table cell. */
+  cell?: ParagraphFormatting;
+  /** The package's numbering, so a style's own list renders as the seed renders it. */
+  numbering?: NumberingDefinitions;
+}
+
 /**
  * The paragraph values applying `styleId` gives a paragraph: what the seed
- * gives one carrying only that style, in a table cell with that cell's
- * table-style paragraph formatting (`cellParagraphFormatting`).
+ * gives one carrying only that style there.
  */
 export function styleParagraphValues(
   styles: StyleResolver | null,
   styleId: string | null,
-  tableParagraphFormatting?: ParagraphFormatting
+  { cell, numbering }: StyleValueContext = {}
 ): Attrs {
   const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined }, content: [] };
-  return paragraphAttrs(paragraph, styles, [], undefined, tableParagraphFormatting);
+  const stylePpr = styles?.resolveParagraphStyle(styleId, cell).paragraphFormatting;
+  const numPr = stylePpr?.numPr;
+  const map = numPr && numbering ? getCachedNumberingMap(numbering) : null;
+  const listRendering = numPr && map ? computeListRendering(numPr, map) : null;
+  if (numPr && map && listRendering) {
+    // The level's indents apply where the style sets none, as the parser renders a style's list.
+    const level = map.getLevel(numPr.numId ?? 0, numPr.ilvl ?? 0)?.pPr;
+    if (stylePpr?.indentLeft == null) listRendering.indentLeft = level?.indentLeft;
+    if (stylePpr?.indentFirstLine == null && stylePpr?.hangingIndent == null) {
+      listRendering.indentFirstLine = level?.indentFirstLine;
+      listRendering.hangingIndent = level?.hangingIndent;
+    }
+    paragraph.listRendering = listRendering;
+  }
+  return paragraphAttrs(paragraph, styles, [], undefined, cell);
 }
 
 function paragraphAttrs(

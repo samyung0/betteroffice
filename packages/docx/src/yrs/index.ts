@@ -40,8 +40,13 @@ export {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 export { documentToYrs, styleParagraphValues } from './documentToYrs';
-export { explicitParagraphAttrs } from './paragraphSeed';
-export { cellParagraphFormatting, yrsToDocument } from './yrsToDocument';
+export {
+  applyStyleValues,
+  explicitParagraphAttrs,
+  type ParagraphStyleValues,
+} from './paragraphSeed';
+export { yrsToDocument } from './yrsToDocument';
+export { cellParagraphFormatting } from './tableParagraphFormatting';
 export { projectYrsComments, commentSharedId, commentNumericId } from './comments';
 
 export interface YrsCommentInfo {
@@ -953,13 +958,15 @@ export interface YrsSession extends CollaborationReplica {
   clearFormatting(range: YrsStoryRange): void;
   /**
    * Applies a paragraph style to every paragraph intersecting the range: its id
-   * and its paragraph values (`styleParagraphValues`), the keys the style
-   * controls that `values` leaves out cleared.
+   * and its paragraph values (`styleParagraphValues`) over what each paragraph
+   * holds from its old style, `previous` giving those values per style id the
+   * paragraphs carry now (`""` for none); direct formatting stays.
    */
   applyParagraphStyle(
     range: YrsStoryRange,
     styleId: string,
     values: Readonly<Record<string, unknown>>,
+    previous: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
     suggesting?: YrsAuthor
   ): void;
   /** Applies tri-state paragraph properties to every paragraph intersecting the range. */
@@ -1813,7 +1820,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         )
       );
     },
-    applyParagraphStyle: (range, styleId, values, suggesting) => {
+    applyParagraphStyle: (range, styleId, values, previous, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.apply_paragraph_style(
@@ -1824,6 +1831,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
           range.end.offset,
           styleId,
           JSON.stringify(values),
+          JSON.stringify(previous),
           suggesting?.name,
           suggesting?.date
         )

@@ -1,9 +1,27 @@
-import type { ParagraphFormatting, Table, TableLook } from '../types/document';
+import type {
+  ParagraphFormatting,
+  TableCellFormatting,
+  TableFormatting,
+  TableLook,
+  TableRowFormatting,
+} from '../types/document';
+import type { StyleResolver } from '../styles';
 import type { Style } from '../types/styles';
 import { mergeParagraphFormatting } from '../utils/paragraphFormattingMerge';
+import type { YrsSession } from './index';
+
+/** What the table-style paragraph formatting of a cell reads from its table. */
+interface TableShape {
+  formatting?: Pick<TableFormatting, 'look' | 'styleRowBandSize' | 'styleColBandSize'>;
+  columnWidths?: number[];
+  rows: Array<{
+    formatting?: Pick<TableRowFormatting, 'gridBefore' | 'gridAfter'>;
+    cells: Array<{ formatting?: Pick<TableCellFormatting, 'gridSpan'> }>;
+  }>;
+}
 
 export function tableCellParagraphFormatting(
-  table: Table,
+  table: TableShape,
   style: Style | undefined,
   rowIndex: number,
   startColumn: number,
@@ -64,7 +82,7 @@ export function tableCellParagraphFormatting(
   return result;
 }
 
-export function tableColumnCount(table: Table): number {
+export function tableColumnCount(table: TableShape): number {
   return Math.max(
     table.columnWidths?.length ?? 0,
     ...table.rows.map((row) =>
@@ -74,4 +92,89 @@ export function tableColumnCount(table: Table): number {
       )
     )
   );
+}
+
+type Attrs = Record<string, unknown>;
+
+/** A table embed's payload in a story, as far as its cells' paragraph formatting needs it. */
+interface TablePayloadShape {
+  tblPr?: Attrs;
+  grid?: unknown;
+  rows?: Array<{ trPr?: Attrs; cells?: Array<{ tcPr?: Attrs; story?: string }> }>;
+}
+
+const CELL_STORY = /:t\d+:r\d+c\d+$/;
+const CONTROL_STORY = /:sdt\d+$/;
+
+/**
+ * The table-style paragraph formatting each cell story of a table embed gives
+ * its paragraphs, from the table's current rows, position and style, as the
+ * seed folds it in under a paragraph's style.
+ */
+export function tablePayloadCellFormatting(
+  payload: TablePayloadShape,
+  styles: StyleResolver | null
+): Map<string, ParagraphFormatting> {
+  const cells = new Map<string, ParagraphFormatting>();
+  if (!styles) return cells;
+  const tblPr = payload.tblPr ?? {};
+  const original = (tblPr._originalFormatting ?? {}) as TableFormatting;
+  const defaultStyle = styles.getDefaultTableStyle();
+  const styleId = (typeof tblPr.styleId === 'string' ? tblPr.styleId : undefined) ?? defaultStyle?.styleId;
+  const style = (styleId ? styles.getStyle(styleId) : undefined) ?? defaultStyle;
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  const table: TableShape = {
+    formatting: { ...original, look: (tblPr.look as TableLook | undefined) ?? original.look },
+    columnWidths: Array.isArray(payload.grid) ? (payload.grid as number[]) : undefined,
+    rows: rows.map((row) => ({
+      formatting: row.trPr?._originalFormatting as TableRowFormatting | undefined,
+      cells: (row.cells ?? []).map((cell) => ({ formatting: { gridSpan: Number(cell.tcPr?.colspan) || 1 } })),
+    })),
+  };
+  const columns = tableColumnCount(table);
+  const occupied: boolean[][] = [];
+  rows.forEach((row, rowIndex) => {
+    let column = 0;
+    for (const cell of row.cells ?? []) {
+      while (occupied[rowIndex]?.[column]) column += 1;
+      const colspan = Number(cell.tcPr?.colspan) || 1;
+      const rowspan = Number(cell.tcPr?.rowspan) || 1;
+      for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
+        occupied[r] ??= [];
+        for (let c = column; c < column + colspan; c += 1) occupied[r][c] = true;
+      }
+      const formatting = tableCellParagraphFormatting(table, style, rowIndex, column, column + colspan, columns);
+      if (cell.story && formatting) cells.set(cell.story, formatting);
+      column += colspan;
+    }
+  });
+  return cells;
+}
+
+/** The cell story whose paragraphs `story` shares the table formatting of: itself, or a control's cell. */
+export function enclosingCellStory(story: string): string | undefined {
+  let id = story;
+  while (CONTROL_STORY.test(id)) id = id.replace(CONTROL_STORY, '');
+  return CELL_STORY.test(id) ? id : undefined;
+}
+
+/**
+ * The table-style paragraph formatting a paragraph in `story` gets from the
+ * table cell holding it, read from the session's current table, so cells
+ * added or moved in the session (by a peer too) get their own.
+ */
+export function cellParagraphFormatting(
+  session: YrsSession,
+  styles: StyleResolver | null,
+  story: string
+): ParagraphFormatting | undefined {
+  const cell = enclosingCellStory(story);
+  if (!cell || !styles) return undefined;
+  for (const segment of session.storySegments(cell.replace(CELL_STORY, ''))) {
+    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+    const payload = segment.payload as TablePayloadShape;
+    if (!payload.rows?.some((row) => row.cells?.some((entry) => entry.story === cell))) continue;
+    return tablePayloadCellFormatting(payload, styles).get(cell);
+  }
+  return undefined;
 }

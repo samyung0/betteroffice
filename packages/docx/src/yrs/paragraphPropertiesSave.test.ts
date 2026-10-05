@@ -9,9 +9,16 @@ import type { BlockContent, Document, Paragraph, ParagraphFormatting } from '../
 import { preloadEditWasm } from '../wasm/edit';
 import { createStyleResolver } from '../styles';
 import { styleParagraphValues } from './documentToYrs';
-import { createYrsSession, type YrsParagraphAttrs, type YrsParagraphTabStop, type YrsSession } from './index';
+import {
+  applyStyleValues,
+  createYrsSession,
+  type YrsParagraphAttrs,
+  type YrsParagraphTabStop,
+  type YrsSession,
+} from './index';
 import { explicitParagraphAttrs } from './paragraphSeed';
-import { cellParagraphFormatting, yrsToDocument } from './yrsToDocument';
+import { cellParagraphFormatting } from './tableParagraphFormatting';
+import { yrsToDocument } from './yrsToDocument';
 
 // Word reads the saved file; the oracle is that reopening it (a publication
 // reseeds from the saved bytes) shows what the editor showed before the save.
@@ -343,16 +350,17 @@ describe('paragraph properties on save', () => {
     let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
     try {
       session.seedFromDocx(bytes);
+      const values = (styleId: string | null) => styleParagraphValues(styles, styleId);
       for (const [index, styleId] of [[0, 'Title'], [1, 'Normal'], [2, 'Tabbed']] as const) {
-        session.applyParagraphStyle(range(session, index), styleId, styleParagraphValues(styles, styleId));
+        applyStyleValues(session, range(session, index), styleId, values);
       }
       const editor = shownAll(session);
       // A paragraph styled anew shows exactly what a fresh one with that style seeds as.
       expect(editor[0]).toMatchObject({ pStyle: 'Title', contextualSpacing: true, spaceAfter: 0, lineSpacing: 240 });
       expect(editor[1]).toMatchObject({ pStyle: 'Normal', spaceAfter: 160, lineSpacing: 259 });
       expect(editor[1]!.contextualSpacing).toBeUndefined();
-      expect(editor[2]).toMatchObject({ pStyle: 'Tabbed', keepNext: true, indentFirstLine: 360 });
-      expect(editor[2]!.keepLines).toBeUndefined();
+      // Direct formatting stays, as Word keeps it.
+      expect(editor[2]).toMatchObject({ pStyle: 'Tabbed', keepLines: true, indentFirstLine: 200, alignment: 'center' });
       reopened = await reopen(await save(session, source), 81009);
       expect(shownAll(reopened.session)).toEqual(editor);
       // Nothing the style gives is copied into a paragraph that had no direct formatting.
@@ -475,9 +483,12 @@ const WORD_STYLES =
   '<w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs><w:spacing w:after="100"/></w:pPr></w:style>' +
   '<w:style w:type="paragraph" w:styleId="RtlPara"><w:name w:val="RTL Paragraph"/><w:basedOn w:val="Normal"/>' +
   '<w:pPr><w:bidi/><w:snapToGrid w:val="0"/><w:autoSpaceDE w:val="0"/></w:pPr></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="ListNumber"><w:name w:val="List Number"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/>' +
   '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>' +
-  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style></w:styles>';
+  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr>' +
+  '<w:tblStylePr w:type="lastRow"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr></w:style></w:styles>';
 
 const WORD_LOOKS = ['Title', 'IntenseQuote', 'Header', 'TOC1', 'RtlPara'] as const;
 const styled = (styleId: string, text: string) =>
@@ -490,28 +501,53 @@ const WORD_BODY = [
   ...WORD_LOOKS.map((styleId) => plain(`to ${styleId}`)),
   plain('Contested'),
   '<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/>' +
-    '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>' +
-    `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${gridCell('Head')}</w:tr><w:tr>${gridCell('Body')}</w:tr></w:tbl>`,
+    '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="1" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr>' +
+    `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${gridCell('Head')}</w:tr><w:tr>${gridCell('Body')}</w:tr>` +
+    `<w:tr>${gridCell('Last')}</w:tr></w:tbl>`,
   plain('Tail'),
+  styled('ListNumber', 'Numbered by style'),
+  plain('To number'),
+  '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Numbered directly</w:t></w:r></w:p>',
+  // Direct formatting a style change keeps (the review's direct-keep shapes), then a mark with its own size.
+  '<w:p><w:pPr><w:bidi/><w:jc w:val="right"/></w:pPr><w:r><w:t>RTL right</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="000000"/>' +
+    '<w:bottom w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr>' +
+    '<w:shd w:val="clear" w:color="auto" w:fill="FFFF00"/></w:pPr><w:r><w:t>Boxed</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8000"/></w:tabs></w:pPr><w:r><w:t>Tabbed</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:ind w:left="1440"/><w:jc w:val="center"/></w:pPr><w:r><w:t>Centred</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:spacing w:before="80" w:beforeLines="100" w:beforeAutospacing="1"/></w:pPr><w:r><w:t>Spaced</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:t>Big mark</w:t></w:r></w:p>',
 ].join('');
+const NUMBERED = WORD_LOOKS.length * 2 + 2;
+const DIRECT = NUMBERED + 3;
 
 describe('applying a style', () => {
   beforeAll(() =>
     preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))))
   );
 
-  /** What the editor's style picker does: the style's values with the cell's table style. */
+  /** What the editor's style picker does: the style's values with the cell's table style and the package's numbering. */
   const applyStyle = (session: YrsSession, source: Document, story: string, index: number, styleId: string) => {
     const { paraId } = session.paragraphs(story)[index]!;
-    const values = styleParagraphValues(
-      createStyleResolver(source.package.styles),
-      styleId,
-      cellParagraphFormatting(source).get(story)
-    );
-    session.applyParagraphStyle({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, styleId, values);
+    const styles = createStyleResolver(source.package.styles);
+    const values = (id: string | null, at: string) =>
+      styleParagraphValues(styles, id, {
+        cell: cellParagraphFormatting(session, styles, at),
+        numbering: source.package.numbering,
+      });
+    applyStyleValues(session, { story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, styleId, values);
   };
-  const stories = (session: YrsSession) =>
-    session.storyIds().filter((id) => id === 'body' || id.startsWith('body:t')).sort();
+  /** The body, then its table's cell stories in row order (ids say where a cell was made, not where it is). */
+  const stories = (session: YrsSession) => [
+    'body',
+    ...session.storySegments('body').flatMap((segment) =>
+      segment.kind === 'embed' && segment.embedKind === 'table'
+        ? ((segment.payload.rows ?? []) as Array<{ cells?: Array<{ story: string }> }>).flatMap((row) =>
+            (row.cells ?? []).map((cell) => cell.story)
+          )
+        : []
+    ),
+  ];
   const shownStories = (session: YrsSession) => stories(session).map((story) => shown(session, story));
 
   it('takes and leaves Word’s borders, tabs and right-to-left with the style alone', async () => {
@@ -559,17 +595,17 @@ describe('applying a style', () => {
     try {
       session.seedFromDocx(bytes);
       const before = shownStories(session);
-      const [head, body] = stories(session).filter((id) => id !== 'body');
-      applyStyle(session, source, head!, 0, 'Normal');
-      applyStyle(session, source, body!, 0, 'Normal');
+      const cells = stories(session).filter((id) => id !== 'body');
+      for (const cell of cells) applyStyle(session, source, cell, 0, 'Normal');
       const editor = shownStories(session);
       expect(editor).toEqual(before.map((story, index) => (index === 0 ? story : [{ ...story[0], pStyle: 'Normal' }])));
       expect(editor[1]![0]).toMatchObject({ alignment: 'center', spaceAfter: 0, lineSpacing: 240 });
       expect(editor[2]![0]).toMatchObject({ spaceAfter: 0, lineSpacing: 240 });
+      expect(editor[3]![0]).toMatchObject({ alignment: 'right', spaceAfter: 0 });
       reopened = await reopen(await save(session, source), 82005);
       expect(shownStories(reopened.session)).toEqual(editor);
-      const cells = paragraphs(reopened.document).slice(WORD_LOOKS.length * 2 + 1, WORD_LOOKS.length * 2 + 3);
-      expect(cells.map((paragraph) => paragraph.formatting)).toEqual([{ styleId: 'Normal' }, { styleId: 'Normal' }]);
+      const saved = paragraphs(reopened.document).slice(WORD_LOOKS.length * 2 + 1, WORD_LOOKS.length * 2 + 4);
+      expect(saved.map((paragraph) => paragraph.formatting)).toEqual(cells.map(() => ({ styleId: 'Normal' })));
     } finally {
       session.destroy();
       reopened?.session.destroy();
@@ -599,6 +635,178 @@ describe('applying a style', () => {
       left.destroy();
       right.destroy();
       alone.destroy();
+    }
+  });
+
+  it('reads a cell’s table style from the session when the editor holds only the host document', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const session = await createYrsSession({ clientId: 82010 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      // As Capy loads it: openDocx, whose host document carries styles but no body.
+      const host = session.openDocx(bytes, true);
+      expect(host.document.package.document.content).toEqual([]);
+      const base = session.materializeDocx()!;
+      const styles = createStyleResolver(host.document.package.styles);
+      const cells = stories(session).filter((id) => id !== 'body');
+      const before = cells.map((story) => shown(session, story)[0]);
+      for (const story of cells) {
+        const { paraId } = session.paragraphs(story)[0]!;
+        applyStyleValues(
+          session,
+          { story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+          'Normal',
+          (id, at) => styleParagraphValues(styles, id, { cell: cellParagraphFormatting(session, styles, at) })
+        );
+      }
+      expect(cells.map((story) => shown(session, story)[0])).toEqual(before.map((paragraph) => ({ ...paragraph, pStyle: 'Normal' })));
+      reopened = await reopen(await save(session, base), 82011);
+      const saved = paragraphs(reopened.document).slice(WORD_LOOKS.length * 2 + 1, WORD_LOOKS.length * 2 + 4);
+      expect(saved.map((paragraph) => paragraph.formatting)).toEqual(cells.map(() => ({ styleId: 'Normal' })));
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('compares a table or row made in the session against its own table style', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82012 });
+    const tableSession = await createYrsSession({ clientId: 82013 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    const typed = (document: Document) =>
+      paragraphs(document).find((paragraph) =>
+        paragraph.content.some((run) => run.type === 'run' && run.content.some((item) => item.type === 'text' && item.text.startsWith('typed ')))
+      )?.formatting;
+    const centre = (target: YrsSession, story: string, alignment: 'center' | 'right') => {
+      const { paraId } = target.paragraphs(story)[0]!;
+      target.insertText({ story, paraId, offset: 0 }, 'typed ');
+      target.setParagraphAttrs({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { alignment });
+    };
+    try {
+      // The last row goes and a row above the header takes its story id; the user right-aligns it.
+      session.seedFromDocx(bytes);
+      const lastRow = { story: 'body', tableIndex: 0, row: 2, column: 0 };
+      session.deleteRow({ anchor: lastRow, head: lastRow });
+      session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+      const top = stories(session)[1]!;
+      centre(session, top, 'right');
+      reopened = await reopen(await save(session, source), 82014);
+      expect(typed(reopened.document)).toMatchObject({ alignment: 'right' });
+      reopened.session.destroy();
+
+      // The table goes and a new one takes its id; the user centres its paragraph.
+      tableSession.seedFromDocx(bytes);
+      tableSession.deleteTable({ story: 'body', tableIndex: 0 });
+      const before = tableSession.paragraphs('body')[WORD_LOOKS.length * 2]!;
+      tableSession.insertTable({ story: 'body', paraId: before.paraId, offset: before.text.length }, 1, 1);
+      const cell = stories(tableSession).find((id) => id !== 'body')!;
+      centre(tableSession, cell, 'center');
+      reopened = await reopen(await save(tableSession, source), 82015);
+      expect(typed(reopened.document)).toMatchObject({ alignment: 'center' });
+    } finally {
+      session.destroy();
+      tableSession.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('gives a row added in the session its table style when a style is applied in it', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82016 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      const before = new Set(stories(session));
+      session.insertRow({ story: 'body', tableIndex: 0, row: 1, column: 0 }, 'below');
+      const added = stories(session).find((id) => !before.has(id))!;
+      applyStyle(session, source, added, 0, 'Normal');
+      expect(shown(session, added)[0]).toMatchObject({ pStyle: 'Normal', spaceAfter: 0, lineSpacing: 240 });
+      const editor = shownStories(session);
+      reopened = await reopen(await save(session, source), 82017);
+      expect(shownStories(reopened.session)).toEqual(editor);
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('takes and leaves a style’s numbering, keeping numbering set on the paragraph', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82018 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      applyStyle(session, source, 'body', NUMBERED, 'Normal');
+      applyStyle(session, source, 'body', NUMBERED + 1, 'ListNumber');
+      applyStyle(session, source, 'body', NUMBERED + 2, 'Heading1');
+      const editor = shown(session, 'body');
+      expect(editor[NUMBERED]!.numPr).toBeUndefined();
+      expect(editor[NUMBERED + 1]!.numPr).toEqual({ numId: 1 });
+      expect(session.paragraphs('body')[NUMBERED + 1]!.properties).toMatchObject({ listNumFmt: 'decimal' });
+      expect(editor[NUMBERED + 2]!.numPr).toEqual({ numId: 1, ilvl: 0 });
+      reopened = await reopen(await save(session, source), 82019);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('keeps direct paragraph formatting and the mark’s own size when a style is applied', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82020 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    const mark = (target: YrsSession) => target.paragraphs('body')[DIRECT + 5]!.properties.defaultTextFormatting;
+    try {
+      session.seedFromDocx(bytes);
+      const markBefore = mark(session) as { fontSize?: unknown };
+      for (let index = DIRECT; index <= DIRECT + 5; index += 1) applyStyle(session, source, 'body', index, 'Heading1');
+      const editor = shown(session, 'body');
+      expect(editor[DIRECT]).toMatchObject({ pStyle: 'Heading1', bidi: true, alignment: 'right', keepNext: true, outlineLevel: 0 });
+      expect(editor[DIRECT + 1]).toMatchObject({ shading: { fill: { rgb: 'FFFF00' } }, spaceBefore: 240 });
+      expect(editor[DIRECT + 2]).toMatchObject({ tabs: [{ position: 8000, alignment: 'right', leader: 'dot' }] });
+      expect(editor[DIRECT + 3]).toMatchObject({ alignment: 'center', indentLeft: 1440, spaceAfter: 0 });
+      expect(editor[DIRECT + 4]).toMatchObject({ spaceBefore: 80, spaceBeforeLines: 100, beforeAutospacing: true });
+      expect((mark(session) as { fontSize?: unknown }).fontSize).toEqual(markBefore.fontSize);
+      reopened = await reopen(await save(session, source), 82021);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+      expect(mark(reopened.session)).toEqual(mark(session));
+      // The file keeps each paragraph's own pPr under the new style, as Word writes it
+      // (document order counts the table's three cell paragraphs before these).
+      const before = paragraphs(source);
+      const after = paragraphs(reopened.document);
+      for (let index = DIRECT + 3; index <= DIRECT + 8; index += 1) {
+        expect(after[index]!.formatting).toEqual({ ...before[index]!.formatting, styleId: 'Heading1' });
+      }
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('stores 0 when the ruler clears the left indent a list level gives', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82022 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    try {
+      session.seedFromDocx(bytes);
+      const item = NUMBERED + 2;
+      expect(shown(session, 'body')[item]).toMatchObject({ indentLeft: 720, hangingIndent: true });
+      const style = styleParagraphValues(createStyleResolver(source.package.styles), null);
+      session.setParagraphAttrs(range(session, item), explicitParagraphAttrs({ indentLeft: null }, style, true));
+      const editor = shown(session, 'body');
+      expect(editor[item]).toMatchObject({ indentLeft: 0, hangingIndent: true });
+      reopened = await reopen(await save(session, source), 82023);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
     }
   });
 

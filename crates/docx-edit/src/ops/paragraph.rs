@@ -14,9 +14,9 @@
 //! paragraph's identity carries over. Tracked-change resolution uses the
 //! opposite rule, for the reasons its own module docs give.
 //!
-//! Style resolution stays outside the CRDT. Ops that apply a style take a
-//! host-supplied [`ResolvedStyleProjection`] rather than reading `styles.xml`,
-//! and reject an unknown style before touching the document.
+//! Style resolution stays outside the CRDT. Ops that apply a style take
+//! host-resolved values (a [`ResolvedStyleProjection`] for a split's next
+//! style) rather than reading `styles.xml`.
 //!
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
@@ -27,7 +27,7 @@ use std::sync::Arc;
 use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
-use crate::format::{PROTECTED_ATTRS, Patch};
+use crate::format::Patch;
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::text::suggest_delete;
 use crate::ops::{
@@ -42,9 +42,10 @@ use crate::{
 };
 
 /// The paragraph attributes a style definition owns: every pPr property the
-/// seed resolves from a style. Applying a style resets every one of them to the
-/// style's value, or clears it when the style has none — an attribute here is
-/// never left over from the previous style.
+/// seed resolves from a style but numbering ([`STYLE_NUMBERING_ATTRS`], which a
+/// paragraph's own numbering overrides). Applying a style resets every one of
+/// them to the style's value, or clears it when the style has none — an
+/// attribute here is never left over from the previous style.
 pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 27] = [
     "alignment",
     "spaceBefore",
@@ -75,17 +76,28 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 27] = [
     "defaultTextFormatting",
 ];
 
-/// The run marks swept from a paragraph's text before the new style's own run
-/// formatting is written, so direct formatting from the old style cannot
-/// survive the switch.
-pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
-    "bold",
-    "italic",
-    "fontSize",
-    "fontFamily",
-    "textColor",
-    "underline",
-    "strike",
+/// The indents a paragraph's numbering level gives it.
+const LIST_INDENT_ATTRS: [&str; 3] = ["indentLeft", "indentFirstLine", "hangingIndent"];
+
+/// A paragraph's numbering and the list rendering the seed derives from it.
+/// Applying a style replaces them where the numbering came from the old style
+/// (or there is none); numbering set on the paragraph itself stays.
+pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
+    "numPr",
+    "numPrFromStyle",
+    "listNumFmt",
+    "listIsBullet",
+    "listMarker",
+    "listMarkerHidden",
+    "listMarkerFontFamily",
+    "listMarkerFontSize",
+    "listMarkerBold",
+    "listMarkerItalic",
+    "listMarkerColor",
+    "listMarkerSuffix",
+    "listLevelNumFmts",
+    "listAbstractNumId",
+    "listStartOverride",
 ];
 
 /// The only paragraph properties an EMPTY second half inherits on split —
@@ -189,8 +201,8 @@ pub struct ParaAttrDelta {
     pub other: BTreeMap<String, Option<Any>>,
 }
 
-/// A style definition already resolved by the host, injected because the
-/// `styles.xml` cascade lives outside the CRDT.
+/// A split's next style (`w:next`) already resolved by the host, injected
+/// because the `styles.xml` cascade lives outside the CRDT.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedStyleProjection {
     pub style_id: String,
@@ -201,9 +213,6 @@ pub struct ResolvedStyleProjection {
     /// entry clears that attribute — plus any list attributes when the style
     /// defines numbering.
     pub paragraph_attrs: BTreeMap<String, Any>,
-    /// The style's run formatting as story attribute values (`bold`,
-    /// `fontSize`, …), applied after the [`STYLE_CONTROLLED_MARKS`] sweep.
-    pub run_marks: BTreeMap<String, Any>,
 }
 
 struct TargetPara {
@@ -850,13 +859,30 @@ impl EditingDoc {
         selector: &ParaSelector,
         delta: &ParaAttrDelta,
     ) -> OpResult<Receipt> {
-        for key in delta.other.keys() {
-            if matches!(key.as_str(), PARA_ID | KIND_KEY) {
-                return Err(OpError::ReservedKey(key.clone()));
-            }
-        }
+        self.set_paragraph_attrs_each(ctx, selector, |_, _| Ok(delta.clone()))
+    }
+
+    /// [`Self::set_paragraph_attrs`] with a delta per paragraph, read from its
+    /// properties before the change.
+    fn set_paragraph_attrs_each(
+        &self,
+        ctx: &EditCtx,
+        selector: &ParaSelector,
+        delta_for: impl Fn(&MapRef, &TransactionMut<'_>) -> OpResult<ParaAttrDelta>,
+    ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
         let targets = resolve_selector(&txn, selector)?;
+        let deltas = targets
+            .iter()
+            .map(|target| delta_for(&target.map, &txn))
+            .collect::<OpResult<Vec<_>>>()?;
+        for delta in &deltas {
+            for key in delta.other.keys() {
+                if matches!(key.as_str(), PARA_ID | KIND_KEY) {
+                    return Err(OpError::ReservedKey(key.clone()));
+                }
+            }
+        }
         let revision_id = ctx.is_suggesting().then(|| {
             targets
                 .iter()
@@ -877,7 +903,7 @@ impl EditingDoc {
                 .unwrap_or_else(|| self.next_id())
         });
         let mut changed = false;
-        for target in &targets {
+        for (target, delta) in targets.iter().zip(&deltas) {
             let previous = paragraph_formatting(&target.map, &txn);
             apply_para_delta(&mut txn, &target.map, delta);
             let current = paragraph_formatting(&target.map, &txn);
@@ -1021,52 +1047,87 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Applies a host-resolved paragraph style in ONE transaction: writes the
-    /// style id, resets every [`STYLE_CONTROLLED_PARA_ATTRS`] entry to the
-    /// projection's value or clears it, sweeps the [`STYLE_CONTROLLED_MARKS`]
-    /// from the paragraph's text, and writes the style's run formats over it.
-    ///
-    /// Errors before any mutation when the style is not known, and when the
-    /// projection's run marks include a protected attribute such as a
-    /// hyperlink or a tracked-change stamp.
+    /// Applies a host-resolved paragraph style to the selected paragraphs in
+    /// one transaction, keeping direct paragraph formatting as Word does:
+    /// writes `style_id`, and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key the
+    /// paragraph holds nothing for, or holds as its old style gives it
+    /// (`previous`, the host's values per style id, `""` for none), to its
+    /// entry in `values` (the new style's), or to an explicit null where
+    /// `values` has none, so two peers applying different styles converge on
+    /// one style's values. The paragraph mark's run defaults become the new
+    /// style's with the mark's own run properties over them. Where the
+    /// paragraph's numbering came from its old style, or it has none, the
+    /// [`STYLE_NUMBERING_ATTRS`] are taken from `values` the same way. Run
+    /// formatting is the host's to apply. In suggesting mode the change is
+    /// recorded as for [`Self::set_paragraph_attrs`]. Errors before any
+    /// mutation when `previous` lacks a selected paragraph's style.
     pub fn apply_paragraph_style(
         &self,
         ctx: &EditCtx,
         selector: &ParaSelector,
-        projection: &ResolvedStyleProjection,
+        style_id: &str,
+        values: &BTreeMap<String, Any>,
+        previous: &BTreeMap<String, BTreeMap<String, Any>>,
     ) -> OpResult<Receipt> {
-        if !projection.known {
-            return Err(OpError::UnknownStyle(projection.style_id.clone()));
-        }
-        for key in projection.run_marks.keys() {
-            if PROTECTED_ATTRS.contains(&key.as_str()) {
-                return Err(OpError::InvalidFormatValue(format!(
-                    "attribute {key:?} is not a formatting attribute"
-                )));
-            }
-        }
-        let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
-        for target in &targets {
-            target
-                .map
-                .insert(&mut txn, "pStyle", projection.style_id.as_str());
-            apply_paragraph_attr_projection(&mut txn, &target.map, &projection.paragraph_attrs)?;
-            let len = target.bounds.len();
-            if len > 0 {
-                let mut attrs: Attrs = STYLE_CONTROLLED_MARKS
-                    .iter()
-                    .map(|key| (Arc::from(*key), Any::Null))
-                    .collect();
-                for (key, value) in &projection.run_marks {
-                    attrs.insert(Arc::from(key.as_str()), value.clone());
+        let value = |key: &str| Some(values.get(key).cloned().unwrap_or(Any::Null));
+        self.set_paragraph_attrs_each(ctx, selector, |map, txn| {
+            let property = |key: &str| match map.get(txn, key) {
+                Some(Out::Any(Any::Null)) | None => None,
+                Some(Out::Any(value)) => Some(value),
+                Some(_) => None,
+            };
+            let old_style = match property("pStyle") {
+                Some(Any::String(style)) => style.to_string(),
+                _ => String::new(),
+            };
+            let old = previous
+                .get(&old_style)
+                .ok_or_else(|| OpError::UnknownStyle(old_style.clone()))?;
+            let source = property(ORIGINAL_FORMATTING);
+            let source = match &source {
+                Some(Any::Map(original)) => Some(original.as_ref()),
+                _ => None,
+            };
+            // The seed keeps a style's numbering only in the source formatting;
+            // an earlier style application writes `numPrFromStyle` itself.
+            let num_pr = property("numPr");
+            let numbering_from_style = num_pr.is_none()
+                || num_pr == property("numPrFromStyle")
+                || num_pr.as_ref() == source.and_then(|original| original.get("numPrFromStyle"));
+            let mut delta = ParaAttrDelta::default();
+            delta
+                .other
+                .insert("pStyle".to_owned(), Some(Any::from(style_id)));
+            for key in STYLE_CONTROLLED_PARA_ATTRS {
+                // A paragraph's own numbering keeps the indents its level gives.
+                if key == DEFAULT_TEXT_FORMATTING
+                    || (!numbering_from_style && LIST_INDENT_ATTRS.contains(&key))
+                {
+                    continue;
                 }
-                target
-                    .story
-                    .format(&mut txn, target.bounds.start, len, attrs);
+                let from_old_style = match (property(key), old.get(key)) {
+                    (None, _) => true,
+                    (Some(current), Some(old)) => same_value(&current, old),
+                    (Some(_), None) => false,
+                };
+                if from_old_style {
+                    delta.other.insert(key.to_owned(), value(key));
+                }
             }
-        }
-        Ok(Receipt::default())
+            delta.other.insert(
+                DEFAULT_TEXT_FORMATTING.to_owned(),
+                Some(mark_defaults(
+                    values.get(DEFAULT_TEXT_FORMATTING),
+                    source.and_then(|original| original.get("runProperties")),
+                )),
+            );
+            if numbering_from_style {
+                for key in STYLE_NUMBERING_ATTRS {
+                    delta.other.insert(key.to_owned(), value(key));
+                }
+            }
+            Ok(delta)
+        })
     }
 
     /// Restores paraId uniqueness after a merge of divergent replicas: every
@@ -1222,6 +1283,50 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
             _ => set_or_remove(txn, map, key, value.clone()),
         }
     }
+}
+
+/// Whether two property values are the same, numbers by value and a map's
+/// null entries ignored, as stored and host-resolved values may differ there.
+fn same_value(a: &Any, b: &Any) -> bool {
+    let number = |value: &Any| match value {
+        Any::Number(number) => Some(*number),
+        Any::BigInt(number) => Some(*number as f64),
+        _ => None,
+    };
+    let present = |map: &HashMap<String, Any>| {
+        map.iter()
+            .filter(|(_, value)| **value != Any::Null)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>()
+    };
+    match (a, b) {
+        (Any::Array(a), Any::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| same_value(a, b))
+        }
+        (Any::Map(a), Any::Map(b)) => {
+            let (a, b) = (present(a), present(b));
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.iter()
+                        .any(|(other, b)| other == key && same_value(value, b))
+                })
+        }
+        _ => match (number(a), number(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => a == b,
+        },
+    }
+}
+
+/// A paragraph mark's run defaults under a style: the style's (`style`) with
+/// the mark's own run properties (`own`, from the source pPr) over them, as
+/// the seed merges them.
+fn mark_defaults(style: Option<&Any>, own: Option<&Any>) -> Any {
+    let json = |value: Option<&Any>| value.and_then(|value| serde_json::to_value(value).ok());
+    crate::seed::merge_text_formatting(json(style).as_ref(), json(own).as_ref())
+        .filter(|merged| !merged.is_null())
+        .and_then(|merged| serde_json::from_value(merged).ok())
+        .unwrap_or(Any::Null)
 }
 
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {

@@ -3354,13 +3354,17 @@ fn lower_paragraph_border(
     })
 }
 
+/// A key the paragraph holds, even as an explicit null (a style applied over
+/// it), wins over the source formatting.
 fn paragraph_auto_spacing(values: &BTreeMap<String, Any>, key: &str) -> bool {
-    values.get(key).and_then(any_bool).or_else(|| {
-        values
+    let auto = match values.get(key) {
+        Some(value) => any_bool(value),
+        None => values
             .get("_originalFormatting")
             .and_then(any_map)
-            .and_then(|map| map_bool(map, key))
-    }) == Some(true)
+            .and_then(|map| map_bool(map, key)),
+    };
+    auto == Some(true)
 }
 
 fn suppress_cell_edge_spacing(

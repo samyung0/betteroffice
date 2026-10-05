@@ -33,6 +33,7 @@ interface RefApiInputs {
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
   getYrsPositionProjectionRef: React.MutableRefObject<() => YrsPositionProjection | null>;
+  paragraphStyleValuesRef: React.MutableRefObject<PagedEditorRef['paragraphStyleValues']>;
   displayPositionToYrsLocRef: React.MutableRefObject<(position: number) => YrsLoc | null>;
 }
 
@@ -70,6 +71,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
+    paragraphStyleValuesRef,
     displayPositionToYrsLocRef,
   } = inputs;
 
@@ -141,6 +143,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     displayPositionToYrsLoc: (position) => displayPositionToYrsLocRef.current(position),
     getYrsSession: () => yrsSessionRef.current,
+    paragraphStyleValues: (styleId, story) => paragraphStyleValuesRef.current(styleId, story),
     flushPendingInput: async () => {
       const input = yrsInputRef.current;
       const session = yrsSessionRef.current;
@@ -217,6 +220,7 @@ export interface UsePagedEditorRefApiOptions {
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;
+  paragraphStyleValues: PagedEditorRef['paragraphStyleValues'];
   displayPositionToYrsLoc: (position: number) => YrsLoc | null;
 }
 
@@ -238,6 +242,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     applyYrsFormatting,
     applyYrsCommand,
     getYrsPositionProjection,
+    paragraphStyleValues,
     displayPositionToYrsLoc,
   } = opts;
   const documentFromYrsRef = useRef(documentFromYrs);
@@ -247,6 +252,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const applyYrsFormattingRef = useRef(applyYrsFormatting);
   const applyYrsCommandRef = useRef(applyYrsCommand);
   const getYrsPositionProjectionRef = useRef(getYrsPositionProjection);
+  const paragraphStyleValuesRef = useRef(paragraphStyleValues);
   const displayPositionToYrsLocRef = useRef(displayPositionToYrsLoc);
   documentFromYrsRef.current = documentFromYrs;
   yrsSessionRef.current = yrsSession;
@@ -255,6 +261,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   applyYrsFormattingRef.current = applyYrsFormatting;
   applyYrsCommandRef.current = applyYrsCommand;
   getYrsPositionProjectionRef.current = getYrsPositionProjection;
+  paragraphStyleValuesRef.current = paragraphStyleValues;
   displayPositionToYrsLocRef.current = displayPositionToYrsLoc;
 
   const inputs = {
@@ -272,6 +279,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     applyYrsFormattingRef,
     applyYrsCommandRef,
     getYrsPositionProjectionRef,
+    paragraphStyleValuesRef,
     displayPositionToYrsLocRef,
   };
 

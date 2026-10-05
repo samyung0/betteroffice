@@ -1369,7 +1369,6 @@ fn split_at_end_with_next_style_switches_the_second_half() {
         paragraph_attrs: [("spaceBefore".to_string(), Any::Number(120.0))]
             .into_iter()
             .collect(),
-        run_marks: BTreeMap::new(),
     };
     doc.split_paragraph(&ctx(), Position::new("body", 12), Some(&next))
         .unwrap();
@@ -1776,19 +1775,19 @@ fn tab_stops_add_replace_and_remove() {
 }
 
 #[test]
-fn apply_paragraph_style_resets_attrs_sweeps_marks_and_errs_before_mutating() {
+fn apply_paragraph_style_resets_what_came_from_the_old_style_and_keeps_direct_formatting() {
     let (doc, para) = doc_with("styled paragraph");
     let selector = ParaSelector::One(para.clone());
-    // Direct formatting that the style must reset/sweep.
-    doc.set_paragraph_attrs(
-        &ctx(),
-        &selector,
-        &ParaAttrDelta {
-            alignment: Patch::Set("center".into()),
-            ..ParaAttrDelta::default()
-        },
-    )
-    .unwrap();
+    doc.set_paragraph_attr(&para, "pStyle", Any::from("Quote"))
+        .unwrap();
+    for (key, value) in [
+        // The old style's, then a direct value over another of its keys.
+        ("spaceAfter", Any::Number(200.0)),
+        ("alignment", Any::from("center")),
+        ("bidi", Any::Bool(true)),
+    ] {
+        doc.set_paragraph_attr(&para, key, value).unwrap();
+    }
     doc.format_range(
         &ctx(),
         StoryRange::new("body", 0, 6),
@@ -1798,45 +1797,22 @@ fn apply_paragraph_style_resets_attrs_sweeps_marks_and_errs_before_mutating() {
         },
     )
     .unwrap();
-
-    // Unknown style: error BEFORE any mutation.
-    let before = doc.story_segments("body").unwrap();
-    let unknown = ResolvedStyleProjection {
-        style_id: "Nope".into(),
-        known: false,
-        ..ResolvedStyleProjection::default()
-    };
-    assert_eq!(
-        doc.apply_paragraph_style(&ctx(), &selector, &unknown),
-        Err(OpError::UnknownStyle("Nope".into()))
-    );
-    assert_eq!(doc.story_segments("body").unwrap(), before);
-
-    // Known style: styleId set, style-controlled attrs reset, 7 marks swept, run formats added.
-    let heading = ResolvedStyleProjection {
-        style_id: "Heading1".into(),
-        known: true,
-        paragraph_attrs: [("spaceBefore".to_string(), Any::Number(240.0))]
-            .into_iter()
-            .collect(),
-        run_marks: [
-            ("bold".to_string(), Any::Bool(true)),
-            (
-                "fontSize".to_string(),
-                Any::Map(Arc::new(
-                    [
-                        ("size".to_string(), Any::Number(32.0)),
-                        ("sizeCs".to_string(), Any::Number(32.0)),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )),
-            ),
+    let previous: BTreeMap<String, BTreeMap<String, Any>> = [(
+        "Quote".to_string(),
+        [
+            ("spaceAfter".to_string(), Any::BigInt(200)),
+            ("alignment".to_string(), Any::from("right")),
         ]
-        .into_iter()
-        .collect(),
-    };
-    doc.apply_paragraph_style(&ctx(), &selector, &heading)
+        .into(),
+    )]
+    .into();
+    let values: BTreeMap<String, Any> = [("spaceBefore".to_string(), Any::Number(240.0))].into();
+    assert_eq!(
+        doc.apply_paragraph_style(&ctx(), &selector, "Heading1", &values, &BTreeMap::new()),
+        Err(OpError::UnknownStyle("Quote".into())),
+        "the old style's values are required"
+    );
+    doc.apply_paragraph_style(&ctx(), &selector, "Heading1", &values, &previous)
         .unwrap();
     let paragraph = &doc.paragraphs("body").unwrap()[0];
     assert_eq!(
@@ -1847,58 +1823,86 @@ fn apply_paragraph_style_resets_attrs_sweeps_marks_and_errs_before_mutating() {
         paragraph.properties.get("spaceBefore"),
         Some(&Any::Number(240.0))
     );
+    // The old style's spacing goes; direct alignment and right-to-left stay.
+    assert_eq!(paragraph.properties.get("spaceAfter"), Some(&Any::Null));
     assert_eq!(
         paragraph.properties.get("alignment"),
-        None,
-        "style-controlled attr reset"
+        Some(&Any::from("center"))
     );
-    let attrs = seg_attrs(&doc, "styled");
-    assert!(!active(&attrs, "italic"), "old style-controlled mark swept");
-    assert_eq!(attrs.get("bold"), Some(&Any::Bool(true)));
-    assert_eq!(
-        map_get(attrs.get("fontSize").unwrap(), "size"),
-        Some(&Any::Number(32.0))
+    assert_eq!(paragraph.properties.get("bidi"), Some(&Any::Bool(true)));
+    // A key the paragraph held nothing for is written as null, so a concurrent style wins whole.
+    assert_eq!(paragraph.properties.get("keepNext"), Some(&Any::Null));
+    assert!(
+        active(&seg_attrs(&doc, "styled"), "italic"),
+        "run formatting is the host's"
     );
 }
 
 #[test]
-fn apply_paragraph_style_clears_a_widow_control_off_the_new_style_does_not_author() {
-    let (doc, para) = doc_with("styled paragraph");
-    let selector = ParaSelector::One(para.clone());
-    doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
-        .unwrap();
-
-    // Absence encodes default-on, so a style that authors nothing must clear
-    // false.
-    let plain = ResolvedStyleProjection {
-        style_id: "Body".into(),
-        known: true,
-        ..ResolvedStyleProjection::default()
+fn apply_paragraph_style_replaces_style_numbering_and_keeps_direct_numbering() {
+    let numbering = |num_id: f64| {
+        Any::Map(Arc::new(
+            [
+                ("numId".to_string(), Any::Number(num_id)),
+                ("ilvl".to_string(), Any::Number(0.0)),
+            ]
+            .into(),
+        ))
     };
-    doc.apply_paragraph_style(&ctx(), &selector, &plain)
+    let (doc, para) = doc_with("from style");
+    let second = doc
+        .split_paragraph(&ctx(), Position::new("body", 4), None)
+        .unwrap()
+        .second_para_id;
+    let selector = ParaSelector::Many(vec![para.clone(), second.clone()]);
+    // The first paragraph's bullet came from its style (the seed records that
+    // only in the source formatting), the second's was set on it.
+    doc.set_paragraph_attr(&para, "numPr", numbering(5.0))
         .unwrap();
+    let source = [("numPrFromStyle".to_string(), numbering(5.0))].into();
+    doc.set_paragraph_attr(&para, "_originalFormatting", Any::Map(Arc::new(source)))
+        .unwrap();
+    doc.set_paragraph_attr(&para, "listIsBullet", Any::Bool(true))
+        .unwrap();
+    doc.set_paragraph_attr(&second, "numPr", numbering(7.0))
+        .unwrap();
+    for target in [&para, &second] {
+        doc.set_paragraph_attr(target, "indentLeft", Any::Number(720.0))
+            .unwrap();
+    }
+    // The old style gives the indent its numbering's level has.
+    let previous: BTreeMap<String, BTreeMap<String, Any>> = [(
+        "Normal".to_string(),
+        [("indentLeft".to_string(), Any::Number(720.0))].into(),
+    )]
+    .into();
+    doc.apply_paragraph_style(&ctx(), &selector, "Plain", &BTreeMap::new(), &previous)
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    assert_eq!(paragraphs[0].properties.get("numPr"), Some(&Any::Null));
     assert_eq!(
-        doc.paragraphs("body").unwrap()[0]
-            .properties
-            .get("widowControl"),
-        None
+        paragraphs[0].properties.get("listIsBullet"),
+        Some(&Any::Null)
+    );
+    assert_eq!(paragraphs[1].properties.get("numPr"), Some(&numbering(7.0)));
+    assert_eq!(paragraphs[0].properties.get("indentLeft"), Some(&Any::Null));
+    assert_eq!(
+        paragraphs[1].properties.get("indentLeft"),
+        Some(&Any::Number(720.0))
     );
 
-    let off = ResolvedStyleProjection {
-        style_id: "Tight".into(),
-        known: true,
-        paragraph_attrs: [("widowControl".to_string(), Any::Bool(false))]
-            .into_iter()
-            .collect(),
-        ..ResolvedStyleProjection::default()
-    };
-    doc.apply_paragraph_style(&ctx(), &selector, &off).unwrap();
-    assert_eq!(
-        doc.paragraphs("body").unwrap()[0]
-            .properties
-            .get("widowControl"),
-        Some(&Any::Bool(false))
-    );
+    let values: BTreeMap<String, Any> = [
+        ("numPr".to_string(), numbering(9.0)),
+        ("numPrFromStyle".to_string(), numbering(9.0)),
+    ]
+    .into();
+    let previous: BTreeMap<String, BTreeMap<String, Any>> =
+        [("Plain".to_string(), BTreeMap::new())].into();
+    doc.apply_paragraph_style(&ctx(), &selector, "ListBullet", &values, &previous)
+        .unwrap();
+    let paragraphs = doc.paragraphs("body").unwrap();
+    assert_eq!(paragraphs[0].properties.get("numPr"), Some(&numbering(9.0)));
+    assert_eq!(paragraphs[1].properties.get("numPr"), Some(&numbering(7.0)));
 }
 
 #[test]
