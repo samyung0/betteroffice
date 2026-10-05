@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { submitButtonStyle, CANCEL_BUTTON_STYLE } from './cardUtils';
 import { useTranslation } from '../../i18n';
 
@@ -36,6 +36,11 @@ export function ReplyInput({ onSubmit }: ReplyInputProps) {
   const [active, setActive] = useState(false);
   const [text, setText] = useState('');
   const { t } = useTranslation();
+  // Focus once, when the box opens: a card re-rendering (a pause ending, say)
+  // must not take the focus back.
+  const focusOnOpen = useCallback((el: HTMLInputElement | null) => {
+    el?.focus({ preventScroll: true });
+  }, []);
 
   if (!active) {
     return (
@@ -60,7 +65,7 @@ export function ReplyInput({ onSubmit }: ReplyInputProps) {
   return (
     <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 12 }}>
       <input
-        ref={(el) => el?.focus({ preventScroll: true })}
+        ref={focusOnOpen}
         type="text"
         value={text}
         onChange={(e) => setText(e.target.value)}

@@ -1397,7 +1397,8 @@ describe('XlsxEditor host integration', () => {
       'xlsx-toolbar-more',
       'xlsx-export-png',
     ]);
-    expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).disabled).toBe(true);
+    const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    expect([formula.disabled, formula.readOnly]).toEqual([false, true]);
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
     expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
     expect(changes).toBe(0);

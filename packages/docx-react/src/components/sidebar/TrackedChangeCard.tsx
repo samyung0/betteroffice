@@ -224,8 +224,11 @@ export function TrackedChangeCard({
 
       <ReplyThread replies={replies} isExpanded={isExpanded} />
 
-      {isExpanded && !readOnly && (
-        <ReplyInput onSubmit={(text) => onReply?.(change.revisionId, text)} />
+      {/* Hidden, not unmounted, while read-only: a reply being typed keeps its draft. */}
+      {isExpanded && (
+        <div hidden={readOnly}>
+          <ReplyInput onSubmit={(text) => onReply?.(change.revisionId, text)} />
+        </div>
       )}
     </div>
   );

@@ -2494,7 +2494,9 @@ function XlsxEditorContent({
                 value={formulaValue}
                 placeholder={t('toolbar.formulaPlaceholder')}
                 aria-label={t('toolbar.formulaPlaceholder')}
-                disabled={!sheetInfo || readOnly}
+                disabled={!sheetInfo}
+                // Read-only, not disabled: its text still selects and copies.
+                readOnly={readOnly}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   setFormulaDraft(e.target.value);

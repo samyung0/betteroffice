@@ -173,8 +173,11 @@ export function CommentCard({
 
       <ReplyThread replies={replies} isExpanded={isExpanded} />
 
-      {isExpanded && !comment.done && !readOnly && (
-        <ReplyInput onSubmit={(text) => onReply?.(comment.id, text)} />
+      {/* Hidden, not unmounted, while read-only: a reply being typed keeps its draft. */}
+      {isExpanded && !comment.done && (
+        <div hidden={readOnly}>
+          <ReplyInput onSubmit={(text) => onReply?.(comment.id, text)} />
+        </div>
       )}
     </div>
   );
