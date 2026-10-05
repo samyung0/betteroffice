@@ -11,7 +11,7 @@ test('fresh paragraph spacing keeps explicit zero and other formatting', () => {
     afterAutospacing: false,
     indentLeft: 720,
     lineSpacing: 360,
-  })).toMatchObject({
+  }, {})).toMatchObject({
     spaceBefore: 0,
     spaceAfter: 120,
     spaceBeforeLines: 0,
@@ -33,16 +33,16 @@ test('imported paragraph spacing keeps the updated authored properties', () => {
     afterAutospacing: false,
     indentLeft: 720,
   };
-  expect(paragraphAttrsToFormatting({ ...formatting, _originalFormatting: formatting }))
+  expect(paragraphAttrsToFormatting({ ...formatting, _originalFormatting: formatting }, {}))
     .toMatchObject(formatting);
 });
 
 test('paragraph auto-spacing opt-outs survive a save', () => {
-  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false }))
+  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false }, {}))
     .toMatchObject({ autoSpaceDE: false, autoSpaceDN: false });
   const on = { autoSpaceDE: true, autoSpaceDN: true };
-  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false, _originalFormatting: on }))
+  expect(paragraphAttrsToFormatting({ autoSpaceDE: false, autoSpaceDN: false, _originalFormatting: on }, on))
     .toMatchObject({ autoSpaceDE: false, autoSpaceDN: false });
-  expect(paragraphAttrsToFormatting({ ...on, _originalFormatting: on }))
+  expect(paragraphAttrsToFormatting({ ...on, _originalFormatting: on }, on))
     .toMatchObject(on);
 });

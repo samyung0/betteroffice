@@ -31,6 +31,9 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   tabs?: ParagraphFormatting['tabs'];
   outlineLevel?: number;
   contextualSpacing?: boolean;
+  keepNext?: boolean;
+  keepLines?: boolean;
+  snapToGrid?: boolean;
   pageBreakBefore?: boolean;
   widowControl?: boolean | null;
   autoSpaceDE?: boolean | null;
@@ -48,99 +51,115 @@ function isStyleSourcedNumPr(attrs: ParagraphSaveAttrs): boolean {
   );
 }
 
-export function paragraphAttrsToFormatting(
-  attrs: ParagraphSaveAttrs
-): ParagraphFormatting | undefined {
-  if (attrs._originalFormatting) {
-    const orig = attrs._originalFormatting;
-    const result = { ...orig };
-    if (attrs.alignment !== (orig.alignment || undefined)) {
-      result.alignment = attrs.alignment || undefined;
-    }
-    if (isStyleSourcedNumPr(attrs)) {
-      delete result.numPr;
-      delete result.numPrFromStyle;
-    } else if (
-      attrs.numPr !== orig.numPr &&
-      JSON.stringify(attrs.numPr) !== JSON.stringify(orig.numPr)
-    ) {
-      result.numPr = attrs.numPr || undefined;
-      delete result.numPrFromStyle;
-    }
-    if (attrs.styleId !== (orig.styleId || undefined)) {
-      result.styleId = attrs.styleId || undefined;
-    }
-    if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
-      result.pageBreakBefore = attrs.pageBreakBefore || undefined;
-    }
-    if (attrs.widowControl !== (orig.widowControl ?? undefined)) {
-      result.widowControl = attrs.widowControl ?? undefined;
-    }
-    if (attrs.autoSpaceDE !== (orig.autoSpaceDE ?? undefined)) {
-      result.autoSpaceDE = attrs.autoSpaceDE ?? undefined;
-    }
-    if (attrs.autoSpaceDN !== (orig.autoSpaceDN ?? undefined)) {
-      result.autoSpaceDN = attrs.autoSpaceDN ?? undefined;
-    }
-    if (attrs.bidi !== (orig.bidi || undefined)) {
-      result.bidi = attrs.bidi || undefined;
-    }
-    return result;
+/** The pPr properties the editor holds resolved (direct, else list level, else style). */
+const RESOLVED_PROPERTIES = [
+  'alignment',
+  'spaceBefore',
+  'spaceAfter',
+  'spaceBeforeLines',
+  'spaceAfterLines',
+  'beforeAutospacing',
+  'afterAutospacing',
+  'lineSpacing',
+  'lineSpacingRule',
+  'indentLeft',
+  'indentRight',
+  'indentFirstLine',
+  'hangingIndent',
+  'borders',
+  'shading',
+  'tabs',
+  'pageBreakBefore',
+  'keepNext',
+  'keepLines',
+  'widowControl',
+  'contextualSpacing',
+  'snapToGrid',
+  'autoSpaceDE',
+  'autoSpaceDN',
+  'outlineLevel',
+  'bidi',
+] as const satisfies readonly (keyof ParagraphFormatting)[];
+
+type ResolvedProperty = (typeof RESOLVED_PROPERTIES)[number];
+
+/** Properties one OOXML attribute set carries together: a change to one writes all. */
+const LINKED: ReadonlyArray<readonly ResolvedProperty[]> = [
+  ['lineSpacing', 'lineSpacingRule'],
+  ['indentFirstLine', 'hangingIndent'],
+];
+
+/** Character-unit twins Word reads in place of a twips indent, dropped when the indent changes. */
+const CHARACTER_TWINS: Partial<Record<ResolvedProperty, ReadonlyArray<keyof ParagraphFormatting>>> = {
+  indentLeft: ['indentLeftChars'],
+  indentRight: ['indentRightChars'],
+  indentFirstLine: ['indentFirstLineChars', 'hangingIndentChars'],
+};
+
+/** JSON with sorted keys and without nulls, so stored and parsed values compare equal. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value).filter(([, entry]) => entry != null);
+    entries.sort(([a], [b]) => (a < b ? -1 : 1));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`).join(',')}}`;
   }
+  return JSON.stringify(value ?? null);
+}
 
-  const hasFormatting =
-    attrs.alignment ||
-    attrs.spaceBefore != null ||
-    attrs.spaceAfter != null ||
-    attrs.spaceBeforeLines != null ||
-    attrs.spaceAfterLines != null ||
-    attrs.beforeAutospacing != null ||
-    attrs.afterAutospacing != null ||
-    attrs.lineSpacing ||
-    attrs.indentLeft ||
-    attrs.indentRight ||
-    attrs.indentFirstLine ||
-    attrs.numPr ||
-    attrs.styleId ||
-    attrs.borders ||
-    attrs.shading ||
-    attrs.tabs ||
-    attrs.outlineLevel != null ||
-    attrs.contextualSpacing ||
-    attrs.pageBreakBefore ||
-    attrs.widowControl != null ||
-    attrs.autoSpaceDE != null ||
-    attrs.autoSpaceDN != null ||
-    attrs.bidi;
-  if (!hasFormatting) return undefined;
+/** Tab stops in the model's shape; editor ops store `{pos, val}`. */
+function modelTabs(value: unknown): ParagraphFormatting['tabs'] {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((stop: Record<string, unknown>) => ({
+    position: (stop.position ?? stop.pos) as number,
+    alignment: (stop.alignment ?? stop.val) as NonNullable<ParagraphFormatting['tabs']>[number]['alignment'],
+    ...(stop.leader != null ? { leader: stop.leader as NonNullable<ParagraphFormatting['tabs']>[number]['leader'] } : {}),
+  }));
+}
 
-  return {
-    alignment: attrs.alignment || undefined,
-    spaceBefore: attrs.spaceBefore ?? undefined,
-    spaceAfter: attrs.spaceAfter ?? undefined,
-    spaceBeforeLines: attrs.spaceBeforeLines ?? undefined,
-    spaceAfterLines: attrs.spaceAfterLines ?? undefined,
-    beforeAutospacing: attrs.beforeAutospacing ?? undefined,
-    afterAutospacing: attrs.afterAutospacing ?? undefined,
-    lineSpacing: attrs.lineSpacing || undefined,
-    lineSpacingRule: attrs.lineSpacingRule || undefined,
-    indentLeft: attrs.indentLeft || undefined,
-    indentRight: attrs.indentRight || undefined,
-    indentFirstLine: attrs.indentFirstLine || undefined,
-    hangingIndent: attrs.hangingIndent || undefined,
-    numPr: isStyleSourcedNumPr(attrs) ? undefined : attrs.numPr || undefined,
-    styleId: attrs.styleId || undefined,
-    borders: attrs.borders || undefined,
-    shading: attrs.shading || undefined,
-    tabs: attrs.tabs || undefined,
-    outlineLevel: attrs.outlineLevel ?? undefined,
-    contextualSpacing: attrs.contextualSpacing || undefined,
-    pageBreakBefore: attrs.pageBreakBefore || undefined,
-    widowControl: attrs.widowControl ?? undefined,
-    autoSpaceDE: attrs.autoSpaceDE ?? undefined,
-    autoSpaceDN: attrs.autoSpaceDN ?? undefined,
-    bidi: attrs.bidi || undefined,
-  };
+function modelValue(attrs: ParagraphSaveAttrs, key: ResolvedProperty): unknown {
+  return key === 'tabs' ? modelTabs(attrs.tabs) : attrs[key];
+}
+
+/**
+ * The pPr a paragraph saves with: its source formatting, with every resolved
+ * property the editor holds differently from what the seed gave it
+ * (`seeded`) written over it. Untouched properties stay as the source wrote
+ * them, and style or list values are never copied into direct formatting.
+ */
+export function paragraphAttrsToFormatting(
+  attrs: ParagraphSaveAttrs,
+  seeded: Readonly<Record<string, unknown>>
+): ParagraphFormatting | undefined {
+  const orig = attrs._originalFormatting ?? {};
+  const result: Record<string, unknown> = { ...orig };
+  const changed = new Set(
+    RESOLVED_PROPERTIES.filter(
+      (key) => canonical(modelValue(attrs, key)) !== canonical(key === 'tabs' ? modelTabs(seeded.tabs) : seeded[key])
+    )
+  );
+  for (const group of LINKED) {
+    if (group.some((key) => changed.has(key))) for (const key of group) changed.add(key);
+  }
+  for (const key of changed) {
+    const value = modelValue(attrs, key);
+    if (value == null) delete result[key];
+    else result[key] = value;
+    for (const twin of CHARACTER_TWINS[key] ?? []) delete result[twin];
+  }
+  if (isStyleSourcedNumPr(attrs)) {
+    delete result.numPr;
+    delete result.numPrFromStyle;
+  } else if (attrs.numPr !== orig.numPr && JSON.stringify(attrs.numPr) !== JSON.stringify(orig.numPr)) {
+    result.numPr = attrs.numPr || undefined;
+    delete result.numPrFromStyle;
+  }
+  if (attrs.styleId !== (orig.styleId || undefined)) {
+    result.styleId = attrs.styleId || undefined;
+  }
+  return Object.values(result).some((value) => value !== undefined)
+    ? (result as ParagraphFormatting)
+    : undefined;
 }
 
 export interface TableSaveAttrs extends Record<string, unknown> {

@@ -25,6 +25,7 @@ import type {
   BlockContent,
   Paragraph,
   ParagraphContent,
+  ParagraphFormatting,
   Run,
   RunContent,
   HorizontalRuleContent,
@@ -50,6 +51,9 @@ import type {
   Endnote,
 } from '../types/document';
 import type { YrsSession } from './index';
+import { seededParagraphProperties } from './paragraphSeed';
+import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import { createStyleResolver, type StyleResolver } from '../styles';
 
 type Attrs = Record<string, unknown>;
 
@@ -1730,7 +1734,8 @@ function paragraphFromStory(
   properties: Attrs,
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
-  baseParagraph: Paragraph | undefined
+  baseParagraph: Paragraph | undefined,
+  seeded: (attrs: ParagraphSaveAttrs) => Attrs
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
   // The engine lists markers in their order at each point.
@@ -1758,7 +1763,7 @@ function paragraphFromStory(
     type: 'paragraph',
     paraId: paraId || undefined,
     textId: baseParagraph?.textId,
-    formatting: paragraphAttrsToFormatting(attrs),
+    formatting: paragraphAttrsToFormatting(attrs, seeded(attrs)),
     content,
   };
   if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
@@ -2365,6 +2370,91 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   return stories;
 }
 
+/** What a seed resolved paragraph properties from besides the paragraph's own pPr. */
+interface SeedSources {
+  styles: StyleResolver | null;
+  /** The table style's paragraph formatting for each seeded cell story. */
+  cells: Map<string, ParagraphFormatting>;
+  /** List renderings by {@link listKey}. */
+  lists: Map<string, NonNullable<Paragraph['listRendering']>>;
+}
+
+/**
+ * A list paragraph gets its level's indents only where neither its own pPr
+ * nor, for a style's numbering, its style sets one, so these decide which
+ * paragraphs share a rendering.
+ */
+function listKey(
+  formatting: ParagraphFormatting,
+  numPr: NonNullable<ParagraphFormatting['numPr']>
+): string {
+  return JSON.stringify([
+    numPr.numId,
+    numPr.ilvl ?? 0,
+    formatting.styleId ?? null,
+    formatting.numPrFromStyle != null,
+    formatting.indentLeft != null || formatting.indentLeftChars != null,
+    !!formatting.indentFirstLine || !!formatting.indentFirstLineChars,
+  ]);
+}
+
+/**
+ * List renderings each session's saves have seen. Only a parsed source holds
+ * them, and the editor's later saves project over the previous projection.
+ */
+const sessionListRenderings = new WeakMap<YrsSession, SeedSources['lists']>();
+
+/** Walks the base as {@link collectBaseStories} does, recording each cell's table formatting. */
+function collectSeedSources(session: YrsSession, document: Document): SeedSources {
+  const styles = document.package.styles ? createStyleResolver(document.package.styles) : null;
+  let lists = sessionListRenderings.get(session);
+  if (!lists) sessionListRenderings.set(session, (lists = new Map()));
+  const sources: SeedSources = { styles, cells: new Map(), lists };
+  const visit = (
+    storyId: string,
+    blocks: readonly BlockContent[],
+    cell: ParagraphFormatting | undefined
+  ): void => {
+    if (cell) sources.cells.set(storyId, cell);
+    let tableIndex = 0;
+    let sdtIndex = 0;
+    for (const block of blocks) {
+      if (block.type === 'paragraph') {
+        const numPr = block.formatting?.numPr;
+        if (block.formatting && numPr && block.listRendering) {
+          sources.lists.set(listKey(block.formatting, numPr), block.listRendering);
+        }
+      } else if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content, cell);
+      } else if (block.type === 'table') {
+        const currentTableIndex = tableIndex++;
+        const defaultStyle = styles?.getDefaultTableStyle();
+        const styleId = block.formatting?.styleId ?? defaultStyle?.styleId;
+        const style = (styleId ? styles?.getStyle(styleId) : undefined) ?? defaultStyle;
+        const columns = tableColumnCount(block);
+        block.rows.forEach((row, rowIndex) => {
+          let column = 0;
+          row.cells.forEach((tableCell, cellIndex) => {
+            const start = column;
+            column += tableCell.formatting?.gridSpan ?? 1;
+            visit(
+              `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex}`,
+              tableCell.content,
+              tableCellParagraphFormatting(block, style, rowIndex, start, column, columns)
+            );
+          });
+        });
+      }
+    }
+  };
+  visit('body', document.package.document.content, undefined);
+  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content, undefined);
+  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content, undefined);
+  for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content, undefined);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content, undefined);
+  return sources;
+}
+
 function commentRanges(
   session: YrsSession,
   comments: readonly Comment[] | undefined
@@ -2505,6 +2595,8 @@ class SaveContext {
   /** Every `w14:paraId` the base holds, then each one minted by {@link savedParaId}. */
   private readonly paraIds: Set<number>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
+  private readonly seedSources: SeedSources;
+  private readonly stylePprs = new Map<string, ParagraphFormatting | undefined>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
@@ -2524,6 +2616,7 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(base);
     this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
     this.baseStories = collectBaseStories(base);
+    this.seedSources = collectSeedSources(session, base);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
     this.memo = sessionProjectionMemo(session);
@@ -2547,6 +2640,26 @@ class SaveContext {
     while (this.paraIds.has(value)) value = (value % (PARA_ID_LIMIT - 1)) + 1;
     this.paraIds.add(value);
     return value.toString(16).toUpperCase().padStart(8, '0');
+  }
+
+  /** The paragraph properties the seed gave a paragraph with the editor's style and list. */
+  private seededProperties(storyId: string, attrs: ParagraphSaveAttrs): Attrs {
+    const { styles, cells, lists } = this.seedSources;
+    const formatting: ParagraphFormatting = {
+      ...attrs._originalFormatting,
+      styleId: attrs.styleId ?? undefined,
+    };
+    const listRendering = attrs.numPr ? lists.get(listKey(formatting, attrs.numPr)) : undefined;
+    let stylePpr: ParagraphFormatting | undefined | null = null;
+    if (styles) {
+      const cell = cells.get(storyId);
+      const key = `${cell ? storyId : ''}|${formatting.styleId ?? ''}`;
+      if (!this.stylePprs.has(key)) {
+        this.stylePprs.set(key, styles.resolveParagraphStyle(formatting.styleId, cell).paragraphFormatting);
+      }
+      stylePpr = this.stylePprs.get(key);
+    }
+    return seededParagraphProperties({ formatting, listRendering }, stylePpr);
   }
 
   private storyIsClean(storyId: string): boolean {
@@ -2930,7 +3043,14 @@ class SaveContext {
           const snapshot = inputs.map((input, index) =>
             index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
           );
-          paragraph = paragraphFromStory(savedParaId, properties, items, boundaries, baseParagraph);
+          paragraph = paragraphFromStory(
+            savedParaId,
+            properties,
+            items,
+            boundaries,
+            baseParagraph,
+            (attrs) => this.seededProperties(storyId, attrs)
+          );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
         paragraph = settle(paragraph, slot, slotBookmarks) ?? paragraph;
