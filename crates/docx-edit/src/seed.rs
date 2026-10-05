@@ -174,7 +174,7 @@ impl<'de> Deserialize<'de> for OrderedValue {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
@@ -4406,6 +4406,58 @@ pub fn seed_parsed_docx_in_place(
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
     Ok(referenced_fonts.into_iter().collect())
+}
+
+/// The raw ops that seed `blocks` (paragraphs the editor wrote) into an empty
+/// story with `package`'s styles, as the seed of a file holding them would:
+/// their units, then their bookmarks and field boundaries. The delete of the
+/// empty story's own pilcrow is left out.
+pub(crate) fn fragment_ops(
+    blocks: &[docx_parse::BlockContent],
+    package: Option<&PackageContext>,
+) -> Result<Vec<RawOp>, String> {
+    let serialized = serde_json::to_string(blocks).map_err(|error| error.to_string())?;
+    let ordered: OrderedValue =
+        serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+    let mut source_json = BTreeMap::new();
+    ordered.collect_source_json(&mut source_json);
+    let blocks: Value = serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+    let mut context = LoweringContext {
+        styles: package.map_or_else(StyleResolver::default, |package| package.styles.clone()),
+        theme: None,
+        source_json: Arc::new(source_json),
+        plans: Vec::new(),
+        compatibility_mode: 12,
+        open_comments: OpenComments::default(),
+    };
+    visit_story(
+        &mut context,
+        "fragment".to_owned(),
+        array(Some(&blocks)),
+        StoryOptions {
+            append_body_tail: false,
+        },
+    );
+    let plan = context.plans.swap_remove(0);
+    let (_, mut ops, _) = seed_plan(plan, &HashMap::new())?;
+    ops.remove(0);
+    Ok(ops)
+}
+
+/// The outline level (0-based) style `style_id` gives a paragraph.
+pub(crate) fn style_outline_level(package: &PackageContext, style_id: &str) -> Option<u8> {
+    let style = package.styles.style(style_id)?;
+    number(field(field(Some(style), "pPr"), "outlineLevel")).map(|level| level as u8)
+}
+
+/// The id of the paragraph style named `name` (case-insensitive), as Word
+/// finds its built-in styles whatever their localized ids.
+pub(crate) fn style_named(package: &PackageContext, name: &str) -> Option<String> {
+    package.styles.styles.iter().find_map(|(id, style)| {
+        (string(field(Some(style), "type")) == Some("paragraph")
+            && string(field(Some(style), "name")).is_some_and(|own| own.eq_ignore_ascii_case(name)))
+        .then(|| id.clone())
+    })
 }
 
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {

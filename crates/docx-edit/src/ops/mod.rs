@@ -6,6 +6,7 @@ pub mod paragraph;
 pub mod resolve;
 pub mod table;
 pub mod text;
+pub mod toc;
 
 use std::collections::BTreeMap;
 

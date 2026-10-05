@@ -449,6 +449,38 @@ impl StoryParser<'_, '_> {
     }
 }
 
+/// The blocks of `xml`, a `w:body` the editor writes itself (no
+/// relationships, media or numbering), read as a body part's are.
+pub fn parse_body_fragment(
+    xml: &str,
+    theme: Option<&Theme>,
+) -> Result<Vec<BlockContent>, ParseError> {
+    let limits = crate::xml::ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let document = crate::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget)?;
+    let Some(body) = document.root() else {
+        return Ok(Vec::new());
+    };
+    let media = MediaMap::default();
+    let charts = ChartPartsMap::default();
+    let mut smart_art = SmartArtContext::default();
+    let mut ids = HexIdAllocator::from_sha256(&"1".repeat(64))?;
+    StoryParser {
+        relationships: None,
+        theme,
+        styles: None,
+        doc_defaults: None,
+        numbering: None,
+        media: &media,
+        charts: &charts,
+        smart_art: &mut smart_art,
+        budget: &mut budget,
+        ids: &mut ids,
+        part: "word/document.xml",
+    }
+    .parse_blocks(body, 0, false)
+}
+
 /// `parent`'s children in document order, descending through `w:customXml`
 /// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
 pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {

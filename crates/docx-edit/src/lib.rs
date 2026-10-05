@@ -96,6 +96,7 @@ pub use ops::paragraph::{
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
 pub use ops::text::RichRun;
+pub use ops::toc::{TOC_INSTRUCTION, TocField, TocHeading, TocLayout};
 pub use queries::{
     ChangeInfo, ChangeKind, CommentInfo, FindMatch, FindOptions, LayoutBridge, NavDirection,
     NavUnit, PageContent, PageParagraph, SelectionInfo, TextView,
@@ -854,7 +855,7 @@ impl EditingDoc {
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))
     }
 
-    fn next_id(&self) -> String {
+    pub(crate) fn next_id(&self) -> String {
         let counter = self.id_counter.fetch_add(1, Ordering::Relaxed);
         format!("{}:{counter}", self.client_id)
     }
