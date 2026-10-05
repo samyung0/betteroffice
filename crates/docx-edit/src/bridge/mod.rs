@@ -2349,6 +2349,22 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_units - segment_start,
         ));
     }
+    // The paragraph mark, and after a break its space-after, belong to the
+    // last part only.
+    let mut parts = blocks.iter_mut().rev().filter_map(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.attrs.as_mut(),
+        _ => None,
+    });
+    parts.next();
+    for attrs in parts {
+        attrs.p_pr_ins = None;
+        attrs.p_pr_del = None;
+        if flow {
+            let spacing = attrs.spacing.get_or_insert_with(ParagraphSpacing::default);
+            spacing.after = Some(0.0);
+            spacing.after_lines = None;
+        }
+    }
     blocks
 }
 

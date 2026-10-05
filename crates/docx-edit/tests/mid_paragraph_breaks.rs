@@ -3,7 +3,9 @@
 //! the same paragraph (no space-before, no first-line indent, no list
 //! number), and nothing before the break is painted again.
 
-use docx_edit::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
+use docx_edit::{
+    EditCtx, EditingDoc, EngineSession, FormatPolicy, Position, RawOp, bridge, seed_from_docx,
+};
 use serde_json::json;
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -81,6 +83,10 @@ struct Laid {
 }
 
 fn lay_out(bytes: &[u8]) -> Laid {
+    lay_out_edited(bytes, |_| {})
+}
+
+fn lay_out_edited(bytes: &[u8], edit: impl FnOnce(&EditingDoc)) -> Laid {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
@@ -88,6 +94,7 @@ fn lay_out(bytes: &[u8]) -> Laid {
         .package;
     let engine = EngineSession::new(76401);
     seed_from_docx(engine.doc(), bytes).unwrap();
+    edit(engine.doc());
     engine
         .layout_document_with_regions_json(
             &json!({
@@ -245,8 +252,10 @@ fn a_list_item_continues_after_its_break_without_a_number() {
     assert_eq!(line(&pages, "Bb").2, line(&pages, "Lead").2);
 }
 
+/// The seed moves a break that ends a paragraph's text onto the next
+/// paragraph, so this covers the seed, not a part after a trailing break.
 #[test]
-fn a_break_ending_the_paragraph_text_starts_the_next_paragraph_on_the_next_page() {
+fn a_file_break_ending_a_paragraphs_text_moves_the_next_paragraph_to_the_next_page() {
     let body = format!(
         "{}{}{}",
         p("", &t("Lead")),
@@ -283,4 +292,72 @@ fn typing_before_a_mid_paragraph_break_keeps_the_text_after_it() {
         .build_display_list_frame(&laid.extras, 2)
         .unwrap();
     assert_eq!(texts(&lines(&laid)), [vec!["Aax"], vec!["Bb", "Cc"]]);
+}
+
+#[test]
+fn a_tracked_paragraph_mark_shows_once_after_the_text_after_the_break() {
+    let mark = r#"<w:rPr><w:ins w:id="1" w:author="Ada" w:date="2026-01-01T00:00:00Z"/></w:rPr>"#;
+    let body = format!(
+        "{}{}{}",
+        p("", &t("Lead")),
+        p(mark, &format!("{}{}{}", t("Aa"), br("page"), t("Bb"))),
+        p("", &t("Cc"))
+    );
+    let pages = lines(&lay_out(&document(&body, ONE_COLUMN)));
+    assert_eq!(texts(&pages), [vec!["Lead", "Aa"], vec!["Bb\u{b6}", "Cc"]]);
+}
+
+/// Space-after ends the paragraph: in a table cell, where the break leaves
+/// the text on the next line, no gap opens between the two parts.
+#[test]
+fn the_text_before_a_break_keeps_no_space_after() {
+    let cell = p(
+        r#"<w:spacing w:after="480"/>"#,
+        &format!("{}{}{}", t("Aa"), br("page"), t("Bb")),
+    );
+    let body = format!(
+        r#"{}<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>{}"#,
+        p("", &t("Lead")),
+        p("", &t("Cc"))
+    );
+    let pages = lines(&lay_out(&document(&body, ONE_COLUMN)));
+    assert_eq!(texts(&pages), [vec!["Lead", "Aa", "Bb", "Cc"]]);
+    assert_eq!(line(&pages, "Bb").2, line(&pages, "Aa").2 + 16.0);
+}
+
+/// An in-flow chart splits its paragraph too; each part keeps its own text.
+#[test]
+fn text_around_an_inline_chart_paints_once() {
+    let body = format!(
+        "{}{}{}",
+        p("", &t("Lead")),
+        p("", &format!("{}{}", t("Aa"), t("Bb"))),
+        p("", &t("Cc"))
+    );
+    let chart = |doc: &EditingDoc| {
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 7,
+                kind: "chart".to_owned(),
+                payload: vec![(
+                    "chartJson".to_owned(),
+                    yrs::Any::String(r#"{"type":"chart","chartType":"bar"}"#.into()),
+                )],
+                attrs: Default::default(),
+            }],
+            &EditCtx::local("", "2026-10-06"),
+        )
+        .unwrap();
+    };
+    let laid = lay_out_edited(&document(&body, ONE_COLUMN), chart);
+    assert_eq!(texts(&lines(&laid)), [vec!["Lead", "Aa", "Bb", "Cc"]]);
+    let ids: Vec<_> =
+        bridge::yrs_doc_to_layout_blocks(laid.engine.doc(), "body", &Default::default())
+            .unwrap()
+            .iter()
+            .map(|block| serde_json::to_value(block).unwrap()["id"].clone())
+            .collect();
+    assert!(ids[2].as_str().unwrap().starts_with("chart:"), "{ids:?}");
+    assert_ne!(ids[1], ids[3]);
 }
