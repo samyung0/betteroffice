@@ -102,9 +102,9 @@ export function analyzePresentation(bytes: Uint8Array): PresentationAnalysis {
   }
 }
 
-/** Read upload metadata from an already-open viewer without reparsing bytes. */
+/** Read upload metadata from an already-open viewer or editor without reparsing bytes. */
 export function analyzeOpenPresentation(
-  presentation: PresentationViewerHandle
+  presentation: Pick<PresentationViewerHandle, 'snapshot'>
 ): PresentationAnalysis {
   const snapshot = presentation.snapshot();
   let textCharacterCount = 0;

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
-import type { XlsxCommand, XlsxCommandState } from './commands';
+import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
 import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -87,6 +87,19 @@ function withHyperlink(bytes: Uint8Array): Uint8Array {
   }
 }
 
+// a used range past the window on both axes, so the keyboard can leave it.
+const FAR_CELL: CellAddr = { row: 40, col: 20 };
+function withFarCell(bytes: Uint8Array, frozen = 0): Uint8Array {
+  const handle = openWorkbook(bytes);
+  try {
+    handle.editCell(0, FAR_CELL.row, FAR_CELL.col, 'far');
+    if (frozen) handle.applyOps([freezePaneOp(0, frozen, frozen)]);
+    return handle.save();
+  } finally {
+    handle.dispose();
+  }
+}
+
 interface Fixture {
   bytes: Uint8Array;
   grid: GridMeta;
@@ -107,6 +120,8 @@ let plain: Fixture;
 let linked: Fixture;
 let charted: Fixture;
 let undrawable: Fixture;
+let wide: Fixture;
+let wideFrozen: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -128,6 +143,8 @@ beforeAll(async () => {
   linked = fixtureFrom(withHyperlink(source));
   charted = fixtureFrom(new Uint8Array(readFileSync(CHART_FIXTURE)));
   undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
+  wide = fixtureFrom(withFarCell(source));
+  wideFrozen = fixtureFrom(withFarCell(source, 2));
 });
 
 afterAll(async () => {
@@ -377,6 +394,98 @@ describe('XlsxEditor grid pointer handling', () => {
     view.click(LINK_CELL);
 
     expect(opened).toEqual([LINK_TARGET]);
+  });
+});
+
+describe('XlsxEditor keyboard', () => {
+  const press = (target: Element, key: string) =>
+    act(async () => {
+      fireEvent.keyDown(target, { key });
+    });
+  // the open editor's box, which only mounts over a painted cell.
+  const editorBox = (input: HTMLInputElement) => {
+    const left = parseFloat(input.style.left);
+    const top = parseFloat(input.style.top);
+    return {
+      left,
+      top,
+      right: left + parseFloat(input.style.width),
+      bottom: top + parseFloat(input.style.height),
+    };
+  };
+
+  it('scrolls a cell the arrow keys reach into view and types into it', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowRight');
+    for (let step = 0; step < 30; step += 1) await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('Q34');
+    expect(view.surface.scrollLeft).toBeGreaterThan(0);
+    expect(view.surface.scrollTop).toBeGreaterThan(0);
+
+    await press(view.surface, '7');
+    const input = view.editor();
+    expect(input?.value).toBe('7');
+    const box = editorBox(input!);
+    expect(box.left).toBeGreaterThanOrEqual(0);
+    expect(box.top).toBeGreaterThanOrEqual(0);
+    expect(box.right).toBeLessThanOrEqual(VIEWPORT.width);
+    expect(box.bottom).toBeLessThanOrEqual(VIEWPORT.height);
+    expect(document.activeElement).toBe(input);
+
+    await press(input!, 'Enter');
+    expect(view.workbook().cell(0, 33, 16).input).toBe('7');
+    expect(view.nameBox().value).toBe('Q35');
+  });
+
+  it('keeps a revealed cell clear of the frozen panes', async () => {
+    const view = await mountEditor(wideFrozen);
+    const pane = cellRect(wideFrozen.grid, 2, 2)!;
+    view.click({ row: 3, col: 1 });
+    for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowRight');
+    for (let step = 0; step < 30; step += 1) await press(view.surface, 'ArrowDown');
+    await press(view.surface, '7');
+    const box = editorBox(view.editor()!);
+    expect(box.left).toBeGreaterThanOrEqual(pane.x);
+    expect(box.top).toBeGreaterThanOrEqual(pane.y);
+    expect(box.right).toBeLessThanOrEqual(VIEWPORT.width);
+    expect(box.bottom).toBeLessThanOrEqual(VIEWPORT.height);
+
+    // back into the frozen columns: the rows stay where they are.
+    const top = view.surface.scrollTop;
+    await press(view.editor()!, 'Escape');
+    for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowLeft');
+    expect(view.nameBox().value).toBe('B34');
+    expect(view.surface.scrollTop).toBe(top);
+  });
+
+  it('brings a cell scrolled out of view back when typing into it', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await act(async () => {
+      view.surface.scrollLeft = 1500;
+      view.surface.scrollTop = 600;
+      fireEvent.scroll(view.surface);
+    });
+
+    await press(view.surface, '7');
+    expect(view.editor()?.value).toBe('7');
+    const box = editorBox(view.editor()!);
+    // at the window's top-left, give or take the engine's f32 rounding.
+    expect(box.left).toBeCloseTo(0, 1);
+    expect(box.top).toBeCloseTo(0, 1);
+    await press(view.editor()!, 'Enter');
+    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+  });
+
+  it('leaves the scroll alone for a move that stays on screen', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, 'ArrowRight');
+    await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('C5');
+    expect(view.surface.scrollLeft).toBe(0);
+    expect(view.surface.scrollTop).toBe(0);
   });
 });
 
@@ -801,6 +910,21 @@ describe('XlsxEditor chart objects', () => {
 });
 
 describe('XlsxEditor host integration', () => {
+  it('reports the first painted grid once per opened workbook', async () => {
+    let painted = 0;
+    const onFirstPaint = () => {
+      painted += 1;
+    };
+    const view = render(<XlsxEditor file={plain.bytes.slice()} onFirstPaint={onFirstPaint} />);
+    await waitFor(() => expect(painted).toBe(1));
+    await act(async () => {
+      fireEvent.scroll(view.getByTestId('xlsx-scroll'));
+    });
+    expect(painted).toBe(1);
+    view.rerender(<XlsxEditor file={wide.bytes.slice()} onFirstPaint={onFirstPaint} />);
+    await waitFor(() => expect(painted).toBe(2));
+  });
+
   it('keeps viewing mode navigable without exposing user mutations', async () => {
     let api: XlsxEditorApi | undefined;
     let changes = 0;

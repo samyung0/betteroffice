@@ -479,6 +479,36 @@ describe('PptxEditor font stability', () => {
 });
 
 describe('PptxEditor host integration', () => {
+  it('reports the first slide painted once, when its paint settles', async () => {
+    const paints: Array<() => void> = [];
+    const painting = spyOn(pptx, 'paintSlide').mockImplementation(
+      () => new Promise<void>((resolve) => paints.push(resolve))
+    );
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      setTransform() {}, drawImage() {},
+    } as unknown as CanvasRenderingContext2D);
+    let api: PptxEditorApi | undefined;
+    let painted = 0;
+    try {
+      render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        onReady={(ready) => { api = ready; }} onFirstPaint={() => { painted += 1; }} />);
+      // the slide and its strip thumbnails all paint through paintSlide.
+      const settle = () => act(async () => { for (const resolve of paints.splice(0)) resolve(); });
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+      await waitFor(() => expect(paints.length).toBeGreaterThan(0));
+      expect(painted).toBe(0);
+      await settle();
+      expect(painted).toBe(1);
+      await act(async () => { api!.goToSlide(2); });
+      await waitFor(() => expect(paints.length).toBeGreaterThan(0));
+      await settle();
+      expect(painted).toBe(1);
+    } finally {
+      painting.mockRestore();
+      context.mockRestore();
+    }
+  }, 30000);
+
   it('keeps viewing mode navigable without exposing user mutations', async () => {
     let api: PptxEditorApi | undefined;
     const cursors: Array<PptxPresenceCursor | null> = [];

@@ -7,7 +7,7 @@
  * layer is framework glue — keyboard/mouse wiring, focus flow, and DOM chrome.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   buildA11yGrid,
   cellAtPoint,
@@ -145,6 +145,8 @@ export interface XlsxEditorProps {
    * before the workbook is replaced or disposed.
    */
   onReady?: (api: XlsxEditorApi) => void | (() => void);
+  /** Called once per opened workbook, right after its first grid is painted. */
+  onFirstPaint?: () => void;
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
@@ -235,6 +237,14 @@ function buildDemoDisplayList(width: number, height: number, cellText: string): 
     align: 'left',
   });
   return { width, height, commands };
+}
+
+// the scroll offset on one axis that shows [start, end) whole, moving as little
+// as possible: scroll coordinates (cellPosition) and the extent outside the
+// frozen pane. A track wider than that shows its start.
+function revealOffset(scroll: number, start: number, end: number, body: number): number {
+  if (start < scroll || end - start > body) return start;
+  return end > scroll + body ? end - body : scroll;
 }
 
 // median of the gaps between consecutive offsets, or a fallback when the window
@@ -449,6 +459,7 @@ function XlsxEditorContent({
   onChange,
   collaboration,
   onReady,
+  onFirstPaint,
   onPendingChange,
   className,
   readOnly = false,
@@ -495,6 +506,9 @@ function XlsxEditorContent({
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  const onFirstPaintRef = useRef(onFirstPaint);
+  onFirstPaintRef.current = onFirstPaint;
+  const firstPaintPendingRef = useRef(false);
   const onChangeRef = useRef(onChange);
   const runCommandRef = useRef<(command: XlsxCommand) => void>(() => {});
   const onCommandStateChangeRef = useRef(onCommandStateChange);
@@ -517,6 +531,9 @@ function XlsxEditorContent({
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   const [revision, setRevision] = useState(0);
+  // bumped by keyboard moves and typing: the focus cell scrolls into view.
+  const [revealRequest, setRevealRequest] = useState(0);
+  const requestReveal = useCallback(() => setRevealRequest((n) => n + 1), []);
   const [dragging, setDragging] = useState(false);
   // the selected chart, and the live pointer offset while it is dragged.
   // `movable` rides along so the arrow keys never depend on a frame lookup.
@@ -726,6 +743,7 @@ function XlsxEditorContent({
             }
           });
           pendingSheetViewRef.current = true;
+          firstPaintPendingRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
           setCollaborationReplica(handle);
@@ -896,6 +914,10 @@ function XlsxEditorContent({
     setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
+    if (handle && firstPaintPendingRef.current) {
+      firstPaintPendingRef.current = false;
+      onFirstPaintRef.current?.();
+    }
   }, [activeSheet, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
@@ -992,11 +1014,6 @@ function XlsxEditorContent({
   const focusContainer = useCallback(() => {
     scrollRef.current?.focus({ preventScroll: true });
   }, []);
-
-  // focus the in-cell editor when it opens, without scrolling the grid.
-  useEffect(() => {
-    if (editing) editorInputRef.current?.focus({ preventScroll: true });
-  }, [editing]);
 
   // fold a mutation result back into state and queue a repaint. re-reads the
   // pending proposals because structural ops and undo/redo can drop them.
@@ -1218,8 +1235,9 @@ function XlsxEditorContent({
         }
       }
       setEditing({ row, col, value });
+      requestReveal();
     },
-    [selection, activeSheet, readOnly]
+    [selection, activeSheet, readOnly, requestReveal]
   );
 
   // commit the open editor, optionally stepping the selection like excel.
@@ -1237,9 +1255,10 @@ function XlsxEditorContent({
       setEditing(null);
       const base = selectionAt({ row, col });
       setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
+      if (move) requestReveal();
       focusContainer();
     },
-    [editing, activeSheet, applyResult, limits, focusContainer, readOnly]
+    [editing, activeSheet, applyResult, limits, focusContainer, readOnly, requestReveal]
   );
 
   const cancelEditor = useCallback(() => {
@@ -1621,9 +1640,12 @@ function XlsxEditorContent({
         setError(e instanceof Error ? e.message : String(e));
       }
       setFormulaDraft(null);
-      if (move) setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+      if (move) {
+        setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+        requestReveal();
+      }
     },
-    [selection, formulaDraft, activeSheet, applyResult, limits, readOnly]
+    [selection, formulaDraft, activeSheet, applyResult, limits, readOnly, requestReveal]
   );
 
   flushEditorRef.current = () => {
@@ -1641,7 +1663,12 @@ function XlsxEditorContent({
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       const handle = handleRef.current;
-      if (!handle || !selection || !sheetInfo || editing) return;
+      if (!handle || !selection || !sheetInfo) return;
+      if (editing) {
+        // the edit scrolled out of view (its input unmounted): bring it back.
+        if (!editorInputRef.current) requestReveal();
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
 
@@ -1723,6 +1750,7 @@ function XlsxEditorContent({
       switch (action.type) {
         case 'move':
           setSelection(action.selection);
+          requestReveal();
           e.preventDefault();
           break;
         case 'startEdit':
@@ -1753,6 +1781,7 @@ function XlsxEditorContent({
       selectedChart,
       nudgeChart,
       readOnly,
+      requestReveal,
     ]
   );
 
@@ -1971,8 +2000,81 @@ function XlsxEditorContent({
     ? scaledRect(selectedChartRegion.rect, zoom)
     : null;
 
-  const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
-  const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
+  // focus the in-cell editor once it is on screen, without scrolling the grid.
+  const editorShown = scaledEditRect !== null;
+  useEffect(() => {
+    if (editing && editorShown) editorInputRef.current?.focus({ preventScroll: true });
+  }, [editing, editorShown]);
+
+  // the focus cell's edges in scroll coordinates, and the frozen panes' extent
+  // (undefined while they fill the window or nothing is painted yet).
+  const focusSpan = useMemo(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return null;
+    const { row, col } = selection.focus;
+    try {
+      const start = handle.cellPosition(activeSheet, row, col);
+      const end = handle.cellPosition(activeSheet, row + 1, col + 1);
+      return { start, end };
+    } catch {
+      // the sheet's last row or column
+      return null;
+    }
+  }, [selection, activeSheet, sheetInfo, revision]);
+  const frozenWidth = sheetInfo?.frozenCols ? grid?.colOffsets[sheetInfo.frozenCols] : 0;
+  const frozenHeight = sheetInfo?.frozenRows ? grid?.rowOffsets[sheetInfo.frozenRows] : 0;
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    if (!revealRequest || !scroll || !selection || !sheetInfo || !focusSpan) return;
+    const axis = (
+      scrolled: number,
+      pinned: boolean,
+      start: number,
+      end: number,
+      extent: number,
+      frozen: number | undefined
+    ) =>
+      pinned || frozen === undefined || extent <= frozen
+        ? scrolled
+        : revealOffset(scrolled, start, end, extent - frozen);
+    const left = scroll.scrollLeft / zoom;
+    const top = scroll.scrollTop / zoom;
+    const { row, col } = selection.focus;
+    const x = axis(
+      left,
+      col < sheetInfo.frozenCols,
+      focusSpan.start.x,
+      focusSpan.end.x,
+      scroll.clientWidth / zoom,
+      frozenWidth
+    );
+    const y = axis(
+      top,
+      row < sheetInfo.frozenRows,
+      focusSpan.start.y,
+      focusSpan.end.y,
+      scroll.clientHeight / zoom,
+      frozenHeight
+    );
+    if (x === left && y === top) return;
+    // whole pixels, rounded toward the cell so no sliver of it stays hidden.
+    const snap = (to: number, from: number) =>
+      to > from ? Math.ceil(to * zoom) : Math.floor(to * zoom);
+    if (x !== left) scroll.scrollLeft = snap(x, left);
+    if (y !== top) scroll.scrollTop = snap(y, top);
+    // paint now, so an editor opened by this keystroke mounts in this commit.
+    doPaint();
+  }, [revealRequest]);
+
+  // the scroll area reaches the focus cell, which the keyboard can move past
+  // the used range.
+  const spacerWidth = sheetInfo
+    ? Math.max(sheetInfo.contentWidth, (frozenWidth ?? 0) + (focusSpan?.end.x ?? 0)) * zoom
+    : undefined;
+  const spacerHeight = sheetInfo
+    ? Math.max(sheetInfo.contentHeight, (frozenHeight ?? 0) + (focusSpan?.end.y ?? 0)) * zoom
+    : undefined;
   const formulaValue = formulaDraft ?? focusedCell?.input ?? '';
   const normalizedSelection = selection ? normalizeRange(selection) : null;
   const selectionRows = normalizedSelection

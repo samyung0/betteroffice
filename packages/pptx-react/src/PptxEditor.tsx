@@ -170,6 +170,8 @@ export interface PptxEditorProps {
   /** 1-based; clamped to the deck. */
   initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
+  /** Called once per opened deck, once its first slide is painted, pictures included. */
+  onFirstPaint?: () => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
@@ -375,6 +377,7 @@ function PptxEditorContent({
   fileName,
   initialSlide,
   onReady,
+  onFirstPaint,
   onChange,
   onError,
   onPendingChange,
@@ -429,6 +432,9 @@ function PptxEditorContent({
   }, []);
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
+  const onFirstPaintRef = useRef(onFirstPaint);
+  onFirstPaintRef.current = onFirstPaint;
+  const firstPaintPendingRef = useRef(false);
   const runCommandRef = useRef<(id: PptxCommandId, value?: string) => boolean>(() => false);
   const insertImageRef = useRef<(bytes: Uint8Array, name: string) => Promise<void>>(() =>
     Promise.resolve()
@@ -773,6 +779,7 @@ function PptxEditorContent({
             initialUpdate: collaborationInitialUpdate,
           });
           handleRef.current = handle;
+          firstPaintPendingRef.current = true;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
@@ -907,9 +914,16 @@ function PptxEditorContent({
     void paintSlide(ctx, frame, dpr, scale, {
       resolveImage: (assetId) =>
         resolveImage(assetId, handleRef, imageCacheRef, decodeImageError),
-    }).catch((value: unknown) => {
-      if (!cancelled) reportError(value);
-    });
+    }).then(
+      () => {
+        if (cancelled || !firstPaintPendingRef.current) return;
+        firstPaintPendingRef.current = false;
+        onFirstPaintRef.current?.();
+      },
+      (value: unknown) => {
+        if (!cancelled) reportError(value);
+      }
+    );
     return () => {
       cancelled = true;
     };
