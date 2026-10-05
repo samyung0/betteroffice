@@ -850,6 +850,13 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    // Its own mark, so picking a font keeps the run's script binding.
+    if let Some(hint) = string(field(formatting.get("fontFamily"), "hint")) {
+        marks.push(mark(
+            "fontHint",
+            ordered_object([("hint", Value::String(hint.to_owned()))]),
+        ));
+    }
     match string(formatting.get("vertAlign")) {
         Some("superscript") => marks.push(mark("superscript", vec![])),
         Some("subscript") => marks.push(mark("subscript", vec![])),

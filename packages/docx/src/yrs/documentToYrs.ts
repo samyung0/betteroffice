@@ -236,6 +236,7 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
       bidi: formatting.language.bidi ?? null,
     });
   }
+  if (formatting.fontFamily?.hint) add('fontHint', { hint: formatting.fontFamily.hint });
   if (formatting.vertAlign === 'superscript') add('superscript');
   else if (formatting.vertAlign === 'subscript') add('subscript');
   if (formatting.allCaps) add('allCaps');

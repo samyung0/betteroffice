@@ -81,6 +81,45 @@ for (const seeder of ['native', 'projected']) {
     }
   });
 
+  it(`${seeder} keeps a run's font hint through typing, a font change, save and publication`, async () => {
+    const bytes = fixture(
+      '<w:p><w:r><w:rPr><w:rFonts w:hint="eastAsia"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>“中文”</w:t></w:r>' +
+        '<w:r><w:t>Latin</w:t></w:r></w:p>'
+    );
+    const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 74007 });
+    const published = await createYrsSession({ clientId: 74008 });
+    const hints = (document: Awaited<ReturnType<typeof parseDocx>>) => {
+      const paragraph = document.package.document.content[0]!;
+      if (paragraph.type !== 'paragraph') throw new Error('missing paragraph');
+      return paragraph.content.flatMap((run) =>
+        run.type === 'run'
+          ? [[run.content.map((item) => (item.type === 'text' ? item.text : '')).join(''), run.formatting?.fontFamily?.hint]]
+          : []
+      );
+    };
+    try {
+      if (seeder === 'native') session.seedFromDocx(bytes);
+      else documentToYrs(session, parsed);
+      const { paraId } = session.paragraphs('body')[0]!;
+      session.insertText({ story: 'body', paraId, offset: 2 }, '字');
+      session.formatRange(
+        { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } },
+        { fontFamily: { ascii: 'SimSun' } }
+      );
+      const expected = [['“中字文”', 'eastAsia'], ['Latin', undefined]];
+      const saved = new Uint8Array(await repackDocx(yrsToDocument(session, parsed)));
+      const reopened = await parseDocx(saved.buffer, { preloadFonts: false });
+      expect(hints(reopened)).toEqual(expected);
+      published.seedFromDocx(saved);
+      expect(hints(await parseDocx(await repackDocx(yrsToDocument(published, reopened)), { preloadFonts: false })))
+        .toEqual(expected);
+    } finally {
+      session.destroy();
+      published.destroy();
+    }
+  });
+
   it(`${seeder} preserves opaque blocks in body, header, footer, cells, controls and notes`, async () => {
     const table = `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>${raw}${paragraph}</w:tc></w:tr></w:tbl>`;
     const sdt = `<w:sdt><w:sdtPr><w:tag w:val="test"/></w:sdtPr><w:sdtContent>${raw}${paragraph}</w:sdtContent></w:sdt>`;

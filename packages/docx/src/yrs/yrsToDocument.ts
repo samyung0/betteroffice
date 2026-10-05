@@ -28,6 +28,7 @@ import type {
   ParagraphFormatting,
   Run,
   RunContent,
+  RunFontHint,
   HorizontalRuleContent,
   TextFormatting,
   Hyperlink,
@@ -393,6 +394,8 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
       csTheme: asString(fontFamily.csTheme),
     };
   }
+  const hint = asString(asObject(attributes.fontHint)?.hint);
+  if (hint) formatting.fontFamily = { ...formatting.fontFamily, hint: hint as RunFontHint };
 
   if (attributes.superscript) formatting.vertAlign = 'superscript';
   if (attributes.subscript) formatting.vertAlign = 'subscript';
