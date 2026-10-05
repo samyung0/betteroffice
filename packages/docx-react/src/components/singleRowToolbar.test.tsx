@@ -315,8 +315,9 @@ test('host menus describe the editor and run their commands', () => {
       entry.kind === 'item' || entry.kind === 'submenu' ? [[entry.id, entry] as const] : []
     )
   );
-  // Placeholders that do nothing, and the clipboard, stay out.
-  for (const id of ['insert-toc', 'cut', 'copy', 'paste']) expect(items.has(id)).toBe(false);
+  // The clipboard stays out, and the TOC items without their commands.
+  for (const id of ['insert-toc', 'update-toc', 'cut', 'copy', 'paste'])
+    expect(items.has(id)).toBe(false);
   expect(items.get('zoom:100')).toMatchObject({ checked: true });
   expect(items.get('show-outline')).toMatchObject({ checked: true });
   expect(items.get('show-comments')).toMatchObject({ checked: false });
@@ -334,6 +335,52 @@ test('host menus describe the editor and run their commands', () => {
   expect(onInsertImage).toHaveBeenCalledTimes(1);
   reported.run('find-replace');
   expect(actions.onFindReplace).toHaveBeenCalledTimes(1);
+});
+
+test('Insert offers table of contents, and its update while the document has one', () => {
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    showComments: false,
+  };
+  const onInsertTOC = mock(() => {});
+  const onUpdateTOC = mock(() => {});
+  const insertIds = (withUpdate: boolean) => {
+    let model: DocxMenuModel | null = null;
+    render(
+      <EditorToolbar
+        singleRow
+        hostMenus
+        zoom={1}
+        onInsertTOC={onInsertTOC}
+        onUpdateTOC={withUpdate ? onUpdateTOC : undefined}
+      >
+        <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+      </EditorToolbar>
+    );
+    const reported = model as DocxMenuModel | null;
+    if (!reported) throw new Error('no menus');
+    cleanup();
+    const insert = reported.menus.find((menu) => menu.id === 'insert')!;
+    return {
+      reported,
+      items: insert.items.flatMap((entry) => (entry.kind === 'item' ? [entry] : [])),
+    };
+  };
+  const { items: without } = insertIds(false);
+  expect(without.map((entry) => entry.id)).toContain('insert-toc');
+  expect(without.map((entry) => entry.id)).not.toContain('update-toc');
+  const { reported, items } = insertIds(true);
+  expect(items.filter((entry) => entry.id.endsWith('-toc'))).toMatchObject([
+    { id: 'insert-toc', label: en.toolbar.tableOfContents },
+    { id: 'update-toc', label: en.hostMenus.updateTableOfContents },
+  ]);
+  reported.run('insert-toc');
+  reported.run('update-toc');
+  expect(onInsertTOC).toHaveBeenCalledTimes(1);
+  expect(onUpdateTOC).toHaveBeenCalledTimes(1);
 });
 
 test('host menus list the first 40 paragraph styles and refuse a disabled item', () => {

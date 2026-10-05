@@ -178,6 +178,16 @@ fn switches(instruction: &str) -> Switches {
     }
 }
 
+/// A `w:t` as the save writes it: `xml:space` only where spaces need it.
+fn text_element(text: &str) -> String {
+    let preserve = text.starts_with(' ') || text.ends_with(' ') || text.contains("  ");
+    format!(
+        "<w:t{}>{}</w:t>",
+        if preserve { r#" xml:space="preserve""# } else { "" },
+        escape(text)
+    )
+}
+
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -227,9 +237,9 @@ fn toc_xml(
     );
     if entries.is_empty() {
         xml.push_str(&format!(
-            r#"<w:p w14:paraId="{}">{begin}<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">{}</w:t></w:r>{}</w:p>"#,
+            r#"<w:p w14:paraId="{}">{begin}<w:r><w:rPr><w:b/><w:bCs/></w:rPr>{}</w:r>{}</w:p>"#,
             para_ids[0],
-            escape(empty_text),
+            text_element(empty_text),
             fld("end")
         ));
     }
@@ -254,20 +264,17 @@ fn toc_xml(
         };
         let number = if flags.numbers {
             format!(
-                r#"<w:r><w:tab/></w:r>{}{}{}<w:r><w:t>{}</w:t></w:r>{}"#,
+                r#"<w:r><w:tab/></w:r>{}{}{}<w:r>{}</w:r>{}"#,
                 fld("begin"),
                 instr(&format!(" PAGEREF {} \\h ", entry.bookmark)),
                 fld("separate"),
-                escape(entry.page),
+                text_element(entry.page),
                 fld("end")
             )
         } else {
             String::new()
         };
-        let content = format!(
-            r#"<w:r><w:t xml:space="preserve">{}</w:t></w:r>{number}"#,
-            escape(entry.text)
-        );
+        let content = format!("<w:r>{}</w:r>{number}", text_element(entry.text));
         let content = if flags.links {
             format!(r#"<w:hyperlink w:anchor="{}">{content}</w:hyperlink>"#, entry.bookmark)
         } else {
@@ -875,7 +882,7 @@ mod tests {
         let tabs = r#"<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9350"/></w:tabs>"#;
         let entry = |bm: &str, text: &str, page: &str| {
             format!(
-                r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t xml:space="preserve">{text}</w:t></w:r><w:r><w:tab/></w:r>{begin}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{separate}<w:r><w:t>{page}</w:t></w:r>{end}</w:hyperlink>"#
+                r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t>{text}</w:t></w:r><w:r><w:tab/></w:r>{begin}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{separate}<w:r><w:t>{page}</w:t></w:r>{end}</w:hyperlink>"#
             )
         };
         assert_eq!(
