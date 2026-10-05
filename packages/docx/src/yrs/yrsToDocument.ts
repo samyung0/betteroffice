@@ -53,7 +53,11 @@ import type {
 } from '../types/document';
 import type { YrsSession } from './index';
 import { seededParagraphProperties, styleListRendering } from './paragraphSeed';
-import { enclosingCellStory, tablePayloadCellFormatting } from './tableParagraphFormatting';
+import {
+  calculateRowSpans,
+  enclosingCellStory,
+  tablePayloadCellFormatting,
+} from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
 
 type Attrs = Record<string, unknown>;
@@ -1906,6 +1910,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
     rowspan: number;
     colspan: number;
     cell: TableCell;
+    story?: string;
   }> = [];
   let totalColumns = 0;
 
@@ -1922,6 +1927,7 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
         rowspan,
         colspan,
         cell: tableCellFromPayload(context, cellPayload),
+        story: cellPayload.story,
       });
       for (let r = rowIndex; r < rowIndex + rowspan; r += 1) {
         occupied[r] ??= [];
@@ -1970,7 +1976,11 @@ function tableFromPayload(context: SaveContext, payload: TablePayload): Table {
       if (covering.colspan > 1) formatting.gridSpan = covering.colspan;
       else delete formatting.gridSpan;
       formatting.vMerge = 'continue';
-      cells.push({ ...covering.cell, content: [], formatting });
+      cells.push({
+        ...covering.cell,
+        content: context.continuationContent(covering.story, rowIndex - covering.row),
+        formatting,
+      });
       col += covering.colspan;
     }
 
@@ -2344,7 +2354,21 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
   return paragraphs;
 }
 
-function collectBaseStories(document: Document): Map<string, readonly BlockContent[]> {
+/** A seeded cell story's source: its table, row and first grid column. */
+interface BaseCell {
+  table: Table;
+  row: number;
+  column: number;
+}
+
+/**
+ * Each story's source blocks by the id the seed gave it. A vMerge
+ * continuation cell the seed folds into its restart gets no id, as in the seed.
+ */
+function collectBaseStories(
+  document: Document,
+  cells: Map<string, BaseCell>
+): Map<string, readonly BlockContent[]> {
   const stories = new Map<string, readonly BlockContent[]>();
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
     stories.set(storyId, blocks);
@@ -2357,10 +2381,18 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
       }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
+      const spans = calculateRowSpans(block);
       block.rows.forEach((row, rowIndex) => {
-        row.cells.forEach((cell, cellIndex) => {
-          visit(`${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex}`, cell.content);
-        });
+        let column = 0;
+        let cellIndex = 0;
+        for (const cell of row.cells) {
+          const start = column;
+          column += cell.formatting?.gridSpan ?? 1;
+          if (spans.get(`${rowIndex}-${start}`)?.skip) continue;
+          const id = `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex++}`;
+          cells.set(id, { table: block, row: rowIndex, column: start });
+          visit(id, cell.content);
+        }
       });
     }
   };
@@ -2568,6 +2600,7 @@ class SaveContext {
   /** Every `w14:paraId` the base holds, then each one minted by {@link savedParaId}. */
   private readonly paraIds: Set<number>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
+  private readonly baseCells = new Map<string, BaseCell>();
   private readonly seedSources: SeedSources;
   /** Table-style paragraph formatting per cell story, from each table as the walk reaches it. */
   private readonly cellFormatting = new Map<string, ParagraphFormatting>();
@@ -2590,7 +2623,7 @@ class SaveContext {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
     this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
-    this.baseStories = collectBaseStories(base);
+    this.baseStories = collectBaseStories(base, this.baseCells);
     this.seedSources = collectSeedSources(session, base, this.baseStories);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
@@ -2647,6 +2680,27 @@ class SaveContext {
         styleListRendering(fromStyle ? (stylePpr ?? undefined) : { numPr: attrs.numPr }, numbering) ?? undefined;
     }
     return seededParagraphProperties({ formatting, listRendering }, stylePpr);
+  }
+
+  /**
+   * The paragraphs a vMerge continuation cell `rows` below its restart cell
+   * `anchorStory` saves with: the source continuation's, with their pPr and
+   * no text, as the seed keeps none. Empty when the source has none there.
+   */
+  continuationContent(anchorStory: string | undefined, rows: number): BlockContent[] {
+    const anchor = anchorStory === undefined ? undefined : this.baseCells.get(anchorStory);
+    let column = 0;
+    const cell = anchor?.table.rows[anchor.row + rows]?.cells.find((candidate) => {
+      const start = column;
+      column += candidate.formatting?.gridSpan ?? 1;
+      return start === anchor.column;
+    });
+    if (cell?.formatting?.vMerge !== 'continue') return [];
+    return cell.content.flatMap((block) =>
+      block.type === 'paragraph' && block.formatting
+        ? [{ type: 'paragraph', formatting: block.formatting, content: [] } satisfies Paragraph]
+        : []
+    );
   }
 
   private storyIsClean(storyId: string): boolean {

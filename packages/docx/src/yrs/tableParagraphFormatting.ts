@@ -1,5 +1,6 @@
 import type {
   ParagraphFormatting,
+  Table,
   TableCellFormatting,
   TableFormatting,
   TableLook,
@@ -175,4 +176,48 @@ export function cellParagraphFormatting(
     return tablePayloadCellFormatting(payload, styles).get(cell);
   }
   return undefined;
+}
+
+export type RowSpanInfo = { rowSpan: number; skip: boolean };
+
+/** Each cell's rowspan by `row-gridColumn`; a covered vMerge continuation is `skip`, as the seed folds it. */
+export function calculateRowSpans(table: Pick<Table, 'rows'>): Map<string, RowSpanInfo> {
+  const result = new Map<string, RowSpanInfo>();
+  const active = new Map<number, number>();
+  table.rows.forEach((row, rowIndex) => {
+    let column = 0;
+    const cells = row.cells.map((cell) => {
+      const current = column;
+      column += cell.formatting?.gridSpan ?? 1;
+      return { column: current, vMerge: cell.formatting?.vMerge, key: `${rowIndex}-${current}` };
+    });
+    const empty =
+      cells.length > 0 &&
+      cells.every((cell) => cell.vMerge === 'continue' && active.has(cell.column));
+    if (empty) {
+      for (const cell of cells) {
+        active.delete(cell.column);
+        result.set(cell.key, { rowSpan: 1, skip: false });
+      }
+      return;
+    }
+    for (const cell of cells) {
+      if (cell.vMerge === 'restart') {
+        active.set(cell.column, rowIndex);
+        result.set(cell.key, { rowSpan: 1, skip: false });
+      } else if (cell.vMerge === 'continue') {
+        const start = active.get(cell.column);
+        if (start === undefined) result.set(cell.key, { rowSpan: 1, skip: false });
+        else {
+          const owner = result.get(`${start}-${cell.column}`);
+          if (owner) owner.rowSpan += 1;
+          result.set(cell.key, { rowSpan: 1, skip: true });
+        }
+      } else {
+        active.delete(cell.column);
+        result.set(cell.key, { rowSpan: 1, skip: false });
+      }
+    }
+  });
+  return result;
 }

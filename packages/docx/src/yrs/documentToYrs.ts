@@ -37,7 +37,12 @@ import type {
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
-import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import {
+  calculateRowSpans,
+  tableCellParagraphFormatting,
+  tableColumnCount,
+  type RowSpanInfo,
+} from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -1347,49 +1352,6 @@ function paragraphFlowBreaks(
           ]
     );
   return [units(0, split), units(split, tokens.length).map(({ unit }) => unit), inlineBreaks];
-}
-
-type RowSpanInfo = { rowSpan: number; skip: boolean };
-
-function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
-  const result = new Map<string, RowSpanInfo>();
-  const active = new Map<number, number>();
-  table.rows.forEach((row, rowIndex) => {
-    let column = 0;
-    const cells = row.cells.map((cell) => {
-      const current = column;
-      column += cell.formatting?.gridSpan ?? 1;
-      return { column: current, vMerge: cell.formatting?.vMerge, key: `${rowIndex}-${current}` };
-    });
-    const empty =
-      cells.length > 0 &&
-      cells.every((cell) => cell.vMerge === 'continue' && active.has(cell.column));
-    if (empty) {
-      for (const cell of cells) {
-        active.delete(cell.column);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      }
-      return;
-    }
-    for (const cell of cells) {
-      if (cell.vMerge === 'restart') {
-        active.set(cell.column, rowIndex);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      } else if (cell.vMerge === 'continue') {
-        const start = active.get(cell.column);
-        if (start === undefined) result.set(cell.key, { rowSpan: 1, skip: false });
-        else {
-          const owner = result.get(`${start}-${cell.column}`);
-          if (owner) owner.rowSpan += 1;
-          result.set(cell.key, { rowSpan: 1, skip: true });
-        }
-      } else {
-        active.delete(cell.column);
-        result.set(cell.key, { rowSpan: 1, skip: false });
-      }
-    }
-  });
-  return result;
 }
 
 function revisionAttrs(info: TrackedChangeInfo): Attrs {

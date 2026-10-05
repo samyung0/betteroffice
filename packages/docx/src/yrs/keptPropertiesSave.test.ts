@@ -132,3 +132,26 @@ describe('pPr children the model has no field for', () => {
     session.destroy();
   });
 });
+
+describe('a vertically merged continuation cell', () => {
+  const CONTINUED = '<w:pPr><w:spacing w:after="0"/><w:rPr><w:sz w:val="16"/></w:rPr></w:pPr>';
+  const cell = (merge: string, content: string) =>
+    `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>${merge}</w:tcPr>${content}</w:tc>`;
+  const bytes = fixture(
+    '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+      `<w:tr>${cell('<w:vMerge w:val="restart"/>', '<w:p><w:r><w:t>Merged</w:t></w:r></w:p>')}${cell('', '<w:p><w:r><w:t>A</w:t></w:r></w:p>')}</w:tr>` +
+      `<w:tr>${cell('<w:vMerge/>', `<w:p>${CONTINUED}</w:p>`)}${cell('', '<w:p><w:r><w:t>B</w:t></w:r></w:p>')}</w:tr>` +
+      '</w:tbl><w:p/>'
+  );
+
+  it('keeps its paragraph properties, also after rows move', async () => {
+    const { session, base } = await open(bytes);
+    // The cell after the continuation is the row's first story, as the seed numbers it.
+    expect(session.paragraphs('body:t0:r1c0')[0]!.text).toBe('B');
+    session.insertText(at(session, 'body:t0:r1c0', 0), 'X');
+    expect(pPrs(await savedDocumentXml(session, base))).toEqual(['', '', CONTINUED, '', '']);
+    session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 1 }, 'above');
+    expect(pPrs(await savedDocumentXml(session, base)).slice(2)).toEqual(['', '', CONTINUED, '', '']);
+    session.destroy();
+  });
+});
