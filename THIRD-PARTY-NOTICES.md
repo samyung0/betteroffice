@@ -102,6 +102,9 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   Undo and Redo restored resolves to the same unit, and Undo after a delete,
   Undo and Redo removes only its own step instead of the text typed before it,
   with unit tests;
+- `Store::next_live_item` (`src/store.rs`), a read-only lookup of the first
+  live item right of a (deleted) item, so the DOCX editor finds the field a
+  peer's delete ends at without computing a position, with a unit test;
 - a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for

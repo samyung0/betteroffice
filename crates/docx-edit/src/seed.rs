@@ -1674,7 +1674,7 @@ pub(crate) fn tail_run(node: &Value) -> bool {
 
 /// `value` without the result nodes at `drop` (indices into its structured
 /// result), its shown runs re-read from the rest.
-fn without_result_nodes(value: &Value, drop: &[usize]) -> Value {
+pub(crate) fn without_result_nodes(value: &Value, drop: &[usize]) -> Value {
     let kept: Vec<Value> = array(field(field(Some(value), "structuredResult"), "inline"))
         .iter()
         .enumerate()
@@ -1840,7 +1840,9 @@ pub(crate) fn field_units(
 }
 
 /// A run's story units as the seed makes them in a paragraph styled
-/// `style_id` in `package` (see [`field_units`]).
+/// `style_id` in `package` (see [`field_units`]); any other inline node's
+/// too (a tracked deletion's text with its mark), as the seed reads it outside
+/// a field.
 pub(crate) fn run_units(
     run: &Value,
     package: Option<&PackageContext>,
@@ -1850,13 +1852,12 @@ pub(crate) fn run_units(
     let styles = package.map_or(&none, |package| &package.styles);
     let paragraph = json!({ "formatting": { "styleId": style_id } });
     let style_formatting = paragraph_style_formatting(&paragraph, styles, None);
-    run_to_units(
-        run,
-        style_formatting.as_ref(),
-        styles,
-        &[],
-        &BTreeMap::new(),
-    )
+    let source = BTreeMap::new();
+    if run["type"] == "run" {
+        run_to_units(run, style_formatting.as_ref(), styles, &[], &source)
+    } else {
+        inline_to_units(run, style_formatting.as_ref(), styles, &[], &source)
+    }
     .into_iter()
     .map(|unit| {
         let content = match unit.content {

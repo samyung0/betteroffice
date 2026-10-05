@@ -48,7 +48,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # keeps the offset into a redone item as Yjs does, so a position inside text
 # Undo and Redo restored stays on its unit and Undo after a delete, Undo and
 # Redo removes only its own step. It also retains the native viewer's UTF-8
-# validation. Drop the patch once upstream includes these fixes.
+# validation and adds `Store::next_live_item` (the first live item right of a
+# deleted one, for the DOCX peer re-read of a field's shown text). Drop the
+# patch once upstream includes these fixes.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
 

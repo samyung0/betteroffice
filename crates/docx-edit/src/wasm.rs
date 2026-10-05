@@ -1929,9 +1929,9 @@ impl EditSession {
     }
 
     /// [`EditSession::apply_update_with_inference`] for the replica peers edit
-    /// through: it then re-reads what the fields whose projected children the
-    /// update deleted or put back show, as a local system edit its peers and
-    /// mirrors (the resident engine) receive.
+    /// through: it then re-reads what each field a deleted range now ends at
+    /// shows, as a local system edit its peers and mirrors (the resident
+    /// engine) receive.
     pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
         crate::ops::field_changes::refreshing_fields(self.engine.doc().yrs_doc(), || {
             self.apply_update_with_inference(update)

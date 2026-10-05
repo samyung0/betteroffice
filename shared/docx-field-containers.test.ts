@@ -3093,3 +3093,49 @@ test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(n
     session.destroy();
   }
 );
+
+// Review of docx-fields, F5 (decided 2026-10-05): Enter in a field's link before a tracked deletion keeps the
+// deletion in its text position, in the second paragraph, so Reject All while split restores it there. The join
+// restores the untouched save and Undo the seed. Accept or Reject All while split resolves the moved text where it
+// is, without the field showing it again (a deletion before the link duplicated the moved runs on capy-ci).
+const deletionAfterLink: Record<string, [string, string, string]> = {
+  "-{d}L(AA)yy": [del(deleted("d")) + link(run("AA")) + run("yy"), "a [«REF a \\h»|-{d}L(A)¶L(A)yy] b", "a dA¶Ayy b"],
+  "L(AA)-{d}yy": [link(run("AA")) + del(deleted("d")) + run("yy"), "a [«REF a \\h»|L(A)¶L(A)-{d}yy] b", "a A¶Adyy b"],
+  "L(AA)-{d}[PAGE|7]yy": [link(run("AA")) + del(deleted("d")) + field(run("7"), " PAGE ") + run("yy"), "a [«REF a \\h»|L(A)¶L(A)-{d}[«PAGE»|7]yy] b", "a A¶Ad7yy b"],
+  "L(AA)[PAGE|7]-{d}yy": [link(run("AA")) + field(run("7"), " PAGE ") + del(deleted("d")) + run("yy"), "a [«REF a \\h»|L(A)¶L(A)[«PAGE»|7]-{d}yy] b", "a A¶A7dyy b"],
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(deletionAfterLink).map((shape) => [where, shape] as const)))(
+  "%s | [REF|%s]: Enter in the link keeps the tracked deletion in its place",
+  async (where, shape) => {
+    const [xml, view, rejected] = deletionAfterLink[shape]!;
+    const [story, part] = STORY[where];
+    const bytes = matrixDocx(where, holder44(field(xml, " REF a \\h ")));
+    const original = await open(bytes);
+    const seeded = matrixUnits(original, story);
+    const untouched = sig(await publish(bytes, original.encodeState()), part);
+    original.destroy();
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    const split = session.encodeState();
+    const saved = await publish(bytes, split);
+    expect(sig(saved, part)).toContain(view);
+    const reopened = await open(saved);
+    expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    reopened.destroy();
+    for (const [resolve, text] of [["reject", rejected], ["accept", rejected.replace("d", "")]] as const) {
+      const resolved = await open(bytes, split);
+      if (resolve === "reject") resolved.rejectChange({ all: true });
+      else resolved.acceptChange({ all: true });
+      expect(storyText(await publish(bytes, resolved.encodeState()), where)).toBe(`${text}¶`);
+      resolved.destroy();
+    }
+    session.addUndoBoundary();
+    session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+    expect(sig(await publish(bytes, session.encodeState()), part)).toBe(untouched);
+    session.undo();
+    session.undo();
+    expect(matrixUnits(session, story)).toBe(seeded);
+    session.destroy();
+  }
+);

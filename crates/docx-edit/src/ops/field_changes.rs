@@ -541,6 +541,11 @@ pub(crate) fn split_field(
         if recorded.contains(&(index as i64)) {
             continue;
         }
+        if let Some(deletion) = tracked_deletion(node) {
+            // Moves with the text around it (decided 2026-10-05).
+            runs.push((index as i64, deletion));
+            continue;
+        }
         match node["type"].as_str() {
             Some("run") => runs.push((index as i64, node.clone())),
             // A nested field that projects nothing moves as its own embed.
@@ -766,17 +771,17 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
     }
 }
 
-/// Runs `apply` (applying a peer's update), then re-reads what the
-/// projecting fields whose last projected children it deleted show
-/// ([`refresh_shown`]), in a system transaction peers receive and Undo skips:
-/// two peers each deleting part of a field's last link remove it only once
-/// each has the other's update. Only a delete that ends at a projecting
-/// field's embed reads its story.
+/// Runs `apply` (applying a peer's update), then re-reads what each
+/// projecting field a deleted range now ends at shows ([`refresh_shown`]),
+/// in a system transaction peers receive and Undo skips: two peers each
+/// deleting part of a field's last link remove it only once each has the
+/// other's update. Each deleted range costs one step right from its last
+/// item; only a field found there reads its story.
 #[cfg(feature = "wasm")]
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
-    use yrs::branch::{BranchPtr, Nested};
+    use yrs::branch::BranchPtr;
     use yrs::types::TypeRef;
-    use yrs::{Assoc, ID, IdSet, IndexedSequence, MapRef, StickyIndex, Transact};
+    use yrs::{ID, IdSet, MapRef, Nested, Transact};
     let deleted = Arc::new(std::sync::Mutex::new(IdSet::new()));
     let subscription = {
         let deleted = Arc::clone(&deleted);
@@ -788,72 +793,46 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
     let result = apply();
     drop(subscription);
     let deleted = std::mem::take(&mut *deleted.lock().unwrap());
-    if deleted.is_empty() {
-        return result;
-    }
-    // Where each deleted range was: a story offset now holding a projecting
-    // field's embed.
-    let mut touched: Vec<(BranchPtr, u32)> = Vec::new();
+    let mut owners: Vec<(BranchPtr, i64)> = Vec::new();
     {
         let txn = doc.transact();
         for (client, ranges) in deleted.iter() {
             for range in ranges.iter() {
-                let Some(offset) =
-                    StickyIndex::from_id(ID::new(*client, range.end - 1), Assoc::After)
-                        .get_offset(&txn)
-                        .filter(|offset| matches!(offset.branch.type_ref(), TypeRef::Text))
+                let Some((next, story)) = txn
+                    .store()
+                    .next_live_item(&ID::new(*client, range.end - 1))
+                    .filter(|(_, story)| matches!(story.type_ref(), TypeRef::Text))
                 else {
                     continue;
                 };
-                let story = TextRef::from(offset.branch);
-                if story
-                    .sticky_index(&txn, offset.index, Assoc::After)
-                    .and_then(|sticky| sticky.id().copied())
-                    .and_then(|id| Nested::<MapRef>::new(id).get(&txn))
-                    .is_some_and(|map| map.contains_key(&txn, "resultProjection"))
+                let id = Nested::<MapRef>::new(next).get(&txn).and_then(|map| {
+                    match map.get(&txn, "resultProjection") {
+                        Some(Out::Any(projection)) => any_value(&projection)["id"].as_i64(),
+                        _ => None,
+                    }
+                });
+                if let Some(id) = id
+                    && !owners.contains(&(story, id))
                 {
-                    touched.push((offset.branch, offset.index));
+                    owners.push((story, id));
                 }
             }
         }
     }
-    if touched.is_empty() {
+    if owners.is_empty() {
         return result;
     }
     let mut txn = doc.transact_mut_with("system");
-    while let Some((branch, _)) = touched.first().cloned() {
-        let offsets: Vec<u32> = touched
+    while let Some(&(story, _)) = owners.first() {
+        let ids: Vec<i64> = owners
             .iter()
-            .filter(|(of, _)| *of == branch)
-            .map(|(_, at)| *at)
+            .filter(|(of, _)| *of == story)
+            .map(|(_, id)| *id)
             .collect();
-        touched.retain(|(of, _)| *of != branch);
-        let story = TextRef::from(branch);
-        let ids = owners_at(&txn, &snapshot(&story, &txn), &offsets);
-        refresh_shown(&mut txn, &story, &ids);
+        owners.retain(|(of, _)| *of != story);
+        refresh_shown(&mut txn, &TextRef::from(story), &ids);
     }
     result
-}
-
-/// The projecting fields whose run of projected children reaches each offset
-/// in `at` (an offset at a field's embed included).
-#[cfg(feature = "wasm")]
-fn owners_at<T: ReadTxn>(txn: &T, chunks: &[Chunk], at: &[u32]) -> Vec<i64> {
-    at.iter()
-        .filter_map(|offset| {
-            let from = chunks.partition_point(|chunk| chunk.end() <= *offset);
-            let mut children = chunks[from..]
-                .iter()
-                .take_while(|chunk| field_result_attr(chunk).is_some());
-            let owner = chunks
-                .get(from + children.clone().count())
-                .and_then(|chunk| projection(txn, chunk))
-                .map(|(id, _)| id)?;
-            children
-                .all(|chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == owner))
-                .then_some(owner)
-        })
-        .collect()
 }
 
 /// What a field shows of `runs`, as the seed's `displayText` reads them: their
@@ -864,6 +843,23 @@ fn display_text(runs: &[Value]) -> String {
         .filter(|content| content["type"] == "text")
         .filter_map(|content| content["text"].as_str().map(str::to_owned))
         .collect()
+}
+
+/// A field result node that is one tracked deletion, as the seed reads it
+/// outside a field (a field keeps it as raw markup).
+fn tracked_deletion(node: &Value) -> Option<Value> {
+    if node["type"] == "deletion" {
+        return Some(node.clone());
+    }
+    let xml = node["xml"]
+        .as_str()
+        .filter(|xml| xml.trim_start().starts_with("<w:del "))?;
+    match docx_parse::paragraph::parse_raw_inline(xml)?.as_slice() {
+        [deletion] => serde_json::to_value(deletion)
+            .ok()
+            .filter(|deletion| deletion["type"] == "deletion"),
+        _ => None,
+    }
 }
 
 /// The text runs show, tabs as tab characters.
@@ -968,15 +964,31 @@ pub(crate) fn rejoin_fields(
         .cloned()
         .unwrap_or_default();
     let projected_run = |index: i64| {
-        inline[..(index.max(0) as usize).min(inline.len())]
-            .iter()
-            .rev()
-            .find_map(|node| match node["type"].as_str() {
-                Some("simpleField") => Some(true),
-                Some("hyperlink") => Some(false),
-                _ => None,
-            })
-            .unwrap_or(false)
+        inline
+            .get(index as usize)
+            .is_some_and(|node| node["type"] == "run")
+            && inline[..(index.max(0) as usize).min(inline.len())]
+                .iter()
+                .rev()
+                .find_map(|node| match node["type"].as_str() {
+                    Some("simpleField") => Some(true),
+                    Some("hyperlink") => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(false)
+    };
+    // The text a moved run or tracked deletion went out as, and whether it is
+    // a deletion (struck text).
+    let moved_text = |node: &Value| match tracked_deletion(node) {
+        Some(deletion) => {
+            let text: String = run_units(&deletion, None, None)
+                .into_iter()
+                .map(|(unit, _)| unit.unwrap_or_else(|_| "\u{fffc}".to_owned()))
+                .collect();
+            (text, true)
+        }
+        None if node["type"] == "run" => (runs_text(std::slice::from_ref(node)), false),
+        None => (String::new(), false),
     };
     // A run that seeds nothing (an empty or formatting-only run) has no
     // place in the editor: it takes no slot. A projected one stays the
@@ -1023,6 +1035,7 @@ pub(crate) fn rejoin_fields(
             let mut left = String::from_utf16_lossy(
                 &text.encode_utf16().take(len as usize).collect::<Vec<_>>(),
             );
+            let struck = chunk.attr_active(crate::DEL);
             let mut last = slot.as_ref().map_or(-1, |(index, _)| *index);
             let mut taken = Vec::new();
             let mut lengths = Vec::new();
@@ -1031,9 +1044,9 @@ pub(crate) fn rejoin_fields(
                 let node = next
                     .and_then(|next| inline.get(next as usize).cloned())
                     .unwrap_or(Value::Null);
-                let own = runs_text(std::slice::from_ref(&node));
+                let (own, deletion) = moved_text(&node);
                 let Some(next) = next
-                    .filter(|_| node["type"] == "run" && !own.is_empty() && left.starts_with(&own))
+                    .filter(|_| !own.is_empty() && left.starts_with(&own) && (!deletion || struck))
                 else {
                     if ends_here.is_none() && taken.is_empty() {
                         tail = Some(chunk.start);
@@ -1676,7 +1689,7 @@ fn resolve_owner(
         return Ok(());
     };
     let mut field = old.clone();
-    let Some([code_moved, result_moved]) = resolve_field(&mut field, how) else {
+    let Some(mut places) = resolve_field(&mut field, how) else {
         return Ok(());
     };
 
@@ -1724,10 +1737,36 @@ fn resolve_owner(
         span.0 = span.0.min(chunk.start);
         span.1 = span.1.max(chunk.end());
     }
+    // What Enter moved out of the field (a run, nested field or tracked
+    // deletion it records and no longer shows) is content in the next
+    // paragraph, which resolves there: the field resolves without it.
+    let mut gone: Vec<usize> = old_items
+        .keys()
+        .filter(|index| **index >= 0 && !spans.contains_key(index))
+        .map(|index| *index as usize)
+        .filter(|index| {
+            old["structuredResult"]["inline"][*index]["type"]
+                .as_str()
+                .is_some_and(|kind| !matches!(kind, "hyperlink" | "simpleField"))
+        })
+        .collect();
+    gone.sort();
+    if !gone.is_empty() {
+        field = crate::seed::without_result_nodes(&old, &gone);
+        match resolve_field(&mut field, how) {
+            Some(resolved) => places = resolved,
+            None => return Ok(()),
+        }
+    }
+    let [code_moved, result_moved] = places;
     // Where an old child now sits, and whether a field inside it resolved.
     let moved = |index: i64| -> Option<(i64, bool)> {
         if index >= 0 {
-            let (at, nested) = result_moved.get(index as usize).copied().flatten()?;
+            if gone.contains(&(index as usize)) {
+                return None;
+            }
+            let at = index as usize - gone.iter().filter(|gone| (**gone as i64) < index).count();
+            let (at, nested) = result_moved.get(at).copied().flatten()?;
             Some((at as i64, nested))
         } else {
             let (at, nested) = code_moved.get((-index - 1) as usize).copied().flatten()?;

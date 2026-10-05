@@ -365,6 +365,20 @@ impl Store {
         SubdocGuids(self.subdocs.values())
     }
 
+    /// Patched for BetterOffice: the ID and parent of the first live, countable
+    /// item right of the item holding `id` (also a deleted one), found by
+    /// walking right from it instead of computing an index.
+    pub fn next_live_item(&self, id: &ID) -> Option<(ID, BranchPtr)> {
+        let mut next = self.blocks.get_item(id)?.right;
+        while let Some(item) = next {
+            if !item.is_deleted() && item.is_countable() {
+                return Some((*item.id(), *item.parent.as_branch()?));
+            }
+            next = item.right;
+        }
+        None
+    }
+
     /// The item slice `id` resolves to once redone, at the same offset into
     /// each redone item (as Yjs's `followRedone` keeps its `diff`).
     pub(crate) fn follow_redone(&self, id: &ID) -> Option<ItemSlice> {
@@ -620,5 +634,30 @@ impl StoreEvents {
 
     pub fn emit_before_observer_calls(&mut self, txn: &TransactionMut) {
         self.before_observer_calls_events.trigger(|fun| fun(txn));
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{ClientID, Doc, GetString, ReadTxn, Text, Transact, ID};
+
+    #[test]
+    fn next_live_item_skips_deleted_items() {
+        let doc = Doc::with_client_id(1);
+        let txt = doc.get_or_insert_text("test");
+        txt.insert(&mut doc.transact_mut(), 0, "ab");
+        txt.insert(&mut doc.transact_mut(), 2, "cd");
+        txt.remove_range(&mut doc.transact_mut(), 1, 2);
+        assert_eq!(txt.get_string(&doc.transact()), "ad");
+        let txn = doc.transact();
+        let client = ClientID::new(1);
+        // "b" (clock 1) and "c" (clock 2) are deleted: right of either is "d".
+        for clock in [1, 2] {
+            let (next, parent) = txn.store().next_live_item(&ID::new(client, clock)).unwrap();
+            assert_eq!(next, ID::new(client, 3));
+            let branch: &crate::branch::Branch = txt.as_ref();
+            assert_eq!(parent, crate::branch::BranchPtr::from(branch));
+        }
+        assert!(txn.store().next_live_item(&ID::new(client, 3)).is_none());
     }
 }

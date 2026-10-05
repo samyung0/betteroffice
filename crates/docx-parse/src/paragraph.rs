@@ -1077,6 +1077,32 @@ pub fn resolve_raw_inline(
     )
 }
 
+/// Raw inline markup a field keeps, parsed as the same markup reads outside a
+/// field: tracked changes stay changes. With no relationships, theme or
+/// styles; `None` when it does not parse.
+pub fn parse_raw_inline(xml: &str) -> Option<Vec<InlineNode>> {
+    let paragraph = XmlElement {
+        name: "w:p".to_owned(),
+        attributes: Default::default(),
+        children: vec![XmlNode::Element(parse_raw_root(xml)?)],
+    };
+    let limits = ParseLimits::default();
+    parse_paragraph_contents(
+        &paragraph,
+        None,
+        None,
+        None,
+        None,
+        "raw-inline",
+        &mut ParseBudget::new(&limits),
+        None,
+        0,
+        false,
+    )
+    .ok()
+    .map(filter_field_inline)
+}
+
 fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
     content
         .into_iter()

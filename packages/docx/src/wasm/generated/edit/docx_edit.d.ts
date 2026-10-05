@@ -103,9 +103,9 @@ export class EditSession {
     apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, author_name?: string | null, author_date?: string | null): void;
     /**
      * [`EditSession::apply_update_with_inference`] for the replica peers edit
-     * through: it then re-reads what the fields whose projected children the
-     * update deleted or put back show, as a local system edit its peers and
-     * mirrors (the resident engine) receive.
+     * through: it then re-reads what each field a deleted range now ends at
+     * shows, as a local system edit its peers and mirrors (the resident
+     * engine) receive.
      */
     apply_peer_update(update: Uint8Array): string;
     /**
