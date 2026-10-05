@@ -918,10 +918,11 @@ fn tracked_deletion(node: &Value) -> Option<Value> {
             _ => return None,
         }
     };
-    // Only plain text runs (text and tabs): a field result, note reference,
-    // bookmark, break, control or symbol inside it does not move intact.
+    // Only plain text runs (text and tabs) showing some text: a field
+    // result, note reference, bookmark, break, control or symbol inside it
+    // does not move intact, nor does a deletion that shows nothing.
     let plain = deletion["content"].as_array().is_some_and(|nodes| {
-        !nodes.is_empty()
+        !runs_text(nodes).is_empty()
             && nodes.iter().all(|node| {
                 node["type"] == "run"
                     && node["content"].as_array().is_some_and(|content| {
@@ -1051,16 +1052,18 @@ pub(crate) fn rejoin_fields(
     };
     // The text a moved run or tracked deletion went out as, and whether it is
     // a deletion (struck text).
+    // The text a moved run or tracked deletion went out as, and the
+    // deletion's revision id (struck text).
     let moved_text = |node: &Value| match tracked_deletion(node) {
         Some(deletion) => {
             let text: String = run_units(&deletion, None, None)
                 .into_iter()
                 .map(|(unit, _)| unit.unwrap_or_else(|_| "\u{fffc}".to_owned()))
                 .collect();
-            (text, true)
+            (text, Some(deletion["info"]["id"].clone()))
         }
-        None if node["type"] == "run" => (runs_text(std::slice::from_ref(node)), false),
-        None => (String::new(), false),
+        None if node["type"] == "run" => (runs_text(std::slice::from_ref(node)), None),
+        None => (String::new(), None),
     };
     // A run that seeds nothing (an empty or formatting-only run) has no
     // place in the editor: it takes no slot. A projected one stays the
@@ -1107,7 +1110,11 @@ pub(crate) fn rejoin_fields(
             let mut left = String::from_utf16_lossy(
                 &text.encode_utf16().take(len as usize).collect::<Vec<_>>(),
             );
-            let struck = chunk.attr_active(crate::DEL);
+            let struck = chunk
+                .attrs
+                .get(crate::DEL)
+                .filter(|mark| **mark != Any::Null)
+                .map(|mark| any_value(mark)["id"].clone());
             let mut last = slot.as_ref().map_or(-1, |(index, _)| *index);
             let mut taken = Vec::new();
             let mut lengths = Vec::new();
@@ -1116,11 +1123,20 @@ pub(crate) fn rejoin_fields(
                 let node = next
                     .and_then(|next| inline.get(next as usize).cloned())
                     .unwrap_or(Value::Null);
-                // Struck text matches only a moved deletion, so a deletion
-                // suggested on moved text stays a deletion (review F7).
+                // Struck text matches only the moved deletion of its own
+                // revision, so a deletion suggested on moved text stays that
+                // deletion (review F7, R3-2).
                 let (own, deletion) = moved_text(&node);
-                let Some(next) = next
-                    .filter(|_| !own.is_empty() && left.starts_with(&own) && deletion == struck)
+                let same_revision = match (&deletion, &struck) {
+                    (None, None) => true,
+                    (Some(moved), Some(struck)) => match (moved.as_f64(), struck.as_f64()) {
+                        (Some(moved), Some(struck)) => moved == struck,
+                        _ => moved == struck,
+                    },
+                    _ => false,
+                };
+                let Some(next) =
+                    next.filter(|_| !own.is_empty() && left.starts_with(&own) && same_revision)
                 else {
                     if ends_here.is_none() && taken.is_empty() {
                         tail = Some(chunk.start);

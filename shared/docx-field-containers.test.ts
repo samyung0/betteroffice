@@ -3151,6 +3151,9 @@ const richDeletions: Record<string, string> = {
   "-{d br}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:r><w:br/></w:r></w:del>`,
   "-{d S{s}}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}${sdt(deleted("s"))}</w:del>`,
   "-{d sym}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r></w:del>`,
+  // R3-1: a deletion that shows no text.
+  "-{∅}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z"><w:r><w:delText xml:space="preserve"/></w:r></w:del>`,
+  "-{rPr only}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z"><w:r><w:rPr><w:b/></w:rPr></w:r></w:del>`,
 };
 test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(richDeletions).map((shape) => [where, shape] as const)))(
   "%s | [REF|L(AA)%syy]: Enter keeps a deletion holding more than text where it was",
@@ -3250,3 +3253,43 @@ test.each(
   }
   A.destroy();
 });
+
+// R3-2: struck text goes back only into the moved deletion of its own revision. A deletion accepted while split and a
+// new suggestion on equal text: the join keeps the suggestion as its own author's revision, and the accepted one stays
+// accepted.
+const revisionShapes: Record<string, [string, (session: YrsSession, story: string, paraId: string) => void]> = {
+  "[REF|L(AA)-{y}y], accept the moved deletion, suggest deleting y": [
+    link(run("AA")) + del(deleted("y")) + run("y"),
+    (session, story, paraId) => {
+      const y = matrixLocate(session, story, "y");
+      session.deleteRange({ story, start: { paraId, offset: y.offset }, end: { paraId, offset: y.offset + 1 } }, ED);
+    },
+  ],
+  "[REF|L(AA)-{d}yy], accept the moved deletion, type d and suggest deleting it": [
+    link(run("AA")) + del(deleted("d")) + run("yy"),
+    (session, story, paraId) => {
+      session.insertText({ story, paraId, offset: 1 }, "d");
+      session.deleteRange({ story, start: { paraId, offset: 1 }, end: { paraId, offset: 2 } }, ED);
+    },
+  ],
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(revisionShapes).map((shape) => [where, shape] as const)))(
+  "%s | %s, join: the suggestion keeps its revision",
+  async (where, shape) => {
+    const [xml, suggest] = revisionShapes[shape]!;
+    const [story, part] = STORY[where];
+    const bytes = matrixDocx(where, holder44(field(xml, " REF a \\h ")));
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    for (const revision of session.listRevisions().filter((r) => r.range.start.paraId === secondParaId))
+      session.acceptChange({ revisionId: revision.revisionId });
+    suggest(session, story, secondParaId);
+    session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+    const saved = partXml(await publish(bytes, session.encodeState()), part);
+    expect(saved).not.toContain('w:id="91"');
+    expect(saved).toMatch(/<w:del [^>]*w:author="Ed"/);
+    expect(session.listRevisions().map((r) => r.author)).toEqual(["Ed"]);
+    session.destroy();
+  }
+);

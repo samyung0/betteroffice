@@ -101,8 +101,8 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
 - `exact+moved` rows (accepted 2026-10-05, the concurrent-join class): Enter in `[REF|xL(AA)yy]`'s link while a peer
   deletes the whole field brings the field back. The nested `[REF|L(AA)[PAGE|7]yy]` row has no `text` oracle, so it is
   `exact` although the field comes back there too; it records the save only.
-- `exact+text` and `exact+moved+text` rows (on hold for a decision, review round 2): both peers press Enter in the
-  same link at once. The field code and the moved content (runs, a nested field, a tracked deletion) come back twice;
+- `exact+text` and `exact+moved+text` rows (accepted 2026-10-06 with the concurrent-join class): both peers press
+  Enter in the same link at once. The field code and the moved content (runs, a nested field, a tracked deletion) come back twice;
   the `text` oracle is one peer's Enter.
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
