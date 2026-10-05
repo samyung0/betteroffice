@@ -543,6 +543,10 @@ pub(crate) fn split_field(
         }
         match node["type"].as_str() {
             Some("run") => runs.push((index as i64, node.clone())),
+            // A nested field that projects nothing moves as its own embed.
+            Some("complexField") if field_units(node, None, None, 0, true).len() == 1 => {
+                runs.push((index as i64, node.clone()))
+            }
             // Shown nowhere, they stay with the field.
             Some("deletion" | "moveFrom" | "bookmarkStart" | "bookmarkEnd") => {}
             Some("rawXml")
@@ -580,12 +584,7 @@ pub(crate) fn split_field(
                 _ => Vec::new(),
             };
             for (index, run) in &runs {
-                let text: String = run["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|content| content["text"].as_str())
-                    .collect();
+                let text = display_text(&shown_runs(std::slice::from_ref(run)));
                 let item = Any::from(HashMap::from([
                     ("kind".to_owned(), Any::from("text")),
                     ("text".to_owned(), Any::from(text)),
@@ -648,7 +647,12 @@ pub(crate) fn split_field(
             .iter()
             .find(|(_, child)| child > index)
             .map_or(to + 1, |(start, _)| start + 1);
-        for unit in run_units(run, package, style.as_deref()) {
+        let units = if run["type"] == "complexField" {
+            field_units(run, package, style.as_deref(), 0, false)
+        } else {
+            run_units(run, package, style.as_deref())
+        };
+        for unit in units {
             let (len, op) = unit_op(at, unit)?;
             apply(txn, story, story_id, vec![(at, 0, op)])?;
             at += len;
@@ -760,6 +764,91 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
             map.insert(txn, "displayText", shown);
         }
     }
+}
+
+/// Runs `apply` (applying a peer's update), then re-reads what the
+/// projecting fields whose projected children it deleted or put back show
+/// ([`refresh_shown`]), in a system transaction peers receive and Undo skips:
+/// two peers each deleting part of a field's last link remove it only once
+/// each has the other's update.
+pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
+    use yrs::types::{DeepObservable, Delta, Event, PathSegment};
+    use yrs::{Transact, TransactionMut};
+    let touched = Arc::new(std::sync::Mutex::new(Vec::<(String, u32)>::new()));
+    let subscription = doc.transact().get_map(crate::STORIES).map(|stories| {
+        let touched = Arc::clone(&touched);
+        stories.observe_deep(move |txn: &TransactionMut<'_>, events| {
+            for event in events.iter() {
+                let Event::Text(event) = event else {
+                    continue;
+                };
+                let Some(PathSegment::Key(story)) = event.path().front().cloned() else {
+                    continue;
+                };
+                let mut index = 0;
+                for delta in event.delta(txn) {
+                    match delta {
+                        Delta::Retain(len, _) => index += len,
+                        Delta::Deleted(_) => touched.lock().unwrap().push((story.to_string(), index)),
+                        Delta::Inserted(value, attrs) => {
+                            if attrs
+                                .as_ref()
+                                .and_then(|attrs| attrs.get(FIELD_RESULT))
+                                .is_some_and(|marker| *marker != Any::Null)
+                            {
+                                touched.lock().unwrap().push((story.to_string(), index));
+                            }
+                            index += match value {
+                                Out::Any(Any::String(text)) => text.encode_utf16().count() as u32,
+                                _ => 1,
+                            };
+                        }
+                    }
+                }
+            }
+        })
+    });
+    let result = apply();
+    drop(subscription);
+    let mut touched = std::mem::take(&mut *touched.lock().unwrap());
+    if touched.is_empty() {
+        return result;
+    }
+    touched.sort();
+    let mut txn = doc.transact_mut_with("system");
+    for (story_id, offsets) in touched.chunk_by(|a, b| a.0 == b.0).map(|group| {
+        (group[0].0.clone(), group.iter().map(|(_, at)| *at).collect::<Vec<_>>())
+    }) {
+        let Some(Out::YText(story)) = txn
+            .get_map(crate::STORIES)
+            .and_then(|stories| stories.get(&txn, &story_id))
+        else {
+            continue;
+        };
+        let ids = owners_at(&txn, &snapshot(&story, &txn), &offsets);
+        refresh_shown(&mut txn, &story, &ids);
+    }
+    result
+}
+
+/// The projecting fields whose run of projected children reaches each offset
+/// in `at` (an offset at a field's embed included).
+fn owners_at<T: ReadTxn>(txn: &T, chunks: &[Chunk], at: &[u32]) -> Vec<i64> {
+    at.iter()
+        .filter_map(|offset| {
+            let from = chunks.partition_point(|chunk| chunk.end() <= *offset);
+            let mut children = chunks[from..]
+                .iter()
+                .take_while(|chunk| field_result_attr(chunk).is_some());
+            let owner = chunks
+                .get(from + children.clone().count())
+                .and_then(|chunk| projection(txn, chunk))
+                .map(|(id, _)| id)?;
+            children
+                .all(|chunk| field_result_attr(chunk).is_some_and(|(child, _)| child == owner))
+                .then_some(owner)
+        })
+        .collect()
 }
 
 /// What a field shows of `runs`, as the seed's `displayText` reads them: their
@@ -902,8 +991,9 @@ pub(crate) fn rejoin_fields(
         .last()
         .map(|(chunk, index, _)| (*index, chunk.attrs.get(HYPERLINK).cloned()));
     // Result text the split moved out goes back as the runs it came from, in
-    // order; anything else (text typed between the halves) keeps the split.
-    let mut folded: Vec<(&Chunk, u32)> = Vec::new();
+    // order (start, length and slot of each); anything else (text typed
+    // between the halves) keeps the split.
+    let mut folded: Vec<(u32, u32, i64)> = Vec::new();
     let mut runs: Vec<(u32, i64, u32)> = Vec::new();
     let mut dropped: Vec<i64> = Vec::new();
     // Where a field that continues past this paragraph has its result's tail
@@ -963,7 +1053,11 @@ pub(crate) fn rejoin_fields(
                     at += run;
                 }
             } else {
-                folded.push((chunk, len));
+                let mut at = chunk.start;
+                for (index, run) in taken.iter().zip(&lengths) {
+                    folded.push((at, *run, *index));
+                    at += run;
+                }
                 dropped.extend(&taken);
             }
             slot = Some((last, None));
@@ -986,7 +1080,17 @@ pub(crate) fn rejoin_fields(
                 }
                 return Ok(());
             };
-            folded.push((chunk, 1));
+            folded.push((chunk.start, 1, next));
+            dropped.push(next);
+            slot = Some((next, None));
+            continue;
+        }
+        // A nested field the split moved out goes back to its slot.
+        if field
+            && let Some(next) = next_slot(slot.as_ref().map_or(0, |(index, _)| index + 1))
+                .filter(|next| inline[*next as usize]["type"] == "complexField")
+        {
+            folded.push((chunk.start, 1, next));
             dropped.push(next);
             slot = Some((next, None));
             continue;
@@ -1010,6 +1114,43 @@ pub(crate) fn rejoin_fields(
         };
         slot = Some((index, link));
         units.push((chunk, index, len));
+    }
+    // Moved runs left ending this paragraph's part of a result that continues
+    // are its tail, which the seed of the save reads as text after the field
+    // (`continued_result_tail`): they stay where they are. A run the field
+    // keeps after them (a tracked deletion) keeps them in, in their order.
+    let plain = |from: u32| {
+        chunks
+            .iter()
+            .filter(|chunk| chunk.start >= from && chunk.start < end)
+            .all(|chunk| match &chunk.kind {
+                ChunkKind::Text(_) => !chunk.attr_active(HYPERLINK),
+                ChunkKind::Embed(Some(map)) => matches!(
+                    map_string(map, txn, KIND_KEY).as_deref(),
+                    Some("tab" | "break")
+                ),
+                _ => false,
+            })
+    };
+    if ends_here.is_none() && tail.is_none_or(plain) {
+        let after = units
+            .iter()
+            .filter(|(chunk, _, _)| chunk.start > owner.start)
+            .map(|(chunk, _, len)| chunk.start + len)
+            .chain(runs.iter().map(|(start, _, len)| start + len))
+            .max()
+            .unwrap_or(0);
+        while let Some(&(start, _, index)) = folded.last() {
+            if start < after
+                || !crate::seed::tail_run(&inline[index as usize])
+                || (index + 1..inline.len() as i64).any(|later| !recorded.contains(&later))
+            {
+                break;
+            }
+            folded.pop();
+            dropped.retain(|dropped| *dropped != index);
+            tail = Some(start);
+        }
     }
     // A moved silent run goes back with the moved run after it, or, last,
     // with the one before it, so the result keeps its order.
@@ -1124,8 +1265,8 @@ pub(crate) fn rejoin_fields(
         .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
         .collect();
     let mut removed = 0;
-    for (chunk, len) in folded.iter().rev() {
-        story.remove_range(txn, chunk.start, *len);
+    for (start, len, _) in folded.iter().rev() {
+        story.remove_range(txn, *start, *len);
         removed += len;
     }
     story.remove_range(txn, owner.start, 1);

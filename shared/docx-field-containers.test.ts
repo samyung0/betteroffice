@@ -2985,3 +2985,111 @@ test.each(
     `<w:p w14:paraId="11111111"><w:r>${own}<w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DOCVARIABLE v </w:instrText></w:r><w:r>${own}<w:fldChar w:fldCharType="separate"/></w:r>${tailXml}</w:p>`
   );
 });
+
+// Office batch 2026-10-05 (docx-fields), item 1: two peers each deleting half the last link of a continued field
+// with a nested field before it show, once each has the other's update, what one peer deleting the whole link shows,
+// and so does the reopened save (the text the file held less the link).
+const nestedBeforeLink =
+  p("44444444", `${run("a")}${char("begin")}${instr(" REF a \\h ")}${char("separate")}${field(run("7"), " PAGE ")}${link(run("AA"))}`) +
+  p("45454545", `${run("0")}${char("end")}${run("z")}`);
+test.each(["body", "cell", "header"] as const)("%s | two peers each deleting half a field's last link show the seed's text", async (where) => {
+  const [story] = STORY[where];
+  const bytes = matrixDocx(where, nestedBeforeLink);
+  const drop = (session: YrsSession, from: number, to: number) =>
+    session.deleteRange({ story, start: { paraId: "44444444", offset: from }, end: { paraId: "44444444", offset: to } });
+  const original = storyText(await publish(bytes, (await open(bytes)).encodeState()), where);
+  const whole = await open(bytes);
+  drop(whole, 1, 3);
+  const A = await open(bytes);
+  const B = await open(bytes, A.encodeState());
+  drop(A, 1, 2);
+  drop(B, 2, 3);
+  const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+  A.applyUpdate(toA);
+  B.applyUpdate(toB);
+  expect(fieldsShown(A, story)).toBe("REF a \\h=7");
+  expect(matrixUnits(A, story)).toBe(matrixUnits(whole, story));
+  expect(matrixUnits(B, story)).toBe(matrixUnits(whole, story));
+  const saved = await publish(bytes, A.encodeState());
+  expect(storyText(saved, where)).toBe(original.replace("AA", ""));
+  const reopened = await open(saved);
+  expect(matrixUnits(reopened, story)).toBe(matrixUnits(A, story));
+  for (const session of [whole, A, B, reopened]) session.destroy();
+});
+
+// Item 2: Enter in a field's link, Enter again in the moved text, then Backspace joining the first two paragraphs.
+// The field continues into the third, so the moved runs left ending the first paragraph stay text after the field,
+// as the seed of the save reads them. Joining the third paragraph back restores the untouched save.
+const rejoinTails: Record<string, [string, string]> = {
+  "y,z": [link(run("AA")) + run("y") + run("z"), "a AAy¶z b"],
+  "y<b/>z": [link(run("AA")) + run("y") + "<w:r><w:rPr><w:b/></w:rPr></w:r>" + run("z"), "a AAy¶z b"],
+  "y<ptab>z": [link(run("AA")) + run("y") + ptabRun + run("z"), "a AAy¶z b"],
+  "y<br>z": [link(run("AA")) + run("y") + "<w:r><w:br/></w:r>" + run("z"), "a AAy¶z b"],
+  "y<tab>z": [link(run("AA")) + run("y") + "<w:r><w:tab/></w:r>" + run("z"), "a AAy¶\tz b"],
+  "<ptab>L(BB)": [link(run("AA")) + ptabRun + linkTo("BB"), "a AA¶BB b"],
+  "y<ptab>L(BB)": [link(run("AA")) + run("y") + ptabRun + linkTo("BB"), "a AAy¶BB b"],
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(rejoinTails).map((shape) => [where, shape] as const)))(
+  "%s | [REF|L(AA)%s]: Enter, Enter in the moved text, then a join leave the field's tail as text",
+  async (where, shape) => {
+    const [xml, text] = rejoinTails[shape]!;
+    const [story, part] = STORY[where];
+    const bytes = matrixDocx(where, holder44(field(xml, " REF a \\h ")));
+    const untouched = sig(await publish(bytes, (await open(bytes)).encodeState()), part);
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    session.splitParagraph({ story, paraId: secondParaId, offset: 2 });
+    const split = matrixUnits(session, story);
+    session.addUndoBoundary();
+    session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+    session.addUndoBoundary();
+    const saved = await publish(bytes, session.encodeState());
+    expect(storyText(saved, where)).toBe(`${text}¶`);
+    const reopened = await open(saved);
+    expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    reopened.destroy();
+    const ids = session.paragraphSpans(story).map((span) => span.paraId);
+    session.deleteAt({ story, paraId: ids[ids.indexOf(at.paraId) + 1]!, offset: 0 }, "backward");
+    expect(sig(await publish(bytes, session.encodeState()), part)).toBe(untouched);
+    session.undo();
+    session.undo();
+    expect(matrixUnits(session, story)).toBe(split);
+    session.destroy();
+  }
+);
+
+// Item 3: Enter in a field's link before a nested field keeps the link's first half in the field; the nested field
+// goes to the second paragraph with the rest of the result. Backspace joins it back to the untouched save.
+const nestedAfterLink: Record<string, [string, string, string]> = {
+  "L(AA)[PAGE|7]yy": [link(run("AA")) + field(run("7"), " PAGE ") + run("yy"), "a [«REF a \\h»|L(A)¶L(A)[«PAGE»|7]yy] b", "a A¶A7yy b"],
+  "xL(AA)[PAGE|7]L(BB)": [run("x") + link(run("AA")) + field(run("7"), " PAGE ") + linkTo("BB"), "a [«REF a \\h»|xL(A)¶L(A)[«PAGE»|7]L(BB)] b", "a xA¶A7BB b"],
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(nestedAfterLink).map((shape) => [where, shape] as const)))(
+  "%s | [REF|%s]: Enter in the link keeps both halves in the field",
+  async (where, shape) => {
+    const [xml, view, text] = nestedAfterLink[shape]!;
+    const [story, part] = STORY[where];
+    const bytes = matrixDocx(where, holder44(field(xml, " REF a \\h ")));
+    const original = await open(bytes);
+    const seeded = matrixUnits(original, story);
+    const untouched = sig(await publish(bytes, original.encodeState()), part);
+    original.destroy();
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    const saved = await publish(bytes, session.encodeState());
+    expect(sig(saved, part)).toContain(view);
+    expect(storyText(saved, where)).toBe(`${text}¶`);
+    const reopened = await open(saved);
+    expect(matrixUnits(session, story)).toBe(matrixUnits(reopened, story));
+    reopened.destroy();
+    session.addUndoBoundary();
+    session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+    expect(sig(await publish(bytes, session.encodeState()), part)).toBe(untouched);
+    session.undo();
+    session.undo();
+    expect(matrixUnits(session, story)).toBe(seeded);
+    session.destroy();
+  }
+);

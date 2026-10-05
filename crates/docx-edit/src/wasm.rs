@@ -1928,6 +1928,16 @@ impl EditSession {
         .map_err(js_err)
     }
 
+    /// [`EditSession::apply_update_with_inference`] for the replica peers edit
+    /// through: it then re-reads what the fields whose projected children the
+    /// update deleted or put back show, as a local system edit its peers and
+    /// mirrors (the resident engine) receive.
+    pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
+        crate::ops::field_changes::refreshing_fields(self.engine.doc().yrs_doc(), || {
+            self.apply_update_with_inference(update)
+        })
+    }
+
     /// Applies an update produced by this document's dedicated local worker.
     /// The local origin lets the main replica's UndoManager retain ownership of
     /// the edit; remote/collaboration updates must use `apply_update` instead.

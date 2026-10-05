@@ -1423,7 +1423,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return mutate(
         () =>
           JSON.parse(
-            session.apply_update_with_inference(update)
+            session.apply_peer_update(update)
           ) as CollaborationTextInsertion | null
       );
     },

@@ -68,7 +68,7 @@ shows as an improvement, and a refusal that stops firing (R11-S1's misses) as a 
 |---|---|---|
 | `docx-breaks.matrix.ts` | breaks by story, file shape and edit | reviews 1–7 and 11: every file untouched in all nine stories; 12 shapes × 14 edits in five stories; tracked breaks with Accept/Reject all; captures after a state the export rewrites; the bookmark hand-off; a section-ending paragraph; breaks beside fields, links and insertions with and without `w14:paraId` |
 | `docx-comments-breaks.matrix.ts` | comments next to breaks | rounds 7–11 (`zz8-p2`, `zz9-refmove`, `zz9-textstart`, `zz11-stale`, `zz11-endpara`), fixtures and names as in those probes, in body, cell and header; round 2's column break a comment boundary precedes and emptied comment over a source reference; round 2 review B's breaks a comment ends at or a bookmark sits at, with joins and typing |
-| `docx-fields.matrix.ts` | field containers by edit | fields rounds 1–6 and round 7: 62 containers untouched, 18 edited by 9 edits, the journey's table of contents, REF fields whose results are links; joins collapsing bookmarks and continued fields with Undo and Redo (round 2); round 2 review B's Enter in projected links joined back (also beside a nested complex field, and with moved `w:ptab`, line-break and empty runs), Enter after projected simple fields, and typing after a field whose code continues; typing and Backspace after a continued result whose tail ends in a line break or a comment's reference; stories holding a `w:ptab`, untouched, typed in and left holding one after Enter, so a story that fails to render fails its rows; formatted and clearing line breaks ending a continued result; the shown-text refresh after Enter (Backspace, range delete, Accept All, type-over, a tail left) and two peers dropping the same link |
+| `docx-fields.matrix.ts` | field containers by edit | fields rounds 1–6 and round 7: 62 containers untouched, 18 edited by 9 edits, the journey's table of contents, REF fields whose results are links; joins collapsing bookmarks and continued fields with Undo and Redo (round 2); round 2 review B's Enter in projected links joined back (also beside a nested complex field, and with moved `w:ptab`, line-break and empty runs), Enter after projected simple fields, and typing after a field whose code continues; typing and Backspace after a continued result whose tail ends in a line break or a comment's reference; stories holding a `w:ptab`, untouched, typed in and left holding one after Enter, so a story that fails to render fails its rows; formatted and clearing line breaks ending a continued result; the shown-text refresh after Enter (Backspace, range delete, Accept All, type-over, a tail left) and two peers dropping the same link; Enter twice and a join leaving a continued result's tail as text, and Enter before a nested complex field (2026-10-05) |
 | `docx-review-all.matrix.ts` | Accept and Reject all | fields rounds 2–6: 41 fields with kept changes (accept, reject, accept then undo), `zz4-matrix`'s before/after grid, other stories' link relationships, tracked changes outside fields; a field deleted after Accept all under a comment (`zz-n4`) |
 
 ## Known non-exact rows in the baseline
@@ -92,10 +92,10 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   it as text after the field (no tail move), so concurrent deletes converge without duplicates. One peer, two peers
   deleting the same link, and two peers each deleting half of it all land here; the `text` oracle checks the two-peer
   rows against one peer's delete.
-- `exact+lost+text` rows (queued): a half-link delete by two peers leaves a stale shown text in the editor until
-  publication. Neither partial delete removes the field's last link, so no refresh runs; with a nested field before
-  the link the editor shows `REF=` where the save, which equals the single-peer save, and its reopened file show
-  `REF=7`.
+- `exact+text` rows: two peers each delete half a field's last link, then one presses Undo. The two half deletes
+  land exactly (each peer re-reads the field's shown text after applying the other's update, 2026-10-05), but the
+  text the Undo restores comes back without its link and child marks, before the field, in the editor and the save
+  alike; the `text` oracle (one peer deleting its half only) keeps its link.
 - `refused` rows follow decisions:
   - field children the rebase cannot match one-to-one (round 5, N20), including text typed next to a projected
     simple field before a capture, which shares that field's result slot the export's seed splits (accepted like

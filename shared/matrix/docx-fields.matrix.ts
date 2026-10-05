@@ -340,6 +340,24 @@ const dropUnits = (from: number, to: number): Edit => (s, st) =>
   void s.deleteRange({ story: st, start: { paraId: P, offset: from }, end: { paraId: P, offset: to } });
 const undo: Edit = (s) => void s.undo();
 const redo: Edit = (s) => void s.redo();
+// Office batch 2026-10-05: Enter, Enter again in the moved text, then a join of the first two paragraphs; the field
+// continues into the third, so the runs the join leaves ending the first are its result's tail (text after it).
+const REJOIN_TAILS: Record<string, string> = {
+  "[REF|L(AA)y,z]": holder(field(`${link(run("AA"))}${run("y")}${run("z")}`, " REF a \\h ")),
+  "[REF|L(AA)y<ptab>z]": holder(field(`${link(run("AA"))}${run("y")}${PTAB}${run("z")}`, " REF a \\h ")),
+  "[REF|L(AA)y<br>z]": holder(field(`${link(run("AA"))}${run("y")}<w:r><w:br/></w:r>${run("z")}`, " REF a \\h ")),
+  "[REF|L(AA)<ptab>L(BB)]": holder(field(`${link(run("AA"))}${PTAB}${link(run("BB"), "other")}`, " REF a \\h ")),
+};
+const enterTwiceJoin: Edit = (s, st) => {
+  const { secondParaId } = s.splitParagraph(firstLink(s, st));
+  s.splitParagraph({ story: st, paraId: secondParaId, offset: 2 });
+  s.deleteAt({ story: st, paraId: secondParaId, offset: 0 }, "backward");
+};
+// A nested complex field after the link Enter splits: both halves stay in the field.
+const NESTED_AFTER: Record<string, string> = {
+  "[REF|L(AA)[PAGE|7]yy]": holder(field(`${link(run("AA"))}${field(run("7"), " PAGE ")}${run("yy")}`, " REF a \\h ")),
+  "[REF|xL(AA)[PAGE|7]L(BB)]": holder(field(`${run("x")}${link(run("AA"))}${field(run("7"), " PAGE ")}${link(run("BB"), "other")}`, " REF a \\h ")),
+};
 
 function rows(): Row[] {
   const out: Row[] = [];
@@ -423,6 +441,19 @@ function rows(): Row[] {
     push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | both peers delete the link", null, peers(dropUnits(1, 3), dropUnits(1, 3)), dropUnits(1, 3));
     push(where, NATIVE_TAIL, "native [REF|xL(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
     push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link", null, peers(dropUnits(1, 2), dropUnits(2, 3)), dropUnits(1, 3));
+    push(where, NATIVE_NESTED, "native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes", null,
+      both(peers(dropUnits(1, 2), dropUnits(2, 3)), undo), dropUnits(2, 3));
+    for (const [name, xml] of Object.entries(REJOIN_TAILS)) {
+      push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join`, null, enterTwiceJoin);
+      push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join, Undo`, null, both(enterTwiceJoin, undo));
+    }
+    for (const [name, xml] of Object.entries(NESTED_AFTER)) {
+      push(where, xml, `${name} | Enter in 1st`, null, enterInAA);
+      for (const [op, edit] of Object.entries(SPLIT_OPS)) push(where, xml, `${name} | ${op}`, null, edit);
+      // Two peers: one splits while the other types at the paragraph's end.
+      push(where, xml, `${name} | Enter in 1st beside a peer typing at the end`, null,
+        peers(enterInAA, (s, st) => void s.insertText({ story: st, paraId: P, offset: len(s, st, P) }, "Q")));
+    }
   }
   for (const where of ["body", "cell", "header"] as Where[])
     for (const [name, [xml, join]] of Object.entries(JOINS)) {
