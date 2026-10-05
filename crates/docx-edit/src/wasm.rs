@@ -3586,16 +3586,8 @@ impl EditSession {
         let tables = self
             .engine
             .doc()
-            .story_segments(story)
-            .map_err(js_err)?
-            .into_iter()
-            .filter_map(|segment| match segment.content {
-                SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
-                    Some(attrs_value(&payload))
-                }
-                _ => None,
-            })
-            .collect::<Result<Vec<Value>, JsValue>>()?;
+            .story_embeds(story, "table")
+            .map_err(js_err)?;
         serde_json::to_string(&tables).map_err(js_err)
     }
 

@@ -2639,9 +2639,12 @@ class SaveContext {
       stylePpr = this.stylePprs.get(key);
     }
     let listRendering = attrs.numPr ? lists.get(listKey(formatting, attrs.numPr)) : undefined;
-    // A style's list no source paragraph had renders as applying the style rendered it.
-    if (!listRendering && attrs.numPr && sameJson(numPrFromStyle, attrs.numPr)) {
-      listRendering = styleListRendering(stylePpr ?? undefined, numbering) ?? undefined;
+    // A list no source paragraph had with this style renders as the seed renders
+    // it: a style's numbering with that style, the paragraph's own from its level.
+    if (!listRendering && attrs.numPr) {
+      const fromStyle = sameJson(numPrFromStyle, attrs.numPr);
+      listRendering =
+        styleListRendering(fromStyle ? (stylePpr ?? undefined) : { numPr: attrs.numPr }, numbering) ?? undefined;
     }
     return seededParagraphProperties({ formatting, listRendering }, stylePpr);
   }

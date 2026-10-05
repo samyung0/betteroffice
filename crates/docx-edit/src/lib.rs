@@ -744,6 +744,30 @@ impl EditingDoc {
         Ok(segments)
     }
 
+    /// The payloads of `story_id`'s embeds of `kind` in order, read without
+    /// lowering the story's text and paragraph marks.
+    pub fn story_embeds(
+        &self,
+        story_id: &str,
+        kind: &str,
+    ) -> EditResult<Vec<BTreeMap<String, Any>>> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        Ok(story
+            .diff(&txn, YChange::identity)
+            .into_iter()
+            .filter_map(|diff| match diff.insert {
+                Out::YMap(map) if map_string(&map, &txn, KIND_KEY).as_deref() == Some(kind) => {
+                    match segment_content(Out::YMap(map), &txn) {
+                        SegmentContent::OtherEmbed { payload, .. } => Some(payload),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect())
+    }
+
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {
         let mut paragraphs = Vec::new();
         let mut text = String::new();

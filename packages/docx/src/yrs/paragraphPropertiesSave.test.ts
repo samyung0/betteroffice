@@ -800,6 +800,9 @@ describe('applying a style', () => {
       [NUMBERED + 1, ['ListNumber'], 82024],
       [DIRECT + 3, ['ListNumber'], 82026],
       [NUMBERED + 1, ['ListNumber', 'Normal'], 82028],
+      // Numbering of its own stays, with its level's indents unwritten.
+      [NUMBERED + 2, ['Heading1'], 82032],
+      [NUMBERED + 2, ['ListNumber'], 82034],
     ] as const) {
       const session = await createYrsSession({ clientId });
       let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
@@ -809,9 +812,12 @@ describe('applying a style', () => {
         const editor = shown(session, 'body');
         reopened = await reopen(await save(session, source), clientId + 1);
         expect(shown(reopened.session, 'body')).toEqual(editor);
+        const { numPrFromStyle, ...saved } = paragraphs(reopened.document)[inFile(index)]!.formatting!;
         // The parser lists a style's numbering on the paragraph; the file holds only pStyle.
-        const { numPr, numPrFromStyle, ...saved } = paragraphs(reopened.document)[inFile(index)]!.formatting!;
-        expect(numPr).toEqual(numPrFromStyle);
+        if (numPrFromStyle) {
+          expect(saved.numPr).toEqual(numPrFromStyle);
+          delete saved.numPr;
+        }
         expect(saved).toEqual({ ...paragraphs(source)[inFile(index)]!.formatting, styleId: styles.at(-1) });
       } finally {
         session.destroy();
