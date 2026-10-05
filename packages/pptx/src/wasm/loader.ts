@@ -130,12 +130,15 @@ export interface PresentationHandle extends CollaborationReplica {
     attributes?: readonly RunAttribute[]
   ): TextReceipt;
   /** Makes the touched paragraphs list items (`levels[level % n]` is each
-   *  level's marker) or, with `null`, plain paragraphs. */
+   *  level's marker) or, with `null`, plain paragraphs. A paragraph already a
+   *  list item (its own marker, or an inherited one named in `listed` by
+   *  paragraph id) keeps its indents. */
   setParagraphList(
     storyId: string,
     start: number,
     end: number,
-    levels: readonly Bullet[] | null
+    levels: readonly Bullet[] | null,
+    listed?: readonly string[]
   ): TextReceipt;
   /** Moves the touched paragraphs `delta` list levels; a marker equal to
    *  `levels[old % n]` becomes `levels[new % n]`. */
@@ -523,9 +526,10 @@ export function openPresentation(
         true
       );
     },
-    setParagraphList(storyId, start, end, levels): TextReceipt {
+    setParagraphList(storyId, start, end, levels, listed = []): TextReceipt {
       return jsonWasmCall(
-        () => doc.setParagraphListJson(JSON.stringify({ storyId, start, end, levels })),
+        () =>
+          doc.setParagraphListJson(JSON.stringify({ storyId, start, end, levels, listed })),
         true
       );
     },

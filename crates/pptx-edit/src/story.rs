@@ -549,9 +549,12 @@ impl DeckSession {
 
     /// Makes every paragraph the range touches a list item, `levels[lvl % n]`
     /// giving each level its marker, or (`None`) a plain paragraph. Markup
-    /// follows PowerPoint: a list item gets `marL`/`indent` with a hanging
-    /// marker and `a:buFont` (Arial for a character, the text's for a number);
-    /// a plain one gets `a:buNone` and no hanging indent.
+    /// follows PowerPoint: a paragraph becoming a list item gets `marL`/
+    /// `indent` with a hanging marker and `a:buFont` (Arial for a character,
+    /// the text's for a number); one already a list item (its own marker, or
+    /// an inherited one the caller names in `listed` by paragraph id) keeps
+    /// its indents and changes only its marker; a plain one gets `a:buNone`
+    /// and no hanging indent.
     pub fn set_paragraph_list(
         &self,
         context: &crate::EditCtx,
@@ -559,6 +562,7 @@ impl DeckSession {
         start: u32,
         end: u32,
         levels: Option<&[Bullet]>,
+        listed: &[String],
     ) -> EditResult<TextReceipt> {
         if let Some(levels) = levels {
             validate_list_levels(levels)?;
@@ -579,10 +583,18 @@ impl DeckSession {
                         }
                         _ => BulletFont::FollowText,
                     };
+                    let own_marker = map_string(&pilcrow, &txn, BULLET)
+                        .and_then(|json| serde_json::from_str::<Bullet>(&json).ok())
+                        .is_some_and(|bullet| bullet != Bullet::None);
+                    let already_listed = own_marker
+                        || map_string(&pilcrow, &txn, PARA_ID)
+                            .is_some_and(|id| listed.contains(&id));
                     insert_pilcrow_json(&pilcrow, &mut txn, BULLET, bullet)?;
                     insert_pilcrow_json(&pilcrow, &mut txn, BULLET_FONT, &font)?;
-                    pilcrow.insert(&mut txn, MARGIN_LEFT, (step + LIST_HANG_EMU) as f64);
-                    pilcrow.insert(&mut txn, INDENT, -LIST_HANG_EMU as f64);
+                    if !already_listed {
+                        pilcrow.insert(&mut txn, MARGIN_LEFT, (step + LIST_HANG_EMU) as f64);
+                        pilcrow.insert(&mut txn, INDENT, -LIST_HANG_EMU as f64);
+                    }
                 }
                 None => {
                     insert_pilcrow_json(&pilcrow, &mut txn, BULLET, &Bullet::None)?;
@@ -878,10 +890,26 @@ pub(crate) fn snapshot_story<T: ReadTxn>(
     let mut runs = Vec::new();
     for diff in story.diff(txn, YChange::identity) {
         match diff.insert {
-            Out::Any(Any::String(text)) => runs.push(TextRunSnapshot {
-                text: text.to_string(),
-                style: style_from_attrs(diff.attributes.as_deref()),
-            }),
+            Out::Any(Any::String(text)) => {
+                let style = style_from_attrs(diff.attributes.as_deref());
+                // A peer's value lands in a schema-typed attribute on save.
+                validate_style_values(
+                    None,
+                    style.underline.as_deref(),
+                    style.color.as_deref(),
+                    None,
+                    None,
+                    None,
+                )
+                .and_then(|()| {
+                    validate_run_extras(style.strike.as_deref(), style.highlight.as_deref())
+                })
+                .map_err(|error| EditError::InvalidState(format!("story {story_id}: {error}")))?;
+                runs.push(TextRunSnapshot {
+                    text: text.to_string(),
+                    style,
+                });
+            }
             Out::YMap(map) => {
                 let id = map_string(&map, txn, PARA_ID).unwrap_or_default();
                 // A rebase can give a split paragraph a file paragraph of its own.
@@ -1370,11 +1398,18 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         font_size_pt: properties.font_size_pt,
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
-        underline: properties.underline.clone(),
+        // Values outside the schema's lists are not modelled; an edited run drops them.
+        underline: properties
+            .underline
+            .clone()
+            .filter(|value| UNDERLINE_TYPES.contains(&value.as_str())),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         caps: properties.caps,
-        strike: properties.strike.clone(),
+        strike: properties
+            .strike
+            .clone()
+            .filter(|value| STRIKES.contains(&value.as_str())),
         highlight: resolve_color_value_to_hex_with_theme(properties.highlight.as_ref(), theme),
     }
 }

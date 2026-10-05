@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use ooxml_text::{FontId, FontStore, PathCmd, shape};
-use pptx_render::{PositionedTextLine, PositionedTextRun};
+use pptx_render::{PositionedTextLine, PositionedTextRun, Strike};
 use tiny_skia::{Color, FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
 use crate::{RenderResources, parse_color};
@@ -60,7 +60,8 @@ pub(crate) fn paint_lines(
             };
             let mut paint = Paint::default();
             paint.set_color(parse_color(color)?);
-            if let Some(rect) = Rect::from_xywh(run.x, line.y, run.width, line.height) {
+            let (top, bottom) = highlight_band(line, run);
+            if let Some(rect) = Rect::from_xywh(run.x, top, run.width, bottom - top) {
                 pixmap.fill_rect(rect, &paint, transform, clip);
             }
         }
@@ -127,38 +128,38 @@ fn paint_run(
             clip,
         );
     }
-    if run.strike {
-        paint_line_through(
-            pixmap,
-            run,
-            baseline - run.baseline_offset_px,
-            &paint,
-            transform,
-            clip,
-        );
+    if let Some(strike) = run.strike {
+        let baseline = baseline - run.baseline_offset_px;
+        let offsets: &[f32] = match strike {
+            Strike::Single => &[0.3],
+            Strike::Double => &[0.36, 0.22],
+        };
+        for offset in offsets {
+            if let Some(rect) = Rect::from_xywh(
+                run.x,
+                baseline - run.font_size_px * offset,
+                run.width,
+                1.0_f32.max(run.font_size_px * 0.05),
+            ) {
+                pixmap.fill_rect(rect, &paint, transform, clip);
+            }
+        }
     }
     Ok(())
 }
 
-/// The strikethrough the canvas backend draws, through the x-height.
-fn paint_line_through(
-    pixmap: &mut Pixmap,
-    run: &PositionedTextRun,
-    baseline: f32,
-    paint: &Paint<'_>,
-    transform: Transform,
-    clip: Option<&Mask>,
-) {
-    let Some(rect) = Rect::from_xywh(
-        run.x,
-        baseline - run.font_size_px * 0.3,
-        run.width,
-        1.0_f32.max(run.font_size_px * 0.05),
-    ) else {
-        return;
-    };
-    pixmap.fill_rect(rect, paint, transform, clip);
+/// The text's own height (Arial's ascent and descent around the run's
+/// baseline) within its line, as the canvas backend paints a highlight: wide
+/// line spacing leaves gaps between highlighted lines, as PowerPoint does.
+fn highlight_band(line: &PositionedTextLine, run: &PositionedTextRun) -> (f32, f32) {
+    let baseline = line.baseline - run.baseline_offset_px;
+    let top = (baseline - run.font_size_px * HIGHLIGHT_ASCENT).max(line.y);
+    let bottom = (baseline + run.font_size_px * HIGHLIGHT_DESCENT).min(line.y + line.height);
+    (top, bottom.max(top))
 }
+
+const HIGHLIGHT_ASCENT: f32 = 0.905;
+const HIGHLIGHT_DESCENT: f32 = 0.212;
 
 /// The underline geometry the canvas backend draws, so raster and browser
 /// underline at the same offset and weight.
@@ -357,5 +358,43 @@ mod tests {
         let error = cached_glyph(&mut cache, &second, other, u32::from(glyph))
             .expect_err("refuse a foreign store");
         assert!(error.contains("bound to another font store"), "{error}");
+    }
+
+    #[test]
+    fn a_highlight_covers_the_text_not_a_double_spaced_line() {
+        let run = PositionedTextRun {
+            text: "mark".into(),
+            start: 0,
+            end: 4,
+            x: 10.0,
+            width: 60.0,
+            font_id: 0,
+            font_family: "Arial".into(),
+            font_size_px: 20.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: Some(Strike::Double),
+            color: "#000000".into(),
+            highlight: Some("#ffff00".into()),
+            letter_spacing_px: 0.0,
+            baseline_offset_px: 0.0,
+            glyphs: Vec::new(),
+        };
+        let line = PositionedTextLine {
+            x: 10.0,
+            y: 0.0,
+            width: 60.0,
+            height: 60.0,
+            baseline: 50.0,
+            start: 0,
+            end: 4,
+            runs: vec![run.clone()],
+            caret_stops: Vec::new(),
+        };
+        // The same band the canvas backend paints (`highlightBand`).
+        let (top, bottom) = highlight_band(&line, &run);
+        assert!((top - (50.0 - 18.1)).abs() < 1e-4);
+        assert!((bottom - (50.0 + 4.24)).abs() < 1e-4);
     }
 }

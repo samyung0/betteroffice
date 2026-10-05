@@ -1912,7 +1912,7 @@ function PptxEditorContent({
       return;
     }
     if (canvasReview.reviewing) return;
-    if (modifier && !event.shiftKey && !event.altKey && event.code === 'KeyA') {
+    if (modifier && !event.shiftKey && !event.altKey && (event.key === 'a' || event.key === 'A')) {
       event.preventDefault();
       selectAll();
       return;
@@ -1975,7 +1975,8 @@ function PptxEditorContent({
         return;
       }
       if (readOnly) return;
-      if (event.key === 'Tab' && !modifier && !event.altKey) {
+      // A table cell leaves Tab to the browser until cells get their own navigation.
+      if (event.key === 'Tab' && !modifier && !event.altKey && !isTableCellStory(selection.storyId)) {
         event.preventDefault();
         tabKey(selection, event.shiftKey);
         return;
@@ -2056,7 +2057,10 @@ function PptxEditorContent({
     if (modifier && !shift && !alt && key === '.') return () => toggleScript('super');
     if (modifier && !shift && !alt && key === ',') return () => toggleScript('sub');
     if (modifier && !shift && !alt && key === '\\') return () => clearFormatting();
-    if ((alt && shift && !modifier && code === 'Digit5') || (modifier && shift && !alt && code === 'KeyX')) {
+    if (
+      (alt && shift && !modifier && code === 'Digit5') ||
+      (modifier && shift && !alt && (key === 'x' || key === 'X'))
+    ) {
       return () => formatSelection('strikethrough');
     }
     if (modifier && shift && !alt && code === 'Period') return () => stepFontSize(1);
@@ -2279,11 +2283,21 @@ function PptxEditorContent({
   const applyList = (kind: ListKind, preset?: ListPresetId) =>
     editParagraphs((handle, range) => {
       const off = !preset && paragraphState?.list === kind;
+      // Items already in a list, inherited ones included, keep their indents.
+      const story = handle.story(range.storyId);
+      const textBox = modelRef.current?.frame?.primitives.find(
+        (primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.storyId === range.storyId
+      );
+      const listed = selectedParagraphs(story, range.start, range.end)
+        .filter((index) => textBox?.paragraphs[index]?.list)
+        .map((index) => story.paragraphs[index].id);
       handle.setParagraphList(
         range.storyId,
         range.start,
         range.end,
-        off ? null : presetLevels(preset ?? DEFAULT_LIST_PRESETS[kind])
+        off ? null : presetLevels(preset ?? DEFAULT_LIST_PRESETS[kind]),
+        listed
       );
     });
 
@@ -3811,6 +3825,11 @@ function shapeBoxes(
     const bounds = frameBoundsForShape(deck, frame, shape);
     return bounds ? [{ shapeId: shape.id, bounds }] : [];
   });
+}
+
+/** A table cell's story, `story:<shape>:table:<row>:<cell>`. */
+function isTableCellStory(storyId: string): boolean {
+  return storyId.includes(':table:');
 }
 
 function caretKey(caret: { storyId: string; paragraph: number } | null): string | null {

@@ -664,7 +664,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
         testId="pptx-text-color"
       />
       <ColorPicker
-        value={currentFormatting.highlight ?? '#fde047'}
+        value={currentFormatting.highlight ?? '#ffff00'}
         label={t('toolbar.highlightColor')}
         clearLabel={t('toolbar.noHighlight')}
         icon="highlight"

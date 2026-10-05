@@ -5,6 +5,7 @@ import type {
   ImagePrimitive,
   Paint,
   PlaceholderPrimitive,
+  PositionedTextLine,
   PositionedTextRun,
   Shadow,
   ShapePrimitive,
@@ -827,7 +828,8 @@ function paintTextBox(
     for (const run of line.runs) {
       if (!run.highlight) continue;
       ctx.fillStyle = run.highlight;
-      ctx.fillRect(run.x, line.y, run.width, line.height);
+      const [top, bottom] = highlightBand(line, run);
+      ctx.fillRect(run.x, top, run.width, bottom - top);
     }
     for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
   }
@@ -891,13 +893,24 @@ function paintTextRun(
     );
   }
   if (run.strike) {
-    ctx.fillRect(
-      run.x,
-      runBaseline - run.fontSizePx * 0.3,
-      run.width,
-      Math.max(1, run.fontSizePx * 0.05)
-    );
+    for (const offset of run.strike === 'double' ? [0.36, 0.22] : [0.3]) {
+      ctx.fillRect(
+        run.x,
+        runBaseline - run.fontSizePx * offset,
+        run.width,
+        Math.max(1, run.fontSizePx * 0.05)
+      );
+    }
   }
+}
+
+/** The text's own height (Arial's ascent and descent around the run's
+ *  baseline) within its line, as the raster backend paints a highlight. */
+function highlightBand(line: PositionedTextLine, run: PositionedTextRun): [number, number] {
+  const baseline = line.baseline - (run.baselineOffsetPx ?? 0);
+  const top = Math.max(line.y, baseline - run.fontSizePx * 0.905);
+  const bottom = Math.min(line.y + line.height, baseline + run.fontSizePx * 0.212);
+  return [top, Math.max(top, bottom)];
 }
 
 function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {

@@ -113,6 +113,7 @@ fn bulleting_a_text_box_writes_powerpoint_list_markup() {
             0,
             story_length(&session, &story),
             Some(&discs()),
+            &[],
         )
         .unwrap();
 
@@ -155,7 +156,7 @@ fn numbering_writes_bu_auto_num_in_the_text_font() {
     let session = DeckSession::open(DEMO, 13).unwrap();
     let (_, _, story) = story_of(&session, "Title");
     session
-        .set_paragraph_list(&context(), &story, 0, 0, Some(&decimal()))
+        .set_paragraph_list(&context(), &story, 0, 0, Some(&decimal()), &[])
         .unwrap();
     let saved = session.save().unwrap();
     let body = saved_body(&saved, "Title");
@@ -186,7 +187,7 @@ fn indenting_a_list_item_moves_its_level_margin_and_marker() {
     let (_, _, story) = story_of(&session, "Title");
     let end = story_length(&session, &story);
     session
-        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()))
+        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &[])
         .unwrap();
     let second = session.story(&story).unwrap().paragraphs[0]
         .runs
@@ -268,7 +269,7 @@ fn removing_an_inherited_bullet_writes_bu_none_without_a_hanging_indent() {
     let session = DeckSession::open(LIST_STYLES, 18).unwrap();
     let (_, _, story) = story_of(&session, "Inherited bullets");
     session
-        .set_paragraph_list(&context(), &story, 0, 0, None)
+        .set_paragraph_list(&context(), &story, 0, 0, None, &[])
         .unwrap();
     let saved = session.save().unwrap();
     let body = saved_body(&saved, "Inherited bullets");
@@ -294,7 +295,14 @@ fn a_bullet_replaces_the_file_marker_and_its_symbol_font() {
     let (_, _, story) = story_of(&session, "Inherited bullets");
     let length = story_length(&session, &story);
     session
-        .set_paragraph_list(&context(), &story, length - 1, length - 1, Some(&discs()))
+        .set_paragraph_list(
+            &context(),
+            &story,
+            length - 1,
+            length - 1,
+            Some(&discs()),
+            &[],
+        )
         .unwrap();
     let xml = shape_xml(
         &session.save().unwrap(),
@@ -310,12 +318,113 @@ fn a_bullet_replaces_the_file_marker_and_its_symbol_font() {
     );
 }
 
+/// The first list item of `lecture.pptx`'s slide 2 (a Google Slides export):
+/// `marL="457200" indent="-317500"` with a 14 pt `●`.
+fn lecture_list_item(session: &DeckSession) -> (String, u32) {
+    let story = session
+        .snapshot()
+        .unwrap()
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .flat_map(|shape| &shape.text_stories)
+        .find(|story| story.plain_text().contains("Ad minim veniam"))
+        .unwrap()
+        .clone();
+    let mut offset = 0;
+    for paragraph in &story.paragraphs {
+        let text: String = paragraph.runs.iter().map(|run| run.text.as_str()).collect();
+        if text.starts_with("Ea c") {
+            return (story.id, offset);
+        }
+        offset += text.encode_utf16().count() as u32 + 1;
+    }
+    panic!("no list item");
+}
+
+fn lecture_item_properties(bytes: &[u8]) -> pptx_parse::ParagraphProperties {
+    pptx_parse::parse_pptx(bytes).unwrap().slides[1]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            ShapeNode::Shape(shape) => shape.text.as_ref()?.paragraphs.iter().find(|paragraph| {
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    .starts_with("Ea c")
+            }),
+            _ => None,
+        })
+        .unwrap()
+        .properties
+        .clone()
+}
+
+#[test]
+fn a_new_style_on_an_existing_list_item_keeps_its_indents() {
+    const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
+    let before = lecture_item_properties(LECTURE);
+    assert_eq!(
+        (before.margin_left, before.indent),
+        (Some(457_200), Some(-317_500))
+    );
+    let session = DeckSession::open(LECTURE, 28).unwrap();
+    let (story, offset) = lecture_list_item(&session);
+    session
+        .set_paragraph_list(&context(), &story, offset, offset, Some(&discs()), &[])
+        .unwrap();
+    let restyled = lecture_item_properties(&session.save().unwrap());
+    assert_eq!(
+        (restyled.margin_left, restyled.indent),
+        (Some(457_200), Some(-317_500))
+    );
+    assert_eq!(
+        restyled.bullet,
+        Some(Bullet::Character {
+            value: "●".to_owned()
+        })
+    );
+    assert_eq!(restyled.bullet_size, before.bullet_size);
+
+    session
+        .set_paragraph_list(&context(), &story, offset, offset, Some(&decimal()), &[])
+        .unwrap();
+    let numbered = lecture_item_properties(&session.save().unwrap());
+    assert_eq!(
+        (numbered.margin_left, numbered.indent),
+        (Some(457_200), Some(-317_500))
+    );
+    assert!(matches!(numbered.bullet, Some(Bullet::AutoNumber { .. })));
+    assert_eq!(numbered.bullet_font, Some(BulletFont::FollowText));
+}
+
+#[test]
+fn an_inherited_list_item_named_by_the_caller_keeps_its_indents() {
+    let session = DeckSession::open(LIST_STYLES, 29).unwrap();
+    let (_, _, story) = story_of(&session, "Inherited bullets");
+    let first = session.story(&story).unwrap().paragraphs[0].id.clone();
+    session
+        .set_paragraph_list(&context(), &story, 0, 0, Some(&discs()), &[first])
+        .unwrap();
+    let saved = session.save().unwrap();
+    let properties = &saved_body(&saved, "Inherited bullets").paragraphs[0].properties;
+    assert_eq!((properties.margin_left, properties.indent), (None, None));
+    assert_eq!(
+        properties.bullet,
+        Some(Bullet::Character {
+            value: "●".to_owned()
+        })
+    );
+}
+
 #[test]
 fn line_and_paragraph_spacing_round_trip_in_schema_order() {
     let session = DeckSession::open(DEMO, 20).unwrap();
     let (_, _, story) = story_of(&session, "Title");
     session
-        .set_paragraph_list(&context(), &story, 0, 0, Some(&discs()))
+        .set_paragraph_list(&context(), &story, 0, 0, Some(&discs()), &[])
         .unwrap();
     session
         .set_paragraph_spacing(
@@ -518,7 +627,7 @@ fn invalid_lists_and_spacing_are_refused_and_change_nothing() {
     for levels in refused {
         assert!(
             session
-                .set_paragraph_list(&context(), &story, 0, 0, Some(&levels))
+                .set_paragraph_list(&context(), &story, 0, 0, Some(&levels), &[])
                 .is_err(),
             "{levels:?}"
         );
@@ -599,7 +708,7 @@ fn a_list_and_a_concurrent_split_converge() {
     let right = DeckSession::open(DEMO, 32).unwrap();
     let (_, _, story) = story_of(&left, "Title");
     let end = story_length(&left, &story);
-    left.set_paragraph_list(&EditCtx::local("left"), &story, 0, end, Some(&discs()))
+    left.set_paragraph_list(&EditCtx::local("left"), &story, 0, end, Some(&discs()), &[])
         .unwrap();
     // The other peer splits the first paragraph and types into the new one.
     right
@@ -639,14 +748,14 @@ fn concurrent_indent_and_list_removal_converge() {
     let right = DeckSession::open(DEMO, 34).unwrap();
     let (_, _, story) = story_of(&left, "Title");
     let end = story_length(&left, &story);
-    left.set_paragraph_list(&EditCtx::local("left"), &story, 0, end, Some(&discs()))
+    left.set_paragraph_list(&EditCtx::local("left"), &story, 0, end, Some(&discs()), &[])
         .unwrap();
     sync(&left, &right);
 
     left.change_paragraph_level(&EditCtx::local("left"), &story, 0, 0, 1, Some(&discs()))
         .unwrap();
     right
-        .set_paragraph_list(&EditCtx::local("right"), &story, 0, 0, None)
+        .set_paragraph_list(&EditCtx::local("right"), &story, 0, 0, None, &[])
         .unwrap();
     sync(&left, &right);
 
@@ -664,7 +773,7 @@ fn undo_restores_the_file_markup_after_a_list_edit() {
     let session = DeckSession::open(DEMO, 35).unwrap();
     let (_, _, story) = story_of(&session, "Title");
     session
-        .set_paragraph_list(&context(), &story, 0, 0, Some(&discs()))
+        .set_paragraph_list(&context(), &story, 0, 0, Some(&discs()), &[])
         .unwrap();
     session.add_undo_barrier();
     session
@@ -685,4 +794,141 @@ fn undo_restores_the_file_markup_after_a_list_edit() {
         session.save().unwrap(),
         pptx_parse::write_pptx(session.package()).unwrap()
     );
+}
+
+#[test]
+fn a_peer_writing_a_junk_strike_or_highlight_is_refused() {
+    for (key, value) in [("strike", "wavy"), ("highlight", "red")] {
+        let left = DeckSession::open(DEMO, 36).unwrap();
+        let right = DeckSession::open(DEMO, 37).unwrap();
+        let (_, _, story) = story_of(&left, "Subtitle");
+        let remote_vector = left.encode_state_vector_v1();
+        {
+            use yrs::{Map, ReadTxn, Text, Transact};
+            let doc = right.yrs_doc();
+            let mut txn = doc.transact_mut_with(37_u64);
+            let text = txn
+                .get_map("pptx:stories")
+                .unwrap()
+                .get(&txn, &story)
+                .unwrap()
+                .cast::<yrs::TextRef>()
+                .unwrap();
+            text.format(
+                &mut txn,
+                0,
+                3,
+                yrs::types::Attrs::from([(std::sync::Arc::from(key), yrs::Any::from(value))]),
+            );
+        }
+        let update = right.encode_diff_v1(&remote_vector).unwrap();
+        assert!(left.apply_update_v1(&update).is_err(), "{key}={value}");
+    }
+}
+
+/// Both peers hold the same story and save the same, readable file.
+fn assert_converged(left: &DeckSession, right: &DeckSession) -> Vec<u8> {
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let saved = left.save().unwrap();
+    assert_eq!(saved, right.save().unwrap());
+    DeckSession::open(&saved, 99).unwrap();
+    saved
+}
+
+#[test]
+fn clearing_formatting_races_a_peers_highlight_and_typing() {
+    let left = DeckSession::open(DEMO, 38).unwrap();
+    let right = DeckSession::open(DEMO, 39).unwrap();
+    let (_, _, story) = story_of(&left, "Subtitle");
+    left.clear_text_formatting(&EditCtx::local("left"), &story, 0, 20, None)
+        .unwrap();
+    right
+        .format_text(
+            &EditCtx::local("right"),
+            &story,
+            5,
+            15,
+            &TextStylePatch {
+                highlight: Some("#FFFF00".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    right
+        .insert_text(
+            &EditCtx::local("right"),
+            &story,
+            10,
+            "typed",
+            &TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+    sync(&left, &right);
+    assert_converged(&left, &right);
+    let text = left.story(&story).unwrap().plain_text();
+    assert!(text.contains("typed"), "{text}");
+}
+
+#[test]
+fn spacing_races_a_split_of_its_paragraph() {
+    let left = DeckSession::open(DEMO, 40).unwrap();
+    let right = DeckSession::open(DEMO, 41).unwrap();
+    let (_, _, story) = story_of(&left, "Title");
+    left.set_paragraph_spacing(
+        &EditCtx::local("left"),
+        &story,
+        0,
+        0,
+        &ParagraphSpacing {
+            line: Some(LineSpacing::Percent { value: 1.5 }),
+            ..ParagraphSpacing::default()
+        },
+    )
+    .unwrap();
+    right
+        .replace_text(
+            &EditCtx::local("right"),
+            &story,
+            6,
+            6,
+            "\n",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    sync(&left, &right);
+    let saved = assert_converged(&left, &right);
+    // As concurrent alignment: the split's second half carries the edit.
+    let spacing: Vec<_> = saved_body(&saved, "Title")
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.properties.line_spacing)
+        .collect();
+    assert_eq!(spacing[1], Some(LineSpacing::Percent { value: 1.5 }));
+}
+
+#[test]
+fn an_anchor_races_a_peers_move_of_the_box() {
+    let left = DeckSession::open(DEMO, 42).unwrap();
+    let right = DeckSession::open(DEMO, 43).unwrap();
+    let (slide, shape, _) = story_of(&left, "Title");
+    left.set_text_anchor(&EditCtx::local("left"), &slide, &shape, Some("b"))
+        .unwrap();
+    right
+        .move_shape(&EditCtx::local("right"), &slide, &shape, 100_000, 200_000)
+        .unwrap();
+    sync(&left, &right);
+    let saved = assert_converged(&left, &right);
+    assert_eq!(saved_body(&saved, "Title").anchor.as_deref(), Some("b"));
+    let moved = left
+        .snapshot()
+        .unwrap()
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .find(|candidate| candidate.id == shape)
+        .map(|candidate| (candidate.x, candidate.y));
+    assert_eq!(moved, Some((100_000, 200_000)));
 }

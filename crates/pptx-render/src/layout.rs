@@ -32,8 +32,9 @@ use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ListKind,
-    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
-    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Strike,
+    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun,
+    Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
@@ -2234,7 +2235,7 @@ struct ResolvedStyle {
     bold: bool,
     italic: bool,
     underline: bool,
-    strike: bool,
+    strike: Option<Strike>,
     color: String,
     /// Highlight colour behind the run, `#rrggbb`.
     highlight: Option<String>,
@@ -2458,7 +2459,7 @@ fn resolve_bullet_style(
 ) -> Result<ResolvedStyle, RenderError> {
     let mut style = text.clone();
     // PowerPoint strikes and highlights the text, not its marker.
-    style.strike = false;
+    style.strike = None;
     style.highlight = None;
     if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
         let family = if family.starts_with('+') {
@@ -2566,11 +2567,15 @@ fn resolve_style(
             .as_deref()
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
-        strike: direct
+        strike: match direct
             .strike
             .as_deref()
             .or_else(|| fallback.and_then(|value| value.strike.as_deref()))
-            .is_some_and(|value| matches!(value, "sngStrike" | "dblStrike")),
+        {
+            Some("sngStrike") => Some(Strike::Single),
+            Some("dblStrike") => Some(Strike::Double),
+            _ => None,
+        },
         color,
         highlight: direct
             .highlight
@@ -2750,7 +2755,7 @@ fn chart_text_primitive(
         bold,
         italic,
         underline: false,
-        strike: false,
+        strike: None,
         color: text.color.to_owned(),
         highlight: None,
         letter_spacing_px: tracking,
@@ -2980,7 +2985,11 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(style.bold));
     key.push(u8::from(style.italic));
     key.push(u8::from(style.underline));
-    key.push(u8::from(style.strike));
+    key.push(match style.strike {
+        None => 0,
+        Some(Strike::Single) => 1,
+        Some(Strike::Double) => 2,
+    });
     key_str(key, &style.color);
     key_opt_str(key, &style.highlight);
 }
@@ -5641,7 +5650,7 @@ mod tests {
                     underline: false,
                     color: "#000000".to_owned(),
                     caps: TextCaps::None,
-                    strike: false,
+                    strike: None,
                     highlight: None,
                 },
             }],
@@ -5869,7 +5878,7 @@ mod tests {
             underline: false,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
-            strike: false,
+            strike: None,
             highlight: None,
         };
         let mut variants = vec![style.clone(); 7];
@@ -5957,7 +5966,7 @@ mod tests {
             underline: true,
             color: "#A99A72".to_owned(),
             caps: TextCaps::None,
-            strike: false,
+            strike: None,
             highlight: None,
         };
         let paragraph = |parts: &[&str]| {
@@ -6025,7 +6034,7 @@ mod tests {
             underline: false,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
-            strike: false,
+            strike: None,
             highlight: None,
         };
         let stack = |text: &str| {

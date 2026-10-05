@@ -13,16 +13,25 @@ if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 
 let fixture: Uint8Array;
+let lecture: Uint8Array;
+let listStyles: Uint8Array;
+let table: Uint8Array;
 let fonts: { family: string; bytes: Uint8Array }[];
 
 beforeAll(async () => {
-  const [wasm, pptx, font] = await Promise.all([
+  const [wasm, pptx, font, lectureDeck, listDeck, tableDeck] = await Promise.all([
     readFile(resolve(root, 'packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm')),
     readFile(resolve(root, 'apps/demo/public/betteroffice-demo.pptx')),
     readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')),
+    readFile(resolve(root, 'poc/fixtures/lecture.pptx')),
+    readFile(resolve(root, 'crates/pptx-render/tests/fixtures/list-style-bullets.pptx')),
+    readFile(resolve(root, 'crates/pptx-render/tests/fixtures/table-basic.pptx')),
   ]);
   await initWasm(wasm);
   fixture = pptx;
+  lecture = lectureDeck;
+  listStyles = listDeck;
+  table = tableDeck;
   fonts = [{ family: 'Arial', bytes: font }];
 });
 
@@ -35,13 +44,13 @@ afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
 });
 
-async function open() {
+async function open(file = fixture) {
   const opened: PptxEditorApi[] = [];
   const states: PptxCommandState[] = [];
   const errors: Error[] = [];
   const view = render(
     <PptxEditor
-      file={fixture}
+      file={file}
       fonts={fonts}
       onReady={(api) => opened.push(api)}
       onCommandState={(state) => states.push(state)}
@@ -51,8 +60,8 @@ async function open() {
   await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
   await waitFor(() => expect(states[states.length - 1]?.enabled['view.zoom']).toBe(true));
   const api = opened[0];
-  const title = api.handle.snapshot().slides[0].shapes.find((shape) => shape.name === 'Title')!;
-  const storyId = title.textStories[0].id;
+  const title = api.handle.snapshot().slides[0].shapes.find((shape) => shape.name === 'Title');
+  const storyId = title?.textStories[0].id ?? '';
   const story = () => api.handle.story(storyId);
   const run = (id: Parameters<PptxEditorApi['runCommand']>[0], value?: string) => {
     let ran = false;
@@ -63,7 +72,7 @@ async function open() {
   };
   const caret = (start: number, end = start) =>
     act(() => {
-      api.selectText({ slide: 1, shapeId: title.id, storyId, start, end });
+      api.selectText({ slide: 1, shapeId: title!.id, storyId, start, end });
     });
   const input = () => view.getByTestId('pptx-text-input');
   const key = (init: { key: string; code?: string; shiftKey?: boolean; metaKey?: boolean }) =>
@@ -206,7 +215,7 @@ describe('PptxEditor lists and paragraph formatting', () => {
 
     expect(run('format.alignBottom')).toBe(true);
     const shape = () =>
-      api.handle.snapshot().slides[0].shapes.find((candidate) => candidate.id === title.id)!;
+      api.handle.snapshot().slides[0].shapes.find((candidate) => candidate.id === title!.id)!;
     expect(shape().textAnchor).toBe('b');
     await waitFor(() => expect(state().checked).toContain('format.alignBottom'));
     expect(errors).toEqual([]);
@@ -256,6 +265,72 @@ describe('PptxEditor lists and paragraph formatting', () => {
     // One step undoes the whole distribution.
     expect(run('edit.undo')).toBe(true);
     expect(new Set(shapes().map((shape) => shape.x)).size).toBe(1);
+    expect(errors).toEqual([]);
+  }, 60_000);
+});
+
+describe('PptxEditor list styles on existing list items', () => {
+  /** Selects `start` in the first story of `slide` whose text contains `text`. */
+  function selectIn(api: PptxEditorApi, slide: number, text: string) {
+    const shape = api.handle
+      .snapshot()
+      .slides[slide - 1].shapes.find((candidate) =>
+        candidate.textStories.some((story) =>
+          story.paragraphs.some((paragraph) => paragraph.runs.some((run) => run.text.includes(text)))
+        )
+      )!;
+    const story = shape.textStories[0];
+    let start = 0;
+    for (const paragraph of story.paragraphs) {
+      const content = paragraph.runs.map((run) => run.text).join('');
+      if (content.includes(text)) break;
+      start += content.length + 1;
+    }
+    act(() => {
+      api.selectText({ slide, shapeId: shape.id, storyId: story.id, start, end: start });
+    });
+    return { index: story.paragraphs.findIndex((paragraph) => paragraph.runs.some((run) => run.text.includes(text))), storyId: story.id };
+  }
+
+  it("changes a file list item's marker, not its indents", async () => {
+    const { api, errors, run } = await open(lecture);
+    act(() => {
+      api.goToSlide(2);
+    });
+    const { index, storyId } = selectIn(api, 2, 'Ad minim veniam');
+    expect(run('format.bulletedList', 'dash')).toBe(true);
+    expect(run('format.numberedList', 'decimal')).toBe(true);
+    const paragraph = api.handle.story(storyId).paragraphs[index];
+    expect(JSON.parse(paragraph.bulletJson!).type).toBe('autoNumber');
+    expect(paragraph.marginLeft).toBeUndefined();
+    expect(paragraph.indent).toBeUndefined();
+    expect(errors).toEqual([]);
+  }, 60_000);
+
+  it('keeps the indents of an item that inherits its marker', async () => {
+    const { api, errors, run } = await open(listStyles);
+    const { index, storyId } = selectIn(api, 1, 'First level');
+    expect(run('format.bulletedList', 'square')).toBe(true);
+    const paragraph = api.handle.story(storyId).paragraphs[index];
+    expect(JSON.parse(paragraph.bulletJson!)).toEqual({ type: 'character', value: '■' });
+    expect(paragraph.marginLeft).toBeUndefined();
+    expect(errors).toEqual([]);
+  }, 60_000);
+
+  it('leaves Tab in a table cell to the browser', async () => {
+    const { api, errors, view } = await open(table);
+    const frame = api.handle.snapshot().slides[0].shapes.find((shape) => shape.kind === 'graphicFrame')!;
+    const cell = frame.textStories[0];
+    act(() => {
+      api.selectText({ slide: 1, shapeId: frame.id, storyId: cell.id, start: 0, end: 0 });
+    });
+    const before = JSON.stringify(api.handle.story(cell.id));
+    let handled = false;
+    act(() => {
+      handled = !fireEvent.keyDown(view.getByTestId('pptx-text-input'), { key: 'Tab' });
+    });
+    expect(handled).toBe(false);
+    expect(JSON.stringify(api.handle.story(cell.id))).toBe(before);
     expect(errors).toEqual([]);
   }, 60_000);
 });

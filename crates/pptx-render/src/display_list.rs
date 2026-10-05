@@ -346,6 +346,14 @@ pub struct TextParagraph {
     pub runs: Vec<TextRun>,
 }
 
+/// `a:rPr@strike`: one line through the text or two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Strike {
+    Single,
+    Double,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ListKind {
@@ -412,8 +420,8 @@ pub struct PositionedTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub strike: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<Strike>,
     pub color: String,
     /// Highlight colour painted behind the run's line box.
     #[serde(default, skip_serializing_if = "Option::is_none")]

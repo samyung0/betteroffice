@@ -111,6 +111,9 @@ struct SetParagraphListArgs {
     end: u32,
     #[serde(default)]
     levels: Option<Vec<Bullet>>,
+    /// Paragraph ids already list items through an inherited marker.
+    #[serde(default)]
+    listed: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -621,6 +624,7 @@ impl PptxDocument {
                     args.start,
                     args.end,
                     args.levels.as_deref(),
+                    &args.listed,
                 )
                 .map_err(js_error)?,
         )

@@ -1451,6 +1451,38 @@ test('paints script glyphs and underlines at their shifted baselines', async () 
   [44.8, 55.8, 50.8].forEach((y, i) => expect(underlines[i]).toBeCloseTo(y));
 });
 
+test('paints a highlight at the text height and a double strike as two lines', async () => {
+  const rects: Array<{ y: number; height: number; color: string }> = [];
+  const state: Record<string, unknown> = {};
+  state.fillRect = (_x: number, y: number, _width: number, height: number) =>
+    rects.push({ y, height, color: String(state.fillStyle) });
+  const ctx = new Proxy(state, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  // A double-spaced line: 60px tall around 20px text.
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 0, width: 60, height: 60, baseline: 50, start: 0, end: 4,
+        caretStops: [], runs: [{
+          text: 'mark', start: 0, end: 4, x: 10, width: 60, fontId: 1, fontFamily: 'Arial',
+          fontSizePx: 20, bold: false, italic: false, underline: false, strike: 'double',
+          color: '#000000', highlight: '#ffff00', glyphs: [],
+        }],
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  const highlight = rects.find((rect) => rect.color === '#ffff00')!;
+  expect(highlight.y).toBeCloseTo(50 - 18.1);
+  expect(highlight.height).toBeCloseTo(18.1 + 4.24);
+  const strikes = rects.filter((rect) => rect.color === '#000000');
+  expect(strikes.map((rect) => rect.y)).toEqual([50 - 7.2, 50 - 4.4]);
+});
+
 test('clips metafile paths before filling their even-odd holes', async () => {
   const calls: string[] = [];
   const ctx = new Proxy({

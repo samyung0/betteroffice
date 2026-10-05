@@ -491,7 +491,8 @@ export interface PositionedTextRun {
   bold: boolean;
   italic: boolean;
   underline: boolean;
-  strike?: boolean;
+  /** `a:rPr@strike`: one line or two. */
+  strike?: 'single' | 'double';
   color: string;
   /** Painted behind the run's line box. */
   highlight?: string;

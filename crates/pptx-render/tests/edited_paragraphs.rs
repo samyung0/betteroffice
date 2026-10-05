@@ -5,7 +5,7 @@ use pptx_edit::{
     Bullet, DeckSession, EditCtx, LineSpacing, ParagraphSpacing, TextStyle, TextStylePatch,
 };
 use pptx_render::{
-    ListKind, PositionedTextLine, Primitive, SlideRenderer, SurfaceDisplayList, TextAnchor,
+    ListKind, PositionedTextLine, Primitive, SlideRenderer, Strike, SurfaceDisplayList, TextAnchor,
     TextParagraph,
 };
 
@@ -125,7 +125,7 @@ fn an_edited_bullet_is_drawn_and_reported() {
 
     let length = session.story(&story).unwrap().length;
     session
-        .set_paragraph_list(&context(), &story, 0, length, Some(&discs()))
+        .set_paragraph_list(&context(), &story, 0, length, Some(&discs()), &[])
         .unwrap();
     let after = layout(&session, None);
     let (paragraphs, lines, _) = text_box(&after, &story);
@@ -153,7 +153,7 @@ fn removing_an_inherited_bullet_hides_its_marker() {
     let (paragraphs, _, _) = text_box(&before, &story);
     assert_eq!(paragraphs[0].list, Some(ListKind::Bullet));
     session
-        .set_paragraph_list(&context(), &story, 0, 0, None)
+        .set_paragraph_list(&context(), &story, 0, 0, None, &[])
         .unwrap();
     let after = layout(&session, None);
     let (paragraphs, lines, _) = text_box(&after, &story);
@@ -168,7 +168,7 @@ fn the_empty_item_holding_the_caret_shows_the_marker_it_would_take() {
     let (_, _, story) = story_of(&session, "Title");
     let length = session.story(&story).unwrap().length;
     session
-        .set_paragraph_list(&context(), &story, 0, length, Some(&numbers()))
+        .set_paragraph_list(&context(), &story, 0, length, Some(&numbers()), &[])
         .unwrap();
     // An empty item between the two: "1.", "", "2.".
     let first_end = session.story(&story).unwrap().paragraphs[0]
@@ -253,8 +253,8 @@ fn spacing_anchor_strike_and_highlight_reach_the_display_list() {
     assert!(((lines[1].y - lines[0].y) - (gap + 40.0)).abs() < 0.5);
     let struck = &lines[0].runs[0];
     assert_eq!(struck.text, "Office");
-    assert!(struck.strike);
+    assert_eq!(struck.strike, Some(Strike::Single));
     assert_eq!(struck.highlight.as_deref(), Some("#FFFF00"));
-    assert!(!lines[0].runs[1].strike);
+    assert_eq!(lines[0].runs[1].strike, None);
     assert_eq!(lines[0].runs[1].highlight, None);
 }

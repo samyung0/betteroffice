@@ -195,7 +195,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 bold: false,
                 italic: false,
                 underline,
-                strike: false,
+                strike: None,
                 color: "#1b2733".into(),
                 highlight: None,
                 baseline_offset_px: 0.0,
