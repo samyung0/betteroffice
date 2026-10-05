@@ -3580,6 +3580,25 @@ impl EditSession {
         serde_json::to_string(&ids).map_err(js_err)
     }
 
+    /// The payloads of `story`'s table embeds in order, as
+    /// [`Self::story_segments`] gives them, without the rest of the story.
+    pub fn story_tables(&self, story: &str) -> Result<String, JsValue> {
+        let tables = self
+            .engine
+            .doc()
+            .story_segments(story)
+            .map_err(js_err)?
+            .into_iter()
+            .filter_map(|segment| match segment.content {
+                SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
+                    Some(attrs_value(&payload))
+                }
+                _ => None,
+            })
+            .collect::<Result<Vec<Value>, JsValue>>()?;
+        serde_json::to_string(&tables).map_err(js_err)
+    }
+
     /// The story as an ordered run of formatted segments — the same view
     /// lowering reads:
     ///

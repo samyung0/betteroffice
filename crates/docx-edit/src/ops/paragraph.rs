@@ -1051,7 +1051,8 @@ impl EditingDoc {
     /// one transaction, keeping direct paragraph formatting as Word does:
     /// writes `style_id`, and sets each [`STYLE_CONTROLLED_PARA_ATTRS`] key the
     /// paragraph holds nothing for, or holds as its old style gives it
-    /// (`previous`, the host's values per style id, `""` for none), to its
+    /// (`previous`, the host's values per style id, `""` for none) and not as
+    /// its own source pPr set it, to its
     /// entry in `values` (the new style's), or to an explicit null where
     /// `values` has none, so two peers applying different styles converge on
     /// one style's values. The paragraph mark's run defaults become the new
@@ -1105,9 +1106,16 @@ impl EditingDoc {
                 {
                     continue;
                 }
+                // A value the paragraph's own pPr set and still holds is direct, even
+                // where the old style gives the same.
                 let from_old_style = match (property(key), old.get(key)) {
                     (None, _) => true,
-                    (Some(current), Some(old)) => same_value(&current, old),
+                    (Some(current), Some(old)) => {
+                        same_value(&current, old)
+                            && !source
+                                .and_then(|original| original.get(key))
+                                .is_some_and(|direct| same_value(direct, &current))
+                    }
                     (Some(_), None) => false,
                 };
                 if from_old_style {

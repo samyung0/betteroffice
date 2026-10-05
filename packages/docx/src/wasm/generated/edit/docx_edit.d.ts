@@ -835,6 +835,11 @@ export class EditSession {
      */
     story_segments(story: string): string;
     /**
+     * The payloads of `story`'s table embeds in order, as
+     * [`Self::story_segments`] gives them, without the rest of the story.
+     */
+    story_tables(story: string): string;
+    /**
      * Applies one run mark over `[start, end)`. `mark_json`:
      * `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
      * {"type":"fontFamily"|"color","value":string} |
@@ -1131,6 +1136,7 @@ export interface InitOutput {
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_story_object_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_segments: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_story_tables: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;

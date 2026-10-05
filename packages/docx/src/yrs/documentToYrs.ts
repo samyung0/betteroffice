@@ -5,7 +5,6 @@
 import { isRawXml } from '../types/content/rawXml';
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
-import { computeListRendering, getCachedNumberingMap } from '../docx/numberingParser';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {
@@ -42,7 +41,7 @@ import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraph
 import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
-import { seededParagraphProperties } from './paragraphSeed';
+import { seededParagraphProperties, styleListRendering } from './paragraphSeed';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -1025,20 +1024,8 @@ export function styleParagraphValues(
   { cell, numbering }: StyleValueContext = {}
 ): Attrs {
   const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined }, content: [] };
-  const stylePpr = styles?.resolveParagraphStyle(styleId, cell).paragraphFormatting;
-  const numPr = stylePpr?.numPr;
-  const map = numPr && numbering ? getCachedNumberingMap(numbering) : null;
-  const listRendering = numPr && map ? computeListRendering(numPr, map) : null;
-  if (numPr && map && listRendering) {
-    // The level's indents apply where the style sets none, as the parser renders a style's list.
-    const level = map.getLevel(numPr.numId ?? 0, numPr.ilvl ?? 0)?.pPr;
-    if (stylePpr?.indentLeft == null) listRendering.indentLeft = level?.indentLeft;
-    if (stylePpr?.indentFirstLine == null && stylePpr?.hangingIndent == null) {
-      listRendering.indentFirstLine = level?.indentFirstLine;
-      listRendering.hangingIndent = level?.hangingIndent;
-    }
-    paragraph.listRendering = listRendering;
-  }
+  const listRendering = styleListRendering(styles?.resolveParagraphStyle(styleId, cell).paragraphFormatting, numbering);
+  if (listRendering) paragraph.listRendering = listRendering;
   return paragraphAttrs(paragraph, styles, [], undefined, cell);
 }
 

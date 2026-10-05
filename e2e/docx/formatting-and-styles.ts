@@ -10,7 +10,12 @@ import {
   typingTarget,
 } from './context';
 import type { DocxScenario } from './context';
-import type { YrsStorySegment } from '../../packages/docx/src/yrs';
+import { createStyleResolver } from '../../packages/docx/src/styles';
+import {
+  applyStyleValues,
+  styleParagraphValues,
+  type YrsStorySegment,
+} from '../../packages/docx/src/yrs';
 
 const WORD = 'Meridian';
 const LINK = 'https://openooxml.dev';
@@ -79,8 +84,11 @@ export const formattingAndStyles: DocxScenario = {
       start: { paraId: target.paraId, offset: 0 },
       end: { paraId: target.paraId, offset: target.end + WORD.length },
     };
+    const styles = createStyleResolver(editor.document.package.styles);
     recorder.op('applyParagraphStyle', () =>
-      session.applyParagraphStyle(whole, 'Heading1')
+      applyStyleValues(session, whole, 'Heading1', (styleId) =>
+        styleParagraphValues(styles, styleId)
+      )
     );
     recorder.op('setParagraphAttrs', () =>
       session.setParagraphAttrs(whole, { alignment: 'center' })

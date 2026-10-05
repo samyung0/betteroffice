@@ -1,4 +1,10 @@
-import type { Paragraph, ParagraphFormatting } from '../types/document';
+import { computeListRendering, getCachedNumberingMap } from '../docx/numberingParser';
+import type {
+  ListRendering,
+  NumberingDefinitions,
+  Paragraph,
+  ParagraphFormatting,
+} from '../types/document';
 import type {
   YrsAuthor,
   YrsParagraphAttrs,
@@ -172,4 +178,27 @@ export function applyStyleValues(
     previous[current] ??= styleValues(current || null, range.story);
   }
   session.applyParagraphStyle(range, styleId, styleValues(styleId, range.story), previous, suggesting);
+}
+
+/**
+ * The list rendering a style's numbering gives a paragraph carrying only that
+ * style (`stylePpr`, resolved): its level's indents where the style sets
+ * none, as the parser renders a style's list.
+ */
+export function styleListRendering(
+  stylePpr: ParagraphFormatting | undefined,
+  numbering: NumberingDefinitions | undefined
+): ListRendering | null {
+  const numPr = stylePpr?.numPr;
+  if (!numPr || !numbering) return null;
+  const map = getCachedNumberingMap(numbering);
+  const listRendering = computeListRendering(numPr, map);
+  if (!listRendering) return null;
+  const level = map.getLevel(numPr.numId ?? 0, numPr.ilvl ?? 0)?.pPr;
+  if (stylePpr?.indentLeft == null) listRendering.indentLeft = level?.indentLeft;
+  if (stylePpr?.indentFirstLine == null && stylePpr?.hangingIndent == null) {
+    listRendering.indentFirstLine = level?.indentFirstLine;
+    listRendering.hangingIndent = level?.hangingIndent;
+  }
+  return listRendering;
 }

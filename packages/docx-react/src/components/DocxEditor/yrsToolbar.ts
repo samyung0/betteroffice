@@ -118,14 +118,17 @@ export function setSelectedParagraphAttrs(
   styleValues: ParagraphStyleValues,
   suggesting?: YrsAuthor
 ): void {
+  // The selection is one story, so each style's values are read once.
+  const valuesByStyle = new Map<string | null, ReturnType<ParagraphStyleValues>>();
   forEachSelectedParagraph(session, selection, (range, properties) => {
     const styleId = typeof properties.pStyle === 'string' ? properties.pStyle : null;
     const numbered = !!paragraphNumPr(properties.numPr)?.numId;
-    session.setParagraphAttrs(
-      range,
-      explicitParagraphAttrs(attrs(properties), styleValues(styleId, range.story), numbered),
-      suggesting
-    );
+    let values = valuesByStyle.get(styleId);
+    if (!values) {
+      values = styleValues(styleId, range.story);
+      valuesByStyle.set(styleId, values);
+    }
+    session.setParagraphAttrs(range, explicitParagraphAttrs(attrs(properties), values, numbered), suggesting);
   });
 }
 

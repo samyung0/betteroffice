@@ -1781,13 +1781,18 @@ fn apply_paragraph_style_resets_what_came_from_the_old_style_and_keeps_direct_fo
     doc.set_paragraph_attr(&para, "pStyle", Any::from("Quote"))
         .unwrap();
     for (key, value) in [
-        // The old style's, then a direct value over another of its keys.
+        // The old style's, a direct value over another of its keys, and a value
+        // the source pPr set that equals the old style's.
         ("spaceAfter", Any::Number(200.0)),
         ("alignment", Any::from("center")),
         ("bidi", Any::Bool(true)),
+        ("keepLines", Any::Bool(true)),
     ] {
         doc.set_paragraph_attr(&para, key, value).unwrap();
     }
+    let source = [("keepLines".to_string(), Any::Bool(true))].into();
+    doc.set_paragraph_attr(&para, "_originalFormatting", Any::Map(Arc::new(source)))
+        .unwrap();
     doc.format_range(
         &ctx(),
         StoryRange::new("body", 0, 6),
@@ -1802,6 +1807,7 @@ fn apply_paragraph_style_resets_what_came_from_the_old_style_and_keeps_direct_fo
         [
             ("spaceAfter".to_string(), Any::BigInt(200)),
             ("alignment".to_string(), Any::from("right")),
+            ("keepLines".to_string(), Any::Bool(true)),
         ]
         .into(),
     )]
@@ -1830,6 +1836,11 @@ fn apply_paragraph_style_resets_what_came_from_the_old_style_and_keeps_direct_fo
         Some(&Any::from("center"))
     );
     assert_eq!(paragraph.properties.get("bidi"), Some(&Any::Bool(true)));
+    assert_eq!(
+        paragraph.properties.get("keepLines"),
+        Some(&Any::Bool(true)),
+        "a source value equal to the old style's is direct"
+    );
     // A key the paragraph held nothing for is written as null, so a concurrent style wins whole.
     assert_eq!(paragraph.properties.get("keepNext"), Some(&Any::Null));
     assert!(

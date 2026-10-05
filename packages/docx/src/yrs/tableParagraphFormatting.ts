@@ -170,9 +170,7 @@ export function cellParagraphFormatting(
 ): ParagraphFormatting | undefined {
   const cell = enclosingCellStory(story);
   if (!cell || !styles) return undefined;
-  for (const segment of session.storySegments(cell.replace(CELL_STORY, ''))) {
-    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
-    const payload = segment.payload as TablePayloadShape;
+  for (const payload of session.storyTables(cell.replace(CELL_STORY, '')) as TablePayloadShape[]) {
     if (!payload.rows?.some((row) => row.cells?.some((entry) => entry.story === cell))) continue;
     return tablePayloadCellFormatting(payload, styles).get(cell);
   }

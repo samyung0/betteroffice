@@ -12,7 +12,6 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  applyStyleValues,
   sameYrsSelection,
   type ParagraphStyleValues,
   type YrsAuthor,
@@ -642,15 +641,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           ? (nextParagraphStyle?.(currentStyleId) ?? null)
           : null;
       if (nextStyleId && paragraphStyleValues) {
-        applyStyleValues(
-          session,
+        // The new paragraph carries the current one's style, so its values are known.
+        session.applyParagraphStyle(
           {
             story: current.story,
             start: { paraId: receipt.secondParaId, offset: 0 },
             end: { paraId: receipt.secondParaId, offset: 0 },
           },
           nextStyleId,
-          paragraphStyleValues
+          paragraphStyleValues(nextStyleId, current.story),
+          { [currentStyleId ?? '']: paragraphStyleValues(currentStyleId, current.story) }
         );
       } else if (currentParagraph?.text && inheritedStored) {
         storedFormattingByParagraphRef.current.set(

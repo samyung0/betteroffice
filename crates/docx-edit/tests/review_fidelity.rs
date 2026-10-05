@@ -1565,8 +1565,9 @@ fn previous_style(engine: &EngineSession) -> String {
 #[test]
 fn line_unit_paragraph_spacing_follows_a_style_applied_over_it() {
     use docx_edit::{EditCtx, ParaSelector};
-    let body = r#"<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:beforeLines="100" w:afterLines="50" w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr><w:r><w:t>Styled spacing</w:t></w:r></w:p>"#;
-    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>"#;
+    // The spacing comes from the paragraph's style; direct spacing would stay.
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Spaced"/></w:pPr><w:r><w:t>Styled spacing</w:t></w:r></w:p>"#;
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Spaced"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="80" w:after="80" w:beforeLines="100" w:afterLines="50" w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr></w:style>"#;
     let engine = EngineSession::new(74235);
     seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
     let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();

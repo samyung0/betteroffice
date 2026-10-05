@@ -52,7 +52,7 @@ import type {
   Endnote,
 } from '../types/document';
 import type { YrsSession } from './index';
-import { seededParagraphProperties } from './paragraphSeed';
+import { seededParagraphProperties, styleListRendering } from './paragraphSeed';
 import { enclosingCellStory, tablePayloadCellFormatting } from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
 
@@ -2376,6 +2376,7 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
 /** What a seed resolved paragraph properties from besides the paragraph's own pPr. */
 interface SeedSources {
   styles: StyleResolver | null;
+  numbering: Document['package']['numbering'];
   /** List renderings by {@link listKey}. */
   lists: Map<string, NonNullable<Paragraph['listRendering']>>;
 }
@@ -2422,6 +2423,7 @@ function collectSeedSources(
   }
   return {
     styles: document.package.styles ? createStyleResolver(document.package.styles) : null,
+    numbering: document.package.numbering,
     lists,
   };
 }
@@ -2617,12 +2619,15 @@ class SaveContext {
 
   /** The paragraph properties the seed gave a paragraph with the editor's style and list. */
   private seededProperties(storyId: string, attrs: ParagraphSaveAttrs): Attrs {
-    const { styles, lists } = this.seedSources;
+    const { styles, lists, numbering } = this.seedSources;
+    // A style applied in the session records its numbering on the paragraph;
+    // the seed leaves it in the source's formatting.
+    const numPrFromStyle = attrs.numPrFromStyle ?? attrs._originalFormatting?.numPrFromStyle;
     const formatting: ParagraphFormatting = {
       ...attrs._originalFormatting,
       styleId: attrs.styleId ?? undefined,
+      numPrFromStyle: numPrFromStyle ?? undefined,
     };
-    const listRendering = attrs.numPr ? lists.get(listKey(formatting, attrs.numPr)) : undefined;
     let stylePpr: ParagraphFormatting | undefined | null = null;
     if (styles) {
       const cellStory = enclosingCellStory(storyId);
@@ -2632,6 +2637,11 @@ class SaveContext {
         this.stylePprs.set(key, styles.resolveParagraphStyle(formatting.styleId, cell).paragraphFormatting);
       }
       stylePpr = this.stylePprs.get(key);
+    }
+    let listRendering = attrs.numPr ? lists.get(listKey(formatting, attrs.numPr)) : undefined;
+    // A style's list no source paragraph had renders as applying the style rendered it.
+    if (!listRendering && attrs.numPr && sameJson(numPrFromStyle, attrs.numPr)) {
+      listRendering = styleListRendering(stylePpr ?? undefined, numbering) ?? undefined;
     }
     return seededParagraphProperties({ formatting, listRendering }, stylePpr);
   }

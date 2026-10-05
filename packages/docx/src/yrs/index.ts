@@ -1049,6 +1049,8 @@ export interface YrsSession extends CollaborationReplica {
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
+  /** The payloads of the story's table embeds in order, without the rest of the story. */
+  storyTables(story: string): Array<Record<string, unknown>>;
   storyObjectIds(story: string): string[];
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
@@ -1997,6 +1999,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
+    storyTables: (story) => JSON.parse(session.story_tables(story)) as Array<Record<string, unknown>>,
     storyObjectIds: (story) => JSON.parse(session.story_object_ids(story)) as string[],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,

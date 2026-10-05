@@ -517,6 +517,7 @@ const WORD_BODY = [
   '<w:p><w:pPr><w:ind w:left="1440"/><w:jc w:val="center"/></w:pPr><w:r><w:t>Centred</w:t></w:r></w:p>',
   '<w:p><w:pPr><w:spacing w:before="80" w:beforeLines="100" w:beforeAutospacing="1"/></w:pPr><w:r><w:t>Spaced</w:t></w:r></w:p>',
   '<w:p><w:pPr><w:rPr><w:rFonts w:hint="eastAsia"/><w:sz w:val="40"/></w:rPr></w:pPr><w:r><w:t>Big mark</w:t></w:r></w:p>',
+  '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:spacing w:before="240"/></w:pPr><w:r><w:t>Spaced heading</w:t></w:r></w:p>',
 ].join('');
 const NUMBERED = WORD_LOOKS.length * 2 + 2;
 const DIRECT = NUMBERED + 3;
@@ -783,6 +784,59 @@ describe('applying a style', () => {
       for (let index = DIRECT + 3; index <= DIRECT + 8; index += 1) {
         expect(after[index]!.formatting).toEqual({ ...before[index]!.formatting, styleId: 'Heading1' });
       }
+    } finally {
+      session.destroy();
+      reopened?.session.destroy();
+    }
+  });
+
+  it('saves no list indents for a style’s list, applied or taken away', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    // Body paragraphs after the table sit three cell paragraphs later in document order.
+    const inFile = (index: number) => index + 3;
+    for (const [index, styles, clientId] of [
+      // A plain paragraph, and one with its own centring and indent (no source paragraph has its key).
+      [NUMBERED + 1, ['ListNumber'], 82024],
+      [DIRECT + 3, ['ListNumber'], 82026],
+      [NUMBERED + 1, ['ListNumber', 'Normal'], 82028],
+    ] as const) {
+      const session = await createYrsSession({ clientId });
+      let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+      try {
+        session.seedFromDocx(bytes);
+        for (const styleId of styles) applyStyle(session, source, 'body', index, styleId);
+        const editor = shown(session, 'body');
+        reopened = await reopen(await save(session, source), clientId + 1);
+        expect(shown(reopened.session, 'body')).toEqual(editor);
+        // The parser lists a style's numbering on the paragraph; the file holds only pStyle.
+        const { numPr, numPrFromStyle, ...saved } = paragraphs(reopened.document)[inFile(index)]!.formatting!;
+        expect(numPr).toEqual(numPrFromStyle);
+        expect(saved).toEqual({ ...paragraphs(source)[inFile(index)]!.formatting, styleId: styles.at(-1) });
+      } finally {
+        session.destroy();
+        reopened?.session.destroy();
+      }
+    }
+  });
+
+  it('keeps a value the paragraph set that equals its old style’s', async () => {
+    const bytes = fixture(WORD_BODY, WORD_STYLES);
+    const source = await parseDocx(bytes.buffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 82030 });
+    let reopened: Awaited<ReturnType<typeof reopen>> | undefined;
+    const heading = DIRECT + 6;
+    try {
+      session.seedFromDocx(bytes);
+      applyStyle(session, source, 'body', heading, 'Normal');
+      const editor = shown(session, 'body');
+      expect(editor[heading]).toMatchObject({ pStyle: 'Normal', spaceBefore: 240 });
+      reopened = await reopen(await save(session, source), 82031);
+      expect(shown(reopened.session, 'body')).toEqual(editor);
+      expect(paragraphs(reopened.document)[heading + 3]!.formatting).toEqual({
+        ...paragraphs(source)[heading + 3]!.formatting,
+        styleId: 'Normal',
+      });
     } finally {
       session.destroy();
       reopened?.session.destroy();
