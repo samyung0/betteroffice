@@ -22,7 +22,13 @@ export type {
   ChartA11yAttrs,
 } from './display-list/types';
 
-export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './viewport/index';
+export type {
+  ScrollBox,
+  TrackOffsets,
+  ViewportState,
+  VisibleRange,
+  VisibleCells,
+} from './viewport/index';
 
 export {
   trackCount,
@@ -31,6 +37,7 @@ export {
   visibleCells,
   clampScroll,
   uniformOffsets,
+  zoomedViewport,
 } from './viewport/index';
 
 export type {

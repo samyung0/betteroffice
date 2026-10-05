@@ -4,6 +4,7 @@
  */
 
 export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './types';
+export type { ScrollBox } from './math';
 export {
   trackCount,
   totalExtent,
@@ -11,4 +12,5 @@ export {
   visibleCells,
   clampScroll,
   uniformOffsets,
+  zoomedViewport,
 } from './math';

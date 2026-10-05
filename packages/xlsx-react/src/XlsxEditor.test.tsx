@@ -233,7 +233,7 @@ async function mountEditor(
   onSave?: (bytes: Uint8Array) => void,
   onChange?: () => void
 ) {
-  const ready: { handle: WorkbookHandle | null; flush?: XlsxEditorApi['flush'] } = { handle: null };
+  const ready: { handle: WorkbookHandle | null; api?: XlsxEditorApi } = { handle: null };
   const view = render(
     <XlsxEditor
       file={fixture.bytes.slice()}
@@ -241,7 +241,7 @@ async function mountEditor(
       onSave={onSave}
       onReady={(api) => {
         ready.handle = api.handle;
-        ready.flush = api.flush;
+        ready.api = api;
       }}
     />
   );
@@ -259,7 +259,9 @@ async function mountEditor(
     nameBox,
     editor,
     workbook: () => ready.handle!,
-    flush: () => act(() => ready.flush!()),
+    flush: () => act(() => ready.api!.flush()),
+    run: (command: XlsxCommand) => act(async () => ready.api!.run(command)),
+    shown: () => ready.api!.visibleViewport()!,
     typeFormula: (value: string) =>
       fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value } }),
     reopenWith: (next: Fixture) =>
@@ -271,7 +273,7 @@ async function mountEditor(
             onSave={onSave}
             onReady={(api) => {
               ready.handle = api.handle;
-              ready.flush = api.flush;
+              ready.api = api;
             }}
           />
         );
@@ -804,6 +806,41 @@ describe('XlsxEditor keyboard', () => {
     expect(tab.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement?.getAttribute('data-testid')).toBe('xlsx-scroll');
   });
+
+  it('keeps the top-left cell where it is when the zoom changes, as Google Sheets does', async () => {
+    const view = await mountEditor(wide);
+    await scrollTo(view, 480, 240);
+    for (const percent of [200, 50, 90, 125]) {
+      await view.run(`zoom:${percent}`);
+      expect(view.shown().x).toBeCloseTo(480, 6);
+      expect(view.shown().y).toBeCloseTo(240, 6);
+    }
+  });
+
+  it('follows the pointer and the keyboard at 200%, clear of the frozen panes', async () => {
+    const view = await mountEditor(wideFrozen);
+    await view.run('zoom:200');
+    // a point twice as far from the corner is the same cell at 200%.
+    const b4 = pointAt(wideFrozen, { row: 3, col: 1 });
+    const zoomed = { clientX: b4.clientX * 2, clientY: b4.clientY * 2 };
+    fireEvent.mouseDown(view.surface, zoomed);
+    fireEvent.mouseUp(view.surface, zoomed);
+    fireEvent.click(view.surface, zoomed);
+    expect(view.nameBox().value).toBe('B4');
+
+    for (let step = 0; step < 10; step += 1) await press(view.surface, 'ArrowRight');
+    for (let step = 0; step < 20; step += 1) await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('L24');
+    await press(view.surface, '7');
+    const pane = cellRect(wideFrozen.grid, 2, 2)!;
+    const box = editorBox(view.editor()!);
+    expect(box.left).toBeGreaterThanOrEqual(pane.x * 2);
+    expect(box.top).toBeGreaterThanOrEqual(pane.y * 2);
+    expect(box.right).toBeLessThanOrEqual(VIEWPORT.width);
+    expect(box.bottom).toBeLessThanOrEqual(VIEWPORT.height);
+    await press(view.editor()!, 'Enter');
+    expect(view.workbook().cell(0, 23, 11).input).toBe('7');
+  }, MANY_KEYS_MS);
 
   it('leaves the formula bar focused when an edit it committed scrolls back', async () => {
     const view = await mountEditor(wide);

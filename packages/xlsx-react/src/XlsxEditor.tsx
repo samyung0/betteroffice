@@ -30,6 +30,7 @@ import {
   safeExternalHyperlink,
   StaleProposalError,
   toTsv,
+  zoomedViewport,
 } from '@betteroffice/xlsx';
 import type {
   CellAddr,
@@ -576,6 +577,23 @@ function XlsxEditorContent({
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  // the sheet point at the grid's top-left when the zoom changed: it stays
+  // there, as in Google Sheets, once the scroll area has the new size.
+  const zoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const changeZoom = useCallback((next: number) => {
+    if (next === zoomRef.current) return;
+    const scroll = scrollRef.current;
+    if (scroll) zoomAnchorRef.current = zoomedViewport(scroll, zoomRef.current);
+    setZoom(next);
+  }, []);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const anchor = zoomAnchorRef.current;
+    zoomAnchorRef.current = null;
+    if (!scroll || !anchor) return;
+    scroll.scrollLeft = anchor.x * zoom;
+    scroll.scrollTop = anchor.y * zoom;
+  }, [zoom]);
   const [revision, setRevision] = useState(0);
   const revisionRef = useRef(revision);
   revisionRef.current = revision;
@@ -845,13 +863,7 @@ function XlsxEditorContent({
             visibleViewport: () => {
               const scroll = scrollRef.current;
               if (!scroll || !scroll.clientWidth || !scroll.clientHeight) return null;
-              const scale = zoomRef.current;
-              return {
-                x: scroll.scrollLeft / scale,
-                y: scroll.scrollTop / scale,
-                width: scroll.clientWidth / scale,
-                height: scroll.clientHeight / scale,
-              };
+              return zoomedViewport(scroll, zoomRef.current);
             },
           });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
@@ -947,14 +959,7 @@ function XlsxEditorContent({
     canvas.height = Math.round(h * dpr);
     canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
-    const logicalWidth = w / zoom;
-    const logicalHeight = h / zoom;
-    const viewport = {
-      x: scroll.scrollLeft / zoom,
-      y: scroll.scrollTop / zoom,
-      width: logicalWidth,
-      height: logicalHeight,
-    };
+    const viewport = zoomedViewport(scroll, zoom);
     const handle = handleRef.current;
     let dl: DisplayList;
     if (handle) {
@@ -968,7 +973,7 @@ function XlsxEditorContent({
         return;
       }
     } else {
-      dl = buildDemoDisplayList(logicalWidth, logicalHeight, t('editor.demoCellText'));
+      dl = buildDemoDisplayList(viewport.width, viewport.height, t('editor.demoCellText'));
     }
     let nextMergedRanges: readonly MergedRange[] = [];
     const grid = dl.grid;
@@ -1725,12 +1730,7 @@ function XlsxEditorContent({
     const scroll = scrollRef.current;
     if (!handle || !scroll) return;
     try {
-      const png = handle.renderPng({
-        x: scroll.scrollLeft / zoom,
-        y: scroll.scrollTop / zoom,
-        width: scroll.clientWidth / zoom,
-        height: scroll.clientHeight / zoom,
-      });
+      const png = handle.renderPng(zoomedViewport(scroll, zoom));
       downloadBytes(png, pngName(fileName), 'image/png');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2307,7 +2307,7 @@ function XlsxEditorContent({
       return;
     }
     const [kind, value] = command.split(':') as [string, string | undefined];
-    if (kind === 'zoom') return setZoom(Number(value) / 100);
+    if (kind === 'zoom') return changeZoom(Number(value) / 100);
     if (kind === 'merge') return mergeSelection(value as MergeAction);
     if (kind === 'numberFormat')
       return formatSelection({ type: 'numberFormat', value: value as NumberFormat });
@@ -2429,7 +2429,7 @@ function XlsxEditorContent({
           canRedo={historyState.canRedo}
           onPrint={print}
           zoom={zoom}
-          onZoomChange={setZoom}
+          onZoomChange={changeZoom}
           onFormat={formatSelection}
           onMerge={mergeSelection}
           singleRow={singleRowToolbar}

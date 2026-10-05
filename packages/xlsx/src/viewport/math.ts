@@ -114,3 +114,29 @@ export function uniformOffsets(count: number, size: number): TrackOffsets {
   for (let i = 0; i <= count; i++) offsets[i] = i * size;
   return offsets;
 }
+
+/** A scroll box's offsets and visible size, in CSS pixels. */
+export interface ScrollBox {
+  scrollLeft: number;
+  scrollTop: number;
+  clientWidth: number;
+  clientHeight: number;
+}
+
+/**
+ * The part of the sheet a scroll box shows at `zoom` (1 = 100%), in sheet
+ * pixels: the viewport a display list is built for, painted at `dpr * zoom`.
+ * Its `x`/`y` stay put across a zoom change when the box scrolls to
+ * `x * zoom`/`y * zoom` (the top-left cell holds, as in Google Sheets).
+ */
+export function zoomedViewport(
+  box: ScrollBox,
+  zoom: number
+): { x: number; y: number; width: number; height: number } {
+  return {
+    x: box.scrollLeft / zoom,
+    y: box.scrollTop / zoom,
+    width: box.clientWidth / zoom,
+    height: box.clientHeight / zoom,
+  };
+}
