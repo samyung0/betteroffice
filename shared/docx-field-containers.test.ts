@@ -3199,3 +3199,54 @@ test.each((["Reject All", "Accept All", "reject by id", "accept by id"] as const
     session.destroy();
   }
 );
+
+// Review F7: text Enter moved out of a field and then suggested for deletion stays deleted through the join: the
+// join folds back only moved text whose deletion state matches (a struck run only into a moved deletion). The saved
+// deleted text is the original deletions plus the suggestion, Reject All restores the original text and Accept All
+// removes them. Also when a peer suggests the deletion.
+const ED = { name: "Ed", date: "2026-10-06T00:00:00Z" };
+const struckJoins: Record<string, [string, string]> = {
+  "L(AA)yy": [link(run("AA")) + run("yy"), ""],
+  "L(AA)-{d}yy": [link(run("AA")) + del(deleted("d")) + run("yy"), "d"],
+};
+const deletedText = (bytes: Uint8Array, part: string) =>
+  [...partXml(bytes, part).matchAll(/<w:delText(?:\s[^>]*)?>([^<]*)<\/w:delText>/g)].map(([, text]) => text).join("");
+test.each(
+  (["body", "cell", "header"] as const).flatMap((where) =>
+    Object.keys(struckJoins).flatMap((shape) =>
+      (["yy", "y", "Ayy"] as const).flatMap((what) => (["alone", "by a peer"] as const).map((who) => [where, shape, what, who] as const))
+    )
+  )
+)("%s | [REF|%s]: Enter, suggest deleting %s (%s), join keeps the suggestion", async (where, shape, what, who) => {
+  const [xml, kept] = struckJoins[shape]!;
+  const [story, part] = STORY[where];
+  const bytes = matrixDocx(where, holder44(field(xml, " REF a \\h ")));
+  const original = storyText(await publish(bytes, (await open(bytes)).encodeState()), where);
+  const A = await open(bytes);
+  const at = matrixLocate(A, story, "AA");
+  const { secondParaId } = A.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+  const suggest = (session: YrsSession) => {
+    const yy = matrixLocate(session, story, "yy");
+    const [from, to] = what === "yy" ? [yy.offset, yy.offset + 2] : what === "y" ? [yy.offset, yy.offset + 1] : [0, yy.offset + 2];
+    session.deleteRange({ story, start: { paraId: yy.paraId, offset: from }, end: { paraId: yy.paraId, offset: to } }, ED);
+  };
+  if (who === "alone") suggest(A);
+  else {
+    const B = await open(bytes, A.encodeState());
+    suggest(B);
+    A.applyUpdate(B.encodeStateAsUpdate(A.encodeStateVector()));
+    B.destroy();
+  }
+  A.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+  const joined = await publish(bytes, A.encodeState());
+  const suggested = what === "Ayy" ? "Ayy" : what;
+  expect([...deletedText(joined, part)].sort().join("")).toBe([...`${kept}${suggested}`].sort().join(""));
+  for (const [mode, text] of [["reject", original.replace("AAyy", `AA${kept}yy`)], ["accept", original.replace(what === "Ayy" ? "Ayy" : "AAyy", what === "Ayy" ? "" : `AA${"yy".slice(what.length)}`)]] as const) {
+    const resolved = await open(bytes, A.encodeState());
+    if (mode === "reject") resolved.rejectChange({ all: true });
+    else resolved.acceptChange({ all: true });
+    expect(storyText(await publish(bytes, resolved.encodeState()), where)).toBe(text);
+    resolved.destroy();
+  }
+  A.destroy();
+});

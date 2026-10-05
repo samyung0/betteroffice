@@ -1116,9 +1116,11 @@ pub(crate) fn rejoin_fields(
                 let node = next
                     .and_then(|next| inline.get(next as usize).cloned())
                     .unwrap_or(Value::Null);
+                // Struck text matches only a moved deletion, so a deletion
+                // suggested on moved text stays a deletion (review F7).
                 let (own, deletion) = moved_text(&node);
                 let Some(next) = next
-                    .filter(|_| !own.is_empty() && left.starts_with(&own) && (!deletion || struck))
+                    .filter(|_| !own.is_empty() && left.starts_with(&own) && deletion == struck)
                 else {
                     if ends_here.is_none() && taken.is_empty() {
                         tail = Some(chunk.start);
@@ -1162,6 +1164,7 @@ pub(crate) fn rejoin_fields(
                 let node = &inline[*next as usize];
                 let units = run_units(node, None, None);
                 node["type"] == "run"
+                    && !chunk.attr_active(crate::DEL)
                     && matches!(units.as_slice(), [(Err((own, _)), _)] if Some(own) == kind.as_ref())
             }) else {
                 if ends_here.is_none() {
