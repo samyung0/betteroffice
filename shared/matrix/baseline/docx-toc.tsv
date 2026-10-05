@@ -1,4 +1,10 @@
-# docx-toc: 47 rows, ids 170e6c40c51808d9; rows not listed are exact
+# docx-toc: 57 rows, ids 48ee888066f34817; rows not listed are exact
+peers | typing at the 1st entry's end while updating | cap<setup+edit	exact+moved
+peers | typing at the 1st entry's end while updating | edit<cap<tail	exact+moved
+peers | typing at the 1st entry's end while updating | setup<cap<edit	exact+moved
+peers | update while typing at the 1st entry's end | cap<setup+edit	exact+moved
+peers | update while typing at the 1st entry's end | edit<cap<tail	exact+moved
+peers | update while typing at the 1st entry's end | setup<cap<edit	exact+moved
 peers | update while updating | cap<setup+edit	exact+text
 peers | update while updating | edit<cap<tail	exact+text
 peers | update while updating | setup<cap<edit	exact+text

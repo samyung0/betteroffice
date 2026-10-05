@@ -1,7 +1,8 @@
 // Insert and Update table of contents (docx-toc track, 2026-10-06): inserting one in an empty paragraph and mid
 // paragraph, updating Insert's and Word's own, editing an entry or a heading after it, and two peers; review 1:
 // a Word TOC whose end paragraph breaks its section (H1), two peers updating at once (M1), a Table of Figures (M2),
-// Insert inside a TOC (L1).
+// Insert inside a TOC (L1); review 2: the old table's own paragraphs carrying an outline level (R2-1) and a peer
+// typing at the first entry's end during an Update (R2-2).
 import type { YrsSession, YrsTocLayout } from "../../packages/docx/src/yrs";
 import { both, docx, field, instr, link, locate, main, orders, p, peers, run, bm, type Edit, type Row } from "./lib";
 
@@ -46,6 +47,19 @@ const SECTION = [
   HEADINGS,
 ].join("");
 
+// Old tables whose own paragraphs carry an outline level (review 2, R2-1): the field opening in a "Contents" title
+// paragraph, and an entry paragraph with its own level. Update lists neither.
+const TITLED = [
+  p("30000001", `${run("Contents")}${fc("begin")}${instr(' TOC \\o "1-3" \\h \\z \\u ')}${fc("separate")}${entry("Old one", 1)}`, `<w:outlineLvl w:val="0"/>`),
+  p("30000002", `${entry("Old two", 2)}${fc("end")}`, `<w:pStyle w:val="TOC2"/>`),
+  HEADINGS,
+].join("");
+const LEVELLED = [
+  p("30000001", `${fc("begin")}${instr(' TOC \\o "1-3" \\h \\z \\u ')}${fc("separate")}${entry("Old one", 1)}`, `<w:pStyle w:val="TOC1"/>`),
+  p("30000002", `${entry("Old two", 2)}${fc("end")}`, `<w:pStyle w:val="TOC2"/><w:outlineLvl w:val="1"/>`),
+  HEADINGS,
+].join("");
+
 // A Table of Figures (`\c`) before the headings (review M2): Update leaves it alone.
 const FIGURES = `${p("40000001", `${fc("begin")}${instr(' TOC \\h \\z \\c "Figure" ')}${fc("separate")}${run("Figure 1")}${fc("end")}`)}${EMPTY}`;
 
@@ -80,6 +94,9 @@ const EDITS: Record<string, Edit> = {
   "type in a heading": (s, st) => void s.insertText({ story: st, paraId: headingAt(s, st, "Details"), offset: 7 }, "Z"),
 };
 
+/** Typing at the first entry's end (review 2, R2-2). */
+const typeEntryEnd: Edit = (s, st) => void s.insertText(at(s, st, "Introduction", 12), "YY");
+
 /** Insert with the caret inside the table's second entry: Word replaces the table (review L1). */
 const insertInside: Edit = (s, st) => void s.insertTableOfContents(at(s, st, "Background", 4), layout);
 
@@ -107,6 +124,11 @@ function rows(): Row[] {
   push(FIGURES, "update with a table of figures only", null, update);
   push(FIGURES, "update with a table of figures and one of headings", insert, update);
   push(EMPTY, "insert inside a table", insert, insertInside);
+  push(TITLED, "update one opening in a heading-level title", null, update);
+  push(LEVELLED, "update one with an entry at an outline level", null, update);
+  // Accepted with the concurrent-join class: the typing sits among the old table's tombstones, after the new table.
+  push(EMPTY, "peers | update while typing at the 1st entry's end", insert, peers(update, typeEntryEnd));
+  push(EMPTY, "peers | typing at the 1st entry's end while updating", insert, peers(typeEntryEnd, update));
   return out;
 }
 

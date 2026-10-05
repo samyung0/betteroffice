@@ -194,8 +194,12 @@ fn switches(instruction: &str) -> Switches {
         .find("\\o")
         .map(|at| {
             let rest = lower[at + 2..].trim_start();
-            rest.strip_prefix('"')
-                .and_then(|rest| rest.split('"').next())
+            // Word quotes the range; an unquoted one runs to the next space or switch.
+            let range = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next(),
+                None => rest.split([' ', '\\']).next(),
+            };
+            range
                 .and_then(|range| {
                     let (from, to) = range.split_once('-')?;
                     Some((from.trim().parse().ok()?, to.trim().parse().ok()?))
@@ -722,14 +726,23 @@ impl TocField {
     }
 }
 
+/// The body's headings of levels `from..=to`. A paragraph inside a table of
+/// contents (its result) is never one, as in Word: Update reads the headings
+/// while the old table is still there.
 fn headings<T: ReadTxn>(
     txn: &T,
     story: &TextRef,
     package: Option<&PackageContext>,
     (from, to): (u8, u8),
 ) -> Vec<TocHeading> {
+    let tables = fields(txn, story, BODY);
     paragraphs(txn, story)
         .into_iter()
+        .filter(|para| {
+            !tables
+                .iter()
+                .any(|table| para.node_start < table.end && para.pilcrow > table.start)
+        })
         .filter_map(|para| {
             let level = outline_level(txn, &para.map, package)? + 1;
             let text = para
@@ -1454,6 +1467,83 @@ mod tests {
         };
         assert_eq!(link.get("href"), Some(&Any::from("#_Toc&\"<x")));
         assert!(units(&doc).contains(r#"[PAGEREF _Toc&"<x \h|2]"#));
+    }
+
+    /// The old table's own paragraphs are never listed by its Update, even
+    /// when they carry an outline level: the field opening in a heading-styled
+    /// "Contents" title (which the split copies onto the old first entry), or
+    /// an entry paragraph with its own level.
+    #[test]
+    fn update_lists_no_paragraph_of_the_table_it_replaces() {
+        let entry = |bm: &str, text: &str| {
+            format!(
+                r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t>{text}</w:t></w:r><w:r><w:tab/></w:r>{}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{}<w:r><w:t>9</w:t></w:r>{}</w:hyperlink>"#,
+                FLD("begin"),
+                FLD("separate"),
+                FLD("end")
+            )
+        };
+        let code =
+            r#"<w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r>"#;
+        let shapes = [
+            (
+                format!(
+                    r#"<w:p w14:paraId="30000001"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Contents</w:t></w:r>{}{code}{}{}</w:p><w:p w14:paraId="30000002">{}{}</w:p>"#,
+                    FLD("begin"),
+                    FLD("separate"),
+                    entry("_Toc1", "Old one"),
+                    entry("_Toc2", "Old two"),
+                    FLD("end"),
+                ),
+                "Contents¶Contents	<[PAGEREF _Toc30000001 \\h|][TOC \\o \"1-3\" \\h \\z \\u|]¶Introduction	[PAGEREF _Toc10000002 \\h|2]¶",
+            ),
+            (
+                format!(
+                    r#"<w:p w14:paraId="30000001"><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>{}{code}{}{}</w:p><w:p w14:paraId="30000002"><w:pPr><w:pStyle w:val="TOC2"/><w:outlineLvl w:val="1"/></w:pPr>{}{}</w:p>"#,
+                    FLD("begin"),
+                    FLD("separate"),
+                    entry("_Toc1", "Old one"),
+                    entry("_Toc2", "Old two"),
+                    FLD("end"),
+                ),
+                "Introduction	<[PAGEREF _Toc10000002 \\h|2][TOC \\o \"1-3\" \\h \\z \\u|]¶",
+            ),
+        ];
+        for (toc, start) in shapes {
+            let doc = open(&package(&format!("{toc}{}", body()), false), 22);
+            assert!(
+                doc.update_toc(&ctx(), None, &layout(&PAGES))
+                    .unwrap()
+                    .is_some()
+            );
+            let text = named(&doc);
+            assert!(text.starts_with(start), "{text}");
+            assert!(!text.contains("Old"), "{text}");
+            let listed: Vec<_> = doc
+                .toc_headings()
+                .unwrap()
+                .into_iter()
+                .map(|heading| heading.text)
+                .collect();
+            assert!(
+                !listed.iter().any(|text| text.starts_with("Old")),
+                "{listed:?}"
+            );
+            assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn levels_come_from_a_quoted_or_unquoted_o_range() {
+        for (code, levels) in [
+            (r#"TOC \o "1-3" \h"#, (1, 3)),
+            (r#"TOC \o 1-2 \h"#, (1, 2)),
+            (r#"TOC \o 2-4"#, (2, 4)),
+            (r#"TOC \o \h \z"#, (1, 9)),
+            (r#"TOC \h \z \u"#, (1, 3)),
+        ] {
+            assert_eq!(switches(code).levels, levels, "{code}");
+        }
     }
 
     fn sync(a: &EditingDoc, b: &EditingDoc) {
