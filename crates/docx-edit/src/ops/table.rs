@@ -3271,12 +3271,18 @@ mod tests {
 
     #[test]
     fn an_auto_fitted_table_holding_a_nested_table_keeps_its_grid() {
-        let doc = inserted(&direct(), 1, 2);
-        type_in(&doc, 0, 1, "Label");
-        doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2)
-            .unwrap();
-        doc.autofit_table(&direct(), &table()).unwrap();
-        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+        let inner = TableLocator::new("body:t0:r0c0", 0);
+        for inner_auto in [false, true] {
+            let doc = inserted(&direct(), 1, 2);
+            type_in(&doc, 0, 1, "Label");
+            doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2)
+                .unwrap();
+            if inner_auto {
+                doc.autofit_table(&direct(), &inner).unwrap();
+            }
+            doc.autofit_table(&direct(), &table()).unwrap();
+            assert_eq!(column_widths(&doc), vec![312.0, 312.0], "inner auto {inner_auto}");
+        }
     }
 
     #[test]
