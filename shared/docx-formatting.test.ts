@@ -123,3 +123,47 @@ test("a zero first line on a numbered paragraph seeds as itself in both seeders"
     projected.destroy();
   }
 });
+
+// pPr children the model has no field for ride the seed's source formatting
+// (2026-10-06); a changed hash means that seed moved.
+test("unmodeled pPr children seed into the source formatting in both seeders", async () => {
+  const KEPT =
+    '<w:pPr><w:kinsoku w:val="0"/><w:wordWrap w:val="0"/><w:overflowPunct w:val="0"/><w:autoSpaceDE w:val="0"/>' +
+    '<w:adjustRightInd w:val="0"/><w:textAlignment w:val="baseline"/></w:pPr>';
+  const CELL = '<w:pPr><w:cnfStyle w:firstRow="1" w:val="100000000000"/></w:pPr>';
+  const bytes = docx(
+    `<w:p>${KEPT}<w:r><w:t>中文段落</w:t></w:r></w:p>` +
+      '<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr><w:r><w:t>D</w:t></w:r></w:p>' +
+      '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>' +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p>${CELL}<w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>`
+  );
+  const seed = await seedOffice("docx", bytes);
+  expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
+    "bb7c8b97ecdac25570f815056924f7114d10a90d75bfcbb74c31cd7505677781"
+  );
+  const kept = (session: YrsSession) =>
+    session.storyIds().flatMap((story) =>
+      session.paragraphs(story).map(({ properties }) => {
+        const original = properties._originalFormatting as Record<string, unknown> | null | undefined;
+        return [original?.extraChildren ?? null, (original?.frame as { dropCap?: string } | undefined)?.dropCap ?? null];
+      })
+    );
+  const native = await createYrsSession({ clientId: 9304 });
+  const projected = await createYrsSession({ clientId: 9305 });
+  try {
+    native.openDocx(bytes, false);
+    native.loadState(seed.state);
+    documentToYrs(projected, await parseDocx(bytes.slice().buffer, { preloadFonts: false }));
+    expect(kept(projected)).toEqual(kept(native));
+    expect(kept(native)).toContainEqual([
+      { kinsoku: { val: "0" }, wordWrap: { val: "0" }, overflowPunct: { val: "0" }, adjustRightInd: { val: "0" }, textAlignment: { val: "baseline" } },
+      null,
+    ]);
+  } finally {
+    native.destroy();
+    projected.destroy();
+  }
+  const xml = documentXml(await exportOffice(bytes, seed, fixed));
+  expect(xml).toContain(KEPT);
+  expect(xml).toContain(CELL);
+});

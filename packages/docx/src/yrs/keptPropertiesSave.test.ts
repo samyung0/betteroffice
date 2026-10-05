@@ -7,7 +7,16 @@ import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { unzipContainer } from '../wasm/opc';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsSession } from './index';
+import { createStyleResolver } from '../styles';
+import {
+  cellParagraphFormatting,
+  createYrsSession,
+  endEmptyListItem,
+  styleNewCells,
+  styleParagraphValues,
+  type ParagraphStyleValues,
+  type YrsSession,
+} from './index';
 import { yrsToDocument } from './yrsToDocument';
 
 // What Word reads that the editor's model does not hold has to come back on
@@ -21,6 +30,8 @@ const STYLES =
   `<w:styles xmlns:w="${W}"><w:docDefaults><w:pPrDefault><w:pPr>` +
   '<w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>' +
   '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/>' +
+  '<w:pPr><w:ind w:left="720"/><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/><w:basedOn w:val="Normal"/>' +
   '<w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/>' +
@@ -87,6 +98,16 @@ function pPrs(xml: string): string[] {
   return [...xml.matchAll(/<w:p(?: [^>]*)?>(.*?)<\/w:p>|<w:p(?: [^>]*)?\/>/g)].map(
     (match) => match[1]?.match(/^<w:pPr>.*<\/w:pPr>/)?.[0] ?? ''
   );
+}
+
+/** Style values as the editor reads them (PagedEditor's `paragraphStyleValues`). */
+function styleValuesFor(session: YrsSession, base: Document): ParagraphStyleValues {
+  const resolver = createStyleResolver(base.package.styles!);
+  return (styleId, story, list = true) =>
+    styleParagraphValues(resolver, styleId, {
+      cell: cellParagraphFormatting(session, resolver, story),
+      numbering: list ? base.package.numbering : undefined,
+    });
 }
 
 function at(session: YrsSession, story: string, index: number, offset = 0) {
@@ -200,8 +221,8 @@ describe('Enter in a paragraph with a tracked revision', () => {
     ]);
     const [copy, source] = saved.slice(0, 2);
     expect(source).toBe(`<w:pPr><w:jc w:val="center"/>${strip(CHANGE)}</w:pPr>`);
-    expect(copy!.replace(/w:id="\d+"/, 'w:id="5"')).toBe(source);
-    expect(revisionIds(copy!)).not.toEqual(['5']);
+    // The copy is numbered above the document's largest revision id, 8.
+    expect(copy).toBe(source!.replace('w:id="5"', 'w:id="9"'));
     session.destroy();
   });
 
@@ -213,10 +234,7 @@ describe('Enter in a paragraph with a tracked revision', () => {
     sync(left, right);
     const saved = await savedDocumentXml(left, base);
     expect(await savedDocumentXml(right, base)).toBe(saved);
-    const ids = pPrs(saved).slice(0, 3).flatMap(revisionIds);
-    expect(ids).toHaveLength(3);
-    expect(new Set(ids).size).toBe(3);
-    expect(ids).toContain('5');
+    expect(pPrs(saved).slice(0, 3).flatMap(revisionIds).sort()).toEqual(['10', '5', '9']);
     left.destroy();
     right.destroy();
   });
@@ -233,10 +251,26 @@ describe('table rows and new cells', () => {
   );
   const rows = (xml: string) => [...xml.matchAll(/<w:tr>.*?<\/w:tr>/g)].map((m) => m[0]);
 
-  it('keeps the grid columns a row skips', async () => {
+  it('keeps the grid columns a row skips while they fit the grid', async () => {
     const { session, base } = await open(bytes);
     session.insertText(at(session, 'body', 0), 'y');
     expect(rows(await savedDocumentXml(session, base))[1]).toStartWith(`<w:tr>${SKIPPED}<w:tc>`);
+    // A row added next to it has every column, so it skips none.
+    session.insertRow({ story: 'body', tableIndex: 0, row: 1, column: 0 }, 'below');
+    const added = rows(await savedDocumentXml(session, base));
+    expect(added[1]).toStartWith(`<w:tr>${SKIPPED}<w:tc>`);
+    expect(added[2]).not.toContain('<w:trPr>');
+    expect(added[2]!.match(/<w:tc>/g)).toHaveLength(3);
+    session.destroy();
+  });
+
+  it('drops the skipped grid columns of a row a column deletion leaves too wide', async () => {
+    const { session, base } = await open(bytes);
+    const last = { story: 'body', tableIndex: 0, row: 0, column: 2 };
+    session.deleteColumn({ anchor: last, head: last });
+    const saved = rows(await savedDocumentXml(session, base));
+    expect(saved[1]).not.toContain('w:gridBefore');
+    expect(saved[1]!.match(/<w:tc>/g)).toHaveLength(2);
     session.destroy();
   });
 
@@ -251,6 +285,88 @@ describe('table rows and new cells', () => {
     expect(rows(saved)[0]).not.toContain('<w:jc ');
     left.destroy();
     right.destroy();
+  });
+});
+
+describe('continuation cells after rows and tables change', () => {
+  const cell = (merge: string, content: string) =>
+    `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>${merge}</w:tcPr>${content}</w:tc>`;
+  const merged = (rows: ReadonlyArray<readonly [string, string, string]>) =>
+    fixture(
+      '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+        rows.map(([merge, content, text]) => `<w:tr>${cell(merge, content)}${cell('', `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`)}</w:tr>`).join('') +
+        '</w:tbl><w:p/>'
+    );
+  const after = (n: number) => `<w:p><w:pPr><w:spacing w:after="${n}"/></w:pPr></w:p>`;
+  const RESTART = '<w:vMerge w:val="restart"/>';
+  const CONTINUE = '<w:vMerge/>';
+  /** Each saved row as `text:continuation spacing after`. */
+  const rows = (xml: string) =>
+    [...xml.matchAll(/<w:tr>.*?<\/w:tr>/g)].map(
+      ([row]) =>
+        `${[...row.matchAll(/<w:t>([^<]*)<\/w:t>/g)].map((text) => text[1]).join('')}:${row.match(/w:after="(\d+)"/)?.[1] ?? '-'}`
+    );
+
+  it('follow their own rows when a row inside the merge goes', async () => {
+    const bytes = merged([
+      [RESTART, '<w:p><w:r><w:t>M</w:t></w:r></w:p>', 'A'],
+      [CONTINUE, after(101), 'B'],
+      [CONTINUE, after(102), 'C'],
+      [CONTINUE, after(103), 'D'],
+    ]);
+    const { session, base } = await open(bytes);
+    const c = { story: 'body', tableIndex: 0, row: 2, column: 1 };
+    session.deleteRow({ anchor: c, head: c });
+    expect(rows(await savedDocumentXml(session, base))).toEqual(['MA:-', 'B:101', 'D:103']);
+    session.destroy();
+  });
+
+  it('keep to their own merge when rows go into another one in the column', async () => {
+    const bytes = merged([
+      [RESTART, '<w:p><w:r><w:t>M</w:t></w:r></w:p>', 'A'],
+      [CONTINUE, after(201), 'B'],
+      [RESTART, '<w:p><w:r><w:t>N</w:t></w:r></w:p>', 'C'],
+      [CONTINUE, after(301), 'D'],
+    ]);
+    const { session, base } = await open(bytes);
+    session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 1 }, 'below');
+    expect(rows(await savedDocumentXml(session, base))).toEqual(['MA:-', ':-', 'B:201', 'NC:-', 'D:301']);
+    session.destroy();
+  });
+
+  it('take nothing from a deleted table whose story ids a new table reuses', async () => {
+    const bytes = merged([
+      [RESTART, '<w:p><w:r><w:t>M</w:t></w:r></w:p>', 'A'],
+      [CONTINUE, after(777), 'B'],
+    ]);
+    const { session, base } = await open(bytes);
+    session.deleteTable({ story: 'body', tableIndex: 0 });
+    session.insertTable(at(session, 'body', 0), 2, 2);
+    const a = { story: 'body', tableIndex: 0, row: 0, column: 0 };
+    const b = { story: 'body', tableIndex: 0, row: 1, column: 0 };
+    session.mergeCells({ anchor: a, head: b });
+    expect(await savedDocumentXml(session, base)).not.toContain('w:after="777"');
+    session.destroy();
+  });
+});
+
+describe('a new row in a table with a header row style', () => {
+  const tc = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const bytes = fixture(
+    '<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/><w:tblLook w:val="04A0" w:firstRow="1"/></w:tblPr>' +
+      `<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>${tc('H0')}${tc('H1')}</w:tr><w:tr>${tc('B0')}${tc('B1')}</w:tr></w:tbl><w:p/>`
+  );
+
+  it('shows its header cells centred, as the file and Word do', async () => {
+    const { session, base } = await open(bytes);
+    const values = styleValuesFor(session, base);
+    const receipt = session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+    styleNewCells(session, receipt.createdStoryIds, values);
+    const added = receipt.createdStoryIds.map((story) => session.paragraphs(story)[0]!.properties.alignment);
+    expect(added).toEqual(['center', 'center']);
+    const xml = await savedDocumentXml(session, base);
+    expect(xml.match(/<w:tr>.*?<\/w:tr>/)![0]).not.toContain('<w:jc ');
+    session.destroy();
   });
 });
 
@@ -342,6 +458,25 @@ describe('a font picked across runs with different fonts', () => {
   });
 });
 
+describe('an East Asian font picked', () => {
+  const bytes = fixture(
+    '<w:p><w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="PMingLiU" w:eastAsiaTheme="minorEastAsia"/></w:rPr><w:t>中文</w:t></w:r></w:p><w:p/>'
+  );
+
+  it('sets the run’s East Asian font too, as Word’s font box does', async () => {
+    const { session, base } = await open(bytes);
+    const { paraId } = session.paragraphs('body')[0]!;
+    session.formatRange(
+      { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 2 } },
+      { fontFamily: { ascii: 'SimSun', hAnsi: 'SimSun' } }
+    );
+    expect((await savedDocumentXml(session, base)).match(/<w:rFonts [^>]*\/>/)?.[0]).toBe(
+      '<w:rFonts w:ascii="SimSun" w:hAnsi="SimSun" w:eastAsia="SimSun" w:cs="SimSun"/>'
+    );
+    session.destroy();
+  });
+});
+
 describe('a tracked deletion of a note reference or a simple field', () => {
   const BY = 'w:author="Rev" w:date="2026-01-01T00:00:00Z"';
   const NOTE = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
@@ -360,5 +495,62 @@ describe('a tracked deletion of a note reference or a simple field', () => {
     expect(xml).toContain(`<w:del w:id="92">${FIELD}</w:del>`);
     expect(xml).toContain(`<w:t>Qe</w:t></w:r>${NOTE}`);
     session.destroy();
+  });
+});
+
+describe('Enter in a list', () => {
+  const NUMBERED = '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>';
+  const bytes = fixture(
+    `<w:p><w:pPr><w:pStyle w:val="ListParagraph"/>${NUMBERED}</w:pPr><w:r><w:t>One</w:t></w:r></w:p>` +
+      '<w:p><w:pPr><w:pStyle w:val="ListBullet"/></w:pPr><w:r><w:t>Bul</w:t></w:r></w:p><w:p/>'
+  );
+  const DIRECT = `<w:pPr><w:pStyle w:val="ListParagraph"/>${NUMBERED}</w:pPr>`;
+  const STYLED = '<w:pPr><w:pStyle w:val="ListBullet"/></w:pPr>';
+
+  it('goes on at the end of an item and ends on an empty one, for direct and style lists', async () => {
+    const { session, base } = await open(bytes);
+    const values = styleValuesFor(session, base);
+    session.splitParagraph(at(session, 'body', 1, 3));
+    session.splitParagraph(at(session, 'body', 0, 3));
+    expect(session.paragraphs('body').map(({ text, properties }) => [text, properties.listMarker ?? null])).toEqual([
+      ['One', '•'],
+      ['', '•'],
+      ['Bul', '•'],
+      ['', '•'],
+      ['', null],
+    ]);
+    expect(pPrs(await savedDocumentXml(session, base)).slice(0, 4)).toEqual([DIRECT, DIRECT, STYLED, STYLED]);
+
+    expect(endEmptyListItem(session, 'body', session.paragraphs('body')[0]!.paraId, values)).toBe(false);
+    for (const index of [1, 3]) {
+      expect(endEmptyListItem(session, 'body', session.paragraphs('body')[index]!.paraId, values)).toBe(true);
+    }
+    const [, direct, , styled] = session.paragraphs('body');
+    expect([direct!.properties.listMarker ?? null, direct!.properties.indentLeft]).toEqual([null, 720]);
+    expect([styled!.properties.listMarker ?? null, styled!.properties.indentLeft ?? null]).toEqual([null, null]);
+    expect(pPrs(await savedDocumentXml(session, base)).slice(0, 4)).toEqual([
+      DIRECT,
+      '<w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>',
+      STYLED,
+      '<w:pPr><w:pStyle w:val="ListBullet"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr></w:pPr>',
+    ]);
+    session.destroy();
+  });
+
+  it('ends for both peers when one types into the empty item meanwhile', async () => {
+    const left = (await open(bytes, 81)).session;
+    const { session: right, base } = await open(bytes, 82);
+    left.splitParagraph(at(left, 'body', 0, 3));
+    sync(left, right);
+    const { paraId } = left.paragraphs('body')[1]!;
+    expect(endEmptyListItem(left, 'body', paraId, styleValuesFor(left, base))).toBe(true);
+    right.insertText({ story: 'body', paraId, offset: 0 }, 'x');
+    sync(left, right);
+    const saved = await savedDocumentXml(left, base);
+    expect(await savedDocumentXml(right, base)).toBe(saved);
+    expect(pPrs(saved)[1]).toBe('<w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>');
+    expect(left.paragraphs('body')[1]!.text).toBe('x');
+    left.destroy();
+    right.destroy();
   });
 });
