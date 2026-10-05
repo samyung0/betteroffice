@@ -67,6 +67,39 @@ export function isXlsxCommand(value: unknown): value is XlsxCommand {
   return (XLSX_COMMANDS as readonly unknown[]).includes(value);
 }
 
+type CommandName<C> = C extends `${infer Name}:${string}` ? Name : C;
+
+/** Whether a command changes the workbook (freezing panes does): a read-only editor runs only those that don't. */
+const EDITS: Record<CommandName<XlsxCommand>, boolean> = {
+  undo: true,
+  redo: true,
+  selectAll: false,
+  deleteValues: true,
+  deleteRows: true,
+  deleteColumns: true,
+  insertRowAbove: true,
+  insertRowBelow: true,
+  insertColumnLeft: true,
+  insertColumnRight: true,
+  insertSheet: true,
+  freezeRows: true,
+  freezeColumns: true,
+  zoom: false,
+  numberFormat: true,
+  bold: true,
+  italic: true,
+  strikethrough: true,
+  align: true,
+  valign: true,
+  wrap: true,
+  merge: true,
+  clearFormatting: true,
+};
+
+export function xlsxCommandEdits(command: XlsxCommand): boolean {
+  return EDITS[command.split(':')[0] as CommandName<XlsxCommand>];
+}
+
 /** What a host menu needs to enable, check and label its items. */
 export interface XlsxCommandState {
   canUndo: boolean;

@@ -989,6 +989,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (command: YrsEditorCommand): boolean => {
         const session = yrsCore.session;
         if (!session || activeYrsRootStory !== 'body') return false;
+        // Read-only: selecting a table is all that runs.
+        if (readOnly && command.type !== 'tableSelect') return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         const positionProjection = getYrsPositionProjectionRef.current('body');
         if (!positionProjection) return false;
@@ -1257,6 +1259,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         author,
         handleYrsStateChange,
         isSuggesting,
+        readOnly,
         yrsCore.inputPositionMap,
         yrsCore.publishDirectInput,
         yrsCore.session,

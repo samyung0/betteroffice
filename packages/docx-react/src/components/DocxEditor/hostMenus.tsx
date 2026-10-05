@@ -15,6 +15,8 @@ export type HostMenuEntry =
       kind: 'item';
       id: string;
       label: string;
+      /** Running it changes the document (or saves it): a read-only editor disables it. */
+      edits: boolean;
       shortcut?: string;
       checked?: boolean;
       disabled?: boolean;
@@ -106,13 +108,13 @@ export function HostMenus({
     const item = (
       id: string,
       label: string,
-      extra: Omit<Extract<HostMenuEntry, { kind: 'item' }>, 'kind' | 'id' | 'label'> = {}
+      extra: Omit<Extract<HostMenuEntry, { kind: 'item' }>, 'kind' | 'id' | 'label'>
     ): HostMenuEntry => ({
       kind: 'item',
       id,
       label,
       ...extra,
-      disabled: disabled || extra.disabled,
+      disabled: (disabled && extra.edits) || extra.disabled,
     });
     const separator: HostMenuEntry = { kind: 'separator' };
     const submenu = (id: string, label: string, items: HostMenuEntry[]): HostMenuEntry => ({
@@ -123,64 +125,97 @@ export function HostMenus({
     });
 
     const file: HostMenuEntry[] = [
-      ...(ctx.onSave ? [item('save', t('toolbar.save'), { shortcut: key('Mod+S') })] : []),
-      ...(ctx.onPageSetup ? [item('page-setup', t('toolbar.pageSetup'))] : []),
+      ...(ctx.onSave
+        ? [item('save', t('toolbar.save'), { edits: true, shortcut: key('Mod+S') })]
+        : []),
+      ...(ctx.onPageSetup ? [item('page-setup', t('toolbar.pageSetup'), { edits: true })] : []),
     ];
     const edit: HostMenuEntry[] = [
-      item('undo', t('formattingBar.undo'), { shortcut: key('Mod+Z'), disabled: !ctx.canUndo }),
-      item('redo', t('formattingBar.redo'), { shortcut: key('Mod+Y'), disabled: !ctx.canRedo }),
+      item('undo', t('formattingBar.undo'), {
+        edits: true,
+        shortcut: key('Mod+Z'),
+        disabled: !ctx.canUndo,
+      }),
+      item('redo', t('formattingBar.redo'), {
+        edits: true,
+        shortcut: key('Mod+Y'),
+        disabled: !ctx.canRedo,
+      }),
       separator,
-      item('select-all', t('hostMenus.selectAll'), { shortcut: key('Mod+A') }),
-      item('delete', t('hostMenus.delete')),
+      item('select-all', t('hostMenus.selectAll'), { edits: false, shortcut: key('Mod+A') }),
+      item('delete', t('hostMenus.delete'), { edits: true }),
       ...(actions.onFindReplace
-        ? [separator, item('find-replace', t('hostMenus.findReplace'), { shortcut: key('Mod+H') })]
+        ? [
+            separator,
+            item('find-replace', t('hostMenus.findReplace'), {
+              edits: false,
+              shortcut: key('Mod+H'),
+            }),
+          ]
         : []),
     ];
     const zoom = Math.round((ctx.zoom ?? 1) * 100);
     const view: HostMenuEntry[] = [
       ...(ctx.onToggleOutline
-        ? [item('show-outline', t('hostMenus.showOutline'), { checked: !!ctx.outlineOpen })]
+        ? [
+            item('show-outline', t('hostMenus.showOutline'), {
+              edits: false,
+              checked: !!ctx.outlineOpen,
+            }),
+          ]
         : []),
-      item('show-comments', t('hostMenus.showComments'), { checked: actions.showComments }),
+      item('show-comments', t('hostMenus.showComments'), {
+        edits: false,
+        checked: actions.showComments,
+      }),
       ...(ctx.onZoomChange
         ? [
             separator,
             submenu(
               'zoom',
               t('hostMenus.zoom'),
-              ZOOMS.map((value) => item(`zoom:${value}`, `${value}%`, { checked: value === zoom }))
+              ZOOMS.map((value) =>
+                item(`zoom:${value}`, `${value}%`, { edits: false, checked: value === zoom })
+              )
             ),
           ]
         : []),
     ];
     const breaks = [
-      ...(ctx.onInsertPageBreak ? [item('insert-page-break', t('toolbar.pageBreak'))] : []),
+      ...(ctx.onInsertPageBreak
+        ? [item('insert-page-break', t('toolbar.pageBreak'), { edits: true })]
+        : []),
       ...(ctx.onInsertSectionBreakNextPage
-        ? [item('insert-section-next', t('toolbar.sectionBreakNextPage'))]
+        ? [item('insert-section-next', t('toolbar.sectionBreakNextPage'), { edits: true })]
         : []),
       ...(ctx.onInsertSectionBreakContinuous
-        ? [item('insert-section-continuous', t('toolbar.sectionBreakContinuous'))]
+        ? [item('insert-section-continuous', t('toolbar.sectionBreakContinuous'), { edits: true })]
         : []),
     ];
     const insert: HostMenuEntry[] = [
-      ...(ctx.onInsertImage ? [item('insert-image', t('toolbar.image'))] : []),
+      ...(ctx.onInsertImage ? [item('insert-image', t('toolbar.image'), { edits: true })] : []),
       ...(ctx.onInsertTable
         ? [submenu('insert-table', t('toolbar.table'), [{ kind: 'grid', id: 'insert-table' }])]
         : []),
-      item('insert-link', t('hostMenus.link'), { shortcut: key('Mod+K') }),
-      item('insert-comment', t('hostMenus.comment')),
-      ...(ctx.onWatermark ? [item('insert-watermark', t('toolbar.watermark'))] : []),
+      item('insert-link', t('hostMenus.link'), { edits: true, shortcut: key('Mod+K') }),
+      item('insert-comment', t('hostMenus.comment'), { edits: true }),
+      ...(ctx.onWatermark
+        ? [item('insert-watermark', t('toolbar.watermark'), { edits: true })]
+        : []),
       ...(breaks.length ? [separator, submenu('insert-break', t('toolbar.break'), breaks)] : []),
     ];
     const spacing = formatting.lineSpacing ?? 240;
     const format: HostMenuEntry[] = [
       submenu('format-text', t('hostMenus.text'), [
-        item('bold', t('formattingBar.bold'), { shortcut: key('Mod+B') }),
-        item('italic', t('formattingBar.italic'), { shortcut: key('Mod+I') }),
-        item('underline', t('formattingBar.underline'), { shortcut: key('Mod+U') }),
-        item('strikethrough', t('formattingBar.strikethrough')),
-        item('superscript', t('formattingBar.superscript'), { shortcut: key('Mod+Shift+=') }),
-        item('subscript', t('formattingBar.subscript'), { shortcut: key('Mod+=') }),
+        item('bold', t('formattingBar.bold'), { edits: true, shortcut: key('Mod+B') }),
+        item('italic', t('formattingBar.italic'), { edits: true, shortcut: key('Mod+I') }),
+        item('underline', t('formattingBar.underline'), { edits: true, shortcut: key('Mod+U') }),
+        item('strikethrough', t('formattingBar.strikethrough'), { edits: true }),
+        item('superscript', t('formattingBar.superscript'), {
+          edits: true,
+          shortcut: key('Mod+Shift+='),
+        }),
+        item('subscript', t('formattingBar.subscript'), { edits: true, shortcut: key('Mod+=') }),
       ]),
       submenu(
         'format-styles',
@@ -189,44 +224,46 @@ export function HostMenus({
           .slice(0, MAX_MENU_STYLES)
           .map((style) =>
             item(`style:${style.styleId}`, style.nameKey ? t(style.nameKey) : style.name, {
+              edits: true,
               checked: (formatting.styleId || 'Normal') === style.styleId,
             })
           )
       ),
       submenu('format-align', t('hostMenus.alignIndent'), [
-        item('align:left', t('hostMenus.left'), { shortcut: key('Mod+L') }),
-        item('align:center', t('hostMenus.center'), { shortcut: key('Mod+E') }),
-        item('align:right', t('hostMenus.right'), { shortcut: key('Mod+R') }),
-        item('align:both', t('hostMenus.justify'), { shortcut: key('Mod+J') }),
+        item('align:left', t('hostMenus.left'), { edits: true, shortcut: key('Mod+L') }),
+        item('align:center', t('hostMenus.center'), { edits: true, shortcut: key('Mod+E') }),
+        item('align:right', t('hostMenus.right'), { edits: true, shortcut: key('Mod+R') }),
+        item('align:both', t('hostMenus.justify'), { edits: true, shortcut: key('Mod+J') }),
         separator,
-        item('indent', t('hostMenus.increaseIndent')),
-        item('outdent', t('hostMenus.decreaseIndent')),
+        item('indent', t('hostMenus.increaseIndent'), { edits: true }),
+        item('outdent', t('hostMenus.decreaseIndent'), { edits: true }),
       ]),
       submenu(
         'format-spacing',
         t('lineSpacing.label'),
         LINE_SPACINGS.map((option) =>
           item(`spacing:${option.twips}`, option.key ? t(option.key) : option.label, {
+            edits: true,
             checked: option.twips === spacing,
           })
         )
       ),
       submenu('format-lists', t('hostMenus.bulletsNumbering'), [
-        item('bulletList', t('hostMenus.bulletedList')),
-        item('numberedList', t('hostMenus.numberedList')),
+        item('bulletList', t('hostMenus.bulletedList'), { edits: true }),
+        item('numberedList', t('hostMenus.numberedList'), { edits: true }),
       ]),
       submenu('format-direction', t('hostMenus.textDirection'), [
-        item('ltr', t('hostMenus.leftToRight'), { checked: !formatting.bidi }),
-        item('rtl', t('hostMenus.rightToLeft'), { checked: !!formatting.bidi }),
+        item('ltr', t('hostMenus.leftToRight'), { edits: true, checked: !formatting.bidi }),
+        item('rtl', t('hostMenus.rightToLeft'), { edits: true, checked: !!formatting.bidi }),
       ]),
       ...(ctx.tableContext?.isInTable && ctx.onTableAction
-        ? [separator, item('table-properties', t('hostMenus.tableProperties'))]
+        ? [separator, item('table-properties', t('hostMenus.tableProperties'), { edits: true })]
         : []),
       ...(ctx.imageContext && ctx.onOpenImageProperties
-        ? [separator, item('image-options', t('hostMenus.imageOptions'))]
+        ? [separator, item('image-options', t('hostMenus.imageOptions'), { edits: true })]
         : []),
       separator,
-      item('clearFormatting', t('formattingBar.clearFormatting')),
+      item('clearFormatting', t('formattingBar.clearFormatting'), { edits: true }),
     ];
     return [
       { id: 'file', label: t('toolbar.file'), items: file },

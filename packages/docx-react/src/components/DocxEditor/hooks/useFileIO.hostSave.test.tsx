@@ -72,6 +72,7 @@ function setup(
       onSaveDocument: io.handleDownloadDocument,
       disableFindReplaceShortcuts: true,
       showFileOpen: false,
+      readOnly: false,
       findReplace: {} as never,
       hyperlinkDialog: {} as never,
       tableSelection: { state: { tableIndex: null } } as never,

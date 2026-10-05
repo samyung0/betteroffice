@@ -14,6 +14,7 @@ export {
   XLSX_COMMANDS,
   ZOOM_PERCENTS,
   isXlsxCommand,
+  xlsxCommandEdits,
   type XlsxCommand,
   type XlsxCommandState,
 } from './commands';

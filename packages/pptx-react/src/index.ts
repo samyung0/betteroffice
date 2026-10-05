@@ -7,7 +7,12 @@ export type {
   PptxTextSelection,
   PptxTextSelectionTarget,
 } from './PptxEditor';
-export { PPTX_COMMAND_IDS, type PptxCommandId, type PptxCommandState } from './commands';
+export {
+  PPTX_COMMAND_EDITS,
+  PPTX_COMMAND_IDS,
+  type PptxCommandId,
+  type PptxCommandState,
+} from './commands';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
   Toolbar,

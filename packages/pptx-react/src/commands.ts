@@ -39,6 +39,40 @@ export const PPTX_COMMAND_IDS = [
 
 export type PptxCommandId = (typeof PPTX_COMMAND_IDS)[number];
 
+/** Whether a command changes the deck (saving counts): a read-only editor runs only those that don't. */
+export const PPTX_COMMAND_EDITS: Record<PptxCommandId, boolean> = {
+  'file.save': true,
+  'file.exportPng': false,
+  'edit.undo': true,
+  'edit.redo': true,
+  'edit.delete': true,
+  'view.present': false,
+  'view.zoom': false,
+  'view.speakerNotes': false,
+  'insert.textBox': true,
+  'insert.image': true,
+  'insert.shape': true,
+  'slide.new': true,
+  'slide.newWithLayout': true,
+  'slide.delete': true,
+  'slide.moveUp': true,
+  'slide.moveDown': true,
+  'slide.moveToStart': true,
+  'slide.moveToEnd': true,
+  'format.bold': true,
+  'format.italic': true,
+  'format.underline': true,
+  'format.alignLeft': true,
+  'format.alignCenter': true,
+  'format.alignRight': true,
+  'format.alignJustify': true,
+  'format.borderWeight': true,
+  'arrange.bringToFront': true,
+  'arrange.bringForward': true,
+  'arrange.sendBackward': true,
+  'arrange.sendToBack': true,
+};
+
 /** What a host menu needs to draw the commands, reported on every change. */
 export interface PptxCommandState {
   enabled: Record<PptxCommandId, boolean>;

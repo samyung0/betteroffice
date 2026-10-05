@@ -80,6 +80,7 @@ import {
   frozenCount,
   freezePaneOp,
   newSheetName,
+  xlsxCommandEdits,
   type XlsxCommand,
   type XlsxCommandState,
 } from './commands';
@@ -2277,6 +2278,7 @@ function XlsxEditorContent({
     applyStructure([freezePaneOp(activeSheet, rows, columns)]);
 
   runCommandRef.current = (command: XlsxCommand) => {
+    if (readOnly && xlsxCommandEdits(command)) return;
     const range = selection ? normalizeRange(selection) : null;
     const rows = range ? range.bottom - range.top + 1 : 0;
     const columns = range ? range.right - range.left + 1 : 0;

@@ -1123,6 +1123,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     findReplace,
     hyperlinkDialog,
     tableSelection,
+    readOnly,
   });
 
   // Handle table insert from toolbar
@@ -1233,6 +1234,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     interactionPageHostRef: canvasRenderer.canvasHostRef,
     i18n,
     partEditOpen: partEditTarget !== null,
+    readOnly,
     onAddComment: useCallback(
       ({ from, to, yPos }: { from: number; to: number; yPos: number | null }) => {
         setCommentSelectionRange({ from, to });
@@ -1604,6 +1606,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       updateComments((prev) => [...prev, comment]);
     },
   };
+  // A read-only editor's comment cards change nothing.
+  if (readOnly) commentCallbacksRef.current = {};
 
   // Stable callbacks wrapper that delegates to ref (avoids recreating items on every render)
   const stableCallbacks = useMemo<CommentCallbacks>(
@@ -1934,7 +1938,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         onToggleOutline={handleToggleOutline}
         scrollPageInfo={scrollPageInfo}
         toolbar={
-          showToolbar && !readOnlyProp ? (
+          // A host that draws the menus keeps the toolbar, disabled, while
+          // read-only: its menus come from the toolbar and keep their read-only items.
+          showToolbar && (!readOnlyProp || onMenus) ? (
             <DocxEditorToolbar
               toolbarRefCallback={toolbarRefCallback}
               document={history.state}
@@ -2124,6 +2130,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             onFindPrevious={handleFindPrevious}
             onReplace={handleReplace}
             onReplaceAll={handleReplaceAll}
+            readOnly={readOnly}
             hyperlinkDialog={hyperlinkDialog}
             onHyperlinkSubmit={handleHyperlinkSubmit}
             onHyperlinkRemove={handleHyperlinkRemove}

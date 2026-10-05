@@ -72,6 +72,8 @@ export interface FindReplaceDialogProps {
   replaceMode?: boolean;
   /** Current match result (from external state) */
   currentResult?: FindResult | null;
+  /** Find only: Replace and Replace all are disabled. */
+  readOnly?: boolean;
   /** Additional CSS class */
   className?: string;
   /** Additional inline styles */
@@ -304,6 +306,7 @@ export function FindReplaceDialog({
   initialSearchText = '',
   replaceMode = false,
   currentResult,
+  readOnly = false,
   className,
   style,
 }: FindReplaceDialogProps): React.ReactElement | null {
@@ -472,7 +475,7 @@ export function FindReplaceDialog({
   );
 
   const handleReplace = useCallback(() => {
-    if (!result || result.totalCount === 0) return;
+    if (readOnly || !result || result.totalCount === 0) return;
 
     const success = onReplace(replaceText);
     if (success) {
@@ -483,6 +486,7 @@ export function FindReplaceDialog({
       }
     }
   }, [
+    readOnly,
     result,
     replaceText,
     searchText,
@@ -506,14 +510,14 @@ export function FindReplaceDialog({
   );
 
   const handleReplaceAll = useCallback(() => {
-    if (!searchText.trim()) return;
+    if (readOnly || !searchText.trim()) return;
 
     const count = onReplaceAll(searchText, replaceText, { matchCase, matchWholeWord });
     if (count > 0) {
       setResult(null);
       onClearHighlightsRef.current?.();
     }
-  }, [searchText, replaceText, matchCase, matchWholeWord, onReplaceAll]);
+  }, [readOnly, searchText, replaceText, matchCase, matchWholeWord, onReplaceAll]);
 
   const toggleReplaceMode = useCallback(() => {
     setShowReplace((prev) => {
@@ -667,6 +671,7 @@ export function FindReplaceDialog({
                   className="docx-find-replace-dialog-input"
                   style={replaceFocused ? INPUT_FOCUS_STYLE : INPUT_STYLE}
                   value={replaceText}
+                  disabled={readOnly}
                   onChange={(e) => setReplaceText(e.target.value)}
                   onKeyDown={handleReplaceKeyDown}
                   onFocus={() => setReplaceFocused(true)}
@@ -678,9 +683,9 @@ export function FindReplaceDialog({
                   <button
                     type="button"
                     className="docx-find-replace-dialog-button"
-                    style={hasMatches ? BUTTON_BASE_STYLE : BUTTON_DISABLED_STYLE}
+                    style={hasMatches && !readOnly ? BUTTON_BASE_STYLE : BUTTON_DISABLED_STYLE}
                     onClick={handleReplace}
-                    disabled={!hasMatches}
+                    disabled={!hasMatches || readOnly}
                     title={t('dialogs.findReplace.replaceCurrentTitle')}
                   >
                     {t('dialogs.findReplace.replaceButton')}
@@ -688,9 +693,9 @@ export function FindReplaceDialog({
                   <button
                     type="button"
                     className="docx-find-replace-dialog-button"
-                    style={hasMatches ? BUTTON_BASE_STYLE : BUTTON_DISABLED_STYLE}
+                    style={hasMatches && !readOnly ? BUTTON_BASE_STYLE : BUTTON_DISABLED_STYLE}
                     onClick={handleReplaceAll}
-                    disabled={!hasMatches}
+                    disabled={!hasMatches || readOnly}
                     title={t('dialogs.findReplace.replaceAllTitle')}
                   >
                     {t('dialogs.findReplace.replaceAllButton')}

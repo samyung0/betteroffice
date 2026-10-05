@@ -71,6 +71,7 @@ export function DocxEditorDialogs({
   onFindPrevious,
   onReplace,
   onReplaceAll,
+  readOnly,
   hyperlinkDialog,
   onHyperlinkSubmit,
   onHyperlinkRemove,
@@ -109,6 +110,8 @@ export function DocxEditorDialogs({
   onFindPrevious: () => FindMatch | null;
   onReplace: (replaceText: string) => boolean;
   onReplaceAll: (searchText: string, replaceText: string, options: FindOptions) => number;
+  /** Find only: the dialog's Replace and Replace all are disabled. */
+  readOnly: boolean;
   // Hyperlink
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
   onHyperlinkSubmit: (data: HyperlinkData) => void;
@@ -160,6 +163,7 @@ export function DocxEditorDialogs({
           initialSearchText={findReplace.state.searchText}
           replaceMode={findReplace.state.replaceMode}
           currentResult={findResultRef.current}
+          readOnly={readOnly}
         />
       )}
       {hyperlinkDialog.state.isOpen && (

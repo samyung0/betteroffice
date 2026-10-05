@@ -10,7 +10,8 @@ const { act, cleanup, renderHook } = await import('@testing-library/react');
 
 function options(
   partEditOpen: boolean,
-  onAddComment: (range: { from: number; to: number; yPos: number | null }) => void = () => {}
+  onAddComment: (range: { from: number; to: number; yPos: number | null }) => void = () => {},
+  readOnly = false
 ) {
   return {
     pagedEditorRef: {
@@ -27,6 +28,7 @@ function options(
     i18n: undefined,
     partEditOpen,
     onAddComment,
+    readOnly,
   };
 }
 
@@ -81,6 +83,35 @@ describe('selection context menu', () => {
     });
 
     expect(added).toBe(0);
+  });
+});
+
+describe('read-only context menu', () => {
+  test('offers only Copy and Select all, and runs nothing else', async () => {
+    let deleted = 0;
+    const base = options(false, () => {}, true);
+    const pagedEditorRef = {
+      current: {
+        ...base.pagedEditorRef.current,
+        deleteSelection: () => {
+          deleted += 1;
+        },
+        insertText: () => {
+          deleted += 1;
+        },
+      } as PagedEditorRef,
+    };
+    const { result } = renderHook(() => useContextMenus({ ...base, pagedEditorRef }));
+    openSelectionMenu(result);
+    expect(result.current.contextMenuItems.map((item) => item.action)).toEqual([
+      'copy',
+      'selectAll',
+    ]);
+    for (const action of ['cut', 'delete', 'paste'] as const)
+      await act(async () => {
+        await result.current.handleContextMenuAction(action);
+      });
+    expect(deleted).toBe(0);
   });
 });
 

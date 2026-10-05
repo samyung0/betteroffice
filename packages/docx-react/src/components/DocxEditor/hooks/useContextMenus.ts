@@ -54,6 +54,7 @@ export function useContextMenus({
   i18n,
   partEditOpen,
   onAddComment,
+  readOnly,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   focusActiveEditor: () => void;
@@ -64,6 +65,8 @@ export function useContextMenus({
   i18n: Translations | undefined;
   partEditOpen: boolean;
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void;
+  /** Only Copy and Select all, and no image menu. */
+  readOnly: boolean;
 }) {
   // DocxEditor's body sits outside its LocaleProvider, so the menus take the
   // strings from `i18n` itself.
@@ -140,7 +143,7 @@ export function useContextMenus({
       } | null;
     }) => {
       // An image right-click takes priority over the text context menu.
-      if (data.image) {
+      if (data.image && !readOnly) {
         imageContextMenu.openForImage({
           x: data.x,
           y: data.y,
@@ -160,7 +163,7 @@ export function useContextMenus({
         tableContext: currentTable,
       });
     },
-    [imageContextMenu, tableContext]
+    [imageContextMenu, readOnly, tableContext]
   );
 
   const handleImageWrapApply = useCallback(
@@ -231,6 +234,20 @@ export function useContextMenus({
     // `formatKeys` handles all modifier swaps on Mac (Ctrl+ → ⌘, Shift+ → ⇧,
     // Alt+ → ⌥) so multi-modifier strings like `Ctrl+Shift+V` render as
     // `⌘⇧V` rather than the wrong `⌘+Shift+V`.
+    if (readOnly)
+      return [
+        {
+          action: 'copy',
+          label: t('contextMenu.copy'),
+          shortcut: formatKeys(t('contextMenu.copyShortcut')),
+          dividerAfter: true,
+        },
+        {
+          action: 'selectAll',
+          label: t('contextMenu.selectAll'),
+          shortcut: formatKeys(t('contextMenu.selectAllShortcut')),
+        },
+      ];
     const items: TextContextMenuItem[] = [
       {
         action: 'cut',
@@ -309,11 +326,13 @@ export function useContextMenus({
     contextMenu.tableContext,
     i18n,
     partEditOpen,
+    readOnly,
     t,
   ]);
 
   const handleContextMenuAction = useCallback(
     async (action: TextContextAction) => {
+      if (readOnly && action !== 'copy' && action !== 'selectAll') return;
       focusActiveEditor();
       const paged = pagedEditorRef.current;
       if (!paged) return;
@@ -428,6 +447,7 @@ export function useContextMenus({
       interactionPageHostRef,
       onAddComment,
       partEditOpen,
+      readOnly,
     ]
   );
 

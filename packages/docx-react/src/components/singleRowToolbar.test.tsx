@@ -105,6 +105,41 @@ test('the find dialog and the placeholders draw the host icons', () => {
     expect(container.querySelector(`[data-host-icon="${name}"]`)).not.toBeNull();
 });
 
+test('a read-only find dialog finds but cannot replace', () => {
+  const onFind = mock(() => ({ matches: [], totalCount: 2, currentIndex: 0 }));
+  const onReplace = mock(() => true);
+  const onReplaceAll = mock(() => 1);
+  const { getByLabelText, getByRole, getByText } = render(
+    <FindReplaceDialog
+      isOpen
+      readOnly
+      replaceMode
+      initialSearchText="Seed"
+      onClose={() => {}}
+      onFind={onFind}
+      onFindNext={() => null}
+      onFindPrevious={() => null}
+      onReplace={onReplace}
+      onReplaceAll={onReplaceAll}
+    />
+  );
+  fireEvent.keyDown(getByLabelText(en.dialogs.findReplace.findAriaLabel), { key: 'Enter' });
+  expect(onFind).toHaveBeenCalled();
+  getByText(en.dialogs.findReplace.matchCount.replace('{current}', '1').replace('{total}', '2'));
+  const replace = getByLabelText(en.dialogs.findReplace.replaceAriaLabel) as HTMLInputElement;
+  expect(replace.disabled).toBe(true);
+  for (const name of [
+    en.dialogs.findReplace.replaceButton,
+    en.dialogs.findReplace.replaceAllButton,
+  ]) {
+    const button = getByRole('button', { name }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+  }
+  expect(onReplace).not.toHaveBeenCalled();
+  expect(onReplaceAll).not.toHaveBeenCalled();
+});
+
 test('the single row scrolls the menu, history, zoom and groups and pins the trailing items', () => {
   const { getByTestId } = render(<SingleRow />);
   const bar = getByTestId('formatting-bar');
@@ -336,4 +371,53 @@ test('host menus list the first 40 paragraph styles and refuse a disabled item',
   reported.run('bold');
   reported.run('style:Style1');
   expect(onFormat).not.toHaveBeenCalled();
+});
+
+test("a read-only editor's host menus say which items edit and keep the others usable", () => {
+  const onZoomChange = mock(() => {});
+  const actions = {
+    onAddComment: mock(() => {}),
+    onEditAction: mock(() => {}),
+    onFindReplace: mock(() => {}),
+    onInsertImageFile: mock(() => {}),
+    onToggleComments: mock(() => {}),
+    showComments: false,
+  };
+  let model: DocxMenuModel | null = null;
+  render(
+    <EditorToolbar
+      singleRow
+      hostMenus
+      zoom={1}
+      disabled
+      canUndo
+      onSave={() => {}}
+      onZoomChange={onZoomChange}
+      onFormat={() => {}}
+    >
+      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+    </EditorToolbar>
+  );
+  const reported = model as DocxMenuModel | null;
+  if (!reported) throw new Error('no menus');
+  const flat = (entries: HostMenuEntry[]): HostMenuEntry[] =>
+    entries.flatMap((entry) => (entry.kind === 'submenu' ? flat(entry.items) : [entry]));
+  const items = flat(reported.menus.flatMap((menu) => menu.items)).flatMap((entry) =>
+    entry.kind === 'item' ? [entry] : []
+  );
+  const reads = ['select-all', 'find-replace', 'show-comments'];
+  for (const item of items) {
+    expect(item.edits, item.id).toBe(!reads.includes(item.id) && !item.id.startsWith('zoom:'));
+    expect(!!item.disabled, item.id).toBe(item.edits);
+  }
+
+  reported.run('select-all');
+  expect(actions.onEditAction).toHaveBeenCalledWith('selectAll');
+  reported.run('find-replace');
+  expect(actions.onFindReplace).toHaveBeenCalledTimes(1);
+  reported.run('zoom:150');
+  expect(onZoomChange).toHaveBeenCalledWith(1.5);
+  reported.run('undo');
+  reported.run('delete');
+  expect(actions.onEditAction).toHaveBeenCalledTimes(1);
 });

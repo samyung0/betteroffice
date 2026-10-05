@@ -15,7 +15,8 @@ import { yrsHyperlinkAtSelection, yrsSelectedText } from '../yrsCommands';
  *
  * Listens on `document` so the shortcut works even when focus isn't in the
  * editor. `disableFindReplaceShortcuts` lets the host app reclaim Cmd+F /
- * Cmd+H when the editor is embedded inside another shell.
+ * Cmd+H when the editor is embedded inside another shell. A read-only editor
+ * keeps only Find (its dialog can't replace).
  */
 export function useKeyboardShortcuts({
   pagedEditorRef,
@@ -27,6 +28,7 @@ export function useKeyboardShortcuts({
   findReplace,
   hyperlinkDialog,
   tableSelection,
+  readOnly,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   containerRef?: React.RefObject<HTMLElement | null>;
@@ -37,6 +39,7 @@ export function useKeyboardShortcuts({
   findReplace: ReturnType<typeof useFindReplace>;
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
   tableSelection: ReturnType<typeof useTableSelection>;
+  readOnly: boolean;
 }) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -45,7 +48,7 @@ export function useKeyboardShortcuts({
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
 
       // Delete a layout-selected table.
-      if (!cmdOrCtrl && !e.shiftKey && !e.altKey) {
+      if (!readOnly && !cmdOrCtrl && !e.shiftKey && !e.altKey) {
         if (e.key === 'Delete' || e.key === 'Backspace') {
           if (tableSelection.state.tableIndex !== null) {
             e.preventDefault();
@@ -79,6 +82,7 @@ export function useKeyboardShortcuts({
           const selectedText = selection && !selection.isCollapsed ? selection.toString() : '';
           findReplace.openReplace(selectedText);
         } else if (e.key.toLowerCase() === 'k') {
+          if (readOnly) return;
           e.preventDefault();
           const session = pagedEditorRef.current?.getYrsSession();
           if (session) {
@@ -112,5 +116,6 @@ export function useKeyboardShortcuts({
     findReplace,
     hyperlinkDialog,
     tableSelection,
+    readOnly,
   ]);
 }
