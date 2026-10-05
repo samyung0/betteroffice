@@ -29,6 +29,13 @@ const WORD = [
   heading("10000006", 3, "Details"),
 ].join("");
 
+// The UAT journey's shape: text before the field in its first paragraph, the end inside the last entry.
+const CONTENTS = [
+  p("30000001", `<w:r><w:t>Contents</w:t><w:tab/></w:r>${fc("begin")}${instr(' TOC \\o "1-3" \\h \\z \\u ')}${fc("separate")}${entry("Old one", 1)}`),
+  p("30000002", `${entry("Old two", 2)}${fc("end")}`),
+  HEADINGS,
+].join("");
+
 const layout: YrsTocLayout = {
   pages: { "10000002": "1", "10000004": "2", "10000006": "ii" },
   tabTwips: 9350,
@@ -71,6 +78,7 @@ function rows(): Row[] {
   push(EMPTY, "insert, update after a rename", both(insert, rename), update);
   push(WORD, "update Word's own", null, update);
   push(WORD, "update Word's own after a rename", rename, update);
+  push(CONTENTS, "update one with text before it", null, update);
   for (const [name, edit] of Object.entries(EDITS)) push(EMPTY, `insert | ${name}`, insert, edit);
   push(EMPTY, "peers | update while renaming", insert, peers(update, rename));
   push(EMPTY, "peers | update while adding a heading", insert, peers(update, addHeading));

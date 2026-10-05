@@ -431,7 +431,12 @@ impl EditingDoc {
             .unwrap_or(field.start);
         let field = if head < field.start {
             self.split_paragraph(ctx, Position::new(BODY, field.start), None)?;
-            let Some(field) = pick(self)? else {
+            // The new mark went in ahead of the field, which now opens the next paragraph.
+            let Some(field) = self
+                .toc_fields(BODY)?
+                .into_iter()
+                .find(|moved| moved.start == field.start + 1)
+            else {
                 return Ok(None);
             };
             field
@@ -448,18 +453,22 @@ impl EditingDoc {
             },
         )?;
         // The field's paragraphs go whole; text after its end stays in the
-        // last one's own paragraph, now first after the new entries.
+        // last one's own paragraph, now first after the new entries. An end
+        // that opened that paragraph (Word's shape) ran ahead of its fields in
+        // the saved paragraph; one later in it is left unnumbered.
         let (remove_to, kept) = if field.end == last.pilcrow {
             (last.pilcrow + 1, None)
         } else {
-            (field.end, Some(last.pilcrow))
+            (
+                field.end,
+                (field.end == last.node_start).then_some(last.pilcrow),
+            )
         };
         for continuation in fields_continuations(&txn, &story, field.start, field.end) {
             remove_field_markers(&mut txn, &continuation);
         }
         story.remove_range(&mut txn, field.start, remove_to - field.start);
         if let Some(pilcrow) = kept {
-            // The old end ran ahead of that text in its saved paragraph.
             let pilcrow = pilcrow - (remove_to - field.start);
             renumber_fields(&mut txn, &story, field.start, pilcrow, -1);
         }
@@ -1157,6 +1166,41 @@ mod tests {
             r#"Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-2" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶after¶Introduction¶Background¶Details¶"#
         );
         assert_eq!(toc_bookmarks(&doc)["10000002"], "_Toc1");
+    }
+
+    /// Text before the field (the matrix's "Contents" shape, the end inside
+    /// the last entry) is split off; the new field opens its own paragraph.
+    #[test]
+    fn update_splits_off_text_before_the_field() {
+        let fld = |kind: &str| format!(r#"<w:r><w:fldChar w:fldCharType="{kind}"/></w:r>"#);
+        let entry = |bm: &str, text: &str| {
+            format!(
+                r#"<w:hyperlink w:anchor="{bm}"><w:r><w:t>{text}</w:t></w:r><w:r><w:tab/></w:r>{}<w:r><w:instrText xml:space="preserve"> PAGEREF {bm} \h </w:instrText></w:r>{}<w:r><w:t>9</w:t></w:r>{}</w:hyperlink>"#,
+                fld("begin"),
+                fld("separate"),
+                fld("end")
+            )
+        };
+        let toc = format!(
+            r#"<w:p w14:paraId="30000001"><w:r><w:t>Contents</w:t><w:tab/></w:r>{}<w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r>{}{}</w:p><w:p w14:paraId="30000002">{}{}</w:p>"#,
+            fld("begin"),
+            fld("separate"),
+            entry("_Toc1", "Old one"),
+            entry("_Toc2", "Old two"),
+            fld("end"),
+        );
+        let doc = open(&package(&format!("{toc}{}", body()), false), 17);
+        let caret = Position::new(BODY, index_of(&doc, "Old two"));
+        assert!(
+            doc.update_toc(&ctx(), Some(&caret), &layout(&PAGES))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            named(&doc),
+            r#"Contents	¶Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-3" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶Details	[PAGEREF _Toc10000006 \h|4]¶¶Introduction¶Some text.¶Background¶Deep¶Details¶"#
+        );
+        assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
     }
 
     fn sync(a: &EditingDoc, b: &EditingDoc) {
