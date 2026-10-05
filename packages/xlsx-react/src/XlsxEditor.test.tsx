@@ -567,6 +567,67 @@ describe('XlsxEditor keyboard', () => {
     expect(view.workbook().cell(0, row, col).input).toBe('78');
   });
 
+  it('leaves a scrolled-away edit where it is for keys that type nothing', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    await scrollTo(view, 1500, 600);
+    const input = view.editor()!;
+    for (const key of ['Meta', 'Control', 'Shift', 'Alt']) await press(input, key);
+    await press(input, 'c', { metaKey: true });
+    expect([view.surface.scrollLeft, view.surface.scrollTop]).toEqual([1500, 600]);
+    expect(input.style.opacity).toBe('0');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('paints once for an Enter that commits and scrolls', async () => {
+    const view = await mountEditor(wide);
+    // the last row the window shows whole: Enter moves below the edge.
+    const offsets = wide.grid.rowOffsets;
+    const last = offsets.findLastIndex((bottom) => bottom <= VIEWPORT.height) - 1;
+    view.click({ row: last, col: 1 });
+    await press(view.surface, '7');
+    const handle = view.workbook();
+    const displayList = handle.displayList.bind(handle);
+    let paints = 0;
+    handle.displayList = (viewport) => {
+      paints += 1;
+      return displayList(viewport);
+    };
+    await press(view.editor()!, 'Enter');
+    // what the browser does next: the scroll event, then a frame.
+    await act(async () => {
+      fireEvent.scroll(view.surface);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(view.surface.scrollTop).toBeGreaterThan(0);
+    expect(view.workbook().cell(0, last, 1).input).toBe('7');
+    expect(paints).toBe(1);
+  });
+
+  it('judges a key against the live view, not a frame its scroll has not repainted', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    // scrolled, and the key lands before the scroll's frame is painted.
+    await act(async () => {
+      view.surface.scrollLeft = 1500;
+    });
+    await press(view.surface, 'ArrowRight');
+    expect(view.nameBox().value).toBe('C4');
+    expect(view.surface.scrollLeft).toBe(Math.floor(view.workbook().cellPosition(0, 3, 2).x));
+  });
+
+  it('brings a partly hidden edit fully into view when typing into it', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    const start = view.workbook().cellPosition(0, 3, 1).x;
+    await scrollTo(view, Math.ceil(start) + 10, 0);
+    expect(view.editor()!.style.opacity).toBe('');
+    await press(view.editor()!, '5');
+    expect(view.surface.scrollLeft).toBe(Math.floor(start));
+  });
+
   it('leaves the formula bar focused when an edit it committed scrolls back', async () => {
     const view = await mountEditor(wide);
     view.click({ row: 3, col: 1 });

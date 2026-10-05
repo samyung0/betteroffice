@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    Cell, CellRange, CellRef, CellValue, ColStyle, DrawCmd, Error, FreezePane, GridGeometry,
-    Hyperlink, PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellRange, CellRef, CellValue, ColStyle, DrawCmd, Error, FreezePane,
+    GridGeometry, Hyperlink, PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, Color, Fill, Stylesheet, Xf};
 use xlsx_render::geometry::{autofit_row_height_pt, row_pt_to_px};
@@ -398,6 +398,36 @@ fn an_unsized_row_fits_its_tallest_font_without_writing_a_height() {
             "{name} changed on save"
         );
     }
+}
+
+#[test]
+fn a_new_unstyled_cell_in_a_tall_font_column_grows_its_row_for_scroll_positions() {
+    let mut parts = autofit_parts();
+    for (name, bytes) in parts.iter_mut() {
+        if name == "xl/worksheets/sheet1.xml" {
+            // no declared default row height; column B carries the 30pt style.
+            *bytes = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr baseColWidth="8"/><cols><col min="2" max="2" width="9" style="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Short</t></is></c></row></sheetData></worksheet>"#
+                .to_vec();
+        }
+    }
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let below = CellRef::new(4, 1);
+    let before = workbook.cell_scroll_bounds(SheetId(0), below).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(2, 1),
+            "typed",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let after = workbook.cell_scroll_bounds(SheetId(0), below).unwrap();
+    let model = workbook.model();
+    let fresh = GridGeometry::new(&model.sheets[0], &model.styles);
+    // the memoized geometry follows the row the column's font grew.
+    assert!(after.1 > before.1);
+    assert_eq!(after.1, fresh.row_y(4));
 }
 
 #[test]

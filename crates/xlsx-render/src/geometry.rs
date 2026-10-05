@@ -149,6 +149,8 @@ pub fn autofit_relevant(
         .format
         .default_row_height_pt
         .unwrap_or(DEFAULT_ROW_HEIGHT_PT);
+    // as autofit_rows: a cell naming no style inherits its column's
+    let style = style.or_else(|| sheet.col_style(at.col));
     autofit_height(
         styles,
         style,

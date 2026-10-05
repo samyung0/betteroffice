@@ -172,9 +172,9 @@ export interface PptxEditorProps {
   onReady?: (api: PptxEditorApi) => void;
   /**
    * Called once per opened deck, once its first slide is painted (pictures
-   * included), with the deck the editor already holds.
+   * included), with the deck the editor holds: read it there, do not keep it.
    */
-  onFirstPaint?: (snapshot: DeckSnapshot) => void;
+  onFirstPaint?: (snapshot: Readonly<DeckSnapshot>) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
