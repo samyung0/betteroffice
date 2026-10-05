@@ -348,8 +348,115 @@ fn resolve_autofit_column_widths(
 }
 
 /// The budget a table may spend, after its own left indent.
-fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
+pub(crate) fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
     (content_width - table_block.indent.unwrap_or(0.0).max(0.0)).max(0.0)
+}
+
+fn fixed_layout(table_block: &TableBlock) -> bool {
+    table_block.layout_mode.as_deref() == Some("fixed")
+}
+
+fn cell_preferred_px(cell: &crate::types::TableCell, parent_width: f64) -> Option<f64> {
+    preferred_width_px(
+        cell.preferred_width.as_ref(),
+        cell.width_value,
+        cell.width_type.as_deref(),
+        parent_width,
+        cell.width,
+    )
+}
+
+/// What Word's AutoFit Contents leaves: no fixed layout and no preferred
+/// width on the table or any cell, so Word sizes every column from content.
+pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
+    !table_block.rows.is_empty()
+        && !fixed_layout(table_block)
+        && preferred_width_px(
+            table_block.preferred_width.as_ref(),
+            table_block.width,
+            table_block.width_type.as_deref(),
+            content_width,
+            None,
+        )
+        .is_none()
+        && table_block
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .all(|cell| cell_preferred_px(cell, content_width).is_none())
+}
+
+/// A `w:noWrap` cell whose text is one unbreakable line (ECMA-376 §17.4.30):
+/// outside a fixed layout and without a fixed (dxa) preferred width.
+pub fn unbreakable_cell(table_block: &TableBlock, cell: &crate::types::TableCell) -> bool {
+    cell.no_wrap == Some(true)
+        && !fixed_layout(table_block)
+        && !(matches!(cell.width_type.as_deref(), None | Some("dxa"))
+            && cell.width_value.is_some_and(|value| value > 0.0))
+}
+
+/// Widens each column to `needs[column]` (its unbreakable cells' one-line
+/// width) out of the room the table has: the page room a table without its
+/// own width leaves, then the empty room of the other columns (their width
+/// above `maximums`, their widest content). A column a merged cell covers
+/// gives nothing. Short of room, every column gets the same share of its need.
+pub fn widen_unbreakable_columns(
+    table_block: &TableBlock,
+    content_width: f64,
+    needs: &[f64],
+    maximums: &[f64],
+    widths: &mut [f64],
+) {
+    let deficits: Vec<f64> = widths
+        .iter()
+        .enumerate()
+        .map(|(column, width)| (needs.get(column).copied().unwrap_or(0.0) - width).max(0.0))
+        .collect();
+    let deficit: f64 = deficits.iter().sum();
+    if !(deficit > 0.0) {
+        return;
+    }
+    let mut merged = vec![false; widths.len()];
+    for cell in resolve_cell_grid(table_block) {
+        if cell.col_span > 1 {
+            for slot in merged.iter_mut().skip(cell.column_index).take(cell.col_span) {
+                *slot = true;
+            }
+        }
+    }
+    let rooms: Vec<f64> = widths
+        .iter()
+        .enumerate()
+        .map(|(column, width)| {
+            if merged[column] || deficits[column] > 0.0 || needs.get(column) > Some(&0.0) {
+                0.0
+            } else {
+                (width - maximums.get(column).copied().unwrap_or(*width)).max(0.0)
+            }
+        })
+        .collect();
+    let room: f64 = rooms.iter().sum();
+    let states_width = preferred_width_px(
+        table_block.preferred_width.as_ref(),
+        table_block.width,
+        table_block.width_type.as_deref(),
+        content_width,
+        None,
+    )
+    .is_some();
+    let slack = if states_width {
+        0.0
+    } else {
+        (table_width_budget(table_block, content_width) - widths.iter().sum::<f64>()).max(0.0)
+    };
+    let granted = deficit.min(slack + room);
+    let taken = (granted - slack).max(0.0);
+    for (column, width) in widths.iter_mut().enumerate() {
+        *width += deficits[column] * granted / deficit;
+        if room > 0.0 {
+            *width -= rooms[column] * taken / room;
+        }
+    }
 }
 
 /// Grid columns whose width no cell states, for a table that states no width

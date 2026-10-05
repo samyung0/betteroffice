@@ -2620,6 +2620,60 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    /// Aligns the table `table_json` ([`TableLocator`]) `left`, `center` or
+    /// `right` on the page. Always a plain local edit.
+    pub fn set_table_alignment(
+        &self,
+        table_json: &str,
+        alignment: &str,
+    ) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_table_alignment(&EditCtx::local("", ""), &table, alignment)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    /// Makes the first `count` rows of the table `table_json`
+    /// ([`TableLocator`]) its repeated header rows; `0` unpins them. Always a
+    /// plain local edit.
+    pub fn set_header_rows(&self, table_json: &str, count: u32) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let receipt = self
+            .engine
+            .doc()
+            .set_header_rows(&EditCtx::local("", ""), &table, count)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    /// Makes the columns the [`TableRange`] `range_json` spans equal (every
+    /// column when it spans one), keeping their total. Always a plain local
+    /// edit.
+    pub fn distribute_columns(&self, range_json: &str) -> Result<String, JsValue> {
+        let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
+        let receipt = self
+            .engine
+            .doc()
+            .distribute_columns(&EditCtx::local("", ""), &range)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
+    /// Word's AutoFit Contents on the table `table_json` ([`TableLocator`]).
+    /// Always a plain local edit.
+    pub fn autofit_table(&self, table_json: &str) -> Result<String, JsValue> {
+        let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
+        let receipt = self
+            .engine
+            .doc()
+            .autofit_table(&EditCtx::local("", ""), &table)
+            .map_err(js_err)?;
+        serde_json::to_string(&receipt).map_err(js_err)
+    }
+
     /// Inserts `text` at `(story, para_id, offset)`, or after the tables and
     /// breaks that open that paragraph slot when the location is ahead of
     /// them. It must contain no paragraph or line breaks, and it inherits the

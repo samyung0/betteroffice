@@ -8,7 +8,8 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
     content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths, resolve_table_width_px,
+    resolve_table_column_widths, resolve_table_width_px, sized_by_content, table_width_budget,
+    unbreakable_cell, widen_unbreakable_columns,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1652,6 +1653,84 @@ fn column_content_maximums(
     Ok(maximums)
 }
 
+/// A cell's widest unwrapped line plus its side padding.
+fn cell_content_width(
+    cell: &crate::types::TableCell,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<f64, String> {
+    let left = cell
+        .padding
+        .as_ref()
+        .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.left);
+    let right = cell
+        .padding
+        .as_ref()
+        .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
+    let budget = (content_width - left - right).max(1.0);
+    let mut widest = 0.0_f64;
+    for block in &cell.blocks {
+        if let LayoutBlock::Paragraph(paragraph) = block {
+            widest = widest.max(paragraph_content_width(paragraph, budget, config)?);
+        }
+    }
+    Ok(widest + left + right)
+}
+
+/// Columns of a table [`sized_by_content`]: the autofit algorithm over each
+/// cell's widest unwrapped line, inside the room left of the page.
+fn content_fitted_column_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<f64>, String> {
+    let mut fitted = table.clone();
+    fitted.width_algorithm = Some("autofit".to_owned());
+    for cell in fitted.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+        cell.max_content_width = Some(cell_content_width(cell, content_width, config)?);
+    }
+    Ok(resolve_table_column_widths(
+        &fitted,
+        table_width_budget(table, content_width),
+    ))
+}
+
+/// Widens the columns of `w:noWrap` cells that must stay on one line
+/// ([`unbreakable_cell`]) with [`widen_unbreakable_columns`].
+fn widen_for_unbreakable_cells(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    widths: &mut [f64],
+) -> Result<(), String> {
+    let grid: Vec<_> = resolve_cell_grid(table)
+        .into_iter()
+        .filter(|entry| entry.col_span == 1 && entry.column_index < widths.len())
+        .collect();
+    let cell_at = |row: usize, index: usize| table.rows.get(row).and_then(|row| row.cells.get(index));
+    if !grid.iter().any(|entry| {
+        cell_at(entry.row_index, entry.cell_index).is_some_and(|cell| unbreakable_cell(table, cell))
+    }) {
+        return Ok(());
+    }
+    let mut needs = vec![0.0_f64; widths.len()];
+    let mut maximums = vec![0.0_f64; widths.len()];
+    for entry in grid {
+        let Some(cell) = cell_at(entry.row_index, entry.cell_index) else {
+            continue;
+        };
+        let width = cell_content_width(cell, content_width, config)?;
+        let slot = if unbreakable_cell(table, cell) {
+            &mut needs[entry.column_index]
+        } else {
+            &mut maximums[entry.column_index]
+        };
+        *slot = slot.max(width);
+    }
+    widen_unbreakable_columns(table, content_width, &needs, &maximums, widths);
+    Ok(())
+}
+
 fn measure_table(
     table: &mut TableBlock,
     content_width: f64,
@@ -1660,12 +1739,18 @@ fn measure_table(
     let explicit_width =
         resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
     let target_width = explicit_width.unwrap_or(content_width);
-    let mut column_widths = resolve_table_column_widths(table, content_width);
-    let content_sized = content_sized_columns(table, content_width, &column_widths);
-    if !content_sized.is_empty() {
-        let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
-        grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
-    }
+    let column_widths = if sized_by_content(table, content_width) {
+        content_fitted_column_widths(table, content_width, config)?
+    } else {
+        let mut widths = resolve_table_column_widths(table, content_width);
+        let content_sized = content_sized_columns(table, content_width, &widths);
+        if !content_sized.is_empty() {
+            let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
+            grow_content_sized_columns(table, content_width, &maximums, &mut widths);
+        }
+        widen_for_unbreakable_cells(table, content_width, config, &mut widths)?;
+        widths
+    };
     let grid = resolve_cell_grid(table);
     let mut rows = Vec::with_capacity(table.rows.len());
 

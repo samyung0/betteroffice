@@ -385,9 +385,17 @@ fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
             ]))
         })
         .collect();
-    map.insert(txn, "tblPr", to_any_map(data.tbl_pr.clone()));
-    map.insert(txn, "grid", to_any_array(data.grid.clone()));
-    map.insert(txn, "rows", to_any_array(rows));
+    // Only changed fields are written, so ops touching different fields (a
+    // peer's row insert and this peer's table alignment) both survive.
+    for (key, value) in [
+        ("tblPr", to_any_map(data.tbl_pr.clone())),
+        ("grid", to_any_array(data.grid.clone())),
+        ("rows", to_any_array(rows)),
+    ] {
+        if !matches!(map.get(txn, key), Some(Out::Any(current)) if current == value) {
+            map.insert(txn, key, value);
+        }
+    }
 }
 
 fn span(cell: &CellData) -> OpResult<(usize, usize)> {
@@ -1891,6 +1899,139 @@ impl EditingDoc {
             Vec::new(),
         )
     }
+
+    /// Sets the table's horizontal alignment (`w:jc`): `left`, `center` or
+    /// `right`. Only `tblPr` changes; `w:tblInd` stays and applies on `left`.
+    pub fn set_table_alignment(
+        &self,
+        ctx: &EditCtx,
+        locator: &TableLocator,
+        alignment: &str,
+    ) -> OpResult<TableReceipt> {
+        if !matches!(alignment, "left" | "center" | "right") {
+            return Err(OpError::InvalidFormatValue(format!(
+                "table alignment {alignment:?} is not left, center or right"
+            )));
+        }
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        data.tbl_pr
+            .insert("justification".to_owned(), Any::from(alignment));
+        write_table(&mut txn, &table, &data);
+        receipt(
+            locator.clone(),
+            Some(&data),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Makes the first `count` rows the repeated header rows (`w:tblHeader`)
+    /// and every later row an ordinary one; `0` unpins them all.
+    pub fn set_header_rows(
+        &self,
+        ctx: &EditCtx,
+        locator: &TableLocator,
+        count: u32,
+    ) -> OpResult<TableReceipt> {
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        if count as usize > data.rows.len() {
+            return Err(invalid(format!(
+                "{count} header rows exceed the table's {} rows",
+                data.rows.len()
+            )));
+        }
+        for (index, row) in data.rows.iter_mut().enumerate() {
+            row.tr_pr
+                .insert("isHeader".to_owned(), Any::Bool(index < count as usize));
+        }
+        write_table(&mut txn, &table, &data);
+        receipt(
+            locator.clone(),
+            Some(&data),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Word's Distribute Columns: the columns `range` spans when it spans two
+    /// or more, otherwise every column, become equal, keeping their grid
+    /// total. Every cell touching them gets the dxa width of the grid it spans.
+    pub fn distribute_columns(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
+        let locator = range.anchor.table();
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, &locator)?;
+        let mut data = read_table(&table, &txn)?;
+        let rect = checked_rect(&data, range)?;
+        let (cell_anchors, columns) = anchors(&data)?;
+        let spread = if rect.right - rect.left >= 2 {
+            rect.left..rect.right
+        } else {
+            0..columns
+        };
+        ensure_grid(&mut data, columns);
+        let total: f64 = data.grid[spread.clone()]
+            .iter()
+            .filter_map(|width| any_number(Some(width)))
+            .sum::<f64>()
+            .round();
+        let count = spread.len() as f64;
+        if !(total >= count) {
+            return Err(invalid("the columns have no width to distribute"));
+        }
+        let each = (total / count).floor();
+        let remainder = total - each * count;
+        for (index, column) in spread.clone().enumerate() {
+            let extra = if (index as f64) < remainder { 1.0 } else { 0.0 };
+            data.grid[column] = Any::Number(each + extra);
+        }
+        for anchor in &cell_anchors {
+            let end = anchor.column + anchor.colspan;
+            if end <= spread.start || anchor.column >= spread.end {
+                continue;
+            }
+            let width: f64 = data.grid[anchor.column..end]
+                .iter()
+                .filter_map(|value| any_number(Some(value)))
+                .sum();
+            let tc_pr = &mut data.rows[anchor.row].cells[anchor.cell_index].tc_pr;
+            tc_pr.insert("width".to_owned(), Any::Number(width));
+            tc_pr.insert("widthType".to_owned(), Any::from("dxa"));
+        }
+        write_table(&mut txn, &table, &data);
+        receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
+    }
+
+    /// Word's AutoFit Contents: the table and every cell lose their preferred
+    /// widths (`0`, `auto`) and a fixed layout turns back to autofit, so the
+    /// layout sizes the columns from their content.
+    pub fn autofit_table(&self, ctx: &EditCtx, locator: &TableLocator) -> OpResult<TableReceipt> {
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, locator)?;
+        let mut data = read_table(&table, &txn)?;
+        let auto_width = |properties: &mut HashMap<String, Any>| {
+            properties.insert("width".to_owned(), Any::Number(0.0));
+            properties.insert("widthType".to_owned(), Any::from("auto"));
+        };
+        auto_width(&mut data.tbl_pr);
+        data.tbl_pr.remove("tableLayout");
+        for cell in data.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+            auto_width(&mut cell.tc_pr);
+        }
+        write_table(&mut txn, &table, &data);
+        receipt(
+            locator.clone(),
+            Some(&data),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -2672,6 +2813,293 @@ mod tests {
         assert_eq!(receipt.deleted_story_ids.len(), 4);
         assert_eq!(doc.story_len("body").unwrap(), 0);
         assert_eq!(doc.story_ids_for_test(), vec!["body".to_owned()]);
+    }
+
+    fn table() -> TableLocator {
+        TableLocator::new("body", 0)
+    }
+
+    fn whole(rows: u32, columns: u32) -> TableRange {
+        TableRange::new(cell(0, 0), cell(rows - 1, columns - 1))
+    }
+
+    fn type_in(doc: &EditingDoc, row: u32, column: u32, text: &str) {
+        let story = format!("body:t0:r{row}c{column}");
+        doc.insert_text(
+            &direct(),
+            Position::new(story.as_str(), 0),
+            text,
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+    }
+
+    fn laid_out(
+        doc: &EditingDoc,
+    ) -> (
+        docx_layout::types::Input,
+        docx_layout::display_list::DisplayList,
+    ) {
+        use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
+        use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
+
+        let mut blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        let mut input = Input {
+            measured: blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect(),
+            options: LayoutOptions {
+                page_size: Some(Size { w: 816.0, h: 1056.0 }),
+                margins: Some(PageMargins {
+                    top: 96.0,
+                    right: 108.0,
+                    bottom: 96.0,
+                    left: 108.0,
+                    header: None,
+                    footer: None,
+                }),
+                ..LayoutOptions::default()
+            },
+        };
+        let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+        let display_list = docx_layout::build_display_list(&input, &layout).unwrap();
+        (input, display_list)
+    }
+
+    fn column_widths(doc: &EditingDoc) -> Vec<f64> {
+        let (input, _) = laid_out(doc);
+        let docx_layout::types::BlockExtent::Table(table) = &input.measured[0].measure else {
+            panic!("expected a measured table");
+        };
+        table.column_widths.iter().map(|width| width.round()).collect()
+    }
+
+    /// `(page, x, baseline)` of every text run reading `text`.
+    fn runs(doc: &EditingDoc, text: &str) -> Vec<(usize, f64, f64)> {
+        use docx_layout::display_list::Primitive;
+        let (_, display_list) = laid_out(doc);
+        display_list
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, display)| {
+                display.primitives.iter().filter_map(move |primitive| match primitive {
+                    Primitive::Text(run) if run.text.trim() == text => Some((
+                        page,
+                        run.x.as_f64().unwrap(),
+                        run.baseline_y.as_f64().unwrap(),
+                    )),
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_alignment_writes_only_jc_and_moves_the_table() {
+        let doc = inserted(&direct(), 1, 2);
+        type_in(&doc, 0, 0, "A");
+        doc.set_table_width(&direct(), &table(), 4320.0).unwrap();
+        let before = table_value(&doc);
+        let left = runs(&doc, "A")[0].1;
+        doc.set_table_alignment(&direct(), &table(), "center").unwrap();
+        let after = table_value(&doc);
+        assert_eq!(after.0["justification"], "center");
+        assert_eq!((&after.1, &after.2), (&before.1, &before.2));
+        // A 288px table on a 600px column moves right by half the difference.
+        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 156.0);
+        doc.set_table_alignment(&direct(), &table(), "right").unwrap();
+        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 312.0);
+        assert!(
+            doc.set_table_alignment(&direct(), &table(), "middle")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn vertical_alignment_sits_text_at_the_cell_bottom() {
+        let doc = inserted(&direct(), 1, 2);
+        type_in(&doc, 0, 0, "A");
+        type_in(&doc, 0, 1, "B");
+        for _ in 0..3 {
+            doc.split_paragraph(&direct(), Position::new("body:t0:r0c1", 1), None)
+                .unwrap();
+        }
+        let top = runs(&doc, "A")[0].2;
+        assert_eq!(top, runs(&doc, "B")[0].2);
+        doc.set_cell_text_format(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &HashMap::from([("verticalAlign".to_owned(), Any::from("bottom"))]),
+        )
+        .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["verticalAlign"], "bottom");
+        assert!(runs(&doc, "A")[0].2 > top + 40.0, "three lines lower");
+    }
+
+    #[test]
+    fn header_rows_repeat_on_every_page_the_table_spans() {
+        let doc = inserted(&direct(), 60, 1);
+        type_in(&doc, 0, 0, "Head");
+        assert_eq!(runs(&doc, "Head").len(), 1);
+        doc.set_header_rows(&direct(), &table(), 1).unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["isHeader"], true);
+        assert_eq!(rows[1]["trPr"]["isHeader"], false);
+        let pages: Vec<usize> = runs(&doc, "Head").iter().map(|run| run.0).collect();
+        assert!(pages.len() > 1, "the header row repeats: {pages:?}");
+        assert_eq!(pages, (0..pages.len()).collect::<Vec<_>>());
+        doc.set_header_rows(&direct(), &table(), 0).unwrap();
+        assert_eq!(runs(&doc, "Head").len(), 1);
+        assert!(doc.set_header_rows(&direct(), &table(), 61).is_err());
+    }
+
+    #[test]
+    fn distribute_columns_evens_the_selected_columns_and_keeps_their_total() {
+        let doc = inserted(&direct(), 2, 3);
+        doc.set_column_width(&direct(), &cell(0, 0), 1001.0).unwrap();
+        doc.distribute_columns(&direct(), &TableRange::new(cell(0, 0), cell(1, 1)))
+            .unwrap();
+        let (_, grid, rows) = table_value(&doc);
+        assert_eq!(grid, serde_json::json!([2061, 2060, 3120]));
+        assert_eq!(rows[1]["cells"][0]["tcPr"]["width"], 2061);
+        assert_eq!(rows[1]["cells"][1]["tcPr"]["widthType"], "dxa");
+
+        // One cell distributes the whole table; a merged cell takes its span.
+        let merged = inserted(&direct(), 2, 3);
+        merged.set_column_width(&direct(), &cell(0, 2), 1000.0).unwrap();
+        merged
+            .merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 1)))
+            .unwrap();
+        merged
+            .distribute_columns(&direct(), &TableRange::cell(cell(1, 2)))
+            .unwrap();
+        let (_, grid, rows) = table_value(&merged);
+        assert_eq!(grid, serde_json::json!([2414, 2413, 2413]));
+        assert_eq!(rows[0]["cells"][0]["tcPr"]["width"], 4827);
+        let widths = column_widths(&merged);
+        assert_eq!(widths, vec![208.0, 208.0, 208.0], "the table keeps its 9360 twips");
+    }
+
+    #[test]
+    fn autofit_drops_every_preferred_width_and_sizes_columns_to_content() {
+        let doc = inserted(&direct(), 2, 2);
+        type_in(&doc, 0, 0, "A");
+        type_in(&doc, 1, 1, "A much longer line of text");
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+        doc.autofit_table(&direct(), &table()).unwrap();
+        let (tbl_pr, _, rows) = table_value(&doc);
+        assert_eq!((tbl_pr["width"].clone(), tbl_pr["widthType"].clone()), (serde_json::json!(0), serde_json::json!("auto")));
+        assert!(tbl_pr.get("tableLayout").is_none());
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                assert_eq!(cell["tcPr"]["width"], 0);
+                assert_eq!(cell["tcPr"]["widthType"], "auto");
+            }
+        }
+        let widths = column_widths(&doc);
+        assert!(widths[0] < widths[1], "{widths:?}");
+        assert!(widths.iter().sum::<f64>() < 600.0, "{widths:?}");
+        // Typing grows a column, as Word re-fits it.
+        type_in(&doc, 1, 0, "Grown wider than before");
+        assert!(column_widths(&doc)[0] > widths[0]);
+    }
+
+    #[test]
+    fn no_wrap_widens_its_column_into_the_other_columns_room() {
+        let doc = inserted(&direct(), 1, 2);
+        let long = "An unbreakable heading that is wide";
+        type_in(&doc, 0, 0, long);
+        type_in(&doc, 0, 1, "B");
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+        let no_wrap = |value: Any| {
+            doc.set_cell_text_format(
+                &direct(),
+                &TableRange::cell(cell(0, 0)),
+                &HashMap::from([("noWrap".to_owned(), value)]),
+            )
+            .unwrap();
+        };
+        no_wrap(Any::Bool(true));
+        let widths = column_widths(&doc);
+        assert!(widths[0] > 312.0 && widths[1] < 312.0, "{widths:?}");
+        assert_eq!(widths.iter().sum::<f64>(), 624.0);
+        let (_, display_list) = laid_out(&doc);
+        let baselines: HashSet<i64> = display_list.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                docx_layout::display_list::Primitive::Text(run)
+                    if !run.text.trim().is_empty() && long.contains(run.text.trim()) =>
+                {
+                    run.baseline_y.as_f64().map(|y| y.round() as i64)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(baselines.len(), 1, "the heading stays on one line");
+        no_wrap(Any::Bool(false));
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+
+        // A fixed layout ignores it (ECMA-376 §17.4.30).
+        no_wrap(Any::Bool(true));
+        let mut tbl_pr = table_value(&doc).0;
+        tbl_pr["tableLayout"] = "fixed".into();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetEmbedAttr {
+                index: 0,
+                key: "tblPr".to_owned(),
+                value: Any::from_json(&tbl_pr.to_string()).unwrap(),
+            }],
+            &direct(),
+        )
+        .unwrap();
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+    }
+
+    #[test]
+    fn table_menu_ops_keep_a_peer_s_typing_and_alignment_survives_a_row_insert() {
+        let left = inserted(&direct(), 2, 2);
+        let right = EditingDoc::new(75);
+        right.apply_update_v1(&left.encode_state_as_update_v1()).unwrap();
+        let sync = |a: &EditingDoc, b: &EditingDoc| {
+            a.apply_update_v1(&b.encode_diff_v1(&a.encode_state_vector_v1()).unwrap())
+                .unwrap();
+            b.apply_update_v1(&a.encode_diff_v1(&b.encode_state_vector_v1()).unwrap())
+                .unwrap();
+        };
+        type_in(&right, 0, 0, "typed");
+        left.set_table_alignment(&direct(), &table(), "center").unwrap();
+        left.set_header_rows(&direct(), &table(), 1).unwrap();
+        left.distribute_columns(&direct(), &whole(2, 2)).unwrap();
+        left.set_cell_text_format(
+            &direct(),
+            &whole(2, 2),
+            &HashMap::from([
+                ("verticalAlign".to_owned(), Any::from("center")),
+                ("noWrap".to_owned(), Any::Bool(true)),
+            ]),
+        )
+        .unwrap();
+        left.autofit_table(&direct(), &table()).unwrap();
+        sync(&left, &right);
+        assert_eq!(table_value(&left), table_value(&right));
+        assert_eq!(project_story(&right, "body:t0:r0c0").unwrap(), project_story(&left, "body:t0:r0c0").unwrap());
+        assert!(runs(&left, "typed").len() == 1 && runs(&right, "typed").len() == 1);
+
+        // Alignment and a peer's row insert touch different fields.
+        right.insert_row(&direct(), &cell(1, 0), true).unwrap();
+        left.set_table_alignment(&direct(), &table(), "right").unwrap();
+        sync(&left, &right);
+        assert_eq!(table_value(&left), table_value(&right));
+        let (tbl_pr, _, rows) = table_value(&left);
+        assert_eq!(tbl_pr["justification"], "right");
+        assert_eq!(rows.as_array().unwrap().len(), 3);
     }
 
     impl EditingDoc {
