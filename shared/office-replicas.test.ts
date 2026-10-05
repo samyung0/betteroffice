@@ -6,12 +6,16 @@ import {
   configureOfficeReplicas,
   dropOfficeReplica,
   exportOffice,
+  inspectOffice,
   officeReplicaStats,
   seedOffice,
   xlsxPendingEffects,
   type OfficeCheckpoint,
 } from "./office-checkpoint";
-import { XlsxDocument } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
+import {
+  XlsxDocument,
+  XlsxEffectsReader,
+} from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
 
 const fixture = (name: string) =>
   readFile(new URL(`../apps/demo/public/${name}`, import.meta.url));
@@ -126,6 +130,101 @@ test("a state that is not a whole workbook is applied, with or without a room", 
   expect(await xlsxPendingEffects(bytes, tail)).toEqual(expected);
   configureOfficeReplicas(1 << 30);
   expect(await xlsxPendingEffects(bytes, tail, ROOM)).toEqual(expected);
+});
+
+test("a whole state the reader refuses fails as its apply does, and drops the replica", async () => {
+  const bytes = await fixture("showcase.xlsx");
+  const seeded = await seedOffice("xlsx", bytes);
+  // A hostile peer repins the source chart to a negative offset.
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, seeded.state);
+  doc.clientID = 424242;
+  const catalog = doc.getMap("xlsx:axis-catalog").get("sheet:0") as Y.Map<Y.Map<string>>;
+  const [[frame, record]] = [...catalog.get("charts")!];
+  const chart = JSON.parse(record);
+  chart.value.anchor.from.colOff = -1;
+  const sheet = doc.getMap("xlsx:sheets").get("sheet:0") as Y.Map<Y.Map<string>>;
+  sheet.get("charts")!.set(frame, JSON.stringify(chart));
+  const state = Y.encodeStateAsUpdate(doc);
+  const editor = XlsxDocument.openCollaborative(bytes, 7004);
+  let refusal = "";
+  try {
+    editor.applyUpdateJson(state);
+  } catch (error) {
+    refusal = String(error);
+  } finally {
+    editor.free();
+  }
+  expect(refusal).toContain("repins xl/charts/chart1.xml");
+  const reader = new XlsxEffectsReader(bytes, 7005);
+  try {
+    expect(() => reader.pendingEffectsJson(state)).toThrow(refusal);
+  } finally {
+    reader.free();
+  }
+  configureOfficeReplicas(1 << 30);
+  await xlsxPendingEffects(bytes, seeded, ROOM);
+  await expect(xlsxPendingEffects(bytes, { ...seeded, state }, ROOM)).rejects.toThrow(refusal);
+  expect(officeReplicaStats().replicas).toBe(0);
+});
+
+test("a state left to a fresh session that fails keeps the replica", async () => {
+  const sample = await fixture("sample.xlsx");
+  const seeded = await seedOffice("xlsx", sample);
+  // Another workbook's seed is not this source's whole document: the reader
+  // leaves it to an apply, which refuses its base.
+  const foreign = (await seedOffice("xlsx", await fixture("showcase.xlsx"))).state;
+  configureOfficeReplicas(1 << 30);
+  await xlsxPendingEffects(sample, seeded, ROOM);
+  await expect(
+    xlsxPendingEffects(sample, { ...seeded, state: foreign }, ROOM)
+  ).rejects.toThrow("base does not match");
+  expect(officeReplicaStats().replicas).toBe(1);
+  expect(await counted(() => xlsxPendingEffects(sample, seeded, ROOM))).toMatchObject({ hits: 1 });
+});
+
+test("a state without the source's active sheet reads, reloads, exports and takes agent edits", async () => {
+  const book = XlsxDocument.open(await fixture("sample.xlsx"));
+  let bytes: Uint8Array;
+  let last: number;
+  try {
+    last = JSON.parse(book.sheetInfoJson()).sheetIds.length;
+    book.applyOpsJson(
+      JSON.stringify({ ops: [{ type: "addSheet", index: last, name: "Last" }] })
+    );
+    book.setActiveSheet(last);
+    bytes = book.saveBytes();
+  } finally {
+    book.free();
+  }
+  const seeded = await seedOffice("xlsx", bytes);
+  const doc = XlsxDocument.openCollaborative(bytes, 7006);
+  let checkpoint: OfficeCheckpoint;
+  try {
+    doc.applyUpdateJson(seeded.state);
+    doc.applyOpsJson(JSON.stringify({ ops: [{ type: "removeSheet", index: last }] }));
+    checkpoint = { ...seeded, state: doc.encodeStateAsUpdate() };
+  } finally {
+    doc.free();
+  }
+  const expected = applied(bytes, checkpoint.state);
+  expect(expected).toMatchObject([{ operation: "remove", label: "Sheet Last" }]);
+  expect(await xlsxPendingEffects(bytes, checkpoint)).toEqual(expected);
+  await exportOffice(bytes, checkpoint, {
+    seed: "0".repeat(64),
+    now: "2026-10-05T00:00:00.000Z",
+  });
+  const [entry] = await inspectOffice(bytes, checkpoint);
+  const at = entry.label.lastIndexOf("!");
+  await applyOfficeCommands(bytes, checkpoint, [
+    {
+      type: "set_cell",
+      sheet: entry.label.slice(0, at),
+      cell: entry.label.slice(at + 1),
+      expectedValue: entry.value,
+      value: "agent",
+    },
+  ]);
 });
 
 test("edits and exports never touch a replica", async () => {

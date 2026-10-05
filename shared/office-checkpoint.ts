@@ -1067,7 +1067,10 @@ async function open(
               "target_id is not an XLSX cell"
             );
           const sheetId = id.slice(0, marker);
-          if (!xlsxCells(doc).sheets.some((item) => item.id === sheetId))
+          const { sheetIds } = JSON.parse(doc.sheetInfoJson()) as {
+            sheetIds: string[];
+          };
+          if (!sheetIds.includes(sheetId))
             throw new OfficeEditError(
               "unavailable_target",
               "the sheet is no longer in the workbook"
@@ -1164,10 +1167,11 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
  * workbook. The reader never applies a state: each save's state is checked
  * and projected beside it, so a replica stays the opened source and serves
  * any state of its base. Only xlsxPendingEffects takes a room; edits,
- * inspection, exports and rebases always open their own session. A call that
- * fails drops its room's replica. Under the budget, a new replica pushes out
- * the least recently used ones only once they have been idle for
- * REPLICA_IDLE_MS; otherwise it is not kept.
+ * inspection, exports and rebases always open their own session. A call on a
+ * replica that fails drops it; a state left to a fresh session (not a whole
+ * document) never touches it, so that session failing keeps it. Under the
+ * budget, a new replica pushes out the least recently used ones only once
+ * they have been idle for REPLICA_IDLE_MS; otherwise it is not kept.
  *
  * DOCX and PPTX keep none. A DOCX open is a small part of its baseline next
  * to the projection. A PPTX replica saved about 0.3 s per save of the 24 MB

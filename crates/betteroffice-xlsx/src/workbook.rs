@@ -615,9 +615,11 @@ impl Workbook {
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
+        let active_name = self.active_sheet_name();
         self.authority = candidate;
         self.preserved.resize(model.sheets.len());
-        self.install_model(model)?;
+        self.install_model_with(model, Some(structure.clone()))?;
+        self.restore_active_sheet(active_name.as_deref());
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
@@ -809,7 +811,9 @@ impl Workbook {
         self.authority
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
+        let active_name = self.active_sheet_name();
         self.install_model(model)?;
+        self.restore_active_sheet(active_name.as_deref());
         self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();

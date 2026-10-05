@@ -1641,3 +1641,68 @@ fn a_reader_leaves_what_it_would_not_adopt_whole_to_an_apply() {
         Ok(Some(effects)) => panic!("read effects of a foreign state: {effects}"),
     }
 }
+
+/// Two value-only sheets, the second one active as Excel saves the last
+/// viewed tab.
+fn second_sheet_active() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    for name in ["First", "Second"] {
+        let mut sheet = Sheet::new(name);
+        sheet.set_cell(
+            at("A1"),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        model.sheets.push(sheet);
+    }
+    let mut book = Workbook::from_model(model).unwrap();
+    book.set_active_sheet(SheetId(1)).unwrap();
+    book.save().unwrap()
+}
+
+#[test]
+fn a_state_without_the_active_sheet_adopts_on_the_remaining_one() {
+    let options = CalculationOptions::default();
+    let source = second_sheet_active();
+    for index in [0, 1] {
+        let mut editor = Workbook::open_collaborative(&source, 3061).unwrap();
+        apply(&mut editor, Op::RemoveSheet { index });
+        let state = editor.encode_state_as_update_v1();
+        let mut fresh = Workbook::open_collaborative_recalculated(&source, 3062, options).unwrap();
+        assert_eq!(fresh.sheet_info().unwrap().active_sheet, SheetId(1));
+        fresh.apply_update_v1(&state, options).unwrap();
+        let info = fresh.sheet_info().unwrap();
+        assert_eq!(info.active_sheet, SheetId(0));
+        assert_eq!(info.sheet_names, [["Second", "First"][index]]);
+        assert_reader_matches_apply(&source, &[state]);
+        Workbook::open(&fresh.save().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn a_peer_on_a_sheet_another_peer_undoes_moves_to_a_remaining_one() {
+    let options = CalculationOptions::default();
+    let source = second_sheet_active();
+    let mut a = Workbook::open_collaborative(&source, 3063).unwrap();
+    let mut b = Workbook::open_collaborative(&source, 3064).unwrap();
+    let send = |from: &Workbook, to: &mut Workbook| {
+        let diff = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+        to.apply_update_v1(&diff, options).unwrap();
+    };
+    apply(
+        &mut a,
+        Op::AddSheet {
+            index: 2,
+            name: "Added".into(),
+        },
+    );
+    send(&a, &mut b);
+    b.set_active_sheet(SheetId(2)).unwrap();
+    a.undo(options).unwrap();
+    send(&a, &mut b);
+    let info = b.sheet_info().unwrap();
+    assert_eq!(info.sheet_names, ["First", "Second"]);
+    assert_eq!(info.active_sheet, SheetId(1));
+}
