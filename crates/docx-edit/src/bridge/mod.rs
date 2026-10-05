@@ -2273,7 +2273,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
             LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
         )
     });
-    let mut first = true;
+    let mut part = 0_usize;
     let mut emit = |runs, start: u32, width: u32| {
         let mut continuation = ListState::default();
         let mut paragraph = flush_paragraph(
@@ -2285,22 +2285,32 @@ fn flush_paragraph_parts<T: ReadTxn>(
             env,
             paragraph_pm_start + u64::from(start),
             width,
-            if first || !flow {
+            if part == 0 || !flow {
                 &mut *list_state
             } else {
                 &mut continuation
             },
         );
-        if flow
-            && !first
-            && let Some(attrs) = &mut paragraph.attrs
-        {
-            attrs.list_marker = None;
-            let spacing = attrs.spacing.get_or_insert_with(ParagraphSpacing::default);
-            spacing.before = Some(0.0);
-            spacing.before_lines = None;
+        if part > 0 {
+            // Layout and paint key blocks by id, so each part needs its own.
+            if let BlockId::Str(id) = &mut paragraph.id {
+                *id = format!("{id}#{part}");
+            }
+            // Text after a break goes on in the same paragraph, as in Word: at
+            // the left indent, without its space-before or number.
+            if flow && let Some(attrs) = &mut paragraph.attrs {
+                attrs.list_marker = None;
+                attrs.page_break_before = None;
+                if let Some(indent) = &mut attrs.indent {
+                    indent.first_line = None;
+                    indent.hanging = None;
+                }
+                let spacing = attrs.spacing.get_or_insert_with(ParagraphSpacing::default);
+                spacing.before = Some(0.0);
+                spacing.before_lines = None;
+            }
         }
-        first = false;
+        part += 1;
         LayoutBlock::Paragraph(paragraph)
     };
     let mut segment_start = 0_u32;
