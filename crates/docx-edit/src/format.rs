@@ -216,19 +216,9 @@ impl InlineFormatDelta {
                 );
             }
         }
-        match &self.font_family {
-            Patch::Keep => {}
-            Patch::Clear => put("fontFamily", Any::Null),
-            Patch::Set(patch) => {
-                let h_ansi = patch.h_ansi.clone().unwrap_or_else(|| patch.ascii.clone());
-                put(
-                    "fontFamily",
-                    Any::Map(Arc::new(HashMap::from([
-                        ("ascii".into(), Any::from(patch.ascii.as_str())),
-                        ("hAnsi".into(), Any::from(h_ansi)),
-                    ]))),
-                );
-            }
+        // A picked font merges into each run's own fonts: see `picked_font`.
+        if self.font_family == Patch::Clear {
+            put("fontFamily", Any::Null);
         }
         for (key, value) in &self.other {
             if PROTECTED_ATTRS.contains(&key.as_str()) {
@@ -354,6 +344,33 @@ impl EditingDoc {
         if !attrs.is_empty() {
             story.format(&mut txn, range.start, len, attrs);
         }
+        if let Patch::Set(patch) = &delta.font_family {
+            let mut pieces = Vec::new();
+            let mut offset = 0;
+            for diff in story.diff(&txn, YChange::identity) {
+                let chunk_end = offset + out_len(&diff.insert);
+                let (from, to) = (offset.max(range.start), chunk_end.min(range.end));
+                if from < to {
+                    let own = diff
+                        .attributes
+                        .as_deref()
+                        .and_then(|attrs| attrs.get("fontFamily"));
+                    pieces.push((from, to - from, picked_font(own, patch)));
+                }
+                offset = chunk_end;
+                if offset >= range.end {
+                    break;
+                }
+            }
+            for (from, len, font) in pieces {
+                story.format(
+                    &mut txn,
+                    from,
+                    len,
+                    Attrs::from([(Arc::from("fontFamily"), font)]),
+                );
+            }
+        }
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {
@@ -434,6 +451,26 @@ impl EditingDoc {
             ..Receipt::default()
         })
     }
+}
+
+/// A font picked over a run's own fonts, as Word's font box sets it: the
+/// Latin and complex-script slots take the font (their theme fonts go, as
+/// they would win over it), the East Asian slot keeps the run's.
+fn picked_font(own: Option<&Any>, patch: &FontFamilyPatch) -> Any {
+    let mut font = match own {
+        Some(Any::Map(own)) => (**own).clone(),
+        _ => HashMap::new(),
+    };
+    let h_ansi = patch.h_ansi.as_deref().unwrap_or(&patch.ascii);
+    for (slot, theme, name) in [
+        ("ascii", "asciiTheme", patch.ascii.as_str()),
+        ("hAnsi", "hAnsiTheme", h_ansi),
+        ("cs", "csTheme", patch.ascii.as_str()),
+    ] {
+        font.insert(slot.to_owned(), Any::from(name));
+        font.remove(theme);
+    }
+    Any::Map(Arc::new(font))
 }
 
 pub(crate) fn range_len(range: &StoryRange) -> OpResult<u32> {

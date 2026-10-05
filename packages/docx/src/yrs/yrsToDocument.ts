@@ -384,12 +384,14 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
 
   const fontFamily = asObject(attributes.fontFamily);
   if (fontFamily) {
-    const ascii = asString(fontFamily.ascii);
+    // A slot's theme font wins over its name in Word; the seed resolves the
+    // name from the theme, which the source did not write.
+    const font = (slot: string) => (fontFamily[`${slot}Theme`] ? undefined : asString(fontFamily[slot]));
     formatting.fontFamily = {
-      ascii: (ascii ?? null) as string | undefined,
-      hAnsi: (asString(fontFamily.hAnsi) ?? null) as string | undefined,
-      eastAsia: asString(fontFamily.eastAsia),
-      cs: asString(fontFamily.cs) || ascii,
+      ascii: (font('ascii') ?? null) as string | undefined,
+      hAnsi: (font('hAnsi') ?? null) as string | undefined,
+      eastAsia: font('eastAsia'),
+      cs: font('cs'),
       asciiTheme: (fontFamily.asciiTheme ?? null) as NonNullable<
         TextFormatting['fontFamily']
       >['asciiTheme'],
