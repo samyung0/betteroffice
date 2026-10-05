@@ -74,8 +74,8 @@ test('the find dialog and the placeholders draw the host icons', () => {
   const icons = Object.fromEntries(
     ICON_NAMES.map((name) => [
       name,
-      function HostIcon() {
-        return <i data-host-icon={name} />;
+      function HostIcon({ size }: IconProps) {
+        return <i data-host-icon={name} data-size={size} />;
       },
     ])
   ) as IconSet;
