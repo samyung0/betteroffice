@@ -733,7 +733,6 @@
       "verticalRL": "Vertical (top-bottom, RL)",
       "verticalLR": "Vertical (bottom-top, LR)"
     },
-    "toggleNoWrap": "Toggle no-wrap",
     "rowHeight": "Row height",
     "heightRules": {
       "auto": "Auto",
@@ -742,8 +741,9 @@
     },
     "rule": "Rule",
     "height": "Height",
-    "toggleHeaderRow": "Toggle header row",
-    "distributeColumns": "Distribute columns evenly",
+    "pinHeaderRow": "Pin header row",
+    "wrapText": "Wrap text",
+    "distributeColumns": "Distribute columns",
     "autoFit": "Auto-fit to contents",
     "tableProperties": "Table properties...",
     "tableAlignment": "Table alignment",
@@ -917,6 +917,7 @@
     "textDirection": "Text direction",
     "leftToRight": "Left-to-right",
     "rightToLeft": "Right-to-left",
+    "table": "Table",
     "tableProperties": "Table properties",
     "updateTableOfContents": "Update table of contents",
     "noTocEntries": "No table of contents entries found.",

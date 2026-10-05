@@ -708,7 +708,6 @@
       "verticalRL": "אנכי (מלמעלה למטה, ימין-שמאל)",
       "verticalLR": "אנכי (מלמטה למעלה, שמאל-ימין)"
     },
-    "toggleNoWrap": "הפעל/בטל גלישת טקסט",
     "rowHeight": "גובה שורה",
     "heightRules": {
       "auto": "אוטומטי",
@@ -717,7 +716,6 @@
     },
     "rule": "כלל",
     "height": "גובה",
-    "toggleHeaderRow": "הפעל/בטל שורת כותרת",
     "distributeColumns": "פזר עמודות באופן שווה",
     "autoFit": "התאם אוטומטית לתוכן",
     "tableProperties": "מאפייני טבלה...",

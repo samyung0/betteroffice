@@ -3045,21 +3045,6 @@ mod tests {
         no_wrap(Any::Bool(false));
         assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
 
-        // A fixed layout ignores it (ECMA-376 §17.4.30).
-        no_wrap(Any::Bool(true));
-        let mut tbl_pr = table_value(&doc).0;
-        tbl_pr["tableLayout"] = "fixed".into();
-        doc.apply_raw_ops(
-            "body",
-            vec![RawOp::SetEmbedAttr {
-                index: 0,
-                key: "tblPr".to_owned(),
-                value: Any::from_json(&tbl_pr.to_string()).unwrap(),
-            }],
-            &direct(),
-        )
-        .unwrap();
-        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
     }
 
     #[test]

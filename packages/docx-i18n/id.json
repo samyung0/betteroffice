@@ -727,7 +727,6 @@
       "verticalRL": "Vertikal (Atas ke Bawah, Kanan ke Kiri)",
       "verticalLR": "Vertikal (Bawah ke Atas, Kiri ke Kanan)"
     },
-    "toggleNoWrap": "Aktifkan/Nonaktifkan Bungkus Teks",
     "rowHeight": "Tinggi Baris",
     "heightRules": {
       "auto": "Otomatis",
@@ -736,7 +735,6 @@
     },
     "rule": "Aturan",
     "height": "Tinggi",
-    "toggleHeaderRow": "Aktifkan/Nonaktifkan Baris Header",
     "distributeColumns": "Sebarkan Kolom Secara Merata",
     "autoFit": "Sesuaikan Otomatis dengan Isi",
     "tableProperties": "Properti Tabel...",

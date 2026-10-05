@@ -711,7 +711,6 @@
       "verticalRL": "लंबवत (ऊपर से नीचे, RL)",
       "verticalLR": "लंबवत (नीचे से ऊपर, LR)"
     },
-    "toggleNoWrap": "नो-रैप टॉगल करें",
     "rowHeight": "पंक्ति की ऊंचाई",
     "heightRules": {
       "auto": "स्वतः",
@@ -720,7 +719,6 @@
     },
     "rule": "नियम",
     "height": "ऊंचाई",
-    "toggleHeaderRow": "हेडर पंक्ति टॉगल करें",
     "distributeColumns": "स्तंभों को समान रूप से वितरित करें",
     "autoFit": "सामग्री के अनुसार स्वतः फिट करें",
     "tableProperties": "तालिका की विशेषताएँ...",

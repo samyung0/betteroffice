@@ -714,7 +714,6 @@
       "verticalRL": "垂直 (从上到下，从右到左)",
       "verticalLR": "垂直 (从下到上，从左到右)"
     },
-    "toggleNoWrap": "切换文本换行",
     "rowHeight": "行高",
     "heightRules": {
       "auto": "自动调整",
@@ -723,7 +722,8 @@
     },
     "rule": "规则",
     "height": "高度",
-    "toggleHeaderRow": "切换标题行",
+    "pinHeaderRow": "固定标题行",
+    "wrapText": "自动换行",
     "distributeColumns": "平均分布各列",
     "autoFit": "根据内容自动调整",
     "tableProperties": "表格属性...",
@@ -917,6 +917,7 @@
     "textDirection": "文字方向",
     "leftToRight": "从左到右",
     "rightToLeft": "从右到左",
+    "table": "表格",
     "tableProperties": "表格属性",
     "updateTableOfContents": "更新目录",
     "noTocEntries": "未找到目录项。",

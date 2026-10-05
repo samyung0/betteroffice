@@ -387,7 +387,9 @@ pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
 }
 
 /// A `w:noWrap` cell whose text is one unbreakable line (ECMA-376 §17.4.30):
-/// outside a fixed layout and without a fixed (dxa) preferred width.
+/// outside a fixed layout and without a fixed (dxa) preferred width. The
+/// editor's bridge does not lower `w:tblLayout`; its fixed tables (a column
+/// drag) carry dxa cell widths.
 pub fn unbreakable_cell(table_block: &TableBlock, cell: &crate::types::TableCell) -> bool {
     cell.no_wrap == Some(true)
         && !fixed_layout(table_block)

@@ -711,7 +711,6 @@
       "verticalRL": "Dikey (üst-alt, RL)",
       "verticalLR": "Dikey (alt-üst, LR)"
     },
-    "toggleNoWrap": "Sarmamayı aç/kapa",
     "rowHeight": "Satır yüksekliği",
     "heightRules": {
       "auto": "Otomatik",
@@ -720,7 +719,6 @@
     },
     "rule": "Kural",
     "height": "Yükseklik",
-    "toggleHeaderRow": "Başlık satırını aç/kapa",
     "distributeColumns": "Sütunları eşit dağıt",
     "autoFit": "İçeriğe otomatik sığdır",
     "tableProperties": "Tablo özellikleri...",

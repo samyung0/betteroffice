@@ -708,7 +708,6 @@
       "verticalRL": "Vertical (cima-baixo, RL)",
       "verticalLR": "Vertical (baixo-cima, LR)"
     },
-    "toggleNoWrap": "Alternar sem quebra",
     "rowHeight": "Altura da linha",
     "heightRules": {
       "auto": "Automático",
@@ -717,7 +716,6 @@
     },
     "rule": "Regra",
     "height": "Altura",
-    "toggleHeaderRow": "Alternar linha de cabeçalho",
     "distributeColumns": "Distribuir colunas uniformemente",
     "autoFit": "Ajustar automaticamente ao conteúdo",
     "tableProperties": "Propriedades da tabela...",

@@ -708,7 +708,6 @@
       "verticalRL": "Pionowo (z góry na dół, RL)",
       "verticalLR": "Pionowo (z dołu do góry, LR)"
     },
-    "toggleNoWrap": "Przełącz zawijanie tekstu",
     "rowHeight": "Wysokość wiersza",
     "heightRules": {
       "auto": "Automatyczna",
@@ -717,7 +716,6 @@
     },
     "rule": "Reguła",
     "height": "Wysokość",
-    "toggleHeaderRow": "Przełącz wiersz nagłówka",
     "distributeColumns": "Rozłóż kolumny równomiernie",
     "autoFit": "Autodopasowanie do zawartości",
     "tableProperties": "Właściwości tabeli...",

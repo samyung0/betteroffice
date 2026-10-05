@@ -708,7 +708,6 @@
       "verticalRL": "Vertikal (oben nach unten, RL)",
       "verticalLR": "Vertikal (unten nach oben, LR)"
     },
-    "toggleNoWrap": "Textumbruch umschalten",
     "rowHeight": "Zeilenhöhe",
     "heightRules": {
       "auto": "Automatisch",
@@ -717,7 +716,6 @@
     },
     "rule": "Regel",
     "height": "Höhe",
-    "toggleHeaderRow": "Überschriftenzeile umschalten",
     "distributeColumns": "Spalten gleichmäßig verteilen",
     "autoFit": "An Inhalt anpassen",
     "tableProperties": "Tabelleneigenschaften...",

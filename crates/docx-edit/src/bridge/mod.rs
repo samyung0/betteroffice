@@ -1216,10 +1216,8 @@ fn lower_table<T: ReadTxn>(
             width: map_number(tbl_pr, "width"),
             width_type: map_string(tbl_pr, "widthType"),
             preferred_width: None,
-            // The editor keeps the grid ("legacy") algorithm; `w:tblLayout`
-            // only tells the content-sized and no-wrap passes a fixed table.
-            layout_mode: map_string(tbl_pr, "tableLayout"),
-            width_algorithm: Some("legacy".to_owned()),
+            layout_mode: None,
+            width_algorithm: None,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),

@@ -711,7 +711,6 @@
       "verticalRL": "Vertical (haut-bas, DàG)",
       "verticalLR": "Vertical (bas-haut, GàD)"
     },
-    "toggleNoWrap": "Activer/Désactiver le retour à la ligne",
     "rowHeight": "Hauteur de ligne",
     "heightRules": {
       "auto": "Auto",
@@ -720,7 +719,6 @@
     },
     "rule": "Règle",
     "height": "Hauteur",
-    "toggleHeaderRow": "Activer/Désactiver la ligne d'en-tête",
     "distributeColumns": "Uniformiser la largeur des colonnes",
     "autoFit": "Ajuster automatiquement au contenu",
     "tableProperties": "Propriétés du tableau...",
