@@ -793,10 +793,14 @@ function XlsxEditorContent({
             if (disposed || !handle) return;
             try {
               const info = handle.sheetInfo();
-              // a peer removed the sheet a draft is open on: drop the draft
-              // rather than land it on whichever sheet is active now.
+              // a peer removed or moved away the sheet a draft is open on:
+              // drop the draft rather than land it on whichever sheet is
+              // active now. Otherwise its sheet may have a new index, which
+              // a commit before the next render must use.
               const draft = pendingDraftRef.current;
-              if (origin === 'remote' && draft && !info.sheetIds.includes(draft.sheetId)) {
+              if (origin === 'remote' && draft && info.sheetIds[info.activeSheet] === draft.sheetId)
+                draft.sheet = info.activeSheet;
+              else if (origin === 'remote' && draft) {
                 pendingDraftRef.current = null;
                 const input = editorInputRef.current;
                 const focused = input !== null && input === document.activeElement;
@@ -1346,11 +1350,13 @@ function XlsxEditorContent({
   const commitEditor = useCallback(
     (move?: Direction, refocus = true) => {
       const handle = handleRef.current;
-      if (!handle || !editing || readOnly) return;
+      // the draft's sheet, as remote updates keep it (null once dropped).
+      const draft = pendingDraftRef.current;
+      if (!handle || !editing || !draft || readOnly) return;
       if (refocus) suppressBlurRef.current = true;
       const { row, col, value } = editing;
       try {
-        applyResult(handle.editCell(activeSheet, row, col, value));
+        applyResult(handle.editCell(draft.sheet, row, col, value));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -1360,7 +1366,7 @@ function XlsxEditorContent({
       if (move) requestReveal();
       if (refocus) focusContainer();
     },
-    [editing, activeSheet, applyResult, limits, focusContainer, readOnly, requestReveal]
+    [editing, applyResult, limits, focusContainer, readOnly, requestReveal]
   );
 
   const cancelEditor = useCallback(() => {
@@ -1734,10 +1740,11 @@ function XlsxEditorContent({
   const commitFormula = useCallback(
     (move?: Direction) => {
       const handle = handleRef.current;
-      if (!handle || !selection || formulaDraft == null || readOnly) return;
+      const draft = pendingDraftRef.current;
+      if (!handle || !selection || formulaDraft == null || !draft || readOnly) return;
       const { row, col } = selection.focus;
       try {
-        applyResult(handle.editCell(activeSheet, row, col, formulaDraft));
+        applyResult(handle.editCell(draft.sheet, row, col, formulaDraft));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -1747,7 +1754,7 @@ function XlsxEditorContent({
         requestReveal();
       }
     },
-    [selection, formulaDraft, activeSheet, applyResult, limits, readOnly, requestReveal]
+    [selection, formulaDraft, applyResult, limits, readOnly, requestReveal]
   );
 
   flushEditorRef.current = () => {
@@ -2498,7 +2505,10 @@ function XlsxEditorContent({
                     e.preventDefault();
                   }
                 }}
-                onBlur={() => commitFormula()}
+                // an app or tab switch keeps the draft, as it keeps a cell edit.
+                onBlur={() => {
+                  if (document.hasFocus()) commitFormula();
+                }}
                 style={xlsxToolbarStyles.formulaInput}
               />
             </div>
@@ -2689,8 +2699,14 @@ function XlsxEditorContent({
                   // the next key on return, as in Excel and Sheets.
                   if (!document.hasFocus()) return;
                   commitEditor(undefined, false);
-                  // a press on nothing focusable: the grid takes the keys again.
-                  if (!e.relatedTarget) focusContainer();
+                  // a press on nothing focusable: once focus has settled on the
+                  // page body, the grid takes the keys again (a focus move a blur
+                  // handler redirects can be dropped).
+                  if (!e.relatedTarget)
+                    requestAnimationFrame(() => {
+                      if (document.hasFocus() && document.activeElement === document.body)
+                        focusContainer();
+                    });
                 }}
                 style={
                   scaledEditRect

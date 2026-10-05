@@ -741,8 +741,35 @@ describe('XlsxEditor keyboard', () => {
     });
     expect(view.editor()).toBeNull();
     expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    // the grid takes the keys once focus has settled, a frame later.
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
     // identity checks stay cheap to print when they fail.
     expect(document.activeElement?.getAttribute('data-testid')).toBe('xlsx-scroll');
+  });
+
+  it('keeps a formula-bar draft across a window or tab switch, commits it on a blur', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    const formula = view.formulaInput();
+    const before = view.workbook().cell(0, 3, 1).input;
+    act(() => formula.focus());
+    view.typeFormula('42');
+    const away = spyOn(document, 'hasFocus').mockReturnValue(false);
+    try {
+      await act(async () => {
+        fireEvent.blur(formula);
+      });
+    } finally {
+      away.mockRestore();
+    }
+    expect(view.workbook().cell(0, 3, 1).input).toBe(before);
+    expect(formula.value).toBe('42');
+    await act(async () => {
+      fireEvent.blur(formula);
+    });
+    expect(view.workbook().cell(0, 3, 1).input).toBe('42');
   });
 
   it('keeps the edit open across a window or tab switch', async () => {
@@ -1269,6 +1296,54 @@ describe('XlsxEditor with a peer', () => {
       for (const handle of [editor, peer])
         for (let sheet = 0; sheet < handle.sheetInfo().sheetNames.length; sheet += 1)
           expect(handle.cell(sheet, 0, 0).input).not.toBe('draft');
+    } finally {
+      cleanup();
+      peer.dispose();
+    }
+  });
+});
+
+describe('XlsxEditor with a peer, before a render', () => {
+  it('commits a draft to its own sheet when a peer inserts one before it', async () => {
+    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3201 });
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        collaboration={{ clientId: 3202 }}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    try {
+      await waitFor(() => expect(api).toBeDefined());
+      const editor = api!.handle;
+      editor.onUpdate((update, origin) => {
+        if (origin === 'local') peer.applyUpdate(update);
+      });
+      const summary = view.getAllByRole('tab')[1];
+      expect(summary.textContent).toBe('Summary');
+      await act(async () => {
+        fireEvent.click(summary);
+      });
+      await act(async () => {
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'd' });
+      });
+      const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+      fireEvent.change(input, { target: { value: 'draft' } });
+
+      // the peer's new first sheet arrives, and a host flush runs before
+      // React renders the shifted indexes.
+      act(() => {
+        const before = editor.encodeStateVector();
+        peer.applyOps([{ type: 'addSheet', index: 0, name: 'First' }]);
+        editor.applyUpdate(peer.encodeStateAsUpdate(before));
+        api!.flush();
+      });
+      const names = editor.sheetInfo().sheetNames;
+      const landed = names.filter((_, sheet) => editor.cell(sheet, 0, 0).input === 'draft');
+      expect(landed).toEqual(['Summary']);
     } finally {
       cleanup();
       peer.dispose();
