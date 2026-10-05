@@ -1298,6 +1298,8 @@ export type TableFragment = FragmentBase & {
    * visible band of that single row is `[clipTop, clipBottom)`.
    */
   clipBottom?: number;
+  /** The drawn grid columns (px), left to right; a column drag starts from them. */
+  columnWidths?: number[];
 };
 
 /**

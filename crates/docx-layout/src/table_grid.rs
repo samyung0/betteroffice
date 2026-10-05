@@ -366,9 +366,17 @@ fn cell_preferred_px(cell: &crate::types::TableCell, parent_width: f64) -> Optio
     )
 }
 
+/// A cell holding only paragraphs, whose content width a line measure gives.
+pub fn paragraphs_only(cell: &crate::types::TableCell) -> bool {
+    cell.blocks
+        .iter()
+        .all(|block| matches!(block, crate::types::LayoutBlock::Paragraph(_)))
+}
+
 /// What Word's AutoFit Contents leaves: no fixed layout, no preferred table
 /// width and every cell's `w:tcW` explicitly `auto`, so Word sizes every
-/// column from content. (Cells that state no width at all keep the grid.)
+/// column from content. (Cells that state no width at all keep the grid, and
+/// so does a table holding a nested table or other block.)
 pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
     !table_block.rows.is_empty()
         && !fixed_layout(table_block)
@@ -387,15 +395,16 @@ pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
             .all(|cell| {
                 cell.width_type.as_deref() == Some("auto")
                     && cell_preferred_px(cell, content_width).is_none()
+                    && paragraphs_only(cell)
             })
 }
 
 /// A `w:noWrap` cell whose text is one unbreakable line (ECMA-376 §17.4.30):
-/// outside a fixed layout and without a fixed (dxa) preferred width. The
-/// editor's bridge does not lower `w:tblLayout`; its fixed tables (a column
-/// drag) carry dxa cell widths.
+/// outside a fixed layout and without a fixed (dxa) preferred width, holding
+/// only paragraphs.
 pub fn unbreakable_cell(table_block: &TableBlock, cell: &crate::types::TableCell) -> bool {
     cell.no_wrap == Some(true)
+        && paragraphs_only(cell)
         && !fixed_layout(table_block)
         && !(matches!(cell.width_type.as_deref(), None | Some("dxa"))
             && cell.width_value.is_some_and(|value| value > 0.0))
@@ -404,8 +413,8 @@ pub fn unbreakable_cell(table_block: &TableBlock, cell: &crate::types::TableCell
 /// Widens each column to `needs[column]` (its unbreakable cells' one-line
 /// width) out of the room the table has: the page room a table without its
 /// own width leaves, then the empty room of the other columns (their width
-/// above `maximums`, their widest content). A column a merged cell covers
-/// gives nothing. Short of room, every column gets the same share of its need.
+/// above `maximums`, their widest content; infinite for a cell holding other
+/// blocks). A column a merged cell covers gives nothing. Short of room, every column gets the same share of its need.
 pub fn widen_unbreakable_columns(
     table_block: &TableBlock,
     content_width: f64,

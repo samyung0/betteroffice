@@ -7,9 +7,9 @@ use serde_json::Value;
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{
-    content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
-    resolve_table_column_widths, resolve_table_width_px, sized_by_content, table_width_budget,
-    unbreakable_cell, widen_unbreakable_columns,
+    content_sized_columns, count_table_columns, grow_content_sized_columns, paragraphs_only,
+    resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px, sized_by_content,
+    table_width_budget, unbreakable_cell, widen_unbreakable_columns,
 };
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -1720,6 +1720,10 @@ fn widen_for_unbreakable_cells(
         let Some(cell) = cell_at(entry.row_index, entry.cell_index) else {
             continue;
         };
+        if !paragraphs_only(cell) {
+            maximums[entry.column_index] = f64::INFINITY;
+            continue;
+        }
         let width = cell_content_width(cell, content_width, config)?;
         let slot = if unbreakable_cell(table, cell) {
             &mut needs[entry.column_index]

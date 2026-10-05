@@ -2055,6 +2055,9 @@ pub struct TableFragment {
     pub clip_top: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_bottom: Option<f64>,
+    /// The drawn grid columns, left to right (a column drag starts from them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub column_widths: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

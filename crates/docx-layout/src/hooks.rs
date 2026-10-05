@@ -359,6 +359,7 @@ fn layout_table_with_position(
             header_row_count: (header_overhead > 0.0).then_some(header_row_count as f64),
             clip_top: if clip_top > 0.0 { Some(clip_top) } else { None },
             clip_bottom,
+            column_widths: measure.column_widths.clone(),
         });
 
         paginator.add_fragment(fragment, fragment_height, 0.0, 0.0);
@@ -570,6 +571,7 @@ pub fn layout_floating_table(
         header_row_count: None,
         clip_top: None,
         clip_bottom: None,
+        column_widths: measure.column_widths.clone(),
     });
     paginator.push_fragment_direct(fragment);
 

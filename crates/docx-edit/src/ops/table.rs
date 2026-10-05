@@ -385,16 +385,19 @@ fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
             ]))
         })
         .collect();
-    // Only changed fields are written, so ops touching different fields (a
-    // peer's row insert and this peer's table alignment) both survive.
-    for (key, value) in [
-        ("tblPr", to_any_map(data.tbl_pr.clone())),
-        ("grid", to_any_array(data.grid.clone())),
-        ("rows", to_any_array(rows)),
-    ] {
-        if !matches!(map.get(txn, key), Some(Out::Any(current)) if current == value) {
-            map.insert(txn, key, value);
-        }
+    let changed = |txn: &TransactionMut<'_>, key: &str, value: &Any| !matches!(map.get(txn, key), Some(Out::Any(current)) if current == *value);
+    // `tblPr` is written only when it changed, so table alignment and a peer's
+    // row insert both survive. `grid` and `rows` describe one grid and are
+    // written together, so a race keeps one op whole, never half of each.
+    let tbl_pr = to_any_map(data.tbl_pr.clone());
+    let grid = to_any_array(data.grid.clone());
+    let rows = to_any_array(rows);
+    if changed(txn, "tblPr", &tbl_pr) {
+        map.insert(txn, "tblPr", tbl_pr);
+    }
+    if changed(txn, "grid", &grid) || changed(txn, "rows", &rows) {
+        map.insert(txn, "grid", grid);
+        map.insert(txn, "rows", rows);
     }
 }
 
@@ -1155,9 +1158,17 @@ impl EditingDoc {
         }
         let width = (9360.0 / columns as f64).floor().max(1.0);
         let data = TableData {
+            // Word's Normal Table pads cells 108 twips left and right.
             tbl_pr: HashMap::from([
                 ("width".to_owned(), Any::Number(9360.0)),
                 ("widthType".to_owned(), Any::from("dxa")),
+                (
+                    "cellMargins".to_owned(),
+                    to_any_map(HashMap::from([
+                        ("left".to_owned(), Any::Number(108.0)),
+                        ("right".to_owned(), Any::Number(108.0)),
+                    ])),
+                ),
             ]),
             grid: vec![Any::Number(width); columns as usize],
             rows: table_rows,
@@ -2920,11 +2931,13 @@ mod tests {
         let after = table_value(&doc);
         assert_eq!(after.0["justification"], "center");
         assert_eq!((&after.1, &after.2), (&before.1, &before.2));
-        // A 288px table on a 600px column moves right by half the difference.
-        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 156.0);
+        // A 288px table on a 600px column moves right by half the difference,
+        // plus the 7.2px a left-aligned table hangs into the margin (its cell
+        // margin, as Word draws it).
+        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 163.0);
         doc.set_table_alignment(&direct(), &table(), "right")
             .unwrap();
-        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 312.0);
+        assert_eq!((runs(&doc, "A")[0].1 - left).round(), 319.0);
         assert!(
             doc.set_table_alignment(&direct(), &table(), "middle")
                 .is_err()
@@ -3113,6 +3126,197 @@ mod tests {
         let (tbl_pr, _, rows) = table_value(&left);
         assert_eq!(tbl_pr["justification"], "right");
         assert_eq!(rows.as_array().unwrap().len(), 3);
+    }
+
+    /// Every row's cells cover exactly the grid's columns.
+    fn assert_consistent(doc: &EditingDoc) {
+        let (_, grid, rows) = table_value(doc);
+        let columns = grid.as_array().unwrap().len();
+        let txn = doc.yrs_doc().transact();
+        let (_, map, _) = table_at(&txn, &table()).unwrap();
+        let (cell_anchors, resolved) = anchors(&read_table(&map, &txn).unwrap()).unwrap();
+        assert_eq!(resolved, columns, "grid {grid} over rows {rows}");
+        for row in 0..rows.as_array().unwrap().len() {
+            let covered: usize = cell_anchors
+                .iter()
+                .filter(|anchor| anchor.row <= row && row < anchor.row + anchor.rowspan)
+                .map(|anchor| anchor.colspan)
+                .sum();
+            assert_eq!(covered, columns, "row {row} of {rows}");
+        }
+    }
+
+    fn set_tbl_pr(doc: &EditingDoc, key: &str, value: Any) {
+        let mut tbl_pr = table_value(doc).0;
+        tbl_pr[key] = serde_json::to_value(&value).unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetEmbedAttr {
+                index: 0,
+                key: "tblPr".to_owned(),
+                value: Any::from_json(&tbl_pr.to_string()).unwrap(),
+            }],
+            &direct(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_row_op_racing_a_column_op_keeps_one_of_them_whole() {
+        type Op = fn(&EditingDoc);
+        let row_ops: [Op; 4] = [
+            |doc| {
+                doc.set_cell_text_format(
+                    &direct(),
+                    &whole(2, 3),
+                    &HashMap::from([("verticalAlign".to_owned(), Any::from("bottom"))]),
+                )
+                .map(drop)
+                .unwrap()
+            },
+            |doc| {
+                doc.set_header_rows(&direct(), &table(), 1)
+                    .map(drop)
+                    .unwrap()
+            },
+            |doc| {
+                doc.distribute_columns(&direct(), &whole(2, 3))
+                    .map(drop)
+                    .unwrap()
+            },
+            |doc| doc.autofit_table(&direct(), &table()).map(drop).unwrap(),
+        ];
+        let column_ops: [Op; 3] = [
+            |doc| {
+                doc.insert_column(&direct(), &cell(0, 1), true)
+                    .map(drop)
+                    .unwrap()
+            },
+            |doc| {
+                doc.delete_column(&direct(), &TableRange::cell(cell(0, 1)))
+                    .map(drop)
+                    .unwrap()
+            },
+            |doc| {
+                doc.insert_row(&direct(), &cell(1, 0), true)
+                    .map(drop)
+                    .unwrap()
+            },
+        ];
+        for row_op in row_ops {
+            for column_op in column_ops {
+                // Both client-id orders: either op may win the rows.
+                for (left_id, right_id) in [(80, 81), (81, 80)] {
+                    let left = EditingDoc::new(left_id);
+                    left.create_story("body", "", "Normal", "left").unwrap();
+                    left.insert_table(&direct(), Position::new("body", 0), 2, 3)
+                        .unwrap();
+                    left.set_column_width(&direct(), &cell(0, 0), 1000.0)
+                        .unwrap();
+                    let right = EditingDoc::new(right_id);
+                    right
+                        .apply_update_v1(&left.encode_state_as_update_v1())
+                        .unwrap();
+                    row_op(&left);
+                    column_op(&right);
+                    left.apply_update_v1(
+                        &right
+                            .encode_diff_v1(&left.encode_state_vector_v1())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    right
+                        .apply_update_v1(
+                            &left
+                                .encode_diff_v1(&right.encode_state_vector_v1())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(table_value(&left), table_value(&right));
+                    assert_consistent(&left);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fixed_layout_keeps_its_grid_under_auto_widths_and_no_wrap() {
+        let doc = inserted(&direct(), 1, 2);
+        type_in(&doc, 0, 0, "An unbreakable heading that is wide");
+        type_in(&doc, 0, 1, "B");
+        doc.autofit_table(&direct(), &table()).unwrap();
+        doc.set_cell_text_format(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &HashMap::from([("noWrap".to_owned(), Any::Bool(true))]),
+        )
+        .unwrap();
+        assert_ne!(column_widths(&doc), vec![312.0, 312.0]);
+        set_tbl_pr(&doc, "tableLayout", Any::from("fixed"));
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+
+        let wide = inserted(&direct(), 1, 2);
+        type_in(&wide, 0, 0, "An unbreakable heading that is wide");
+        type_in(&wide, 0, 1, "B");
+        wide.set_cell_text_format(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &HashMap::from([("noWrap".to_owned(), Any::Bool(true))]),
+        )
+        .unwrap();
+        assert_ne!(column_widths(&wide), vec![312.0, 312.0]);
+        set_tbl_pr(&wide, "tableLayout", Any::from("fixed"));
+        assert_eq!(column_widths(&wide), vec![312.0, 312.0]);
+    }
+
+    #[test]
+    fn an_auto_fitted_table_holding_a_nested_table_keeps_its_grid() {
+        let doc = inserted(&direct(), 1, 2);
+        type_in(&doc, 0, 1, "Label");
+        doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2)
+            .unwrap();
+        doc.autofit_table(&direct(), &table()).unwrap();
+        assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
+    }
+
+    #[test]
+    fn a_table_fragment_carries_its_drawn_columns() {
+        let doc = inserted(&direct(), 1, 2);
+        type_in(&doc, 0, 0, "A");
+        type_in(&doc, 0, 1, "A much longer line of text");
+        doc.autofit_table(&direct(), &table()).unwrap();
+        let (input, _) = laid_out(&doc);
+        let layout = docx_layout::compute_layout_input(&mut input.clone()).unwrap();
+        let fragment = layout.pages[0]
+            .fragments
+            .iter()
+            .find_map(|fragment| match fragment {
+                docx_layout::types::Fragment::Table(table) => Some(table.column_widths.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let drawn: Vec<f64> = fragment.iter().map(|width| width.round()).collect();
+        assert_eq!(drawn, column_widths(&doc));
+        assert!(drawn[0] < drawn[1], "{drawn:?}");
+    }
+
+    #[test]
+    fn an_inserted_table_has_word_s_default_cell_margins() {
+        let doc = inserted(&direct(), 1, 1);
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(
+            tbl_pr["cellMargins"],
+            serde_json::json!({ "left": 108, "right": 108 })
+        );
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let value = serde_json::to_value(&blocks).unwrap();
+        let padding = &value[0]["rows"][0]["cells"][0]["padding"];
+        for side in ["left", "right"] {
+            assert!(
+                (padding[side].as_f64().unwrap() - 7.2).abs() < 1e-9,
+                "{padding}"
+            );
+        }
     }
 
     impl EditingDoc {
