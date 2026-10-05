@@ -489,9 +489,11 @@ describe('PptxEditor host integration', () => {
     } as unknown as CanvasRenderingContext2D);
     let api: PptxEditorApi | undefined;
     let painted = 0;
+    let slides = 0;
     try {
       render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
-        onReady={(ready) => { api = ready; }} onFirstPaint={() => { painted += 1; }} />);
+        onReady={(ready) => { api = ready; }}
+        onFirstPaint={(snapshot) => { painted += 1; slides = snapshot.slides.length; }} />);
       // the slide and its strip thumbnails all paint through paintSlide.
       const settle = () => act(async () => { for (const resolve of paints.splice(0)) resolve(); });
       await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
@@ -499,6 +501,7 @@ describe('PptxEditor host integration', () => {
       expect(painted).toBe(0);
       await settle();
       expect(painted).toBe(1);
+      expect(slides).toBe(api!.handle.snapshot().slides.length);
       await act(async () => { api!.goToSlide(2); });
       await waitFor(() => expect(paints.length).toBeGreaterThan(0));
       await settle();

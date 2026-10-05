@@ -170,8 +170,11 @@ export interface PptxEditorProps {
   /** 1-based; clamped to the deck. */
   initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
-  /** Called once per opened deck, once its first slide is painted, pictures included. */
-  onFirstPaint?: () => void;
+  /**
+   * Called once per opened deck, once its first slide is painted (pictures
+   * included), with the deck the editor already holds.
+   */
+  onFirstPaint?: (snapshot: DeckSnapshot) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
@@ -916,9 +919,10 @@ function PptxEditorContent({
         resolveImage(assetId, handleRef, imageCacheRef, decodeImageError),
     }).then(
       () => {
-        if (cancelled || !firstPaintPendingRef.current) return;
+        const snapshot = modelRef.current?.snapshot;
+        if (cancelled || !firstPaintPendingRef.current || !snapshot) return;
         firstPaintPendingRef.current = false;
-        onFirstPaintRef.current?.();
+        onFirstPaintRef.current?.(snapshot);
       },
       (value: unknown) => {
         if (!cancelled) reportError(value);

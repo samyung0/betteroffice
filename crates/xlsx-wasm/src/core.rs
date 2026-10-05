@@ -155,6 +155,8 @@ struct TextSearchMatch {
 struct CellPosition {
     x: f32,
     y: f32,
+    width: f32,
+    height: f32,
 }
 
 #[derive(Deserialize)]
@@ -741,11 +743,17 @@ impl Session {
     pub fn cell_position_json(&self, args: &str) -> Result<String, String> {
         let args: CellArgs =
             serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
-        let (x, y) = self
+        let (x, y, width, height) = self
             .workbook
-            .cell_scroll_position(SheetId(args.sheet), CellRef::new(args.row, args.col))
+            .cell_scroll_bounds(SheetId(args.sheet), CellRef::new(args.row, args.col))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
+        serde_json::to_string(&CellPosition {
+            x,
+            y,
+            width,
+            height,
+        })
+        .map_err(|error| error.to_string())
     }
 
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {

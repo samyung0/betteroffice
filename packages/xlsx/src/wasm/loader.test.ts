@@ -101,6 +101,11 @@ describe('wasm loader', () => {
       const position = handle.cellPosition(0, 7, 2);
       expect(position.x).toBeGreaterThan(0);
       expect(position.y).toBeGreaterThan(0);
+      // the size reaches the next cell's position, also on the sheet's last row.
+      const next = handle.cellPosition(0, 8, 3);
+      expect(position.x + position.width).toBeCloseTo(next.x, 3);
+      expect(position.y + position.height).toBeCloseTo(next.y, 3);
+      expect(handle.cellPosition(0, 1_048_575, 16_383).height).toBeGreaterThan(0);
     } finally {
       handle.dispose();
     }

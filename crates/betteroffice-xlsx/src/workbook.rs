@@ -1126,16 +1126,43 @@ impl Workbook {
     }
 
     pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
+        let (x, y, _, _) = self.cell_scroll_bounds(sheet, cell)?;
+        Ok((x, y))
+    }
+
+    /// `cell_scroll_position` plus the cell's width and height: `(x, y, width,
+    /// height)`. The active sheet reuses the geometry `sheet_info` memoized.
+    pub fn cell_scroll_bounds(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+    ) -> Result<(f32, f32, f32, f32)> {
         validate_cell_ref(cell)?;
-        let sheet = self.sheet(sheet)?;
-        let geometry = GridGeometry::new(sheet, &self.model.styles);
-        let (frozen_rows, frozen_cols) = sheet
+        let sheet_ref = self.sheet(sheet)?;
+        let (frozen_rows, frozen_cols) = sheet_ref
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols));
-        Ok((
-            (geometry.col_x(cell.col) - geometry.col_x(frozen_cols)).max(0.0),
-            (geometry.row_y(cell.row) - geometry.row_y(frozen_rows)).max(0.0),
-        ))
+        let bounds = |geometry: &GridGeometry| {
+            let left = geometry.col_x(cell.col);
+            let top = geometry.row_y(cell.row);
+            (
+                (left - geometry.col_x(frozen_cols)).max(0.0),
+                (top - geometry.row_y(frozen_rows)).max(0.0),
+                geometry.col_x(cell.col + 1) - left,
+                geometry.row_y(cell.row + 1) - top,
+            )
+        };
+        if sheet == self.active_sheet {
+            self.sheet_info()?;
+            let slot = self
+                .sheet_info_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cache) = &*slot {
+                return Ok(bounds(&cache.geometry));
+            }
+        }
+        Ok(bounds(&GridGeometry::new(sheet_ref, &self.model.styles)))
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {

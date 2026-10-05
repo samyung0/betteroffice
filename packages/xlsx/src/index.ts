@@ -98,6 +98,7 @@ export type {
   WorkbookUpdateListener,
   WorkbookUpdateOrigin,
   CellEdit,
+  CellBounds,
   CellPosition,
   CellInputEdit,
   EditResult,

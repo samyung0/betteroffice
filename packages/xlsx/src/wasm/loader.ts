@@ -54,6 +54,12 @@ export interface CellPosition {
   y: number;
 }
 
+/** A cell's scroll position (as {@link CellPosition}) and its size, in sheet pixels. */
+export interface CellBounds extends CellPosition {
+  width: number;
+  height: number;
+}
+
 /**
  * Result of any mutating call: whether it changed the workbook and the
  * (possibly grown) sheet metadata. Mirrors the Rust `EditResult`.
@@ -377,7 +383,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   cell(sheet: number, row: number, col: number): CellEdit;
   /** Searches formatted text in sheet and row order. */
   searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
-  cellPosition(sheet: number, row: number, col: number): CellPosition;
+  cellPosition(sheet: number, row: number, col: number): CellBounds;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -714,7 +720,7 @@ export function openWorkbook(
         )
       );
     },
-    cellPosition(sheet: number, row: number, col: number): CellPosition {
+    cellPosition(sheet: number, row: number, col: number): CellBounds {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
     rangeCells(sheet: number, range: string): CellEdit[][] {

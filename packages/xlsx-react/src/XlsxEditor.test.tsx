@@ -122,6 +122,8 @@ let charted: Fixture;
 let undrawable: Fixture;
 let wide: Fixture;
 let wideFrozen: Fixture;
+// frozen panes larger than the window on both axes.
+let paneFilled: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -145,6 +147,7 @@ beforeAll(async () => {
   undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
   wide = fixtureFrom(withFarCell(source));
   wideFrozen = fixtureFrom(withFarCell(source, 2));
+  paneFilled = fixtureFrom(withFarCell(source, 40));
 });
 
 afterAll(async () => {
@@ -233,6 +236,7 @@ async function mountEditor(
     },
     type: (value: string) => fireEvent.change(editor()!, { target: { value } }),
     formula: () => (view.getByTestId('xlsx-formula-input') as HTMLInputElement).value,
+    formulaInput: () => view.getByTestId('xlsx-formula-input') as HTMLInputElement,
     canUndo: () => !(view.getByTestId('xlsx-undo') as HTMLButtonElement).disabled,
     outline: () => view.queryByTestId('xlsx-chart-selection'),
     selectionBox: () => view.queryByTestId('xlsx-selection'),
@@ -398,11 +402,24 @@ describe('XlsxEditor grid pointer handling', () => {
 });
 
 describe('XlsxEditor keyboard', () => {
-  const press = (target: Element, key: string) =>
+  // dozens of keys, each with a full paint: generous for a loaded runner.
+  const MANY_KEYS_MS = 30_000;
+  const press = (target: Element, key: string, init: KeyboardEventInit = {}) =>
     act(async () => {
-      fireEvent.keyDown(target, { key });
+      fireEvent.keyDown(target, { key, ...init });
     });
-  // the open editor's box, which only mounts over a painted cell.
+  const scrollTo = (view: Awaited<ReturnType<typeof mountEditor>>, left: number, top: number) =>
+    act(async () => {
+      view.surface.scrollLeft = left;
+      view.surface.scrollTop = top;
+      fireEvent.scroll(view.surface);
+    });
+  const cellAt = (a1: string) => {
+    const [, letters, digits] = /^([A-Z]+)(\d+)$/.exec(a1)!;
+    const col = [...letters].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1;
+    return { row: Number(digits) - 1, col };
+  };
+  // the open editor's box over its cell.
   const editorBox = (input: HTMLInputElement) => {
     const left = parseFloat(input.style.left);
     const top = parseFloat(input.style.top);
@@ -436,7 +453,7 @@ describe('XlsxEditor keyboard', () => {
     await press(input!, 'Enter');
     expect(view.workbook().cell(0, 33, 16).input).toBe('7');
     expect(view.nameBox().value).toBe('Q35');
-  });
+  }, MANY_KEYS_MS);
 
   it('keeps a revealed cell clear of the frozen panes', async () => {
     const view = await mountEditor(wideFrozen);
@@ -457,16 +474,12 @@ describe('XlsxEditor keyboard', () => {
     for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowLeft');
     expect(view.nameBox().value).toBe('B34');
     expect(view.surface.scrollTop).toBe(top);
-  });
+  }, MANY_KEYS_MS);
 
   it('brings a cell scrolled out of view back when typing into it', async () => {
     const view = await mountEditor(wide);
     view.click({ row: 3, col: 1 });
-    await act(async () => {
-      view.surface.scrollLeft = 1500;
-      view.surface.scrollTop = 600;
-      fireEvent.scroll(view.surface);
-    });
+    await scrollTo(view, 1500, 600);
 
     await press(view.surface, '7');
     expect(view.editor()?.value).toBe('7');
@@ -486,6 +499,88 @@ describe('XlsxEditor keyboard', () => {
     expect(view.nameBox().value).toBe('C5');
     expect(view.surface.scrollLeft).toBe(0);
     expect(view.surface.scrollTop).toBe(0);
+  });
+
+  it('keeps the view on select all, as the menu does', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, 'a', { ctrlKey: true });
+    expect(view.selectionBox()).not.toBeNull();
+    expect(view.surface.scrollLeft).toBe(0);
+    expect(view.surface.scrollTop).toBe(0);
+  });
+
+  it('keeps typing into an open edit whose cell scrolled away, and scrolls back', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    await scrollTo(view, 1500, 600);
+
+    // still mounted and focused, out of sight.
+    expect(view.editor()).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.style.opacity).toBe('0');
+
+    await press(input, '5');
+    fireEvent.change(input, { target: { value: '75' } });
+    expect(view.editor()).toBe(input);
+    expect(input.style.opacity).toBe('');
+    const box = editorBox(input);
+    expect(box.left).toBeCloseTo(0, 1);
+    expect(box.top).toBeCloseTo(0, 1);
+    await press(input, 'Enter');
+    expect(view.workbook().cell(0, 3, 1).input).toBe('75');
+  });
+
+  it('keeps an IME composition in the edit while its cell scrolls back', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, 'F2');
+    const input = view.editor()!;
+    await scrollTo(view, 1500, 600);
+
+    fireEvent.compositionStart(input);
+    await press(input, 'Process', { isComposing: true, keyCode: 229 });
+    expect(view.editor()).toBe(input);
+    expect(document.activeElement).toBe(input);
+    expect(input.style.opacity).toBe('');
+    fireEvent.change(input, { target: { value: '日本' } });
+    fireEvent.compositionEnd(input, { data: '日本' });
+    await press(input, 'Enter');
+    expect(view.workbook().cell(0, 3, 1).input).toBe('日本');
+  });
+
+  it('types into a cell the frozen panes leave no room to show', async () => {
+    const view = await mountEditor(paneFilled);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, 'End', { ctrlKey: true });
+    const { row, col } = cellAt(view.nameBox().value);
+    expect(row).toBeGreaterThan(40);
+
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    expect(document.activeElement).toBe(input);
+    await press(input, '8');
+    fireEvent.change(input, { target: { value: '78' } });
+    await press(input, 'Enter');
+    expect(view.workbook().cell(0, row, col).input).toBe('78');
+  });
+
+  it('leaves the formula bar focused when an edit it committed scrolls back', async () => {
+    const view = await mountEditor(wide);
+    view.click({ row: 3, col: 1 });
+    await press(view.surface, '7');
+    const input = view.editor()!;
+    await scrollTo(view, 1500, 600);
+
+    const formula = view.formulaInput();
+    act(() => formula.focus());
+    expect(view.editor()).toBeNull();
+    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    await scrollTo(view, 0, 0);
+    expect(document.activeElement).toBe(formula);
+    expect(input.isConnected).toBe(false);
   });
 });
 
@@ -582,9 +677,9 @@ describe('XlsxEditor chart objects', () => {
       view.surface.scrollTop = SCROLLED_BY;
       fireEvent.scroll(view.surface);
     });
-    // the input unmounts once its cell leaves the painted window, so there is
-    // no blur left to commit through: only the explicit commit saves the edit.
-    expect(view.editor()).toBeNull();
+    // the input stays mounted, out of sight, while its cell is away; the press
+    // commits it without a blur.
+    expect(view.editor()?.style.opacity).toBe('0');
 
     fireEvent.mouseDown(view.surface, chartCenter(target));
     await waitFor(() => view.outline()!);

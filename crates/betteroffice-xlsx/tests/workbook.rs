@@ -5,9 +5,9 @@ use betteroffice_xlsx::{
     CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
     DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane, GridGeometry,
     Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
-    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_COLS, MAX_ROWS, NumberFormatKind,
+    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId,
+    StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1343,6 +1343,52 @@ fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
     assert_eq!(
         reopened.sheet(SheetId(0)).unwrap().hyperlinks,
         workbook.sheet(SheetId(0)).unwrap().hyperlinks
+    );
+}
+
+#[test]
+fn cell_scroll_bounds_reach_the_sheet_edge_and_agree_across_sheets() {
+    let mut first = Sheet::new("First");
+    first.freeze_pane = Some(FreezePane::new(2, 1, cell("B3")));
+    first.set_cell(cell("C4"), Cell::default());
+    let mut second = first.clone();
+    second.name = "Second".into();
+    let mut model = WorkbookModel::default();
+    model.sheets.push(first);
+    model.sheets.push(second);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let geometry = GridGeometry::new(workbook.sheet(SheetId(0)).unwrap(), &Stylesheet::default());
+
+    // the active sheet answers from the memoized geometry, the other fresh.
+    let active = workbook.cell_scroll_bounds(SheetId(0), cell("C4")).unwrap();
+    let other = workbook.cell_scroll_bounds(SheetId(1), cell("C4")).unwrap();
+    assert_eq!(active, other);
+    assert_eq!(
+        active,
+        (
+            geometry.col_x(2) - geometry.col_x(1),
+            geometry.row_y(3) - geometry.row_y(2),
+            geometry.col_x(3) - geometry.col_x(2),
+            geometry.row_y(4) - geometry.row_y(3),
+        )
+    );
+    // a frozen cell sits at scroll zero and keeps its size.
+    let (x, y, width, _) = workbook.cell_scroll_bounds(SheetId(0), cell("A1")).unwrap();
+    assert_eq!((x, y, width), (0.0, 0.0, geometry.col_x(1)));
+    // the last row and column have a size too.
+    let (_, _, width, height) = workbook
+        .cell_scroll_bounds(SheetId(0), CellRef::new(MAX_ROWS - 1, MAX_COLS - 1))
+        .unwrap();
+    assert!(width > 0.0 && height > 0.0);
+    assert!(
+        workbook
+            .cell_scroll_bounds(SheetId(0), CellRef::new(MAX_ROWS, 0))
+            .is_err()
+    );
+    workbook.set_active_sheet(SheetId(1)).unwrap();
+    assert_eq!(
+        workbook.cell_scroll_bounds(SheetId(1), cell("C4")).unwrap(),
+        active
     );
 }
 
