@@ -772,6 +772,7 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
 /// two peers each deleting part of a field's last link remove it only once
 /// each has the other's update. Only a delete that ends at a projecting
 /// field's embed reads its story.
+#[cfg(feature = "wasm")]
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
     use yrs::branch::{BranchPtr, Nested};
     use yrs::types::TypeRef;
@@ -836,6 +837,7 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
 
 /// The projecting fields whose run of projected children reaches each offset
 /// in `at` (an offset at a field's embed included).
+#[cfg(feature = "wasm")]
 fn owners_at<T: ReadTxn>(txn: &T, chunks: &[Chunk], at: &[u32]) -> Vec<i64> {
     at.iter()
         .filter_map(|offset| {
