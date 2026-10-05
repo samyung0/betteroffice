@@ -1,4 +1,4 @@
-# docx-fields: 1448 rows, ids 394db79391101d57; rows not listed are exact
+# docx-fields: 1574 rows, ids f1a04a24b5766197; rows not listed are exact
 body | [DATE|F{20}M-{w}y] | Enter after the simple field | cap<edit	refused
 body | [REF|xL(AA)yy] | Enter in 1st, Accept All of its suggested deletion | cap<edit	exact+moved
 body | [REF|xL(AA)yy] | Enter in 1st, Accept All of its suggested deletion | edit<cap<tail	exact+moved
@@ -11,8 +11,8 @@ body | [REF|xL(AA)yy] | Enter in 1st, range delete the link left | edit<cap<tail
 body | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 body | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 body | join nested continued field, undo | setup<cap<edit	refused
-body | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | cap<edit	exact+lost+text
-body | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+lost+text
+body | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | cap<edit	exact+text
+body | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | edit<cap<tail	exact+text
 body | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+moved
 body | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+moved
 body | native [REF|xL(AA)¶0] | delete the link | cap<edit	exact+moved
@@ -38,8 +38,8 @@ cell | [REF|xL(AA)yy] | Enter in 1st, range delete the link left | edit<cap<tail
 cell | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 cell | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 cell | join nested continued field, undo | setup<cap<edit	refused
-cell | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | cap<edit	exact+lost+text
-cell | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+lost+text
+cell | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | cap<edit	exact+text
+cell | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | edit<cap<tail	exact+text
 cell | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+moved
 cell | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+moved
 cell | native [REF|xL(AA)¶0] | delete the link | cap<edit	exact+moved
@@ -58,8 +58,8 @@ header | [REF|xL(AA)yy] | Enter in 1st, range delete the link left | edit<cap<ta
 header | field result continued, comment reference in its tail | type at its paragraph's end | cap<edit	exact+unstable
 header | field result continued, comment reference in its tail | type at its paragraph's end | edit<cap<tail	timing+unstable
 header | join nested continued field, undo | setup<cap<edit	refused
-header | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | cap<edit	exact+lost+text
-header | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link | edit<cap<tail	exact+lost+text
+header | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | cap<edit	exact+text
+header | native [REF|[PAGE|7]L(AA)¶0] | each peer deletes half the link, one Undoes | edit<cap<tail	exact+text
 header | native [REF|xL(AA)¶0] | both peers delete the link | cap<edit	exact+moved
 header | native [REF|xL(AA)¶0] | both peers delete the link | edit<cap<tail	exact+moved
 header | native [REF|xL(AA)¶0] | delete the link | cap<edit	exact+moved
