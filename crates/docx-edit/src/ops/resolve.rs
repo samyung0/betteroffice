@@ -599,13 +599,14 @@ impl EditingDoc {
     pub fn has_field_changes(&self) -> bool {
         let txn = self.yrs_doc().transact();
         sorted_stories(&txn).iter().any(|(_, story)| {
-            snapshot(story, &txn).iter().any(|chunk| {
+            let chunks = snapshot(story, &txn);
+            chunks.iter().enumerate().any(|(position, chunk)| {
                 let ChunkKind::Embed(Some(map)) = &chunk.kind else {
                     return false;
                 };
                 match (map.get(&txn, KIND_KEY), map.get(&txn, "fieldData")) {
                     (_, Some(Out::Any(Any::String(data)))) => {
-                        field_changes::field_data_keeps_changes(&data)
+                        field_changes::embed_keeps_changes(&txn, &chunks, position, &data)
                     }
                     (Some(Out::Any(Any::String(kind))), _) if kind.as_ref() == "sdt" => {
                         matches!(map.get(&txn, "content"), Some(Out::Any(content)) if field_changes::sdt_keeps_changes(&content))

@@ -546,20 +546,28 @@ pub(crate) fn split_field(
             runs.push((index as i64, deletion));
             continue;
         }
+        let raw = node["xml"].as_str().map(str::trim_start);
         match node["type"].as_str() {
             Some("run") => runs.push((index as i64, node.clone())),
             // A nested field that projects nothing moves as its own embed.
             Some("complexField") if field_units(node, None, None, 0, true).len() == 1 => {
                 runs.push((index as i64, node.clone()))
             }
-            // Shown nowhere, they stay with the field.
-            Some("deletion" | "moveFrom" | "bookmarkStart" | "bookmarkEnd") => {}
+            // A deletion holding more than text keeps the old Enter, which
+            // keeps it in its text position (review round 2).
+            Some("deletion") => return Ok(()),
             Some("rawXml")
-                if node["xml"].as_str().is_some_and(|xml| {
-                    let xml = xml.trim_start();
-                    xml.starts_with("<w:del")
-                        || xml.starts_with("<w:moveFrom")
-                        || xml.starts_with("<w:bookmark")
+                if raw.is_some_and(|xml| {
+                    xml.starts_with("<w:del ") || xml.starts_with("<w:del>")
+                }) =>
+            {
+                return Ok(());
+            }
+            // Shown nowhere, they stay with the field.
+            Some("moveFrom" | "bookmarkStart" | "bookmarkEnd") => {}
+            Some("rawXml")
+                if raw.is_some_and(|xml| {
+                    xml.starts_with("<w:moveFrom") || xml.starts_with("<w:bookmark")
                 }) => {}
             // A content control or foreign markup keeps the old Enter.
             _ => return Ok(()),
@@ -845,21 +853,85 @@ fn display_text(runs: &[Value]) -> String {
         .collect()
 }
 
+/// The result nodes Enter moved out of the projecting field at `position`:
+/// runs, nested fields and tracked deletions it records as children but no
+/// child shows. They are content of the next paragraph now.
+fn moved_out<T: ReadTxn>(txn: &T, chunks: &[Chunk], position: usize, data: &Value) -> Vec<usize> {
+    let Some((id, recorded)) = projection(txn, &chunks[position]) else {
+        return Vec::new();
+    };
+    let live: Vec<i64> = chunks[..position]
+        .iter()
+        .rev()
+        .map_while(|chunk| {
+            field_result_attr(chunk)
+                .filter(|(child, index)| *child == id && recorded.contains(index))
+        })
+        .map(|(_, index)| index)
+        .collect();
+    let mut gone: Vec<usize> = recorded
+        .iter()
+        .filter(|index| **index >= 0 && !live.contains(index))
+        .map(|index| *index as usize)
+        .filter(|index| {
+            data["structuredResult"]["inline"][*index]["type"]
+                .as_str()
+                .is_some_and(|kind| !matches!(kind, "hyperlink" | "simpleField"))
+        })
+        .collect();
+    gone.sort();
+    gone.dedup();
+    gone
+}
+
+/// Whether the field embed at `position` keeps a tracked change only Accept
+/// or Reject All resolves: not one Enter moved out, which is listed in the
+/// next paragraph.
+pub(crate) fn embed_keeps_changes<T: ReadTxn>(
+    txn: &T,
+    chunks: &[Chunk],
+    position: usize,
+    data: &str,
+) -> bool {
+    if !field_data_keeps_changes(data) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return true;
+    };
+    let gone = moved_out(txn, chunks, position, &value);
+    gone.is_empty()
+        || field_data_keeps_changes(&crate::seed::without_result_nodes(&value, &gone).to_string())
+}
+
 /// A field result node that is one tracked deletion, as the seed reads it
 /// outside a field (a field keeps it as raw markup).
 fn tracked_deletion(node: &Value) -> Option<Value> {
-    if node["type"] == "deletion" {
-        return Some(node.clone());
-    }
-    let xml = node["xml"]
-        .as_str()
-        .filter(|xml| xml.trim_start().starts_with("<w:del "))?;
-    match docx_parse::paragraph::parse_raw_inline(xml)?.as_slice() {
-        [deletion] => serde_json::to_value(deletion)
-            .ok()
-            .filter(|deletion| deletion["type"] == "deletion"),
-        _ => None,
-    }
+    let deletion = if node["type"] == "deletion" {
+        node.clone()
+    } else {
+        let xml = node["xml"]
+            .as_str()
+            .filter(|xml| xml.trim_start().starts_with("<w:del "))?;
+        match docx_parse::paragraph::parse_raw_inline(xml)?.as_slice() {
+            [deletion] => serde_json::to_value(deletion).ok()?,
+            _ => return None,
+        }
+    };
+    // Only plain text runs (text and tabs): a field result, note reference,
+    // bookmark, break, control or symbol inside it does not move intact.
+    let plain = deletion["content"].as_array().is_some_and(|nodes| {
+        !nodes.is_empty()
+            && nodes.iter().all(|node| {
+                node["type"] == "run"
+                    && node["content"].as_array().is_some_and(|content| {
+                        content
+                            .iter()
+                            .all(|item| matches!(item["type"].as_str(), Some("text" | "tab")))
+                    })
+            })
+    });
+    (deletion["type"] == "deletion" && plain).then_some(deletion)
 }
 
 /// The text runs show, tabs as tab characters.
@@ -1737,20 +1809,9 @@ fn resolve_owner(
         span.0 = span.0.min(chunk.start);
         span.1 = span.1.max(chunk.end());
     }
-    // What Enter moved out of the field (a run, nested field or tracked
-    // deletion it records and no longer shows) is content in the next
-    // paragraph, which resolves there: the field resolves without it.
-    let mut gone: Vec<usize> = old_items
-        .keys()
-        .filter(|index| **index >= 0 && !spans.contains_key(index))
-        .map(|index| *index as usize)
-        .filter(|index| {
-            old["structuredResult"]["inline"][*index]["type"]
-                .as_str()
-                .is_some_and(|kind| !matches!(kind, "hyperlink" | "simpleField"))
-        })
-        .collect();
-    gone.sort();
+    // What Enter moved out is content in the next paragraph, which resolves
+    // there: the field resolves without it.
+    let gone = moved_out(txn, chunks, position, &old);
     if !gone.is_empty() {
         field = crate::seed::without_result_nodes(&old, &gone);
         match resolve_field(&mut field, how) {
@@ -2039,6 +2100,29 @@ fn resolved_sdt_content(content: &Any, how: Resolve<'_>, style: Option<&str>) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The vendored yrs's `Store::next_live_item` (the peer re-read's lookup):
+    /// tested here, since CI does not run the vendored crate's own tests.
+    #[test]
+    fn next_live_item_skips_deleted_items() {
+        use yrs::{ClientID, Doc, GetString, ID, Transact};
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("test");
+        text.insert(&mut doc.transact_mut(), 0, "ab");
+        text.insert(&mut doc.transact_mut(), 2, "cd");
+        text.remove_range(&mut doc.transact_mut(), 1, 2);
+        assert_eq!(text.get_string(&doc.transact()), "ad");
+        let txn = doc.transact();
+        let client = ClientID::new(1);
+        // "b" (clock 1) and "c" (clock 2) are deleted: right of either is "d".
+        for clock in [1, 2] {
+            let (next, parent) = txn.store().next_live_item(&ID::new(client, clock)).unwrap();
+            assert_eq!(next, ID::new(client, 3));
+            let branch: &yrs::branch::Branch = text.as_ref();
+            assert!(parent == yrs::branch::BranchPtr::from(branch));
+        }
+        assert!(txn.store().next_live_item(&ID::new(client, 3)).is_none());
+    }
 
     #[test]
     fn nested_revision_nodes_and_control_units_resolve() {

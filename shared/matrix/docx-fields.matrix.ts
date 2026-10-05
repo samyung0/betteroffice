@@ -479,6 +479,14 @@ function rows(): Row[] {
     for (const name of ["[REF|L(AA)[PAGE|7]yy]"])
       push(where, NESTED_AFTER[name]!, `${name} | Enter in 1st while a peer deletes the field`, null, peers(enterInAA, dropUnits(2, 5)));
     push(where, REFRESHED["[REF|xL(AA)yy]"]!, "[REF|xL(AA)yy] | Enter in 1st while a peer deletes the field", null, peers(enterInAA, dropUnits(2, 5)));
+    // Review round 2, R2-3 (on hold for a decision): both peers press Enter in the same link at once. The `text` oracle
+    // is one peer's Enter, so a duplicated field or moved content shows.
+    for (const [name, xml] of [
+      ["[REF|xL(AA)yy]", REFRESHED["[REF|xL(AA)yy]"]!],
+      ["[REF|L(AA)[PAGE|7]yy]", NESTED_AFTER["[REF|L(AA)[PAGE|7]yy]"]!],
+      ["[REF|L(AA)-{d}yy]", NESTED_AFTER["[REF|L(AA)-{d}yy]"]!],
+    ] as const)
+      push(where, xml, `${name} | Enter in 1st by both peers at once`, null, peers(enterInAA, enterInAA), enterInAA);
     for (const [name, xml] of Object.entries(REJOIN_TAILS)) {
       push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join`, null, enterTwiceJoin);
       push(where, xml, `${name} | Enter in 1st, Enter in the moved text, join, Undo`, null, both(enterTwiceJoin, undo));

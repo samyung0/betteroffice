@@ -3139,3 +3139,63 @@ test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(d
     session.destroy();
   }
 );
+
+// Review round 2, R2-1: a tracked deletion after the split point that holds more than text (a simple field, a note
+// reference, a bookmark, a break, a content control, a symbol) keeps the old Enter, which leaves it in the field as
+// it was: the save after Enter holds it byte for byte (no lost result, the reference stays deleted, the bookmark keeps
+// its range) and the join restores the untouched save.
+const richDeletions: Record<string, string> = {
+  "-{dF{9}}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}${fs(deleted("9"), " PAGE ")}</w:del>`,
+  "-{d fnref}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:del>`,
+  "-{dB(e)}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:bookmarkStart w:id="5" w:name="mark"/>${deleted("e")}<w:bookmarkEnd w:id="5"/></w:del>`,
+  "-{d br}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:r><w:br/></w:r></w:del>`,
+  "-{d S{s}}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}${sdt(deleted("s"))}</w:del>`,
+  "-{d sym}": `<w:del w:id="91" w:author="A" w:date="2026-09-01T00:00:00Z">${deleted("d")}<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r></w:del>`,
+};
+test.each((["body", "cell", "header"] as const).flatMap((where) => Object.keys(richDeletions).map((shape) => [where, shape] as const)))(
+  "%s | [REF|L(AA)%syy]: Enter keeps a deletion holding more than text where it was",
+  async (where, shape) => {
+    const [story, part] = STORY[where];
+    const bytes = matrixDocx(where, holder44(field(link(run("AA")) + richDeletions[shape]! + run("yy"), " REF a \\h ")));
+    const original = await open(bytes);
+    const seeded = matrixUnits(original, story);
+    const untouchedBytes = await publish(bytes, original.encodeState());
+    const untouched = sig(untouchedBytes, part);
+    const deletion = partXml(untouchedBytes, part).match(/<w:del [^>]*>[\s\S]*?<\/w:del>/)![0];
+    original.destroy();
+    const session = await open(bytes);
+    const at = matrixLocate(session, story, "AA");
+    const { secondParaId } = session.splitParagraph({ story, paraId: at.paraId, offset: at.offset + 1 });
+    const saved = await publish(bytes, session.encodeState());
+    expect(partXml(saved, part)).toContain(deletion);
+    session.addUndoBoundary();
+    session.deleteAt({ story, paraId: secondParaId, offset: 0 }, "backward");
+    expect(sig(await publish(bytes, session.encodeState()), part)).toBe(untouched);
+    session.undo();
+    session.undo();
+    expect(matrixUnits(session, story)).toBe(seeded);
+    session.destroy();
+  }
+);
+
+// R2-2: once the moved deletion is resolved while the field is split, no field change is left for Accept or Reject
+// All (the sidebar's row would do nothing).
+test.each((["Reject All", "Accept All", "reject by id", "accept by id"] as const).map((how) => [how] as const))(
+  "[REF|L(AA)-{d}yy]: Enter, then %s of the moved deletion leaves no field change",
+  async (how) => {
+    const bytes = matrixDocx("body", holder44(field(link(run("AA")) + del(deleted("d")) + run("yy"), " REF a \\h ")));
+    const session = await open(bytes);
+    const at = matrixLocate(session, "body", "AA");
+    const { secondParaId } = session.splitParagraph({ story: "body", paraId: at.paraId, offset: at.offset + 1 });
+    expect(session.listRevisions().length).toBe(1);
+    if (how === "Reject All") session.rejectChange({ all: true });
+    else if (how === "Accept All") session.acceptChange({ all: true });
+    else
+      for (const revision of session.listRevisions().filter((r) => r.range.start.paraId === secondParaId))
+        if (how === "reject by id") session.rejectChange({ revisionId: revision.revisionId });
+        else session.acceptChange({ revisionId: revision.revisionId });
+    expect(session.listRevisions().length).toBe(0);
+    expect(session.hasFieldChanges()).toBe(false);
+    session.destroy();
+  }
+);
