@@ -279,6 +279,20 @@ pub struct TabRun {
     pub width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ptab: Option<PositionalTab>,
+}
+
+/// A `w:ptab`'s attributes as authored.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionalTab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1303,12 +1317,14 @@ impl PartialEq for TabRun {
             fmt: _,
             width: _,
             leader_glyphs: _,
+            ptab: _,
             pm_start: _,
             pm_end: _,
         } = other;
         self.fmt == other.fmt
             && self.width == other.width
             && self.leader_glyphs == other.leader_glyphs
+            && self.ptab == other.ptab
     }
 }
 

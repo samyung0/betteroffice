@@ -128,8 +128,8 @@ mod tabs;
 
 pub use input::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
-    MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
-    SpacingIn, TabStopIn,
+    MeasureInput, MeasureRequest, PositionalTabIn, RotationBoundsIn, RunFontSlotsIn, RunIn,
+    RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 
 use crate::font_store::{FontId, FontStore};
@@ -463,6 +463,8 @@ pub fn measure_paragraph_typed(
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
         indent_left_px: indent_left,
         first_line_offset_px: first_line_offset,
+        indent_right_px: indent_right,
+        content_width_px: request.max_width,
         zones,
         paragraph_y_offset,
         authoritative_shaping: request.authoritative_shaping,

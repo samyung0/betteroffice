@@ -3,7 +3,7 @@ use std::f64::consts::PI;
 
 use docx_layout::types::{
     AxisPosition, BlockId, BoxEdges, ImageRunPosition, LineBreakRun, ParagraphAttrs,
-    ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
+    ParagraphBlock, PositionalTab, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map, Value, json};
@@ -488,12 +488,17 @@ fn shape_document_runs(run: &Value) -> Vec<Run> {
                         inline_sdt_widget: None,
                     })
                 }),
-            Some("tab") => Some(Run::Tab(TabRun {
+            Some(kind @ ("tab" | "ptab")) => Some(Run::Tab(TabRun {
                 fmt: formatting.clone(),
                 pm_start: None,
                 pm_end: None,
                 width: None,
                 leader_glyphs: None,
+                ptab: (kind == "ptab").then(|| PositionalTab {
+                    alignment: string(content, "alignment"),
+                    relative_to: string(content, "relativeTo"),
+                    leader: string(content, "leader"),
+                }),
             })),
             Some("break") => Some(Run::LineBreak(LineBreakRun {
                 pm_start: None,

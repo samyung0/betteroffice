@@ -8,8 +8,8 @@
 
 use ooxml_text::measure::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
-    MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn,
-    TabStopIn,
+    MeasureRequest, PositionalTabIn, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
+    SpacingIn, TabStopIn,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -186,7 +186,14 @@ fn run_in(run: &Run) -> Option<RunIn> {
             out.text = Some(text.text.clone());
             Some(out)
         }
-        Run::Tab(tab) => Some(formatted_run("tab", &tab.fmt)),
+        Run::Tab(tab) => {
+            let mut out = formatted_run("tab", &tab.fmt);
+            out.ptab = tab.ptab.as_ref().map(|ptab| PositionalTabIn {
+                alignment: ptab.alignment.clone(),
+                relative_to: ptab.relative_to.clone(),
+            });
+            Some(out)
+        }
         Run::LineBreak(_) => Some(bare_run("lineBreak")),
         Run::Field(field) => {
             let mut out = formatted_run("field", &field.fmt);
@@ -266,6 +273,7 @@ fn bare_run(kind: &str) -> RunIn {
         wrap_type: None,
         display_mode: None,
         position: None,
+        ptab: None,
     }
 }
 
@@ -659,12 +667,47 @@ mod parity_tests {
                 pm_end: None,
                 width: None,
                 leader_glyphs: None,
+                ptab: None,
             }),
             text_run("after the stop"),
         ];
         assert_parity(
             "tabs",
             &paragraph(runs, Some(attrs)),
+            400.0,
+            &fixture.config,
+            None,
+            0.0,
+        );
+    }
+
+    #[test]
+    fn positional_tabs_match_the_json_path() {
+        let fixture = fixture();
+        let ptab = |alignment: &str| {
+            Run::Tab(TabRun {
+                fmt: RunFormatting::default(),
+                pm_start: None,
+                pm_end: None,
+                width: None,
+                leader_glyphs: None,
+                ptab: Some(crate::types::PositionalTab {
+                    alignment: Some(alignment.to_owned()),
+                    relative_to: Some("margin".to_owned()),
+                    leader: Some("dot".to_owned()),
+                }),
+            })
+        };
+        let runs = vec![
+            text_run("left"),
+            ptab("center"),
+            text_run("middle"),
+            ptab("right"),
+            text_run("end"),
+        ];
+        assert_parity(
+            "ptab",
+            &paragraph(runs, None),
             400.0,
             &fixture.config,
             None,

@@ -287,6 +287,20 @@ pub struct RunIn {
     /// Anchor placement; only presence affects floating detection.
     #[serde(default)]
     pub position: Option<serde::de::IgnoredAny>,
+    /// Tab runs: a `w:ptab`'s attributes as authored. A tab without both a
+    /// known `alignment` and `relativeTo` measures as an ordinary tab.
+    #[serde(default)]
+    pub ptab: Option<PositionalTabIn>,
+}
+
+/// `w:ptab` (ECMA-376 §17.3.3.23) attributes that drive measurement.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionalTabIn {
+    #[serde(default)]
+    pub alignment: Option<String>,
+    #[serde(default)]
+    pub relative_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

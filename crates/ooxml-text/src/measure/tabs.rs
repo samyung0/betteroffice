@@ -212,3 +212,89 @@ pub(super) fn calculate_tab_width(
         reserves_following: matches!(kind, StopKind::End | StopKind::Center),
     }
 }
+
+/// Where a positional tab's text aligns (`w:ptab@w:alignment`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PositionalAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// A `w:ptab` (ECMA-376 §17.3.3.23): it ignores the paragraph's stops and the
+/// default grid and advances to a position on the margins or the indents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PositionalTab {
+    pub align: PositionalAlign,
+    /// `relativeTo="indent"`: between the paragraph indents, else the margins.
+    pub indent: bool,
+}
+
+impl PositionalTab {
+    /// Both attributes are required by the schema; anything else is `None`.
+    pub(super) fn parse(alignment: Option<&str>, relative_to: Option<&str>) -> Option<Self> {
+        let align = match alignment? {
+            "left" => PositionalAlign::Left,
+            "center" => PositionalAlign::Center,
+            "right" => PositionalAlign::Right,
+            _ => return None,
+        };
+        let indent = match relative_to? {
+            "indent" => true,
+            "margin" => false,
+            _ => return None,
+        };
+        Some(Self { align, indent })
+    }
+
+    /// The position the following text aligns at, in content-area px (the
+    /// margin is 0, `width_px` the far margin).
+    pub(super) fn position(self, width_px: f32, indent_left_px: f32, indent_right_px: f32) -> f32 {
+        let (start, end) = if self.indent {
+            (indent_left_px, width_px - indent_right_px)
+        } else {
+            (0.0, width_px)
+        };
+        match self.align {
+            PositionalAlign::Left => start,
+            PositionalAlign::Center => (start + end) / 2.0,
+            PositionalAlign::Right => end,
+        }
+    }
+
+    /// Width of what follows that sits before the position: none for left,
+    /// half for centre, all of it for right.
+    pub(super) fn lead(self, following_width_px: f32) -> f32 {
+        match self.align {
+            PositionalAlign::Left => 0.0,
+            PositionalAlign::Center => following_width_px / 2.0,
+            PositionalAlign::Right => following_width_px,
+        }
+    }
+}
+
+#[cfg(test)]
+mod positional_tab_tests {
+    use super::*;
+
+    #[test]
+    fn positions_on_the_margins_and_indents() {
+        let at = |alignment, relative_to| {
+            PositionalTab::parse(Some(alignment), Some(relative_to))
+                .unwrap()
+                .position(600.0, 100.0, 50.0)
+        };
+        assert_eq!(at("left", "margin"), 0.0);
+        assert_eq!(at("center", "margin"), 300.0);
+        assert_eq!(at("right", "margin"), 600.0);
+        assert_eq!(at("left", "indent"), 100.0);
+        assert_eq!(at("center", "indent"), 325.0);
+        assert_eq!(at("right", "indent"), 550.0);
+    }
+
+    #[test]
+    fn needs_both_attributes() {
+        assert_eq!(PositionalTab::parse(Some("center"), None), None);
+        assert_eq!(PositionalTab::parse(Some("start"), Some("margin")), None);
+    }
+}

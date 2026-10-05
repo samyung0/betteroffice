@@ -83,6 +83,9 @@ pub(super) struct FillParams<'a> {
     pub indent_left_px: f32,
     /// `firstLine − hanging` in px, applied to grid x on the first line only.
     pub first_line_offset_px: f32,
+    /// `indent.right` in px and the margin-to-margin width, which place a `w:ptab`.
+    pub indent_right_px: f32,
+    pub content_width_px: f32,
     /// Validated float exclusion zones.
     pub zones: &'a [FloatZoneIn],
     /// Paragraph Y in the floating-zone coordinate space.
@@ -452,25 +455,31 @@ impl Filler<'_> {
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         let following = self.following_width_after(run_index);
-        let mut tab = self.tab_width(following);
-        let word = if tab.reserves_following {
-            0.0
-        } else {
-            self.first_word_after(run_index)
+        let width = match t.ptab {
+            Some(ptab) => self.positional_tab_width(ri, ptab, following)?,
+            None => {
+                let mut tab = self.tab_width(following);
+                let word = if tab.reserves_following {
+                    0.0
+                } else {
+                    self.first_word_after(run_index)
+                };
+                let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
+                let strands_word = self.cur.width > 0.0
+                    && word > 0.0
+                    && word <= self.cur.available + WRAP_SLACK_PX
+                    && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
+                if overflows || strands_word {
+                    self.start_new_line(ri, 0)?;
+                    tab = self.tab_width(following);
+                }
+                tab.width
+            }
         };
-        let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
-        let strands_word = self.cur.width > 0.0
-            && word > 0.0
-            && word <= self.cur.available + WRAP_SLACK_PX
-            && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
-        if overflows || strands_word {
-            self.start_new_line(ri, 0)?;
-            tab = self.tab_width(following);
-        }
 
         self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
-        self.record_atomic(ri, 0, 1, tab.width, t.bidi_level);
-        self.cur.width += tab.width;
+        self.record_atomic(ri, 0, 1, width, t.bidi_level);
+        self.cur.width += width;
         self.cur.tail_run = ri;
         self.cur.tail_char = 1;
         Ok(())
@@ -512,18 +521,48 @@ impl Filler<'_> {
         width
     }
 
+    /// A `w:ptab` advances to its position on the margins or indents, placing
+    /// the text up to the next tab left of, around or right of it. A position
+    /// the line has already passed is taken on the next line (§17.3.3.23); the
+    /// text never runs past the line's own right edge.
+    fn positional_tab_width(
+        &mut self,
+        ri: u32,
+        ptab: tabs::PositionalTab,
+        following: f32,
+    ) -> Result<f32, MeasureError> {
+        let position = ptab.position(
+            self.p.content_width_px,
+            self.p.indent_left_px,
+            self.p.indent_right_px,
+        );
+        if self.cur.width > 0.0 && self.content_x() > position + WRAP_SLACK_PX {
+            self.start_new_line(ri, 0)?;
+        }
+        // Centred and right-aligned text keeps all of itself on the line.
+        let kept = match ptab.align {
+            tabs::PositionalAlign::Left => 0.0,
+            _ => following,
+        };
+        let room = self.cur.available - self.cur.width - kept;
+        Ok((position - ptab.lead(following) - self.content_x())
+            .min(room)
+            .max(0.0))
+    }
+
+    /// The pen in content-area coordinates, where tab stops are measured.
+    fn content_x(&self) -> f32 {
+        let first_line_offset = if self.lines.is_empty() {
+            self.p.first_line_offset_px
+        } else {
+            0.0
+        };
+        self.p.indent_left_px + first_line_offset + self.cur.width + self.cur.left_offset
+    }
+
     fn tab_width(&self, following: f32) -> tabs::TabAdvance {
-        let line_x = self.cur.width + self.cur.left_offset;
-        let is_first_line = self.lines.is_empty();
-        let content_x = self.p.indent_left_px
-            + if is_first_line {
-                self.p.first_line_offset_px
-            } else {
-                0.0
-            }
-            + line_x;
         tabs::calculate_tab_width(
-            content_x,
+            self.content_x(),
             self.p.tabs,
             tabs::px_to_twips(self.p.indent_left_px),
             following,
@@ -1298,6 +1337,8 @@ mod tests {
             tabs: &[],
             indent_left_px: 0.0,
             first_line_offset_px: 0.0,
+            indent_right_px: 0.0,
+            content_width_px: width,
             zones: &[],
             paragraph_y_offset: 0.0,
             authoritative_shaping: false,

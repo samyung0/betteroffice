@@ -41,10 +41,10 @@ use docx_layout::types::{
     BlockId, BorderStyle, BoxEdges, CellBorderSpec, CellBorders, ChartBlock, ColumnBreakBlock,
     ColumnLayout, FieldRun, FloatingTablePosition, HorizontalRule, HyperlinkInfo, ImageRun,
     ImageRunPosition, LayoutBlock, LineBreakRun, ListNumPr, PageBreakBlock, PageMargins,
-    ParagraphAttrs, ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing, Run,
-    RunFontSlots, RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock, SectionBreakType,
-    ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell, TableRow, TextRun,
-    UnderlineSpec,
+    ParagraphAttrs, ParagraphBlock, ParagraphBorders, ParagraphIndent, ParagraphSpacing,
+    PositionalTab, Run, RunFontSlots, RunFormatting, RunLanguageSlots, SdtGroup, SectionBreakBlock,
+    SectionBreakType, ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell,
+    TableRow, TextRun, UnderlineSpec,
 };
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::Attrs;
@@ -621,7 +621,9 @@ fn lower_story<T: ReadTxn>(
                     if shared_map_string(&tab, txn, "_kind").as_deref() == Some("tab") =>
                 {
                     paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Tab,
+                        kind: RawRunKind::Tab(positional_tab(
+                            shared_any(&tab, txn, "ptab").as_ref(),
+                        )),
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
                         story_end: story_index + 1,
@@ -1784,7 +1786,9 @@ fn lower_inline_sdt_values(
             }
             "tab" => {
                 runs.push(RawRun {
-                    kind: RawRunKind::Tab,
+                    kind: RawRunKind::Tab(positional_tab(
+                        payload.and_then(|payload| payload.get("ptab")),
+                    )),
                     formatting,
                     story_start: story_index,
                     story_end: story_index + 1,
@@ -2045,7 +2049,8 @@ struct CommentInterval {
 #[derive(Clone, Debug)]
 enum RawRunKind {
     Text(String),
-    Tab,
+    /// A tab; a `w:ptab` carries its attributes.
+    Tab(Option<PositionalTab>),
     Image(ImageRun),
     HorizontalRule(HorizontalRule),
     LineBreak,
@@ -2177,7 +2182,7 @@ fn push_text_chunks(
         }
         let value = utf16_slice(text, start - chunk_start, end - chunk_start);
         let kind = match value.as_str() {
-            "\t" => RawRunKind::Tab,
+            "\t" => RawRunKind::Tab(None),
             "\u{000b}" => RawRunKind::LineBreak,
             _ => RawRunKind::Text(value),
         };
@@ -2620,12 +2625,13 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             pm_end,
             inline_sdt_widget: raw.inline_sdt_widget,
         }),
-        RawRunKind::Tab => Run::Tab(TabRun {
+        RawRunKind::Tab(ptab) => Run::Tab(TabRun {
             fmt: raw.formatting,
             pm_start,
             pm_end,
             width: None,
             leader_glyphs: None,
+            ptab,
         }),
         RawRunKind::LineBreak => Run::LineBreak(LineBreakRun { pm_start, pm_end }),
         RawRunKind::Image(mut image) => {
@@ -3892,6 +3898,16 @@ fn mark_bool(attributes: Option<&Attrs>, key: &str) -> Option<bool> {
         Any::Map(map) => map_bool(map, "enabled").or(Some(true)),
         _ => any_bool(value).or(Some(true)),
     }
+}
+
+/// A tab embed's `w:ptab` attributes, when it is one.
+fn positional_tab(value: Option<&Any>) -> Option<PositionalTab> {
+    let ptab = any_map(value?)?;
+    Some(PositionalTab {
+        alignment: map_string(ptab, "alignment"),
+        relative_to: map_string(ptab, "relativeTo"),
+        leader: map_string(ptab, "leader"),
+    })
 }
 
 fn any_map(value: &Any) -> Option<&std::collections::HashMap<String, Any>> {

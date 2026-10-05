@@ -97,6 +97,8 @@ pub(super) struct PreparedTab {
     /// Head of the run's fallback chain (metrics source).
     pub metrics_font: FontId,
     pub bidi_level: u8,
+    /// Set for a `w:ptab`, which aligns to the margin or indent instead of the stop grid.
+    pub ptab: Option<super::tabs::PositionalTab>,
 }
 
 /// Field run measured from its cached display text; the live value is
@@ -415,6 +417,12 @@ fn prepare_tab_run(
         font_size_pt,
         metrics_font: chain[0],
         bidi_level,
+        ptab: run.ptab.as_ref().and_then(|ptab| {
+            super::tabs::PositionalTab::parse(
+                ptab.alignment.as_deref(),
+                ptab.relative_to.as_deref(),
+            )
+        }),
     })
 }
 

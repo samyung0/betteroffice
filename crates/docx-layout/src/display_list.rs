@@ -1637,8 +1637,17 @@ struct TabRunIn {
     width: Option<f64>,
     #[serde(default)]
     leader_glyphs: Option<LeaderGlyphIn>,
+    /// A `w:ptab` fills its gap with its own leader, never a stop's.
+    #[serde(default)]
+    ptab: Option<PositionalTabIn>,
     #[serde(flatten)]
     fmt: RunFormattingIn,
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct PositionalTabIn {
+    #[serde(default)]
+    leader: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -6280,7 +6289,10 @@ fn emit_line(
                     .as_ref()
                     .and_then(|leader| leader.glyph.as_deref())
                     .map(|_| "shaped".to_string())
-                    .or_else(|| tab_leader_for(attrs, pen_x - geom.frag_x));
+                    .or_else(|| match &run.ptab {
+                        Some(ptab) => ptab.leader.clone().filter(|leader| leader != "none"),
+                        None => tab_leader_for(attrs, pen_x - geom.frag_x),
+                    });
                 if let Some(leader) = leader {
                     emit_tab_leader(
                         prims,
