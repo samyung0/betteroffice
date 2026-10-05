@@ -541,7 +541,12 @@ function XlsxEditorContent({
   const pendingSheetViewRef = useRef(false);
   const flushNudgeRef = useRef<() => void>(() => {});
   const settlePendingEditsRef = useRef<() => boolean>(() => true);
-  const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
+  // the open cell or formula-bar draft, with the sheet it was typed on: its
+  // index now and its stable id (an open draft never changes sheet locally,
+  // so the id is the one it opened on).
+  const pendingDraftRef = useRef<(EditState & { sheet: number; sheetId: string }) | null>(
+    null
+  );
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -615,10 +620,11 @@ function XlsxEditorContent({
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
 
   const activeSheet = sheetInfo?.activeSheet ?? 0;
+  const activeSheetId = sheetInfo?.sheetIds[activeSheet] ?? '';
   pendingDraftRef.current = editing
-    ? { sheet: activeSheet, ...editing }
+    ? { sheet: activeSheet, sheetId: activeSheetId, ...editing }
     : selection && formulaDraft !== null
-      ? { sheet: activeSheet, ...selection.focus, value: formulaDraft }
+      ? { sheet: activeSheet, sheetId: activeSheetId, ...selection.focus, value: formulaDraft }
       : null;
 
   const clearSelection = useCallback(() => {
@@ -783,10 +789,25 @@ function XlsxEditorContent({
             handle.applyUpdate(collaborationInitialUpdate.slice());
           }
           handleRef.current = handle;
-          unsubscribeUpdates = handle.onUpdate(() => {
+          unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (disposed || !handle) return;
             try {
-              setSheetInfo(handle.sheetInfo());
+              const info = handle.sheetInfo();
+              // a peer removed the sheet a draft is open on: drop the draft
+              // rather than land it on whichever sheet is active now.
+              const draft = pendingDraftRef.current;
+              if (origin === 'remote' && draft && !info.sheetIds.includes(draft.sheetId)) {
+                pendingDraftRef.current = null;
+                const input = editorInputRef.current;
+                const focused = input !== null && input === document.activeElement;
+                suppressBlurRef.current = true;
+                input?.blur();
+                suppressBlurRef.current = false;
+                setEditing(null);
+                setFormulaDraft(null);
+                if (focused) scrollRef.current?.focus({ preventScroll: true });
+              }
+              setSheetInfo(info);
               setRevision((current) => current + 1);
               setStaleFor({});
               refreshProposals();
