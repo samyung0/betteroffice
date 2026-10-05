@@ -60,6 +60,25 @@ test('the palette highlights with a hex and clears with none', () => {
   expect(onChange).toHaveBeenLastCalledWith('none');
 });
 
+test('the palette ticks the selection\'s highlight, named or hex', () => {
+  const palette = [...PALETTE, { name: 'Yellow', value: '#ffff00' }];
+  const ticked = (value: string) => {
+    const { container, getByRole, unmount } = render(
+      <ColorPicker mode="highlight" value={value} palette={palette} />
+    );
+    open(container);
+    const selected = palette
+      .filter(({ name }) => getByRole('gridcell', { name }).getAttribute('aria-selected') === 'true')
+      .map(({ name }) => name);
+    unmount();
+    return selected;
+  };
+  expect(ticked('yellow')).toEqual(['Yellow']);
+  expect(ticked('2563EB')).toEqual(['Blue']);
+  expect(ticked('#2563EB')).toEqual(['Blue']);
+  expect(ticked('none')).toEqual([]);
+});
+
 test('a dropdown near the window edge moves back inside it', async () => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 300 });
   Element.prototype.getBoundingClientRect = function (this: Element) {

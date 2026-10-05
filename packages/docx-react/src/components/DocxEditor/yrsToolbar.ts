@@ -238,6 +238,7 @@ export function withStoredYrsFormatting(
         fontFamily: null,
         fontSize: null,
         color: null,
+        highlight: null,
       }
     : selection.context;
   const fontFamily = delta.fontFamily;
@@ -266,6 +267,7 @@ export function withStoredYrsFormatting(
             : delta.fontSize * 2,
       color:
         color === undefined ? base.color : color?.rgb ?? color?.themeColor ?? null,
+      highlight: delta.highlight === undefined ? base.highlight : delta.highlight,
     },
   };
 }

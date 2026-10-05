@@ -569,6 +569,8 @@ export interface YrsSelectionContext {
   fontSize: number | null;
   /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
   color: string | null;
+  /** Uniform highlight (a Word name such as `yellow`, or a hex), or `null` when absent/mixed. */
+  highlight: string | null;
   /** Paragraph containing the range start. */
   paraId: string;
   styleId: string | null;

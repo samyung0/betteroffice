@@ -80,6 +80,9 @@ pub struct SelectionContextInfo {
     /// The uniform text color: the `rgb` hex when set, else the theme color
     /// name; `None` when mixed/absent.
     pub color: Option<String>,
+    /// The uniform highlight (a Word name such as `yellow`, or a hex);
+    /// `None` when mixed/absent.
+    pub highlight: Option<String>,
     // Paragraph state at the range start.
     pub para_id: ParagraphId,
     /// The paragraph's `pStyle`, extracted from `paragraph_properties`.
@@ -246,6 +249,7 @@ impl EditingDoc {
         let mut font_family = ValueAgg::Empty;
         let mut font_size = ValueAgg::Empty;
         let mut color = ValueAgg::Empty;
+        let mut highlight = ValueAgg::Empty;
         for chunk in chunks.iter() {
             if chunk.start >= mark_to {
                 break;
@@ -262,6 +266,7 @@ impl EditingDoc {
             font_family.fold(chunk.attrs.get("fontFamily"));
             font_size.fold(chunk.attrs.get("fontSize"));
             color.fold(chunk.attrs.get("textColor"));
+            highlight.fold(chunk.attrs.get("highlight"));
         }
 
         let map_field = |value: Option<&Any>, key: &str| match value {
@@ -317,6 +322,14 @@ impl EditingDoc {
             font_family,
             font_size,
             color,
+            // Seeded runs hold the colour itself, a toolbar edit `{color}`.
+            highlight: match highlight.uniform() {
+                Some(Any::String(highlight)) => Some(highlight.to_string()),
+                value => match map_field(value, "color") {
+                    Some(Any::String(highlight)) => Some(highlight.to_string()),
+                    _ => None,
+                },
+            },
             para_id,
             style_id: prop_string("pStyle"),
             alignment: prop_string("alignment"),
@@ -444,6 +457,7 @@ mod tests {
             }),
             font_size: Patch::Set(14.0),
             color: Patch::Set(ColorPatch::Rgb("336699".into())),
+            highlight: Patch::Set("FFFF00".into()),
             ..Default::default()
         };
         doc.format_range(&local(), StoryRange::new("body", 0, 5), &delta)
@@ -453,15 +467,18 @@ mod tests {
         assert_eq!(styled.font_family.as_deref(), Some("Georgia"));
         assert_eq!(styled.font_size, Some(28.0));
         assert_eq!(styled.color.as_deref(), Some("336699"));
+        assert_eq!(styled.highlight.as_deref(), Some("yellow"));
 
         let spanning = context(&doc, 0, 11);
         assert_eq!(spanning.font_family, None);
         assert_eq!(spanning.font_size, None);
         assert_eq!(spanning.color, None);
+        assert_eq!(spanning.highlight, None);
 
         let plain = context(&doc, 6, 11);
         assert_eq!(plain.font_family, None);
         assert_eq!(plain.font_size, None);
+        assert_eq!(plain.highlight, None);
     }
 
     #[test]

@@ -3323,6 +3323,7 @@ impl EditSession {
     /// {
     ///   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
     ///   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+    ///   "highlight": string|null,
     ///   "paraId": string, "styleId": string|null, "alignment": string|null,
     ///   "paragraphProperties": {…},
     ///   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
@@ -3362,6 +3363,7 @@ impl EditSession {
             "fontFamily": context.font_family,
             "fontSize": context.font_size,
             "color": context.color,
+            "highlight": context.highlight,
             "paraId": context.para_id,
             "styleId": context.style_id,
             "alignment": context.alignment,

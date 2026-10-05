@@ -105,6 +105,7 @@ function yrsSelectionState(selection: YrsToolbarSelection): SelectionState {
         : undefined,
       fontSize: context.fontSize ?? undefined,
       color: textColor,
+      highlight: context.highlight ?? undefined,
     },
     paragraphFormatting,
     styleId: context.styleId,
