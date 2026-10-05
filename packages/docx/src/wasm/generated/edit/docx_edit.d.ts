@@ -638,6 +638,7 @@ export class EditSession {
      * {
      *   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
      *   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+     *   "highlight": string|null,
      *   "paraId": string, "styleId": string|null, "alignment": string|null,
      *   "paragraphProperties": {…},
      *   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,

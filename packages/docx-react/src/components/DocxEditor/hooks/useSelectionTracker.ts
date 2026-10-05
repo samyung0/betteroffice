@@ -6,6 +6,7 @@ import type {
   ColorValue,
   Theme,
   TabStop,
+  TextFormatting,
 } from '@betteroffice/docx/types/document';
 import type { SelectionState, TableContextInfo } from '../types';
 import { createStyleResolver } from '@betteroffice/docx/styles';
@@ -91,6 +92,10 @@ function yrsSelectionState(selection: YrsToolbarSelection): SelectionState {
       : /^#?[0-9a-f]{6}$/i.test(color)
         ? { rgb: color.replace(/^#/, '') }
         : { themeColor: color as ColorValue['themeColor'] };
+  // A Word highlight name, or the hex of a colour Word's highlights lack,
+  // which the document keeps as clear shading.
+  const highlight = context.highlight;
+  const highlightHex = highlight != null && /^#?[0-9a-f]{6}$/i.test(highlight);
 
   return {
     hasSelection: context.hasSelection,
@@ -105,7 +110,13 @@ function yrsSelectionState(selection: YrsToolbarSelection): SelectionState {
         : undefined,
       fontSize: context.fontSize ?? undefined,
       color: textColor,
-      highlight: context.highlight ?? undefined,
+      highlight:
+        highlight == null || highlightHex
+          ? undefined
+          : (highlight as TextFormatting['highlight']),
+      shading: highlightHex
+        ? { fill: { rgb: highlight.replace(/^#/, '') }, pattern: 'clear' }
+        : undefined,
     },
     paragraphFormatting,
     styleId: context.styleId,
@@ -241,7 +252,7 @@ export function useSelectionTracker({
         fontFamily,
         fontSize,
         color: textColor,
-        highlight: textFormatting.highlight,
+        highlight: textFormatting.highlight ?? textFormatting.shading?.fill?.rgb,
         alignment: paragraphFormatting.alignment,
         lineSpacing: paragraphFormatting.lineSpacing,
         listState,
