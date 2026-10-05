@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use ooxml_text::word_fonts::is_east_asian_family;
 use yrs::types::Attrs;
+use yrs::types::Delta;
 use yrs::types::text::YChange;
-use yrs::{Any, Out, ReadTxn, Text, TextRef};
+use yrs::{Any, In, Out, ReadTxn, Text, TextRef};
 
 use crate::op::{OpError, OpResult, Receipt};
 use crate::{DEL, EditCtx, EditingDoc, INS, StoryRange, out_len, story_ref};
@@ -345,31 +347,22 @@ impl EditingDoc {
             story.format(&mut txn, range.start, len, attrs);
         }
         if let Patch::Set(patch) = &delta.font_family {
-            // Runs whose own fonts hold more than the picked slots keep the
-            // rest: one format per stretch of equal fonts, across marks and
-            // objects that hold none, over one plain format of the range.
-            let plain = picked_font(None, patch);
-            let mut stretches: Vec<(u32, u32, Any)> = Vec::new();
-            let mut open = false;
+            // Each run keeps what its own fonts hold beyond the picked slots;
+            // one pass over the range, one retain per stretch of equal fonts.
+            let mut stretches: Vec<(u32, Any)> = Vec::new();
             let mut offset = 0;
             for diff in story.diff(&txn, YChange::identity) {
                 let chunk_end = offset + out_len(&diff.insert);
                 let (from, to) = (offset.max(range.start), chunk_end.min(range.end));
-                let own = diff
-                    .attributes
-                    .as_deref()
-                    .and_then(|attrs| attrs.get("fontFamily"))
-                    .filter(|own| !matches!(own, Any::Null));
-                let text = matches!(diff.insert, Out::Any(Any::String(_)));
-                if from < to && (own.is_some() || text) {
+                if from < to {
+                    let own = diff
+                        .attributes
+                        .as_deref()
+                        .and_then(|attrs| attrs.get("fontFamily"));
                     let font = picked_font(own, patch);
                     match stretches.last_mut() {
-                        Some((_, end, last)) if open && *last == font => *end = to,
-                        _ if font != plain => {
-                            stretches.push((from, to, font));
-                            open = true;
-                        }
-                        _ => open = false,
+                        Some((len, last)) if *last == font => *len += to - from,
+                        _ => stretches.push((to - from, font)),
                     }
                 }
                 offset = chunk_end;
@@ -377,11 +370,15 @@ impl EditingDoc {
                     break;
                 }
             }
-            let font = |value: Any| Attrs::from([(Arc::from("fontFamily"), value)]);
-            story.format(&mut txn, range.start, len, font(plain));
-            for (from, to, value) in stretches {
-                story.format(&mut txn, from, to - from, font(value));
-            }
+            let deltas = std::iter::once(Delta::<In>::Retain(range.start, None)).chain(
+                stretches.into_iter().map(|(len, font)| {
+                    Delta::Retain(
+                        len,
+                        Some(Box::new(Attrs::from([(Arc::from("fontFamily"), font)]))),
+                    )
+                }),
+            );
+            story.apply_delta(&mut txn, deltas);
         }
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
@@ -467,18 +464,24 @@ impl EditingDoc {
 
 /// A font picked over a run's own fonts, as Word's font box sets it: the
 /// Latin and complex-script slots take the font (their theme fonts go, as
-/// they would win over it), the East Asian slot keeps the run's.
+/// they would win over it), and the East Asian slot takes it only when it is
+/// an East Asian face, keeping the run's otherwise.
 fn picked_font(own: Option<&Any>, patch: &FontFamilyPatch) -> Any {
     let mut font = match own {
         Some(Any::Map(own)) => (**own).clone(),
         _ => HashMap::new(),
     };
     let h_ansi = patch.h_ansi.as_deref().unwrap_or(&patch.ascii);
+    let east_asian = is_east_asian_family(&patch.ascii);
     for (slot, theme, name) in [
         ("ascii", "asciiTheme", patch.ascii.as_str()),
         ("hAnsi", "hAnsiTheme", h_ansi),
         ("cs", "csTheme", patch.ascii.as_str()),
+        ("eastAsia", "eastAsiaTheme", patch.ascii.as_str()),
     ] {
+        if slot == "eastAsia" && !east_asian {
+            continue;
+        }
         font.insert(slot.to_owned(), Any::from(name));
         font.remove(theme);
     }

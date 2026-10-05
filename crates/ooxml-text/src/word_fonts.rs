@@ -283,9 +283,76 @@ pub fn requested_line_metrics(family: &str) -> Option<RequestedLineMetrics> {
         .map(|&(_, metrics)| metrics)
 }
 
+/// Families named for CJK text that [`EAST_ASIAN_FACES`] has no metrics for.
+const EAST_ASIAN_PREFIXES: &[&str] = &[
+    "noto sans cjk",
+    "noto serif cjk",
+    "noto sans sc",
+    "noto sans tc",
+    "noto sans hk",
+    "noto sans jp",
+    "noto sans kr",
+    "noto serif sc",
+    "noto serif tc",
+    "noto serif jp",
+    "noto serif kr",
+    "source han",
+    "pingfang",
+    "hiragino",
+    "songti",
+    "heiti",
+    "stsong",
+    "stheiti",
+    "stkaiti",
+    "stfangsong",
+    "stxihei",
+    "apple sd gothic",
+    "apple ligothic",
+    "apple lisung",
+];
+
+/// Whether `family` is an East Asian face, which Word's font box also sets as
+/// a run's East Asian font: one of [`EAST_ASIAN_FACES`], a name written in
+/// CJK, kana, Hangul or full-width forms, or a family named for CJK text.
+pub fn is_east_asian_family(family: &str) -> bool {
+    let key = family.trim().to_lowercase();
+    EAST_ASIAN_FACES
+        .iter()
+        .any(|(names, _)| names.contains(&key.as_str()))
+        || key.chars().any(|character| {
+            matches!(character as u32,
+                0x1100..=0x11FF | 0x3040..=0x30FF | 0x3130..=0x318F | 0x3400..=0x4DBF
+                | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xFF00..=0xFFEF)
+        })
+        || EAST_ASIAN_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_east_asian_families_from_latin_ones() {
+        for family in [
+            "SimSun",
+            "Microsoft YaHei",
+            "PMingLiU",
+            "MS Mincho",
+            "Malgun Gothic",
+            "宋体",
+            "游ゴシック",
+            "Noto Sans CJK SC",
+            "PingFang TC",
+            "Hiragino Mincho ProN",
+        ] {
+            assert!(is_east_asian_family(family), "{family}");
+        }
+        for family in ["Arial", "Calibri", "Times New Roman", "Noto Sans", "Aptos"] {
+            assert!(!is_east_asian_family(family), "{family}");
+        }
+    }
 
     /// Every Word family `@betteroffice/fonts` substitutes a Noto CJK face for.
     /// A miss measures that family with Noto's 1.448 em span.
