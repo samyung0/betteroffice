@@ -536,7 +536,7 @@ describe('clicking a note', () => {
     const options = stableOptions();
     let attempts = 0;
     const input = options().yrsInputRef.current!;
-    input.beginPointerSelection = () => { attempts++; };
+    input.beginPointerSelection = () => { attempts++; return true; };
     const { rerender } = renderHook(({ queries }) => usePagesPointer(options({ displayListQueries: queries })), {
       initialProps: { queries: fakeQueries() as DisplayListQueries | null },
     });

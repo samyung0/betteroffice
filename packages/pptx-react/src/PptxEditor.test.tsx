@@ -428,7 +428,7 @@ describe('PptxEditor pending image insertion', () => {
         const before = opened[0].handle.snapshot();
         const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'pending.png', { type: 'image/png' });
         fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [file] } });
-        expect(pending.at(-1)).toBe(true);
+        expect(pending[pending.length - 1]).toBe(true);
         await waitFor(() => expect(finish).toBeDefined());
         if (scenario === 'replace' || scenario === 'stale-error') {
           view.rerender(<PptxEditor {...props} file={new Uint8Array(fixture)} />);
@@ -441,7 +441,7 @@ describe('PptxEditor pending image insertion', () => {
         await act(async () => { finish!(); await Promise.resolve(); });
         if (scenario !== 'unmount') expect(opened[opened.length - 1].handle.snapshot()).toEqual(before);
         expect(errors).toHaveLength(scenario === 'decode-error' ? 1 : 0);
-        expect(pending.at(-1)).toBe(false);
+        expect(pending[pending.length - 1]).toBe(false);
       } finally {
         cleanup();
         globalThis.Image = originalImage;
