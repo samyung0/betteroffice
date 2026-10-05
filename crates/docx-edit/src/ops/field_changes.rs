@@ -767,64 +767,67 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
 }
 
 /// Runs `apply` (applying a peer's update), then re-reads what the
-/// projecting fields whose projected children it deleted or put back show
+/// projecting fields whose last projected children it deleted show
 /// ([`refresh_shown`]), in a system transaction peers receive and Undo skips:
 /// two peers each deleting part of a field's last link remove it only once
-/// each has the other's update.
+/// each has the other's update. Only a delete that ends at a projecting
+/// field's embed reads its story.
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
-    use yrs::types::{DeepObservable, Delta, Event, PathSegment};
-    use yrs::{Transact, TransactionMut};
-    let touched = Arc::new(std::sync::Mutex::new(Vec::<(String, u32)>::new()));
-    let subscription = doc.transact().get_map(crate::STORIES).map(|stories| {
-        let touched = Arc::clone(&touched);
-        stories.observe_deep(move |txn: &TransactionMut<'_>, events| {
-            for event in events.iter() {
-                let Event::Text(event) = event else {
-                    continue;
-                };
-                let Some(PathSegment::Key(story)) = event.path().front().cloned() else {
-                    continue;
-                };
-                let mut index = 0;
-                for delta in event.delta(txn) {
-                    match delta {
-                        Delta::Retain(len, _) => index += len,
-                        Delta::Deleted(_) => touched.lock().unwrap().push((story.to_string(), index)),
-                        Delta::Inserted(value, attrs) => {
-                            if attrs
-                                .as_ref()
-                                .and_then(|attrs| attrs.get(FIELD_RESULT))
-                                .is_some_and(|marker| *marker != Any::Null)
-                            {
-                                touched.lock().unwrap().push((story.to_string(), index));
-                            }
-                            index += match value {
-                                Out::Any(Any::String(text)) => text.encode_utf16().count() as u32,
-                                _ => 1,
-                            };
-                        }
-                    }
-                }
-            }
+    use yrs::branch::{BranchPtr, Nested};
+    use yrs::types::TypeRef;
+    use yrs::{Assoc, ID, IdSet, IndexedSequence, MapRef, StickyIndex, Transact};
+    let deleted = Arc::new(std::sync::Mutex::new(IdSet::new()));
+    let subscription = {
+        let deleted = Arc::clone(&deleted);
+        doc.observe_after_transaction(move |txn| {
+            deleted.lock().unwrap().merge_with(txn.delete_set().clone());
         })
-    });
+        .ok()
+    };
     let result = apply();
     drop(subscription);
-    let mut touched = std::mem::take(&mut *touched.lock().unwrap());
+    let deleted = std::mem::take(&mut *deleted.lock().unwrap());
+    if deleted.is_empty() {
+        return result;
+    }
+    // Where each deleted range was: a story offset now holding a projecting
+    // field's embed.
+    let mut touched: Vec<(BranchPtr, u32)> = Vec::new();
+    {
+        let txn = doc.transact();
+        for (client, ranges) in deleted.iter() {
+            for range in ranges.iter() {
+                let Some(offset) =
+                    StickyIndex::from_id(ID::new(*client, range.end - 1), Assoc::After)
+                        .get_offset(&txn)
+                        .filter(|offset| matches!(offset.branch.type_ref(), TypeRef::Text))
+                else {
+                    continue;
+                };
+                let story = TextRef::from(offset.branch);
+                if story
+                    .sticky_index(&txn, offset.index, Assoc::After)
+                    .and_then(|sticky| sticky.id().copied())
+                    .and_then(|id| Nested::<MapRef>::new(id).get(&txn))
+                    .is_some_and(|map| map.contains_key(&txn, "resultProjection"))
+                {
+                    touched.push((offset.branch, offset.index));
+                }
+            }
+        }
+    }
     if touched.is_empty() {
         return result;
     }
-    touched.sort();
     let mut txn = doc.transact_mut_with("system");
-    for (story_id, offsets) in touched.chunk_by(|a, b| a.0 == b.0).map(|group| {
-        (group[0].0.clone(), group.iter().map(|(_, at)| *at).collect::<Vec<_>>())
-    }) {
-        let Some(Out::YText(story)) = txn
-            .get_map(crate::STORIES)
-            .and_then(|stories| stories.get(&txn, &story_id))
-        else {
-            continue;
-        };
+    while let Some((branch, _)) = touched.first().cloned() {
+        let offsets: Vec<u32> = touched
+            .iter()
+            .filter(|(of, _)| *of == branch)
+            .map(|(_, at)| *at)
+            .collect();
+        touched.retain(|(of, _)| *of != branch);
+        let story = TextRef::from(branch);
         let ids = owners_at(&txn, &snapshot(&story, &txn), &offsets);
         refresh_shown(&mut txn, &story, &ids);
     }
