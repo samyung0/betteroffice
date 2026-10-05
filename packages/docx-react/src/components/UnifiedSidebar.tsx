@@ -23,6 +23,8 @@ export interface UnifiedSidebarProps {
   onExpandedItemChange?: (itemId: string | null) => void;
   /** Controlled: sidebar item to expand based on cursor position. */
   activeItemId?: string | null;
+  /** Cards hide parts while read-only (an add-comment card): heights change. */
+  readOnly?: boolean;
 }
 
 export function UnifiedSidebar({
@@ -34,6 +36,7 @@ export function UnifiedSidebar({
   editorContainerRef,
   onExpandedItemChange,
   activeItemId,
+  readOnly = false,
 }: UnifiedSidebarProps) {
   const { t } = useTranslation();
   // Fully controlled: parent owns expansion state via activeItemId
@@ -126,11 +129,12 @@ export function UnifiedSidebar({
     return () => observer.disconnect();
   }, [editorContainerRef]);
 
-  // Re-measure on expand/collapse so collision avoidance uses up-to-date sizes.
+  // Re-measure on expand/collapse, and when read-only hides or shows parts of
+  // cards, so collision avoidance uses up-to-date sizes.
   useEffect(() => {
     const raf = requestAnimationFrame(remeasureAll);
     return () => cancelAnimationFrame(raf);
-  }, [expandedItem, remeasureAll]);
+  }, [expandedItem, readOnly, remeasureAll]);
 
   // Watch expanded card for ongoing size changes (e.g. typing in reply input)
   useEffect(() => {

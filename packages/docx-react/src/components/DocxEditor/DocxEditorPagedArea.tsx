@@ -344,6 +344,7 @@ export function DocxEditorPagedArea({
           editorContainerRef={scrollContainerRef}
           onExpandedItemChange={setExpandedSidebarItem}
           activeItemId={expandedSidebarItem}
+          readOnly={readOnly}
         />
       )}
       <CommentMarginMarkers
@@ -562,10 +563,20 @@ export function DocxEditorPagedArea({
             <InlineHeaderFooterEditor
               position={bandEdit.kind}
               targetRect={hfChromeRect}
+              // Its Options menu had the focus and unmounts with it: the
+              // document input takes it back.
               onClose={() => {
                 setPartEditTarget(null);
+                pagedEditorRef.current?.focus();
               }}
-              onRemove={readOnly ? undefined : onRemoveHeaderFooter}
+              onRemove={
+                readOnly
+                  ? undefined
+                  : () => {
+                      onRemoveHeaderFooter();
+                      pagedEditorRef.current?.focus();
+                    }
+              }
             />
           );
           return canvasOverlayTarget ? createPortal(editor, canvasOverlayTarget) : editor;

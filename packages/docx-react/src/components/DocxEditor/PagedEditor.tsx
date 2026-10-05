@@ -1528,18 +1528,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         setIsFocused(true);
       };
       // Never from an embedding page: while the frame lacks the focus, the
-      // new session takes it when the frame itself is focused (the host
-      // focusing it), not when a control in the frame is clicked.
-      const onFrameFocus = () => {
-        if (window.document.activeElement === window.document.body) take();
-      };
+      // new session takes it when the frame first gets the focus (the host
+      // focusing it, or a click into the frame, whose target then keeps it).
       const raf = requestAnimationFrame(() => {
         if (window.document.hasFocus()) take();
-        else window.addEventListener('focus', onFrameFocus, { once: true });
+        else window.addEventListener('focus', take, { once: true });
       });
       return () => {
         cancelAnimationFrame(raf);
-        window.removeEventListener('focus', onFrameFocus);
+        window.removeEventListener('focus', take);
       };
     }, [focusBodyInput, readOnly, runLayoutPipelineRef, yrsCore.session]);
 
