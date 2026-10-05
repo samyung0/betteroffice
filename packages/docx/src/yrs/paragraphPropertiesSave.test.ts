@@ -789,7 +789,7 @@ describe('applying a style', () => {
     }
   });
 
-  it('stores 0 when the ruler clears the left indent a list level gives', async () => {
+  it('stores 0 when the ruler clears the indents a list level gives', async () => {
     const bytes = fixture(WORD_BODY, WORD_STYLES);
     const source = await parseDocx(bytes.buffer, { preloadFonts: false });
     const session = await createYrsSession({ clientId: 82022 });
@@ -799,9 +799,13 @@ describe('applying a style', () => {
       const item = NUMBERED + 2;
       expect(shown(session, 'body')[item]).toMatchObject({ indentLeft: 720, hangingIndent: true });
       const style = styleParagraphValues(createStyleResolver(source.package.styles), null);
-      session.setParagraphAttrs(range(session, item), explicitParagraphAttrs({ indentLeft: null }, style, true));
+      session.setParagraphAttrs(
+        range(session, item),
+        explicitParagraphAttrs({ indentLeft: null, indentFirstLine: null, hangingIndent: false }, style, true)
+      );
       const editor = shown(session, 'body');
-      expect(editor[item]).toMatchObject({ indentLeft: 0, hangingIndent: true });
+      expect(editor[item]).toMatchObject({ indentLeft: 0, indentFirstLine: 0 });
+      expect(editor[item]!.hangingIndent).toBeUndefined();
       reopened = await reopen(await save(session, source), 82023);
       expect(shown(reopened.session, 'body')).toEqual(editor);
     } finally {

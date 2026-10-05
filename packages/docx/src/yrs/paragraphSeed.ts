@@ -19,11 +19,12 @@ export function seededParagraphProperties(
   stylePpr: ParagraphFormatting | undefined | null
 ): Attrs {
   const formatting = paragraph.formatting;
-  const directFirst = formatting?.indentFirstLine === 0 ? undefined : formatting?.indentFirstLine;
-  const firstLine = directFirst ?? paragraph.listRendering?.indentFirstLine ?? formatting?.indentFirstLine;
-  const hanging = directFirst === undefined && paragraph.listRendering?.indentFirstLine !== undefined
-    ? paragraph.listRendering.hangingIndent
-    : formatting?.hangingIndent ?? paragraph.listRendering?.hangingIndent;
+  // A first line set on the paragraph, zero included, wins over its list level's, as in Word.
+  const list = paragraph.listRendering;
+  const [firstLine, hanging] =
+    formatting?.indentFirstLine !== undefined
+      ? [formatting.indentFirstLine, formatting.hangingIndent]
+      : [list?.indentFirstLine, list?.indentFirstLine !== undefined ? list.hangingIndent : undefined];
   const attrs: Attrs = {};
   if (stylePpr !== null) {
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
@@ -50,9 +51,7 @@ export function seededParagraphProperties(
       styleFirstLine?.indentFirstLine ??
       null;
     attrs.hangingIndent =
-      hanging ??
-      styleFirstLine?.hangingIndent ??
-      false;
+      (firstLine !== undefined ? hanging : styleFirstLine?.hangingIndent) ?? false;
     attrs.borders = formatting?.borders ?? stylePpr?.borders ?? null;
     attrs.shading = formatting?.shading ?? stylePpr?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? stylePpr?.tabs ?? null;
@@ -103,14 +102,14 @@ export function seededParagraphProperties(
   return attrs;
 }
 
+const LIST_INDENTS = new Set(['indentLeft', 'indentFirstLine', 'hangingIndent']);
+
 /**
  * `attrs` as an editor operation stores them: a property cleared that the
- * paragraph's style sets (`style`, from `styleParagraphValues`), or the left
- * indent of a `numbered` paragraph (its list level sets one), becomes 0 or
- * false, and a style tab stop left out becomes a `clear` stop, so the
- * paragraph shows, saves and reopens without the inherited value. A list
- * level's first line is not cleared: Word, and the seed, let it win over a
- * zero one.
+ * paragraph's style sets (`style`, from `styleParagraphValues`), or an indent
+ * of a `numbered` paragraph (its list level sets them), becomes 0 or false,
+ * and a style tab stop left out becomes a `clear` stop, so the paragraph
+ * shows, saves and reopens without the inherited value.
  */
 export function explicitParagraphAttrs(
   attrs: YrsParagraphAttrs,
@@ -121,8 +120,8 @@ export function explicitParagraphAttrs(
   for (const [key, value] of Object.entries(attrs)) {
     if (value !== null || key === 'tabs') continue;
     const off =
-      numbered && key === 'indentLeft'
-        ? 0
+      numbered && LIST_INDENTS.has(key)
+        ? key === 'hangingIndent' ? false : 0
         : typeof style[key] === 'number' && style[key] !== 0
           ? 0
           : style[key] === true

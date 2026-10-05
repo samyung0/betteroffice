@@ -160,7 +160,12 @@ for (const seeder of ['native', 'projected']) {
     }
   });
 
-  for (const direct of ['', '<w:ind w:firstLine="0"/>', '<w:ind w:hanging="0"/>']) {
+  // A first line set on the paragraph, zero included, wins over the list level's, as in Word.
+  for (const [direct, firstLine, hanging] of [
+    ['', -360, true],
+    ['<w:ind w:firstLine="0"/>', 0, false],
+    ['<w:ind w:hanging="0"/>', 0, true],
+  ] as const) {
     it(`${seeder} applies numbering before style with direct indent ${direct || 'absent'}`, async () => {
       const bytes = fixture(`<w:p><w:pPr><w:pStyle w:val="List"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>${direct}</w:pPr><w:r><w:t>List</w:t></w:r></w:p>`);
       const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
@@ -170,8 +175,8 @@ for (const seeder of ['native', 'projected']) {
         else documentToYrs(session, parsed);
         const properties = session.paragraphs('body')[0]!.properties;
         expect(properties.indentLeft).toBe(1440);
-        expect(properties.indentFirstLine).toBe(-360);
-        expect(properties.hangingIndent).toBe(true);
+        expect(properties.indentFirstLine).toBe(firstLine);
+        expect(properties.hangingIndent ?? false).toBe(hanging);
       } finally {
         session.destroy();
       }

@@ -2169,18 +2169,16 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
-    let direct_value = field(formatting, "indentFirstLine");
-    let direct_nonzero = direct_value.filter(|value| number(Some(value)) != Some(0.0));
-    let list_value = field(list, "indentFirstLine");
-    let (selected_first, selected_hanging) = if let Some(value) = direct_nonzero {
-        (Some(value), field(formatting, "hangingIndent"))
-    } else if let Some(value) = list_value {
-        (Some(value), field(list, "hangingIndent"))
-    } else if let Some(value) = direct_value {
-        (Some(value), field(formatting, "hangingIndent"))
-    } else {
-        (None, None)
-    };
+    // A first line set on the paragraph, zero included, wins over its list
+    // level's, as in Word.
+    let (selected_first, selected_hanging) =
+        if let Some(value) = field(formatting, "indentFirstLine") {
+            (Some(value), field(formatting, "hangingIndent"))
+        } else if let Some(value) = field(list, "indentFirstLine") {
+            (Some(value), field(list, "hangingIndent"))
+        } else {
+            (None, None)
+        };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
         "textId": nullish(field(Some(paragraph), "textId")),
@@ -4723,16 +4721,17 @@ mod tests {
     }
 
     #[test]
-    fn numbering_indents_precede_styles_and_ignore_zero_first_line() {
+    fn numbering_indents_precede_styles_and_yield_to_a_zero_first_line() {
         let style_data = json!({"styles":[{"styleId":"List","type":"paragraph","pPr":{"indentLeft":720,"indentFirstLine":180,"hangingIndent":false}}]});
         for styles in [
             StyleResolver::new(Some(&style_data)),
             StyleResolver::new(None),
         ] {
-            for direct in [
-                json!({}),
-                json!({"indentFirstLine":0}),
-                json!({"indentFirstLine":0,"hangingIndent":true}),
+            // A first line set on the paragraph, zero included, wins over the level's, as in Word.
+            for (direct, first_line, hanging) in [
+                (json!({}), -360, true),
+                (json!({"indentFirstLine":0}), 0, false),
+                (json!({"indentFirstLine":0,"hangingIndent":true}), 0, true),
             ] {
                 let mut formatting = direct;
                 formatting["styleId"] = json!("List");
@@ -4744,8 +4743,8 @@ mod tests {
                     None,
                 );
                 assert_eq!(properties["indentLeft"], json!(1440));
-                assert_eq!(properties["indentFirstLine"], json!(-360));
-                assert_eq!(properties["hangingIndent"], json!(true));
+                assert_eq!(properties["indentFirstLine"], json!(first_line));
+                assert_eq!(properties["hangingIndent"], json!(hanging));
             }
             let properties = paragraph_attrs(
                 &json!({"formatting":{"styleId":"List","indentLeft":0,"indentFirstLine":240,"hangingIndent":false},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
@@ -4831,8 +4830,8 @@ mod tests {
             &[],
             None,
         );
-        assert_eq!(properties["indentFirstLine"], json!(-360));
-        assert_eq!(properties["hangingIndent"], json!(true));
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
         let properties = paragraph_attrs(
             &json!({"formatting":{"indentFirstLine":-720,"hangingIndent":true},"listRendering":{"indentLeft":2145},"content":[]}),
             &hanging_styles,
