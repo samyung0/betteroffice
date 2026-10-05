@@ -267,6 +267,30 @@ export interface YrsImageGeometry {
   other?: Readonly<Record<string, unknown | null>>;
 }
 
+/** A heading a table of contents lists ({@link YrsSession.tableOfContentsHeadings}). */
+export interface YrsTocHeading {
+  paraId: string;
+  /** 1-based outline level. */
+  level: number;
+  text: string;
+}
+
+/** Where a table of contents was written: its first paragraph and the one after it. */
+export interface YrsTocReceipt {
+  firstParaId: string;
+  nextParaId: string;
+}
+
+/** What the host reads off its layout for a table of contents. */
+export interface YrsTocLayout {
+  /** Each heading's page, as its page shows the number, by paraId. */
+  pages: Record<string, string>;
+  /** The entries' right tab in twips: the text width less 10, as Word sets it. */
+  tabTwips: number;
+  /** The result when no heading qualifies. */
+  emptyText: string;
+}
+
 /** A text or picture watermark payload for {@link YrsSession.insertWatermark}. */
 export type YrsWatermark =
   | {
@@ -991,6 +1015,14 @@ export interface YrsSession extends CollaborationReplica {
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
+  /** Inserts Word's table of contents at a body location; text before it is split off. */
+  insertTableOfContents(at: YrsLoc, layout: YrsTocLayout): YrsTocReceipt;
+  /** Rebuilds the table of contents holding `at`, else the body's first; null when there is none. */
+  updateTableOfContents(at: YrsLoc | null, layout: YrsTocLayout): YrsTocReceipt | null;
+  /** The body headings a table of contents lists. */
+  tableOfContentsHeadings(): YrsTocHeading[];
+  /** How many tables of contents the body holds. */
+  tableOfContentsCount(): number;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Applies seed raw operations with deterministic item ordering. */
@@ -1913,6 +1945,27 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         session.insert_watermark(at.story, at.paraId, at.offset, JSON.stringify(watermark))
       );
     },
+    insertTableOfContents: (at, layout) => {
+      ensureUndo(at.story);
+      return JSON.parse(
+        mutate(() => session.insert_toc(at.story, at.paraId, at.offset, JSON.stringify(layout)))
+      ) as YrsTocReceipt;
+    },
+    updateTableOfContents: (at, layout) => {
+      ensureUndo('body');
+      return JSON.parse(
+        mutate(() =>
+          session.update_toc(
+            at?.story ?? 'body',
+            at?.paraId ?? '',
+            at?.offset ?? 0,
+            JSON.stringify(layout)
+          )
+        )
+      ) as YrsTocReceipt | null;
+    },
+    tableOfContentsHeadings: () => JSON.parse(session.toc_headings()) as YrsTocHeading[],
+    tableOfContentsCount: () => session.toc_count(),
     applyRawOps: (story, ops) => {
       markDirty(story);
       mutate(() => session.apply_raw_ops(story, JSON.stringify(ops)));

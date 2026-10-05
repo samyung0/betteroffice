@@ -918,6 +918,8 @@
     "leftToRight": "Left-to-right",
     "rightToLeft": "Right-to-left",
     "tableProperties": "Table properties",
+    "updateTableOfContents": "Update table of contents",
+    "noTocEntries": "No table of contents entries found.",
     "imageOptions": "Image options"
   }
 }

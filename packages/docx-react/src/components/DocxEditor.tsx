@@ -94,7 +94,7 @@ import { useCommentSidebarItems, type CommentCallbacks } from '../hooks/useComme
 import { useReviewAllItems } from '../hooks/useReviewAllItems';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import type { Comment } from '@betteroffice/docx/types/content';
-import type { Translations } from '@betteroffice/docx-i18n';
+import { createT, deepMerge, en, type LocaleStrings, type Translations } from '@betteroffice/docx-i18n';
 import { type PrintOptions } from './ui/PrintPreview';
 // Dialog hooks and utilities (static imports — lightweight, no UI)
 import { useFindReplace } from './dialogs/FindReplaceDialog';
@@ -1189,6 +1189,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     borderSpecRef,
   });
 
+  const noTocEntries = useMemo(
+    () =>
+      createT(
+        deepMerge(en as Record<string, unknown>, i18n as Record<string, unknown> | undefined) as LocaleStrings,
+        typeof i18n?._lang === 'string' ? i18n._lang : 'en'
+      )('hostMenus.noTocEntries'),
+    [i18n]
+  );
   const {
     handleFormat,
     handleInsertTable,
@@ -1196,11 +1204,33 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleInsertSectionBreakNextPage,
     handleInsertSectionBreakContinuous,
     handleInsertTOC,
+    handleUpdateTOC,
   } = useFormattingActions({
     focusActiveEditor,
     pagedEditorRef,
     hyperlinkDialog,
+    noTocEntries,
   });
+
+  // Update table of contents is offered while the body holds one.
+  const [hasToc, setHasToc] = useState(false);
+  useEffect(() => {
+    const session = yrsCore.session;
+    if (!session) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => setHasToc(session.tableOfContentsCount() > 0);
+    refresh();
+    const unsubscribe = session.onUpdate(() => {
+      timer ??= setTimeout(() => {
+        timer = null;
+        refresh();
+      }, 300);
+    });
+    return () => {
+      unsubscribe();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [yrsCore.session]);
 
   const handleZoomChange = useCallback((zoom: number) => {
     setState((prev) => ({ ...prev, zoom }));
@@ -2008,7 +2038,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               }
               onInsertSectionBreakNextPage={handleInsertSectionBreakNextPage}
               onInsertSectionBreakContinuous={handleInsertSectionBreakContinuous}
-              onInsertTOC={handleInsertTOC}
+              onInsertTOC={!liveYrsStory || liveYrsStory === 'body' ? handleInsertTOC : undefined}
+              onUpdateTOC={hasToc ? handleUpdateTOC : undefined}
               onImageWrapType={handleImageWrapType}
               onImageTransform={handleImageTransform}
               onOpenImageProperties={handleOpenImageProperties}

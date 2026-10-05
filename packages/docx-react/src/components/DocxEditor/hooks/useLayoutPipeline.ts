@@ -95,6 +95,8 @@ export interface UseLayoutPipelineReturn {
   layout: Layout | null;
   layoutUpdateOrigin: LayoutUpdateOrigin;
   runLayoutPipeline: () => void;
+  /** The layout the last pass computed, before React renders it. */
+  getLatestLayout: () => Layout | null;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   cancelPendingScrollRestore: () => void;
 }
@@ -124,6 +126,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   } = opts;
 
   const [layout, setLayout] = useState<Layout | null>(null);
+  const latestLayoutRef = useRef<Layout | null>(null);
 
   // Callback refs — parent may hand in a fresh closure every render. Mirroring
   // these in refs keeps `runLayoutPipeline`'s dep array stable; otherwise
@@ -303,6 +306,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
         viewportAnchorCaptureReadyRef.current = false;
         layoutUpdateOriginRef.current = layoutUpdateOrigin;
+        latestLayoutRef.current = newLayout;
         setLayout(newLayout);
 
         const vp = viewportLayoutRef.current;
@@ -506,6 +510,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     layout,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
+    getLatestLayout: useCallback(() => latestLayoutRef.current, []),
     scheduleLayout,
     cancelPendingScrollRestore,
   };

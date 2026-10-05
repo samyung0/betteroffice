@@ -37,6 +37,8 @@ export type YrsEditorCommand =
       value: YrsContentControlValue;
     }
   | { type: 'insertPageBreak' }
+  /** Insert, or update the one at the caret (else the first), with `emptyText` as the result when no heading qualifies. */
+  | { type: 'tableOfContents'; update: boolean; emptyText: string }
   | {
       type: 'insertSectionBreak';
       breakType: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage';

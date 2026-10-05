@@ -8,10 +8,13 @@ export function useFormattingActions({
   focusActiveEditor,
   pagedEditorRef,
   hyperlinkDialog,
+  noTocEntries,
 }: {
   focusActiveEditor: () => void;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
+  /** The result of a table of contents no heading qualifies for. */
+  noTocEntries: string;
 }) {
   const handleFormat = useCallback(
     (action: FormattingAction) => {
@@ -55,7 +58,13 @@ export function useFormattingActions({
     handleInsertPageBreak,
     handleInsertSectionBreakNextPage,
     handleInsertSectionBreakContinuous,
-    // TOC insertion has no Yrs command yet; keep the UI callback inert.
-    handleInsertTOC: useCallback(() => focusActiveEditor(), [focusActiveEditor]),
+    handleInsertTOC: useCallback(
+      () => applyCommand({ type: 'tableOfContents', update: false, emptyText: noTocEntries }),
+      [applyCommand, noTocEntries]
+    ),
+    handleUpdateTOC: useCallback(
+      () => applyCommand({ type: 'tableOfContents', update: true, emptyText: noTocEntries }),
+      [applyCommand, noTocEntries]
+    ),
   };
 }

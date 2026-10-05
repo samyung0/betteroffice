@@ -161,6 +161,30 @@ fn landed_receipt(receipt: crate::Receipt) -> Value {
 }
 
 /// `Loc { story, paraId, offset }` -> transient story-global index.
+fn toc_receipt(receipt: &crate::TocReceipt) -> String {
+    json!({"firstParaId": receipt.first_para_id, "nextParaId": receipt.next_para_id}).to_string()
+}
+
+fn toc_layout(json: &str) -> Result<crate::TocLayout, JsValue> {
+    let value: Value = serde_json::from_str(json).map_err(js_err)?;
+    let pages = value["pages"]
+        .as_object()
+        .ok_or_else(|| js_err("table of contents layout needs pages"))?
+        .iter()
+        .filter_map(|(id, page)| Some((id.clone(), page.as_str()?.to_owned())))
+        .collect();
+    Ok(crate::TocLayout {
+        pages,
+        tab_twips: value["tabTwips"]
+            .as_u64()
+            .ok_or_else(|| js_err("table of contents layout needs tabTwips"))? as u32,
+        empty_text: value["emptyText"]
+            .as_str()
+            .ok_or_else(|| js_err("table of contents layout needs emptyText"))?
+            .to_owned(),
+    })
+}
+
 fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Result<u32, JsValue> {
     let span = find_para_span(doc, story, para_id)?;
     let para_len = span.pilcrow - span.start;
@@ -3153,6 +3177,72 @@ impl EditSession {
             )
             .map(|_| ())
             .map_err(js_err)
+    }
+
+    /// Inserts Word's table of contents at `(story, para_id, offset)` (body
+    /// only). `layout_json` is `{"pages":{paraId:label},"tabTwips":number,
+    /// "emptyText":string}`: each heading's page as its page shows it, the
+    /// entries' right tab and the result when no heading qualifies. Returns
+    /// `{"firstParaId","nextParaId"}`: the TOC's first paragraph and the one after it.
+    pub fn insert_toc(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        layout_json: &str,
+    ) -> Result<String, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let layout = toc_layout(layout_json)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        let receipt = self
+            .engine
+            .doc()
+            .insert_toc(&ctx, Position::new(story, index), &layout)
+            .map_err(js_err)?;
+        Ok(toc_receipt(&receipt))
+    }
+
+    /// Rebuilds the table of contents holding `(story, para_id, offset)`,
+    /// else the body's first (see [`Self::insert_toc`] for `layout_json` and
+    /// the result). Returns `null` when the body has none.
+    pub fn update_toc(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        layout_json: &str,
+    ) -> Result<String, JsValue> {
+        let at = loc_index(self.engine.doc(), story, para_id, offset)
+            .ok()
+            .map(|index| Position::new(story, index));
+        let layout = toc_layout(layout_json)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        let receipt = self
+            .engine
+            .doc()
+            .update_toc(&ctx, at.as_ref(), &layout)
+            .map_err(js_err)?;
+        Ok(receipt.as_ref().map_or_else(|| "null".to_owned(), toc_receipt))
+    }
+
+    /// The body headings a table of contents lists, as
+    /// `[{"paraId","level","text"}]`.
+    pub fn toc_headings(&self) -> Result<String, JsValue> {
+        let headings = self.engine.doc().toc_headings().map_err(js_err)?;
+        Ok(Value::Array(
+            headings
+                .into_iter()
+                .map(|heading| {
+                    json!({"paraId": heading.para_id, "level": heading.level, "text": heading.text})
+                })
+                .collect(),
+        )
+        .to_string())
+    }
+
+    /// How many TOC fields the body holds.
+    pub fn toc_count(&self) -> Result<u32, JsValue> {
+        Ok(self.engine.doc().toc_fields("body").map_err(js_err)?.len() as u32)
     }
 
     /// Inserts a watermark embed at `(story, para_id, offset)`, its payload

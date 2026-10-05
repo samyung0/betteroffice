@@ -221,6 +221,8 @@ export interface ToolbarProps {
   onInsertSectionBreakContinuous?: () => void;
   /** Callback when user wants to insert a table of contents */
   onInsertTOC?: () => void;
+  /** Rebuilds the table of contents; set only while the document has one */
+  onUpdateTOC?: () => void;
   /** Callback when user wants to insert a shape */
   onInsertShape?: (data: {
     shapeType: string;

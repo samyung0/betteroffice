@@ -207,6 +207,10 @@ export function HostMenus({
         ? [item('insert-watermark', t('toolbar.watermark'), { edits: true })]
         : []),
       ...(breaks.length ? [separator, submenu('insert-break', t('toolbar.break'), breaks)] : []),
+      ...(ctx.onInsertTOC ? [item('insert-toc', t('toolbar.tableOfContents'))] : []),
+      ...(ctx.onUpdateTOC
+        ? [item('update-toc', t('hostMenus.updateTableOfContents'))]
+        : []),
     ];
     const spacing = formatting.lineSpacing ?? 240;
     const format: HostMenuEntry[] = [
@@ -292,6 +296,8 @@ export function HostMenus({
     ctx.onInsertPageBreak,
     ctx.onInsertSectionBreakNextPage,
     ctx.onInsertSectionBreakContinuous,
+    ctx.onInsertTOC,
+    ctx.onUpdateTOC,
     ctx.documentStyles,
     ctx.tableContext?.isInTable,
     ctx.onTableAction,
@@ -381,6 +387,12 @@ export function HostMenus({
           return;
         case 'insert-section-continuous':
           c.onInsertSectionBreakContinuous?.();
+          return;
+        case 'insert-toc':
+          c.onInsertTOC?.();
+          return;
+        case 'update-toc':
+          c.onUpdateTOC?.();
           return;
         case 'style':
           format({ type: 'applyStyle', value: argument });

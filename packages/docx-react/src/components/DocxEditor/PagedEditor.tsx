@@ -99,6 +99,7 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
+import { samePages, tocLayout } from './tableOfContents';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
@@ -703,6 +704,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       layout,
       layoutUpdateOrigin,
       runLayoutPipeline,
+      getLatestLayout,
       scheduleLayout,
       cancelPendingScrollRestore,
     } = useLayoutPipeline({
@@ -1137,6 +1139,41 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               : selected;
             if (!range) return false;
             session.setHyperlink(range, null);
+          } else if (command.type === 'tableOfContents') {
+            const at = session.selection()?.head;
+            const caret = at?.story === 'body' ? at : null;
+            const current = getLatestLayout();
+            // Word's field has no tracked form here; suggesting mode leaves it out.
+            if (!current || isSuggesting || (!command.update && !caret)) return false;
+            // One Undo step: the TOC, then its page numbers once it is laid
+            // out, so they count its own pages as Word's do.
+            session.addUndoBoundary();
+            session.setUndoCaptureMode('manual');
+            try {
+              const before = tocLayout(session, current, caret?.paraId ?? null, command.emptyText);
+              const receipt = command.update
+                ? session.updateTableOfContents(caret, before)
+                : session.insertTableOfContents(caret!, before);
+              if (!receipt) return false;
+              runLayoutPipeline();
+              const laidOut = getLatestLayout();
+              const after =
+                laidOut && laidOut !== current
+                  ? tocLayout(session, laidOut, receipt.firstParaId, command.emptyText)
+                  : null;
+              if (after && !samePages(before, after)) {
+                session.updateTableOfContents(
+                  { story: 'body', paraId: receipt.firstParaId, offset: 0 },
+                  after
+                );
+              }
+              if (!command.update) {
+                session.setSelection({ story: 'body', paraId: receipt.nextParaId, offset: 0 });
+              }
+            } finally {
+              session.setUndoCaptureMode('auto');
+              session.addUndoBoundary();
+            }
           } else if (command.type === 'insertPageBreak' || command.type === 'insertSectionBreak') {
             const at = session.selection()?.head;
             if (!at) return false;
@@ -1295,9 +1332,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [
         activeYrsRootStory,
         author,
+        getLatestLayout,
         handleYrsStateChange,
         isSuggesting,
         readOnly,
+        runLayoutPipeline,
         yrsCore.inputPositionMap,
         yrsCore.publishDirectInput,
         yrsCore.session,

@@ -7,7 +7,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { worse, type Result } from "./lib";
 
-const GENERATORS = ["docx-breaks", "docx-comments-breaks", "docx-fields", "docx-review-all"];
+const GENERATORS = ["docx-breaks", "docx-comments-breaks", "docx-fields", "docx-review-all", "docx-toc"];
 const argv = process.argv.slice(2);
 const update = argv.includes("--update-baseline");
 const jobsAt = argv.indexOf("--jobs");

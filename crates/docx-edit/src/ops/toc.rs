@@ -46,6 +46,13 @@ pub struct TocHeading {
     pub text: String,
 }
 
+/// Where a written TOC lies: its first paragraph, and the paragraph after it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TocReceipt {
+    pub first_para_id: String,
+    pub next_para_id: String,
+}
+
 /// A TOC field in a story: `start..end` holds its code, result and markers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TocField {
@@ -350,7 +357,12 @@ impl EditingDoc {
     /// Inserts a table of contents at `at` in the body. A paragraph with text
     /// before `at` is split there first, so the TOC takes paragraphs of its
     /// own: what came before stays above it, the rest follows it.
-    pub fn insert_toc(&self, ctx: &EditCtx, at: Position, layout: &TocLayout) -> OpResult<()> {
+    pub fn insert_toc(
+        &self,
+        ctx: &EditCtx,
+        at: Position,
+        layout: &TocLayout,
+    ) -> OpResult<TocReceipt> {
         if at.story != BODY {
             return Err(OpError::NotTopLevel);
         }
@@ -376,14 +388,14 @@ impl EditingDoc {
     /// Rebuilds the TOC holding `at`, else the body's first, from the
     /// current headings and `layout`, keeping its field code: Word's
     /// "Update entire table", so edits made inside it are replaced. Returns
-    /// false when the body has no TOC. A first paragraph with text before
+    /// `None` when the body has no TOC. A first paragraph with text before
     /// the field is split there first.
     pub fn update_toc(
         &self,
         ctx: &EditCtx,
         at: Option<&Position>,
         layout: &TocLayout,
-    ) -> OpResult<bool> {
+    ) -> OpResult<Option<TocReceipt>> {
         let pick = |doc: &Self| -> OpResult<Option<TocField>> {
             let found = doc.toc_fields(BODY)?;
             let inside = at.filter(|at| at.story == BODY).and_then(|at| {
@@ -394,7 +406,7 @@ impl EditingDoc {
             Ok(inside.or(found.first()).cloned())
         };
         let Some(field) = pick(self)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let head = self
             .segment_index(BODY)?
@@ -404,7 +416,7 @@ impl EditingDoc {
         let field = if head < field.start {
             self.split_paragraph(ctx, Position::new(BODY, field.start), None)?;
             let Some(field) = pick(self)? else {
-                return Ok(false);
+                return Ok(None);
             };
             field
         } else {
@@ -436,8 +448,8 @@ impl EditingDoc {
             let pilcrow = pilcrow - (remove_to - field.start);
             renumber_fields(&mut txn, &story, field.start, pilcrow, -1);
         }
-        self.write_toc(&mut txn, &story, field.start, &field.instruction_code(), layout)?;
-        Ok(true)
+        self.write_toc(&mut txn, &story, field.start, &field.instruction_code(), layout)
+            .map(Some)
     }
 
     /// Writes a TOC's paragraphs at `index` (a paragraph's content start)
@@ -449,7 +461,7 @@ impl EditingDoc {
         index: u32,
         instruction: &str,
         layout: &TocLayout,
-    ) -> OpResult<()> {
+    ) -> OpResult<TocReceipt> {
         let package = self.package();
         let package = package.as_deref();
         let flags = switches(instruction);
@@ -570,7 +582,19 @@ impl EditingDoc {
                 other => other,
             })
             .collect();
-        crate::raw::apply_raw_ops_to_story(txn, BODY, shifted, false)
+        let next_para_id = paras
+            .iter()
+            .find(|para| para.pilcrow >= index)
+            .map(|para| para.id.clone())
+            .ok_or(OpError::ExpectedPilcrow {
+                story: BODY.to_owned(),
+                index,
+            })?;
+        crate::raw::apply_raw_ops_to_story(txn, BODY, shifted, false)?;
+        Ok(TocReceipt {
+            first_para_id: para_ids[0].clone(),
+            next_para_id,
+        })
     }
 }
 
@@ -1028,7 +1052,8 @@ mod tests {
         let caret = Position::new(BODY, index_of(&doc, "Some text"));
         assert!(doc
             .update_toc(&ctx(), Some(&caret), &layout(&[("10000002", "3"), ("10000004", "4"), ("10000006", "5")]))
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert_eq!(
             named(&doc),
             r#"Introduction	<[PAGEREF _Toc10000002 \h|3][TOC \o "1-3" \h \z \u|]¶Context	[PAGEREF _Toc10000004 \h|4]¶Details	[PAGEREF _Toc10000006 \h|5]¶¶Introduction¶Some text.¶Context¶Deep¶Details¶"#
@@ -1065,7 +1090,7 @@ mod tests {
             p("10000006", Some("Heading3"), "Details"),
         );
         let doc = open(&package(&format!("{toc}{headings}"), false), 16);
-        assert!(doc.update_toc(&ctx(), None, &layout(&PAGES)).unwrap());
+        assert!(doc.update_toc(&ctx(), None, &layout(&PAGES)).unwrap().is_some());
         assert_eq!(
             named(&doc),
             r#"Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-2" \h \z \u|]¶Background	[PAGEREF _Toc10000004 \h|3]¶after¶Introduction¶Background¶Details¶"#
