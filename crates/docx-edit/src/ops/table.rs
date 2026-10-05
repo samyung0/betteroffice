@@ -659,7 +659,8 @@ fn create_cell_story(
         MapPrelim::default(),
         insertion_attrs(None, None),
     );
-    write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", "left");
+    // No alignment: a new cell takes its table style's, as in Word.
+    write_pilcrow_properties(&pilcrow, txn, &para_id, "Normal", None);
     Ok(para_id)
 }
 

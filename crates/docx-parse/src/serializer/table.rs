@@ -113,6 +113,16 @@ pub fn serialize_table_row_formatting(
         let conditional =
             serialize_conditional_format_style(formatting.conditional_format.as_ref());
         append_generated(&mut body, &conditional);
+        for (element, count) in [
+            ("w:gridBefore", formatting.grid_before),
+            ("w:gridAfter", formatting.grid_after),
+        ] {
+            if let Some(count) = count {
+                empty_attr(&mut body, element, "w:val", &int_attr(Some(count)));
+            }
+        }
+        write_measurement(&mut body, formatting.width_before.as_ref(), "w:wBefore");
+        write_measurement(&mut body, formatting.width_after.as_ref(), "w:wAfter");
         if formatting.cant_split == Some(true) {
             body.start_element("w:cantSplit").end_element();
         }
@@ -465,6 +475,31 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    /// Cells a row skips at either end keep their grid columns in Word.
+    #[test]
+    fn a_row_keeps_its_skipped_grid_columns() {
+        let formatting = TableRowFormatting {
+            grid_before: Some(1.0),
+            grid_after: Some(2.0),
+            width_before: Some(TableMeasurement {
+                value: 1500.0,
+                kind: "dxa".to_owned(),
+            }),
+            width_after: Some(TableMeasurement {
+                value: 0.0,
+                kind: "auto".to_owned(),
+            }),
+            cant_split: Some(true),
+            ..TableRowFormatting::default()
+        };
+        assert_eq!(
+            serialize_table_row_formatting(Some(&formatting), None, None),
+            "<w:trPr><w:gridBefore w:val=\"1\"/><w:gridAfter w:val=\"2\"/>\
+             <w:wBefore w:w=\"1500\" w:type=\"dxa\"/><w:wAfter w:w=\"0\" w:type=\"auto\"/>\
+             <w:cantSplit/></w:trPr>"
+        );
     }
 
     #[test]

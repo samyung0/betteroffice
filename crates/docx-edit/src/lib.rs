@@ -488,7 +488,7 @@ impl EditingDoc {
                 MapPrelim::default(),
                 insertion_attrs(None, None),
             );
-            write_pilcrow_properties(&pilcrow, &mut txn, &para_id, "Normal", "left");
+            write_pilcrow_properties(&pilcrow, &mut txn, &para_id, "Normal", Some("left"));
         }
         Ok(())
     }
@@ -522,7 +522,7 @@ impl EditingDoc {
             MapPrelim::default(),
             insertion_attrs(None, None),
         );
-        write_pilcrow_properties(&pilcrow, &mut txn, &para_id, p_style, alignment);
+        write_pilcrow_properties(&pilcrow, &mut txn, &para_id, p_style, Some(alignment));
         Ok(para_id)
     }
 
@@ -941,12 +941,14 @@ fn write_pilcrow_properties(
     txn: &mut yrs::TransactionMut<'_>,
     para_id: &str,
     p_style: &str,
-    alignment: &str,
+    alignment: Option<&str>,
 ) {
     pilcrow.insert(txn, KIND_KEY, PILCROW_KIND);
     pilcrow.insert(txn, PARA_ID, para_id);
     pilcrow.insert(txn, "pStyle", p_style);
-    pilcrow.insert(txn, "alignment", alignment);
+    if let Some(alignment) = alignment {
+        pilcrow.insert(txn, "alignment", alignment);
+    }
 }
 
 fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
