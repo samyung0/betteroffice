@@ -117,7 +117,8 @@ fn layout_request(package: &S9PackageWire) -> Value {
         .unwrap_or_default()
         .iter()
         .filter(|note| note.note_type.is_empty() || note.note_type == "normal")
-        .map(|note| json!({ "id": note.id, "noteKind": "footnote", "height": 0 }))
+        // Note ids parse as f64; the layout request reads them as integers.
+        .map(|note| json!({ "id": note.id as i64, "noteKind": "footnote", "height": 0 }))
         .chain(
             package
                 .endnotes
@@ -125,7 +126,7 @@ fn layout_request(package: &S9PackageWire) -> Value {
                 .unwrap_or_default()
                 .iter()
                 .filter(|note| note.note_type.is_empty() || note.note_type == "normal")
-                .map(|note| json!({ "id": note.id, "noteKind": "endnote", "height": 0 })),
+                .map(|note| json!({ "id": note.id as i64, "noteKind": "endnote", "height": 0 })),
         )
         .collect::<Vec<_>>();
 
@@ -206,4 +207,23 @@ fn is_toc_style_name(name: &str) -> bool {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_document_with_footnotes_lays_out() {
+        let bytes = include_bytes!("../../docx-edit/tests/fixtures/footnote-anchor.docx");
+        let mut document = DocxViewDocument::open(bytes).unwrap();
+        let request: Value = serde_json::from_str(&document.layout_request_json()).unwrap();
+        let notes = request["notes"]["contents"].as_array().unwrap();
+        assert!(!notes.is_empty());
+        assert!(notes.iter().all(|note| note["id"].is_i64()));
+        document
+            .font_requirements_json(&document.layout_request_json())
+            .unwrap();
+        document.layout(&document.layout_request_json()).unwrap();
+    }
 }
