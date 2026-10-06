@@ -8,6 +8,7 @@ mod docx;
 pub mod env;
 mod error;
 pub mod js;
+pub mod jsv;
 mod pptx;
 mod rebase;
 mod replicas;

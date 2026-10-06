@@ -28,7 +28,8 @@ const formatOf = (call: Recorded): string | undefined => {
 if (!dir || !binary) throw new Error("usage: replay.ts <dir> <binary> [--report file] [--only method]");
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-const blob = (sha: string) => new Uint8Array(readFileSync(join(dir, "blobs", sha)));
+const blobs = option("--blobs") ?? join(dir, "blobs");
+const blob = (sha: string) => new Uint8Array(readFileSync(join(blobs, sha)));
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /** Recorded `{$blob}` to the wire's `{$bytes}`. */

@@ -45,6 +45,19 @@ impl Item {
         }
     }
 
+    /// [`Item::visual`] of a JS value.
+    pub fn visual_v(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: &crate::jsv::V,
+        position: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: EffectKind::Visual,
+            ..Self::text(id, label, crate::jsv::canonical(value), position)
+        }
+    }
+
     /// The `officeBaseline` entry: visual values hashed, assets by hash.
     pub fn baseline(self) -> BaselineEntry {
         BaselineEntry {
