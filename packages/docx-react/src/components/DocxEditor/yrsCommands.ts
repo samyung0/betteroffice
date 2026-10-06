@@ -256,9 +256,14 @@ function continuedFieldEnds(segments: readonly YrsStorySegment[]): Map<unknown, 
   return ends;
 }
 
+const FLOW_BREAKS = new Set(['pageBreak', 'columnBreak']);
+/** Embeds that can open a paragraph slot ahead of its text. */
+const BLOCKS = new Set(['table', 'blockSdt', ...FLOW_BREAKS]);
+
 /**
- * The current Yrs selection as plain text: paragraph ends and soft line breaks
- * become newlines, and a field its shown text. A selection holding anything
+ * The current Yrs selection as plain text: paragraph ends, soft line breaks
+ * and page or column breaks after text become newlines, and a field its shown
+ * text. A selection holding anything
  * else plain text cannot carry (a table, image, field, note reference, content
  * control, page break…) is not `plain`. Bookmarks are not in the text, so a
  * selection over one stays plain.
@@ -278,10 +283,17 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   // marker it is taken to end with the embed's paragraph.
   let fieldUntil = -1;
   let inUnmatchedField = false;
+  // Whether text comes before this point in its paragraph.
+  let textBefore = false;
   for (const segment of segments) {
     if (offset >= end) break;
     const segmentStart = offset;
     offset += segment.kind === 'text' ? segment.text.length : 1;
+    const embedKind = segment.kind === 'embed' ? segment.embedKind : '';
+    // A page or column break after text in its paragraph copies as a line
+    // break; one opening the paragraph follows the previous mark's newline.
+    const breakAfterText = textBefore && FLOW_BREAKS.has(embedKind);
+    textBefore = segment.kind !== 'pilcrow' && (textBefore || !BLOCKS.has(embedKind));
     if (segment.kind === 'pilcrow') inUnmatchedField = false;
     if (segment.kind === 'embed' && segment.embedKind === 'field' && segment.payload.continuationId != null) {
       const until = fieldEnds.get(segment.payload.continuationId);
@@ -298,6 +310,7 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
       text += '\n';
     } else {
       plain = false;
+      if (breakAfterText) text += '\n';
       if (segment.embedKind === 'field' && typeof segment.payload.displayText === 'string') {
         text += segment.payload.displayText;
       }

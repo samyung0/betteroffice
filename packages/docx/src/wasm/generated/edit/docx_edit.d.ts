@@ -827,9 +827,9 @@ export class EditSession {
     /**
      * Splits a paragraph at `(story, para_id, offset)` by inserting one
      * pilcrow. The FIRST half keeps the original paraId and the second is
-     * re-minted. A split at the paragraph end leaves the empty second half
-     * with only the inherited property subset and its list; a mid-paragraph
-     * split keeps its properties. Paragraph borders are cleared either way. Suggesting
+     * re-minted. A split at the paragraph end gives the empty second half
+     * a copy of the paragraph's properties, as Word does; a mid-paragraph
+     * split keeps its properties but borders. Suggesting
      * mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
      * `{"firstParaId","secondParaId","revisionId": string|null}`.
      */

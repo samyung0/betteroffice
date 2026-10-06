@@ -100,30 +100,11 @@ pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
     "listStartOverride",
 ];
 
-/// The only paragraph properties an EMPTY second half inherits on split —
-/// pressing Enter at the end of a paragraph starts a clean one that keeps the
-/// style and vertical rhythm but nothing else.
-const INHERITED_PARA_ATTRS: [&str; 11] = [
-    "defaultTextFormatting",
-    "pStyle",
-    "lineSpacing",
-    "lineSpacingRule",
-    "spaceAfter",
-    "spaceBefore",
-    "spaceBeforeLines",
-    "spaceAfterLines",
-    "beforeAutospacing",
-    "afterAutospacing",
-    "contextualSpacing",
-];
-
-/// The `defaultTextFormatting` keys that cross a split: font, size and color
-/// only. Bold, italic, underline and the rest deliberately do not carry.
-const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
-
 const BORDERS: &str = "borders";
 /// The source formatting a save compares against; it names borders too.
 const ORIGINAL_FORMATTING: &str = "_originalFormatting";
+/// The source paragraph's runs, which a save restores when its text is unchanged.
+const ORIGINAL_RUN_BOUNDARIES: &str = "_originalRunBoundaries";
 /// The properties of a mark that ends a section. A split leaves them on the
 /// original mark, which still ends the section, and never copies them.
 const SECTION_KEYS: [&str; 2] = ["sectPr", "sectionBreakType"];
@@ -388,25 +369,6 @@ fn apply_paragraph_attr_projection(
     Ok(())
 }
 
-/// The paragraph's numbering, and whether its style gives it
-/// (`numPrFromStyle`, on the paragraph or in its source formatting, equal to
-/// `numPr`).
-fn list_numbering(props: &[(String, Any)]) -> Option<(Any, bool)> {
-    let get = |key: &str| {
-        props
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value)
-            .filter(|value| !matches!(value, Any::Null))
-    };
-    let num_pr = get("numPr")?;
-    let from_style = get("numPrFromStyle").or_else(|| match get(ORIGINAL_FORMATTING) {
-        Some(Any::Map(original)) => original.get("numPrFromStyle"),
-        _ => None,
-    });
-    Some((num_pr.clone(), from_style == Some(num_pr)))
-}
-
 /// `pPrChange` records under new revision ids.
 fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -> Any {
     let Any::Array(changes) = changes else {
@@ -455,23 +417,6 @@ fn remove_borders(txn: &mut TransactionMut<'_>, map: &MapRef) {
     }
 }
 
-/// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
-fn style_carry_dtf(value: &Any) -> Option<Any> {
-    let Any::Map(map) = value else {
-        return None;
-    };
-    let subset: HashMap<String, Any> = map
-        .iter()
-        .filter(|(key, _)| STYLE_CARRY_DTF_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if subset.is_empty() {
-        None
-    } else {
-        Some(Any::Map(Arc::new(subset)))
-    }
-}
-
 /// Whether `chunk` is the reference field of a comment, which shows nothing.
 fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
     matches!(&chunk.kind, ChunkKind::Embed(Some(map))
@@ -490,16 +435,16 @@ impl EditingDoc {
     /// pilcrow is re-minted with a fresh paraId and becomes the second half's
     /// mark. What the second half then keeps depends on where the split fell:
     ///
-    /// - mid-paragraph: it keeps its own properties;
-    /// - at the paragraph end, so the second half is empty: only
-    ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys,
-    ///   plus the list's numbering and level indents, so the list goes on;
+    /// - mid-paragraph: it keeps its own properties but borders;
+    /// - at the paragraph end, so the second half is empty: it keeps all of
+    ///   them, as Word copies the paragraph mark, but the mark's tracked
+    ///   insertion or deletion and the source's run cache, which stay with
+    ///   the text, and its copy of a tracked property change takes new
+    ///   revision ids;
     /// - at the end WITH a `next_style`: it switches to that style's
-    ///   projection outright instead.
+    ///   projection outright instead, without borders.
     ///
-    /// Paragraph borders are cleared in every case, because Word never
-    /// propagates `w:pBdr` across a split. A section the paragraph ends stays
+    /// A section the paragraph ends stays
     /// with the second half's mark, which still ends it: the new mark never
     /// takes `sectPr` or `sectionBreakType`. Suggesting mode stamps the inserted
     /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
@@ -637,35 +582,19 @@ impl EditingDoc {
                 apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
                 orig_map.remove(&mut txn, BORDERS);
             } else {
-                // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep. The list goes on,
-                // as in Word, with its numbering and level indents.
-                let list = list_numbering(&props);
-                for (key, value) in &props {
-                    if SECTION_KEYS.contains(&key.as_str()) {
-                        continue;
-                    }
-                    let list_key = STYLE_NUMBERING_ATTRS.contains(&key.as_str())
-                        || LIST_INDENT_ATTRS.contains(&key.as_str());
-                    if !INHERITED_PARA_ATTRS.contains(&key.as_str())
-                        && !(list.is_some() && list_key)
-                    {
-                        orig_map.remove(&mut txn, key);
-                    } else if key == DEFAULT_TEXT_FORMATTING {
-                        set_or_remove(
-                            &mut txn,
-                            &orig_map,
-                            DEFAULT_TEXT_FORMATTING,
-                            style_carry_dtf(value),
-                        );
-                    }
+                // The new paragraph is a copy, as in Word: the mark revision went
+                // to the text's mark with the run cache, and its property change
+                // becomes one of its own.
+                for key in [PPR_INS, PPR_DEL, ORIGINAL_RUN_BOUNDARIES] {
+                    orig_map.remove(&mut txn, key);
                 }
-                if let Some((num_pr, true)) = list {
-                    orig_map.insert(&mut txn, "numPrFromStyle", num_pr);
+                if let Some((_, changes)) = props.iter().find(|(key, _)| key == PPR_CHANGE) {
+                    let changes = with_fresh_revision_ids(changes, || self.next_id());
+                    orig_map.insert(&mut txn, PPR_CHANGE, changes);
                 }
             }
         } else {
-            // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
+            // A mid-paragraph split keeps the second half's pPr but its borders.
             remove_borders(&mut txn, &orig_map);
         }
         if !ctx.is_suggesting() {
