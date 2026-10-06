@@ -12,6 +12,7 @@ use pptx_render::{
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const LIST_STYLES: &[u8] = include_bytes!("fixtures/list-style-bullets.pptx");
 const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
+const PLAIN_PARAGRAPH: &[u8] = include_bytes!("fixtures/list-style-plain-paragraph.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 fn renderer() -> SlideRenderer {
@@ -320,5 +321,27 @@ fn a_plain_paragraph_listed_with_items_lines_up_with_them_as_reopened() {
 
     let reopened = DeckSession::open(&session.save().unwrap(), 46).unwrap();
     let again = layout_slide(&reopened, 1, None);
+    assert_eq!(text_box(&again, &story).1, lines);
+}
+
+#[test]
+fn powerpoints_plain_paragraph_listed_lines_up_with_an_inherited_item_as_reopened() {
+    let session = DeckSession::open(PLAIN_PARAGRAPH, 47).unwrap();
+    let (_, _, story) = story_of(&session, "Inherited bullets");
+    let paragraphs = session.story(&story).unwrap().paragraphs;
+    // The editor names the items whose markers are inherited.
+    let listed = [paragraphs[1].id.clone(), paragraphs[3].id.clone()];
+    let length = session.story(&story).unwrap().length;
+    session
+        .set_paragraph_list(&context(), &story, 0, length, Some(&discs()), &listed)
+        .unwrap();
+    let edited = layout(&session, None);
+    let (_, lines, _) = text_box(&edited, &story);
+    let hangs = hangs(&session, &story, lines);
+    // "First level" lines up with "Text follows bullet", both at level 0.
+    assert_eq!(hangs[0], hangs[3], "{hangs:?}");
+
+    let reopened = DeckSession::open(&session.save().unwrap(), 48).unwrap();
+    let again = layout(&reopened, None);
     assert_eq!(text_box(&again, &story).1, lines);
 }

@@ -478,8 +478,7 @@ impl DeckSession {
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        let pilcrows = selected_pilcrows(&story, &txn, start, end);
-        for pilcrow in pilcrows {
+        for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
             match alignment {
                 Some(alignment) => {
                     pilcrow.insert(&mut txn, "alignment", alignment);
@@ -551,11 +550,11 @@ impl DeckSession {
     /// giving each level its marker, or (`None`) a plain paragraph. Markup
     /// follows PowerPoint: a paragraph becoming a list item gets `a:buFont`
     /// (Arial for a character, the text's for a number) and the `marL`/
-    /// `indent` of the range's first list item at its level, else a hanging
-    /// marker; one already a list item (its own marker, or an inherited one
-    /// the caller names in `listed` by paragraph id) keeps its indents and
-    /// changes only its marker; a plain one gets `a:buNone` and no hanging
-    /// indent.
+    /// `indent` the range's first list item at its level lays out with
+    /// (nothing where both inherit them), else a hanging marker; one already
+    /// a list item (its own marker, or an inherited one the caller names in
+    /// `listed` by paragraph id) keeps its indents and changes only its
+    /// marker; a plain one gets `a:buNone` and no hanging indent.
     pub fn set_paragraph_list(
         &self,
         context: &crate::EditCtx,
@@ -580,18 +579,23 @@ impl DeckSession {
                 .is_some_and(|bullet| bullet != Bullet::None)
                 || map_string(pilcrow, txn, PARA_ID).is_some_and(|id| listed.contains(&id))
         };
-        // The first list item at each level: its indents as laid out, `None` inherited.
-        let mut items: Vec<(u32, [Option<i64>; 2])> = Vec::new();
-        for pilcrow in &pilcrows {
+        // The first list item at each level, its position and its indents as
+        // laid out (an edit's, else the file's; `None` inherited).
+        let mut items: Vec<(u32, usize, [Option<i64>; 2])> = Vec::new();
+        for (index, pilcrow) in &pilcrows {
             let level = pilcrow_level(pilcrow, &txn);
-            if is_listed(pilcrow, &txn) && !items.iter().any(|(at, _)| *at == level) {
+            if is_listed(pilcrow, &txn) && !items.iter().any(|(at, ..)| *at == level) {
                 let file = file_indents(pilcrow, &txn, story_id, source);
                 let edited = [MARGIN_LEFT, INDENT]
                     .map(|key| map_number(pilcrow, &txn, key).map(|value| value as i64));
-                items.push((level, [edited[0].or(file[0]), edited[1].or(file[1])]));
+                items.push((
+                    level,
+                    *index,
+                    [edited[0].or(file[0]), edited[1].or(file[1])],
+                ));
             }
         }
-        for pilcrow in pilcrows {
+        for (_, pilcrow) in pilcrows {
             let level = pilcrow_level(&pilcrow, &txn);
             let step = LEVEL_STEP_EMU * i64::from(level);
             match levels {
@@ -607,20 +611,34 @@ impl DeckSession {
                     insert_pilcrow_json(&pilcrow, &mut txn, BULLET, bullet)?;
                     insert_pilcrow_json(&pilcrow, &mut txn, BULLET_FONT, &font)?;
                     if !already_listed {
-                        let item = items.iter().find(|(at, _)| *at == level);
+                        let item = items.iter().find(|(at, ..)| *at == level);
                         let file = file_indents(&pilcrow, &txn, story_id, source);
                         let defaults = [step + LIST_HANG_EMU, -LIST_HANG_EMU];
-                        for (index, key) in [MARGIN_LEFT, INDENT].into_iter().enumerate() {
-                            match item.map(|(_, indents)| indents[index]) {
-                                Some(Some(value)) => {
-                                    pilcrow.insert(&mut txn, key, value as f64);
+                        for (attribute, key) in [MARGIN_LEFT, INDENT].into_iter().enumerate() {
+                            let value = match item {
+                                None => Some(defaults[attribute]),
+                                Some((.., indents)) if indents[attribute].is_some() => {
+                                    indents[attribute]
                                 }
                                 // Inherited by the item and, without a file value, by this one.
-                                Some(None) if file[index].is_none() => {
-                                    pilcrow.remove(&mut txn, key);
+                                Some(_) if file[attribute].is_none() => None,
+                                // The file value would win: write what the item inherits.
+                                Some((_, at, _)) => Some(
+                                    crate::deck::inherited_indents(
+                                        &self.package,
+                                        story_id,
+                                        *at,
+                                        level,
+                                    )[attribute]
+                                        .unwrap_or_default(),
+                                ),
+                            };
+                            match value {
+                                Some(value) => {
+                                    pilcrow.insert(&mut txn, key, value as f64);
                                 }
-                                _ => {
-                                    pilcrow.insert(&mut txn, key, defaults[index] as f64);
+                                None => {
+                                    pilcrow.remove(&mut txn, key);
                                 }
                             }
                         }
@@ -662,7 +680,7 @@ impl DeckSession {
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        for pilcrow in selected_pilcrows(&story, &txn, start, end) {
+        for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
             let old = pilcrow_level(&pilcrow, &txn);
             let new = (i64::from(old) + i64::from(delta)).clamp(0, i64::from(MAX_LEVEL)) as u32;
             if new == old {
@@ -717,7 +735,7 @@ impl DeckSession {
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        for pilcrow in selected_pilcrows(&story, &txn, start, end) {
+        for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
             for (key, value) in [
                 (LINE_SPACING, spacing.line),
                 (SPACE_BEFORE, spacing.before),
@@ -1262,21 +1280,29 @@ fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
     Ok(())
 }
 
-/// The pilcrow of every paragraph the range touches. A collapsed caret picks
-/// the paragraph it sits in; a range stopping at a paragraph start does not.
-fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
+/// The position and pilcrow of every paragraph the range touches. A collapsed
+/// caret picks the paragraph it sits in; a range stopping at a paragraph start
+/// does not.
+fn selected_pilcrows<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    end: u32,
+) -> Vec<(usize, MapRef)> {
     let start = start.min(story.len(txn).saturating_sub(1));
     let mut pilcrows = Vec::new();
     let mut paragraph_start = 0;
     let mut offset = 0;
+    let mut index = 0;
     for diff in story.diff(txn, YChange::identity) {
         let item_length = out_len(&diff.insert);
         if let Out::YMap(map) = diff.insert {
             let touches = start <= offset
                 && (end > paragraph_start || (start == end && start >= paragraph_start));
             if touches {
-                pilcrows.push(map);
+                pilcrows.push((index, map));
             }
+            index += 1;
             paragraph_start = offset + item_length;
         }
         offset += item_length;

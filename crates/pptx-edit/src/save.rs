@@ -33,41 +33,48 @@ impl<'a> SlideContext<'a> {
             .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
             .map(|slide| slide.shapes.as_slice())
             .unwrap_or_default();
-        let layout = snapshot
-            .layout_part_path
-            .as_deref()
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        let (layout, master) = layout_and_master(package, snapshot.layout_part_path.as_deref());
         Self {
             layout,
             master,
             source_shapes,
         }
     }
+}
+
+/// A slide's layout and master, as `pptx-render` picks them.
+pub(crate) fn layout_and_master<'a>(
+    package: &'a PptxPackage,
+    layout_part_path: Option<&str>,
+) -> (Option<&'a SlideLayout>, Option<&'a SlideMaster>) {
+    let layout = layout_part_path
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
+    let master = layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        })
+        .or_else(|| package.masters.first());
+    (layout, master)
 }
 
 impl DeckSession {
@@ -531,7 +538,10 @@ fn inherited_transform<'a>(
         .find(|transform| transform.width > 0 && transform.height > 0)
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
+pub(crate) fn find_placeholder<'a>(
+    nodes: &'a [ShapeNode],
+    target: &Placeholder,
+) -> Option<&'a ShapeNode> {
     for node in nodes {
         if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
             return Some(node);
@@ -555,7 +565,7 @@ fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
     }
 }
 
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
+pub(crate) fn normalize_placeholder_type(value: Option<&str>) -> &str {
     match value.unwrap_or("body") {
         "ctrTitle" => "title",
         "obj" => "body",

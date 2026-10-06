@@ -13,6 +13,8 @@ use pptx_parse::{ShapeNode, TextBody};
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const LIST_STYLES: &[u8] =
     include_bytes!("../../pptx-render/tests/fixtures/list-style-bullets.pptx");
+const PLAIN_PARAGRAPH: &[u8] =
+    include_bytes!("../../pptx-render/tests/fixtures/list-style-plain-paragraph.pptx");
 const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
 /// `lecture.pptx` slide 2's body (a Google Slides export): a plain paragraph at
 /// `marL="457200" indent="0"`, then two `●` items at `marL="457200" indent="-317500"`.
@@ -595,22 +597,14 @@ fn a_paragraph_listed_with_an_inherited_indent_item_inherits_too() {
     assert_saved_as_edited(&session, &story, &source, &body);
 }
 
-/// Saving cannot drop a file's `marL`/`indent`, so a paragraph whose own
-/// markup sets the indents an item inherits gets the hanging default.
 #[test]
-fn file_indents_an_inherited_item_lacks_fall_back_to_the_hanging_default() {
-    let session = DeckSession::open(LIST_STYLES, 57).unwrap();
-    let (_, _, story) = story_of(&session, "Inherited bullets");
-    session
-        .set_paragraph_list(&context(), &story, 0, 0, None, &[])
-        .unwrap();
-    // PowerPoint's plain paragraph in a bulleted placeholder.
-    let plain = session.save().unwrap();
-    assert_eq!(
-        indents(&saved_body(&plain, "Inherited bullets"))[0],
-        (Some(0), Some(0))
-    );
-    let session = DeckSession::open(&plain, 58).unwrap();
+fn powerpoints_plain_paragraph_takes_an_inherited_items_laid_out_indents() {
+    // `marL="0" indent="0"` with `a:buNone` beside items inheriting the
+    // layout's 228600/-228600; saving cannot drop the file's zeros.
+    let source = saved_body(PLAIN_PARAGRAPH, "Inherited bullets");
+    assert_eq!(indents(&source)[0], (Some(0), Some(0)));
+    assert_eq!(indents(&source)[3], (None, None));
+    let session = DeckSession::open(PLAIN_PARAGRAPH, 57).unwrap();
     let (_, _, story) = story_of(&session, "Inherited bullets");
     let ids: Vec<_> = session
         .story(&story)
@@ -630,9 +624,28 @@ fn file_indents_an_inherited_item_lacks_fall_back_to_the_hanging_default() {
             &[ids[1].clone(), ids[3].clone()],
         )
         .unwrap();
-    let body = saved_body(&session.save().unwrap(), "Inherited bullets");
-    assert_eq!(indents(&body)[0], (Some(342_900), Some(-342_900)));
-    assert_eq!(indents(&body)[3], (None, None));
+
+    let saved = session.save().unwrap();
+    let body = saved_body(&saved, "Inherited bullets");
+    assert_eq!(texts(&body), texts(&source));
+    assert_eq!(
+        indents(&body),
+        [
+            (Some(228_600), Some(-228_600)),
+            (None, None),
+            (Some(2 * 457_200 + 342_900), Some(-342_900)),
+            (None, None),
+        ]
+    );
+    let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
+    assert!(
+        xml.contains(r#"<a:pPr indent="-228600" marL="228600"><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#),
+        "{xml}"
+    );
+    assert_saved_as_edited(&session, &story, &source, &body);
+    let reopened = DeckSession::open(&saved, 58).unwrap();
+    let (_, _, story) = story_of(&reopened, "Inherited bullets");
+    assert_saved_as_edited(&reopened, &story, &body, &body);
 }
 
 #[test]
