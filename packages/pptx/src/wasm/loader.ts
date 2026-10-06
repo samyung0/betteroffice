@@ -132,7 +132,8 @@ export interface PresentationHandle extends CollaborationReplica {
   /** Makes the touched paragraphs list items (`levels[level % n]` is each
    *  level's marker) or, with `null`, plain paragraphs. A paragraph already a
    *  list item (its own marker, or an inherited one named in `listed` by
-   *  paragraph id) keeps its indents. */
+   *  paragraph id) keeps its indents; a newly listed one takes those of the
+   *  range's first item at its level. */
   setParagraphList(
     storyId: string,
     start: number,

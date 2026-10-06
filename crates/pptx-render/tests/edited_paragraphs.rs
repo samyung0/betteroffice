@@ -11,6 +11,7 @@ use pptx_render::{
 
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const LIST_STYLES: &[u8] = include_bytes!("fixtures/list-style-bullets.pptx");
+const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 fn renderer() -> SlideRenderer {
@@ -62,8 +63,20 @@ fn story_of(session: &DeckSession, name: &str) -> (String, String, String) {
 }
 
 fn layout(session: &DeckSession, caret: Option<(&str, usize)>) -> SurfaceDisplayList {
+    layout_slide(session, 0, caret)
+}
+
+fn layout_slide(
+    session: &DeckSession,
+    slide: usize,
+    caret: Option<(&str, usize)>,
+) -> SurfaceDisplayList {
     renderer()
-        .layout_scoped_slide_at_caret(session.package(), &session.slide_scope(0).unwrap(), caret)
+        .layout_scoped_slide_at_caret(
+            session.package(),
+            &session.slide_scope(slide).unwrap(),
+            caret,
+        )
         .unwrap()
         .display_list
 }
@@ -257,4 +270,55 @@ fn spacing_anchor_strike_and_highlight_reach_the_display_list() {
     assert_eq!(struck.highlight.as_deref(), Some("#FFFF00"));
     assert_eq!(lines[0].runs[1].strike, None);
     assert_eq!(lines[0].runs[1].highlight, None);
+}
+
+/// The x of each paragraph's marker and of its first text on its first line.
+fn hangs(session: &DeckSession, story: &str, lines: &[PositionedTextLine]) -> Vec<(f32, f32)> {
+    let mut start = 0;
+    session
+        .story(story)
+        .unwrap()
+        .paragraphs
+        .iter()
+        .map(|paragraph| {
+            let line = lines.iter().find(|line| line.start == start).unwrap();
+            start += paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.encode_utf16().count() as u32)
+                .sum::<u32>()
+                + 1;
+            let marker = line
+                .runs
+                .iter()
+                .find(|run| run.start == run.end && !run.text.is_empty())
+                .unwrap();
+            let text = line.runs.iter().find(|run| run.end > run.start).unwrap();
+            (marker.x, text.x)
+        })
+        .collect()
+}
+
+#[test]
+fn a_plain_paragraph_listed_with_items_lines_up_with_them_as_reopened() {
+    // `lecture.pptx` slide 2: a plain paragraph (`marL` 457200, `indent` 0)
+    // over two items (`marL` 457200, `indent` -317500).
+    let session = DeckSession::open(LECTURE, 45).unwrap();
+    let (_, _, story) = story_of(&session, "Google Shape;117;p26");
+    let length = session.story(&story).unwrap().length;
+    let square = vec![Bullet::Character {
+        value: "■".to_owned(),
+    }];
+    session
+        .set_paragraph_list(&context(), &story, 0, length, Some(&square), &[])
+        .unwrap();
+    let edited = layout_slide(&session, 1, None);
+    let (_, lines, _) = text_box(&edited, &story);
+    let hangs = hangs(&session, &story, lines);
+    assert_eq!(hangs.len(), 3);
+    assert!(hangs.iter().all(|hang| *hang == hangs[1]), "{hangs:?}");
+
+    let reopened = DeckSession::open(&session.save().unwrap(), 46).unwrap();
+    let again = layout_slide(&reopened, 1, None);
+    assert_eq!(text_box(&again, &story).1, lines);
 }
