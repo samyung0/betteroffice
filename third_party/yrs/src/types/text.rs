@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::Formatter;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 /// A shared data type used for collaborative text editing. It enables multiple users to add and
 /// remove chunks of text in efficient manner. This type is internally represented as a mutable
@@ -235,33 +236,18 @@ pub trait Text: AsRef<Branch> + Sized {
         D: IntoIterator<Item = Delta<P>>,
         P: Prelim,
     {
-        let branch = BranchPtr::from(self.as_ref());
-        let mut pos = ItemPosition {
-            parent: TypePtr::Branch(branch),
-            left: None,
-            right: branch.start,
-            index: 0,
-            current_attrs: Some(Box::new(Attrs::new())),
-        };
-        for delta in delta {
-            match delta {
-                Delta::Inserted(value, attrs) => {
-                    let attrs: Attrs = match attrs {
-                        None => Attrs::new(),
-                        Some(attrs) => *attrs,
-                    };
-                    insert(branch, txn, &mut pos, DeltaChunk(value), attrs);
-                }
-                Delta::Deleted(len) => remove(txn, &mut pos, len),
-                Delta::Retain(len, attrs) => {
-                    let attrs: Attrs = match attrs {
-                        None => Attrs::new(),
-                        Some(attrs) => *attrs,
-                    };
-                    insert_format(branch, txn, &mut pos, len, attrs);
-                }
-            }
-        }
+        apply_delta(BranchPtr::from(self.as_ref()), txn, delta, false)
+    }
+
+    /// Patched for BetterOffice: [Text::apply_delta] whose deletions clean the
+    /// format items they leave behind as Yjs 13.6.31's `deleteText` does, so a
+    /// delta lands as it does in Yjs. The native Office rebase replays Yjs.
+    fn apply_delta_as_yjs<D, P>(&self, txn: &mut TransactionMut, delta: D)
+    where
+        D: IntoIterator<Item = Delta<P>>,
+        P: Prelim,
+    {
+        apply_delta(BranchPtr::from(self.as_ref()), txn, delta, true)
     }
 
     /// Inserts a `chunk` of text at a given `index`.
@@ -361,7 +347,7 @@ pub trait Text: AsRef<Branch> + Sized {
     fn remove_range(&self, txn: &mut TransactionMut, index: u32, len: u32) {
         let this = BranchPtr::from(self.as_ref());
         if let Some(mut pos) = find_position(this, txn, index) {
-            remove(txn, &mut pos, len)
+            remove(txn, &mut pos, len, false)
         } else {
             panic!("The type or the position doesn't exist!");
         }
@@ -700,6 +686,39 @@ where
     asm.finish()
 }
 
+fn apply_delta<D, P>(branch: BranchPtr, txn: &mut TransactionMut, delta: D, yjs: bool)
+where
+    D: IntoIterator<Item = Delta<P>>,
+    P: Prelim,
+{
+    let mut pos = ItemPosition {
+        parent: TypePtr::Branch(branch),
+        left: None,
+        right: branch.start,
+        index: 0,
+        current_attrs: Some(Box::new(Attrs::new())),
+    };
+    for delta in delta {
+        match delta {
+            Delta::Inserted(value, attrs) => {
+                let attrs: Attrs = match attrs {
+                    None => Attrs::new(),
+                    Some(attrs) => *attrs,
+                };
+                insert(branch, txn, &mut pos, DeltaChunk(value), attrs);
+            }
+            Delta::Deleted(len) => remove(txn, &mut pos, len, yjs),
+            Delta::Retain(len, attrs) => {
+                let attrs: Attrs = match attrs {
+                    None => Attrs::new(),
+                    Some(attrs) => *attrs,
+                };
+                insert_format(branch, txn, &mut pos, len, attrs);
+            }
+        }
+    }
+}
+
 fn insert<P: Prelim>(
     branch: BranchPtr,
     txn: &mut TransactionMut,
@@ -803,7 +822,7 @@ fn find_position(this: BranchPtr, txn: &mut TransactionMut, index: u32) -> Optio
     Some(pos)
 }
 
-fn remove(txn: &mut TransactionMut, pos: &mut ItemPosition, len: u32) {
+fn remove(txn: &mut TransactionMut, pos: &mut ItemPosition, len: u32, yjs: bool) {
     let encoding = txn.store().offset_kind;
     let mut remaining = len;
     let start = pos.right.clone();
@@ -849,7 +868,19 @@ fn remove(txn: &mut TransactionMut, pos: &mut ItemPosition, len: u32) {
         );
     }
 
-    if let (Some(start), Some(start_attrs), Some(end_attrs)) =
+    if yjs {
+        if let Some(start) = start {
+            let start_attrs = start_attrs.unwrap_or_default();
+            let curr = pos.right;
+            yjs_clean_format_gap(
+                txn,
+                start,
+                curr,
+                &start_attrs,
+                pos.current_attrs.get_or_init(),
+            );
+        }
+    } else if let (Some(start), Some(start_attrs), Some(end_attrs)) =
         (start, start_attrs, pos.current_attrs.as_mut())
     {
         clean_format_gap(
@@ -1090,6 +1121,65 @@ fn clean_format_gap(
         }
     }
     cleanups
+}
+
+/// Yjs 13.6.31 `cleanupFormattingGap`: `curr` is the position after the
+/// deletion and `curr_attrs` its attributes. A format between `start` and the
+/// next content goes when a later one sets its key or it restates the start's
+/// value, and `curr_attrs` follows the drops. Values compare as JS `===`, so
+/// equal maps from different format items differ.
+fn yjs_clean_format_gap(
+    txn: &mut TransactionMut,
+    start: ItemPtr,
+    curr: Option<ItemPtr>,
+    start_attrs: &Attrs,
+    curr_attrs: &mut Attrs,
+) {
+    let mut end = Some(start);
+    let mut end_formats: HashMap<Arc<str>, ItemPtr> = HashMap::new();
+    while let Some(item) = end {
+        if item.is_countable() && !item.is_deleted() {
+            break;
+        }
+        if let (false, ItemContent::Format(key, _)) = (item.is_deleted(), &item.content) {
+            end_formats.insert(key.clone(), item);
+        }
+        end = item.right;
+    }
+    let mut at = Some(start);
+    let mut reached_curr = false;
+    while at != end {
+        let Some(item) = at else { break };
+        reached_curr |= curr == at;
+        if let (false, ItemContent::Format(key, value)) = (item.is_deleted(), &item.content) {
+            let value = value.as_ref();
+            let start_value = start_attrs.get(key).unwrap_or(&Any::Null);
+            let restated = same_value(start_value, value);
+            if end_formats.get(key) != Some(&item) || restated {
+                txn.delete(item);
+                if !reached_curr
+                    && !restated
+                    && same_value(curr_attrs.get(key).unwrap_or(&Any::Null), value)
+                {
+                    update_current_attributes(curr_attrs, key, start_value);
+                }
+            }
+            if !reached_curr && !item.is_deleted() {
+                update_current_attributes(curr_attrs, key, value);
+            }
+        }
+        at = item.right;
+    }
+}
+
+/// JS `===` on attribute values: maps, arrays and buffers by identity.
+fn same_value(a: &Any, b: &Any) -> bool {
+    match (a, b) {
+        (Any::Map(a), Any::Map(b)) => Arc::ptr_eq(a, b),
+        (Any::Array(a), Any::Array(b)) => Arc::ptr_eq(a, b),
+        (Any::Buffer(a), Any::Buffer(b)) => Arc::ptr_eq(a, b),
+        _ => a == b,
+    }
 }
 
 /// A representation of an uniformly-formatted chunk of rich context stored by [TextRef] or
