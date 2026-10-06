@@ -56,6 +56,8 @@ import { seededParagraphProperties, styleListRendering } from './paragraphSeed';
 import {
   calculateRowSpans,
   enclosingCellStory,
+  tableCellParagraphFormatting,
+  tableColumnCount,
   tablePayloadCellFormatting,
 } from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
@@ -2376,11 +2378,12 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
   return paragraphs;
 }
 
-/** A seeded cell story's source: its table, row and first grid column. */
+/** A seeded cell story's source: its table, row, first grid column and the column past its last. */
 interface BaseCell {
   table: Table;
   row: number;
   column: number;
+  end: number;
 }
 
 /**
@@ -2412,7 +2415,7 @@ function collectBaseStories(
           column += cell.formatting?.gridSpan ?? 1;
           if (spans.get(`${rowIndex}-${start}`)?.skip) continue;
           const id = `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex++}`;
-          cells.set(id, { table: block, row: rowIndex, column: start });
+          cells.set(id, { table: block, row: rowIndex, column: start, end: column });
           visit(id, cell.content);
         }
       });
@@ -2626,6 +2629,8 @@ class SaveContext {
   private readonly seedSources: SeedSources;
   /** Table-style paragraph formatting per cell story, from each table as the walk reaches it. */
   private readonly cellFormatting = new Map<string, ParagraphFormatting>();
+  /** What each cell story's paragraphs save against, from {@link cellContext}. */
+  private readonly cellContexts = new Map<string, ParagraphFormatting | undefined>();
   private readonly stylePprs = new Map<string, ParagraphFormatting | undefined>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
@@ -2686,7 +2691,7 @@ class SaveContext {
     let stylePpr: ParagraphFormatting | undefined | null = null;
     if (styles) {
       const cellStory = enclosingCellStory(storyId);
-      const cell = cellStory ? this.cellFormatting.get(cellStory) : undefined;
+      const cell = cellStory ? this.cellContext(cellStory, styles) : undefined;
       const key = `${cell ? cellStory : ''}|${formatting.styleId ?? ''}`;
       if (!this.stylePprs.has(key)) {
         this.stylePprs.set(key, styles.resolveParagraphStyle(formatting.styleId, cell).paragraphFormatting);
@@ -2702,6 +2707,30 @@ class SaveContext {
         styleListRendering(fromStyle ? (stylePpr ?? undefined) : { numPr: attrs.numPr }, numbering) ?? undefined;
     }
     return seededParagraphProperties({ formatting, listRendering }, stylePpr);
+  }
+
+  /**
+   * The table-style formatting a cell's paragraphs save against: the seed's for
+   * a cell the table had at open (the editor keeps showing it after rows or
+   * columns move), the current place's for a cell made in the session.
+   */
+  private cellContext(cellStory: string, styles: StyleResolver): ParagraphFormatting | undefined {
+    if (!this.cellContexts.has(cellStory)) {
+      const current = this.cellFormatting.get(cellStory);
+      const base = this.baseCells.get(cellStory);
+      let context = current;
+      if (base) {
+        const { table, row, column, end } = base;
+        const fallback = styles.getDefaultTableStyle();
+        const styleId = table.formatting?.styleId ?? fallback?.styleId;
+        const style = (styleId ? styles.getStyle(styleId) : undefined) ?? fallback;
+        const seeded = tableCellParagraphFormatting(table, style, row, column, end, tableColumnCount(table));
+        // Only a cell whose look moved needs the costlier source check.
+        if (!sameJson(seeded, current) && this.sourceCell(cellStory)) context = seeded;
+      }
+      this.cellContexts.set(cellStory, context);
+    }
+    return this.cellContexts.get(cellStory);
   }
 
   /**

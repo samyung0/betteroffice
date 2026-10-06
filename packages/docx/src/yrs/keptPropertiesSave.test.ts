@@ -39,7 +39,11 @@ const STYLES =
   '<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/><w:basedOn w:val="Normal"/>' +
   '<w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/>' +
-  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style></w:styles>';
+  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style>' +
+  '<w:style w:type="table" w:styleId="Edged"><w:name w:val="Edged"/>' +
+  '<w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr>' +
+  '<w:tblStylePr w:type="lastRow"><w:pPr><w:spacing w:before="120"/></w:pPr></w:tblStylePr>' +
+  '<w:tblStylePr w:type="lastCol"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr></w:style></w:styles>';
 
 const NUMBERING =
   `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
@@ -378,6 +382,85 @@ describe('a new row in a table with a header row style', () => {
     const xml = await savedDocumentXml(session, base);
     expect(xml.match(/<w:tr>.*?<\/w:tr>/)![0]).not.toContain('<w:jc ');
     session.destroy();
+  });
+});
+
+describe('cells the table had when it opened, after rows and columns move', () => {
+  // Header row centred, last row 120 before, last column right: what the seed
+  // gave each cell where it was, which the editor keeps showing after a move.
+  const tc = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const bytes = fixture(
+    '<w:tbl><w:tblPr><w:tblStyle w:val="Edged"/><w:tblW w:w="0" w:type="auto"/>' +
+      '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="1" w:firstColumn="0" w:lastColumn="1" w:noHBand="1" w:noVBand="1"/></w:tblPr>' +
+      '<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>' +
+      `<w:tr>${tc('H0')}${tc('H1')}</w:tr><w:tr>${tc('B0')}${tc('B1')}</w:tr><w:tr>${tc('L0')}${tc('L1')}</w:tr></w:tbl><w:p/>`
+  );
+  const SOURCE = ['H0', 'H1', 'B0', 'B1', 'L0', 'L1'];
+  const NEW_CELL = '<w:pPr><w:pStyle w:val="Normal"/></w:pPr>';
+  /** Each saved paragraph's text and pPr ('' for none); a new cell's text is ''. */
+  const savedCells = (xml: string) =>
+    [...xml.matchAll(/<w:p(?: [^>]*)?>(.*?)<\/w:p>|<w:p(?: [^>]*)?\/>/g)].map(
+      (match) =>
+        [
+          match[1]?.match(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/)?.[1] ?? '',
+          match[1]?.match(/^<w:pPr>.*<\/w:pPr>/)?.[0] ?? '',
+        ] as const
+    );
+  /** Saved paragraphs with a pPr besides a new cell's style. */
+  const formatted = (xml: string) =>
+    savedCells(xml).filter(([text, pPr]) => pPr !== '' && !(text === '' && pPr === NEW_CELL));
+  const table = { story: 'body', tableIndex: 0 };
+  const moves: Array<[string, (session: YrsSession) => readonly string[]]> = [
+    ['a row inserted above the header row', (session) => session.insertRow({ ...table, row: 0, column: 0 }, 'above').createdStoryIds],
+    ['a row added below the last row', (session) => session.insertRow({ ...table, row: 2, column: 0 }, 'below').createdStoryIds],
+    ['a column added after the last', (session) => session.insertColumn({ ...table, row: 0, column: 1 }, 'right').createdStoryIds],
+    ['the header row deleted', (session) => {
+      session.deleteRow({ anchor: { ...table, row: 0, column: 0 }, head: { ...table, row: 0, column: 1 } });
+      return [];
+    }],
+  ];
+
+  for (const [move, edit] of moves)
+    it(`save untouched as they were, so Word gives them their new place's look, after ${move}`, async () => {
+      const { session, base } = await open(bytes);
+      const before = new Map(session.storyIds().map((story) => [story, session.paragraphs(story)[0]?.properties]));
+      const created = edit(session);
+      styleNewCells(session, created, styleValuesFor(session, base));
+      // The editor still shows the look each cell seeded with.
+      for (const [story, properties] of before)
+        if (session.storyIds().includes(story)) expect(session.paragraphs(story)[0]?.properties).toEqual(properties);
+      // The source's cells save no pPr, as the source has none, and new ones
+      // (styled for their new place) only their style.
+      const xml = await savedDocumentXml(session, base);
+      expect(formatted(xml)).toEqual([]);
+      expect(savedCells(xml).map(([text]) => text).filter((text) => text !== '')).toEqual(
+        SOURCE.filter((text) => !text.startsWith('H') || !move.includes('deleted'))
+      );
+      session.destroy();
+    });
+
+  it('saves what the user changed in such a cell against the look it seeded with', async () => {
+    const { session, base } = await open(bytes);
+    session.insertRow({ ...table, row: 0, column: 0 }, 'above');
+    const story = session.storyIds().find((id) => session.paragraphs(id)[0]?.text === 'H0')!;
+    const { paraId } = session.paragraphs(story)[0]!;
+    session.setParagraphAttrs({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { alignment: 'left' });
+    const saved = Object.fromEntries(savedCells(await savedDocumentXml(session, base)));
+    expect(saved.H0).toBe('<w:pPr><w:jc w:val="left"/></w:pPr>');
+    expect(saved.H1).toBe('');
+    session.destroy();
+  });
+
+  it('saves the same for each peer when the other moved the rows', async () => {
+    const left = (await open(bytes, 83)).session;
+    const { session: right, base } = await open(bytes, 84);
+    left.insertRow({ ...table, row: 2, column: 0 }, 'below');
+    sync(left, right);
+    const saved = await savedDocumentXml(right, base);
+    expect(await savedDocumentXml(left, base)).toBe(saved);
+    expect(formatted(saved)).toEqual([]);
+    left.destroy();
+    right.destroy();
   });
 });
 
