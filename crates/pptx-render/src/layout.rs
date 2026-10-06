@@ -23,7 +23,7 @@ use pptx_parse::{
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
     Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
     TextOverflow, builtin_table_style, effective_color_map, find_placeholder, inherited_paragraph,
-    master_text_style, paragraph_cascade,
+    master_for_layout, master_text_style, paragraph_cascade,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -249,25 +249,7 @@ impl SlideRenderer {
                     .find(|layout| layout.part_path == path)
             })
             .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        let master = master_for_layout(package, layout);
         let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
