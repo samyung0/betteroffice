@@ -69,6 +69,7 @@ import {
   applyStyleValues,
   type ParagraphStyleValues,
   projectYrsComments,
+  inOneUndoStep,
   styleNewCells,
   cellParagraphFormatting,
   commentSharedId,
@@ -528,6 +529,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             ? cellParagraphFormatting(yrsCoreSession, yrsStyleResolver, story)
             : undefined,
           numbering: list ? sourceNumbering() : undefined,
+          numPr: typeof list === 'object' ? list : undefined,
         }),
       [sourceNumbering, yrsCoreSession, yrsStyleResolver]
     );
@@ -1209,13 +1211,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                     offset: 0,
                   }
                 : at;
-            const receipt = session.insertTable(
-              tableAt,
-              command.rows,
-              command.columns,
-              structuralAuthor
-            );
-            styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+            const receipt = inOneUndoStep(session, () => {
+              const inserted = session.insertTable(
+                tableAt,
+                command.rows,
+                command.columns,
+                structuralAuthor
+              );
+              styleNewCells(session, inserted.createdStoryIds, paragraphStyleValues);
+              return inserted;
+            });
             const firstCell = {
               story: receipt.table.story,
               tableIndex: receipt.table.tableIndex,
@@ -1272,13 +1277,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             if (command.type === 'tableInsertRow') {
               const at = command.at ?? target.focused;
               session.setCellSelection({ anchor: at, head: at });
-              const receipt = session.insertRow(at, command.side, structuralAuthor);
-              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              inOneUndoStep(session, () => {
+                const receipt = session.insertRow(at, command.side, structuralAuthor);
+                styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              });
             } else if (command.type === 'tableInsertColumn') {
               const at = command.at ?? target.focused;
               session.setCellSelection({ anchor: at, head: at });
-              const receipt = session.insertColumn(at, command.side);
-              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              inOneUndoStep(session, () => {
+                const receipt = session.insertColumn(at, command.side);
+                styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              });
             } else if (command.type === 'tableDeleteRow') {
               const receipt = session.deleteRow(target.range, structuralAuthor);
               if (receipt.deletedTable) {
@@ -1309,8 +1318,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               const surviving = session.cellSelection()?.anchor ?? target.range.anchor;
               setYrsSelectionInCell(session, surviving);
             } else if (command.type === 'tableSplitCell') {
-              const receipt = session.splitCell(target.focused, command.rows, command.columns);
-              styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              inOneUndoStep(session, () => {
+                const receipt = session.splitCell(target.focused, command.rows, command.columns);
+                styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+              });
             } else if (command.type === 'tableCellShading') {
               session.setCellShading(target.range, command.color);
             } else {

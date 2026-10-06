@@ -1017,6 +1017,8 @@ export interface StyleValueContext {
   cell?: ParagraphFormatting;
   /** The package's numbering, so a style's own list renders as the seed renders it. */
   numbering?: NumberingDefinitions;
+  /** Numbering set on the paragraph itself, rendered from its own level. */
+  numPr?: ParagraphFormatting['numPr'];
 }
 
 /**
@@ -1026,10 +1028,13 @@ export interface StyleValueContext {
 export function styleParagraphValues(
   styles: StyleResolver | null,
   styleId: string | null,
-  { cell, numbering }: StyleValueContext = {}
+  { cell, numbering, numPr }: StyleValueContext = {}
 ): Attrs {
-  const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined }, content: [] };
-  const listRendering = styleListRendering(styles?.resolveParagraphStyle(styleId, cell).paragraphFormatting, numbering);
+  const paragraph: Paragraph = { type: 'paragraph', formatting: { styleId: styleId ?? undefined, numPr }, content: [] };
+  const listRendering = styleListRendering(
+    numPr ? { numPr } : styles?.resolveParagraphStyle(styleId, cell).paragraphFormatting,
+    numbering
+  );
   if (listRendering) paragraph.listRendering = listRendering;
   return paragraphAttrs(paragraph, styles, [], undefined, cell);
 }

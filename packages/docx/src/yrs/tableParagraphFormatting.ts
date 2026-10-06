@@ -171,11 +171,41 @@ export function cellParagraphFormatting(
 ): ParagraphFormatting | undefined {
   const cell = enclosingCellStory(story);
   if (!cell || !styles) return undefined;
-  for (const payload of session.storyTables(cell.replace(CELL_STORY, '')) as TablePayloadShape[]) {
+  const parent = cell.replace(CELL_STORY, '');
+  let payloads = tableReads?.tables.get(parent);
+  if (!payloads) {
+    payloads = session.storyTables(parent) as TablePayloadShape[];
+    tableReads?.tables.set(parent, payloads);
+  }
+  for (const payload of payloads) {
     if (!payload.rows?.some((row) => row.cells?.some((entry) => entry.story === cell))) continue;
-    return tablePayloadCellFormatting(payload, styles).get(cell);
+    let cells = tableReads?.cells.get(payload);
+    if (!cells) {
+      cells = tablePayloadCellFormatting(payload, styles);
+      tableReads?.cells.set(payload, cells);
+    }
+    return cells.get(cell);
   }
   return undefined;
+}
+
+/** Table reads `withTableReads` keeps for edits that change no table. */
+let tableReads:
+  | { tables: Map<string, TablePayloadShape[]>; cells: Map<TablePayloadShape, Map<string, ParagraphFormatting>> }
+  | undefined;
+
+/**
+ * Runs `edit`, which changes paragraphs but no table, reading each story's
+ * tables and each table's cell formatting once.
+ */
+export function withTableReads<T>(edit: () => T): T {
+  const outer = tableReads;
+  tableReads ??= { tables: new Map(), cells: new Map() };
+  try {
+    return edit();
+  } finally {
+    tableReads = outer;
+  }
 }
 
 export type RowSpanInfo = { rowSpan: number; skip: boolean };

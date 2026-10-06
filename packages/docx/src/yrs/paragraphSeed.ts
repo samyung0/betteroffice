@@ -1,4 +1,5 @@
 import { computeListRendering, getCachedNumberingMap } from '../docx/numberingParser';
+import { withTableReads } from './tableParagraphFormatting';
 import type {
   ListRendering,
   NumberingDefinitions,
@@ -152,11 +153,15 @@ export function explicitParagraphAttrs(
  * A paragraph style's values for a paragraph in `story`: `styleParagraphValues`
  * with that story's cell context (`cellParagraphFormatting`) and the package's numbering.
  */
-/** A style's paragraph values in `story`; `list` false leaves the style's numbering out. */
+/**
+ * A style's paragraph values in `story`. `list` false leaves the style's
+ * numbering out; a numbering (`numPr`) gives the values of that style
+ * numbered on the paragraph itself, with the level's rendering and indents.
+ */
 export type ParagraphStyleValues = (
   styleId: string | null,
   story: string,
-  list?: boolean
+  list?: boolean | { numId?: number; ilvl?: number }
 ) => Readonly<Record<string, unknown>>;
 
 /**
@@ -186,20 +191,36 @@ export function applyStyleValues(
  * Gives the paragraphs of cells a table op made (`storyIds`) their style's
  * values in their cell, table style included, as the seed gives a file's
  * cells, so the editor shows a new header-row cell centred as Word does.
+ * Run it with the op in `inOneUndoStep`.
  */
 export function styleNewCells(
   session: YrsSession,
   storyIds: readonly string[],
   styleValues: ParagraphStyleValues
 ): void {
-  for (const story of storyIds) {
-    const paragraphs = session.paragraphs(story);
-    const first = paragraphs[0];
-    const last = paragraphs.at(-1);
-    if (!first || !last) continue;
-    const styleId = typeof first.properties.pStyle === 'string' ? first.properties.pStyle : 'Normal';
-    const range = { story, start: { paraId: first.paraId, offset: 0 }, end: { paraId: last.paraId, offset: 0 } };
-    applyStyleValues(session, range, styleId, styleValues);
+  withTableReads(() => {
+    for (const story of storyIds) {
+      const paragraphs = session.paragraphs(story);
+      const first = paragraphs[0];
+      const last = paragraphs.at(-1);
+      if (!first || !last) continue;
+      const styleId = typeof first.properties.pStyle === 'string' ? first.properties.pStyle : 'Normal';
+      const range = { story, start: { paraId: first.paraId, offset: 0 }, end: { paraId: last.paraId, offset: 0 } };
+      // A new cell's paragraphs carry only `styleId`, so its values are also the previous ones.
+      const values = styleValues(styleId, story);
+      session.applyParagraphStyle(range, styleId, values, { [styleId]: values });
+    }
+  });
+}
+
+/** Runs `edit` as one Undo step, whatever stories it selects. */
+export function inOneUndoStep<T>(session: YrsSession, edit: () => T): T {
+  const mode = session.undoCaptureMode();
+  session.setUndoCaptureMode('manual');
+  try {
+    return edit();
+  } finally {
+    session.setUndoCaptureMode(mode);
   }
 }
 
@@ -219,11 +240,24 @@ const LIST_ATTRS = [
   'listStartOverride',
 ] as const;
 
+const NO_LIST: YrsParagraphAttrs = {
+  numPr: null,
+  numPrFromStyle: null,
+  ...Object.fromEntries(LIST_ATTRS.map((key) => [key, null])),
+  indentLeft: null,
+  indentFirstLine: null,
+  hangingIndent: null,
+};
+
+const LIST_VALUE_KEYS = ['numPr', ...LIST_ATTRS, 'indentLeft', 'indentFirstLine', 'hangingIndent'] as const;
+
 /**
- * Enter in an empty list item ends the list, as in Word: numbering set on the
- * paragraph goes, a style's is turned off (`numId` 0), and the indents become
- * the style's without its list. Returns false, changing nothing, for a
- * paragraph that is not an empty list item.
+ * Enter in an empty list item, as in Word: an item below the first level
+ * moves up one level, and a first-level item leaves the list: numbering set
+ * on the paragraph goes, and where its style gives a list it is turned off
+ * (`numId` 0); the indents become the style's without its list. Returns
+ * false, changing nothing, for a paragraph that is no empty list item (one
+ * holding a field, picture or break is not empty).
  */
 export function endEmptyListItem(
   session: YrsSession,
@@ -235,25 +269,48 @@ export function endEmptyListItem(
   const paragraph = session.paragraphs(story).find((candidate) => candidate.paraId === paraId);
   const properties = paragraph?.properties ?? {};
   const numPr = properties.numPr as { numId?: number; ilvl?: number } | null | undefined;
-  if (!paragraph || paragraph.text !== '' || !numPr?.numId) return false;
-  const original = properties._originalFormatting as ParagraphFormatting | null | undefined;
-  const fromStyle =
-    JSON.stringify(properties.numPrFromStyle ?? original?.numPrFromStyle ?? null) === JSON.stringify(numPr);
+  const empty = session.paragraphSpans(story).find((span) => span.paraId === paraId)?.length === 0;
+  if (!paragraph || !empty || !numPr?.numId) return false;
   const styleId = typeof properties.pStyle === 'string' ? properties.pStyle : null;
-  const values = styleValues(styleId, story, false);
-  const attrs: YrsParagraphAttrs = {
-    numPr: fromStyle ? { numId: 0, ilvl: numPr.ilvl ?? 0 } : null,
-    indentLeft: (values.indentLeft as number | undefined) ?? null,
-    indentFirstLine: (values.indentFirstLine as number | undefined) ?? null,
-    hangingIndent: (values.hangingIndent as boolean | undefined) ?? null,
-  };
-  for (const key of LIST_ATTRS) (attrs as Record<string, unknown>)[key] = null;
+  const level = numPr.ilvl ?? 0;
+  const attrs: Record<string, unknown> = {};
+  if (level > 0) {
+    const values = styleValues(styleId, story, { numId: numPr.numId, ilvl: level - 1 });
+    for (const key of LIST_VALUE_KEYS) attrs[key] = values[key] ?? null;
+  } else {
+    const styleList = styleValues(styleId, story).listNumFmt != null;
+    const values = styleValues(styleId, story, false);
+    Object.assign(attrs, NO_LIST, {
+      numPr: styleList ? { numId: 0, ilvl: 0 } : null,
+      indentLeft: values.indentLeft ?? null,
+      indentFirstLine: values.indentFirstLine ?? null,
+      hangingIndent: values.hangingIndent ?? null,
+    });
+  }
   session.setParagraphAttrs(
     { story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
-    attrs,
+    attrs as YrsParagraphAttrs,
     suggesting
   );
   return true;
+}
+
+/**
+ * Gives the paragraph Enter made after one whose style names another next
+ * style that style, starting clean as Word does: without the list the
+ * previous paragraph set on itself, which the split carries.
+ */
+export function applyNextStyle(
+  session: YrsSession,
+  range: YrsStoryRange,
+  nextStyleId: string,
+  currentStyleId: string | null,
+  styleValues: ParagraphStyleValues
+): void {
+  session.setParagraphAttrs(range, NO_LIST);
+  session.applyParagraphStyle(range, nextStyleId, styleValues(nextStyleId, range.story), {
+    [currentStyleId ?? '']: styleValues(currentStyleId, range.story),
+  });
 }
 
 /**

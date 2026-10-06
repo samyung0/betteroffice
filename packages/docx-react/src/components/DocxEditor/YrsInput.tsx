@@ -12,7 +12,9 @@ import React, {
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  applyNextStyle,
   endEmptyListItem,
+  inOneUndoStep,
   sameYrsSelection,
   styleNewCells,
   type ParagraphStyleValues,
@@ -626,8 +628,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const currentParagraph = session
         .paragraphs(current.story)
         .find((paragraph) => paragraph.paraId === current.paraId);
-      // Enter in an empty list item ends the list, as in Word.
+      // Enter in a list item that was empty before it ends the list, as in Word.
       if (
+        !selectedStart &&
         paragraphStyleValues &&
         endEmptyListItem(session, current.story, current.paraId, paragraphStyleValues, suggestingAuthor())
       ) {
@@ -652,15 +655,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           : null;
       if (nextStyleId && paragraphStyleValues) {
         // The new paragraph carries the current one's style, so its values are known.
-        session.applyParagraphStyle(
+        applyNextStyle(
+          session,
           {
             story: current.story,
             start: { paraId: receipt.secondParaId, offset: 0 },
             end: { paraId: receipt.secondParaId, offset: 0 },
           },
           nextStyleId,
-          paragraphStyleValues(nextStyleId, current.story),
-          { [currentStyleId ?? '']: paragraphStyleValues(currentStyleId, current.story) }
+          currentStyleId,
+          paragraphStyleValues
         );
       } else if (currentParagraph?.text && inheritedStored) {
         storedFormattingByParagraphRef.current.set(
@@ -943,8 +947,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         // Terminal-Tab behavior when the document has no trailing paragraph:
         // append a row and enter its first cell (never in a read-only one).
         if (readOnly) return true;
-        const receipt = session.insertRow(focused, 'below');
-        if (paragraphStyleValues) styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+        inOneUndoStep(session, () => {
+          const receipt = session.insertRow(focused, 'below');
+          if (paragraphStyleValues) styleNewCells(session, receipt.createdStoryIds, paragraphStyleValues);
+        });
         row = lastRow + 1;
         column = 0;
       }

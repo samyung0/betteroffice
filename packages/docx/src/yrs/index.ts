@@ -41,9 +41,11 @@ export {
 } from './residentCaret';
 export { documentToYrs, styleParagraphValues } from './documentToYrs';
 export {
+  applyNextStyle,
   applyStyleValues,
   endEmptyListItem,
   explicitParagraphAttrs,
+  inOneUndoStep,
   styleNewCells,
   type ParagraphStyleValues,
 } from './paragraphSeed';
