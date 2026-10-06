@@ -414,6 +414,7 @@ const styles = {
     justifyContent: 'center',
     background: '#000000',
     cursor: 'pointer',
+    outline: 'none',
   },
   presentationCanvas: { display: 'block', pointerEvents: 'none' },
   presentationExit: {
