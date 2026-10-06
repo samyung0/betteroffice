@@ -20,7 +20,7 @@ pub fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Opt
 }
 
 /// `p:ph@type`, with `ctrTitle` as `title` and `obj` or none as `body`.
-pub fn normalize_placeholder_type(value: Option<&str>) -> &str {
+fn normalize_placeholder_type(value: Option<&str>) -> &str {
     match value.unwrap_or("body") {
         "ctrTitle" => "title",
         "obj" => "body",
