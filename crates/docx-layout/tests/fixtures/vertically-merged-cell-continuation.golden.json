@@ -12,6 +12,10 @@
           "carriedFromPrev": false,
           "carriedToNext": true,
           "clipBottom": 432,
+          "columnWidths": [
+            100,
+            100
+          ],
           "height": 480,
           "kind": "table",
           "rowEnd": 3,
@@ -42,6 +46,10 @@
           "carriedFromPrev": true,
           "carriedToNext": false,
           "clipTop": 432,
+          "columnWidths": [
+            100,
+            100
+          ],
           "height": 480,
           "kind": "table",
           "rowEnd": 3,
