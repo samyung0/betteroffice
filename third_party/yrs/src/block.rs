@@ -74,6 +74,19 @@ type CID = std::num::NonZeroU64;
 #[cfg(feature = "small-client")]
 type CID = u32;
 
+/// Patched for BetterOffice: an item's parent as [Item::update_parent] reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UpdateParent<'a> {
+    /// A root type, by name.
+    Root(&'a Arc<str>),
+    /// The item holding a nested type.
+    Item(&'a ID),
+    /// The branch of an integrated item.
+    Branch(BranchPtr),
+    /// Not named: the parent of the item's origin (or right origin).
+    Unknown,
+}
+
 /// Globally unique 53-bit client identifier. No two active peers are allowed to share the same [ClientID].
 /// If that happens, following updates may cause document store to be corrupted and desync in a result.
 #[repr(transparent)]
@@ -854,6 +867,19 @@ impl Item {
     /// Patched for BetterOffice: see [Item::origin].
     pub fn content(&self) -> &ItemContent {
         &self.content
+    }
+
+    /// Patched for BetterOffice: the parent as a decoded, not yet integrated
+    /// item names it ([crate::UpdateBlock]): a root type by name, the item
+    /// holding a nested type, or neither when the item takes its origin's
+    /// parent. An integrated item answers [UpdateParent::Branch].
+    pub fn update_parent(&self) -> UpdateParent<'_> {
+        match &self.parent {
+            TypePtr::Named(name) => UpdateParent::Root(name),
+            TypePtr::ID(id) => UpdateParent::Item(id),
+            TypePtr::Branch(branch) => UpdateParent::Branch(*branch),
+            TypePtr::Unknown => UpdateParent::Unknown,
+        }
     }
 
     /// Patched for BetterOffice: the branch holding an integrated item.

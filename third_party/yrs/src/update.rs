@@ -154,6 +154,18 @@ impl BlockSet {
     }
 }
 
+/// Patched for BetterOffice: one decoded struct of an [Update] ([Update::blocks]).
+#[derive(Debug, Clone, Copy)]
+pub enum UpdateBlock<'a> {
+    /// An item with its content, origins and parent as the update names them
+    /// ([Item::update_parent]).
+    Item(&'a Item),
+    /// A garbage-collected run.
+    Gc(BlockRange),
+    /// A gap the update does not cover.
+    Skip(BlockRange),
+}
+
 /// Update type which contains an information about all decoded blocks which are incoming from a
 /// remote peer. Since these blocks are not yet integrated into current document's block store,
 /// they still may require repairing before doing so as they don't contain full data about their
@@ -266,6 +278,20 @@ impl Update {
     /// Returns a delete set associated with current update.
     pub fn delete_set(&self) -> &IdSet {
         &self.delete_set
+    }
+
+    /// Patched for BetterOffice: every struct this update carries, as decoded
+    /// and before integration, grouped by client in clock order (clients in no
+    /// particular order). Read-only, for callers that check an update against a
+    /// document before applying it (the collaboration server).
+    pub fn blocks(&self) -> impl Iterator<Item = UpdateBlock<'_>> {
+        self.blocks.clients.values().flat_map(|blocks| {
+            blocks.iter().map(|block| match block {
+                Block::Item(item) => UpdateBlock::Item(item),
+                Block::GC(range) => UpdateBlock::Gc(*range),
+                Block::Skip(range) => UpdateBlock::Skip(*range),
+            })
+        })
     }
 
     /// Merges another update into current one. Their blocks are deduplicated and reordered.
@@ -1640,5 +1666,124 @@ mod test {
 
     fn decode_update(bin: &[u8]) -> Update {
         Update::decode(&mut DecoderV1::new(Cursor::new(bin))).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod inspection_test {
+    use crate::block::{ItemContent, UpdateParent};
+    use crate::types::text::Text;
+    use crate::updates::decoder::Decode;
+    use crate::{
+        ClientID, Doc, Map, MapPrelim, ReadTxn, StateVector, Transact, Update, UpdateBlock, ID,
+    };
+
+    fn id(client: u64, clock: u32) -> ID {
+        ID::new(ClientID::new(client), clock)
+    }
+
+    fn encode(doc: &Doc, since: &StateVector) -> Vec<u8> {
+        doc.transact().encode_state_as_update_v1(since)
+    }
+
+    // Patched for BetterOffice: the decoded structs of an update, read as sent.
+    #[test]
+    fn iterates_decoded_structs() {
+        let doc = Doc::with_client_id(5);
+        let text = doc.get_or_insert_text("content");
+        let map = doc.get_or_insert_map("meta");
+        {
+            let mut txn = doc.transact_mut();
+            text.insert(&mut txn, 0, "ab");
+            let nested = map.insert(&mut txn, "inner", MapPrelim::default());
+            nested.insert(&mut txn, "k", "v");
+        }
+        let before = doc.transact().state_vector();
+        text.insert(&mut doc.transact_mut(), 2, "c");
+        text.remove_range(&mut doc.transact_mut(), 1, 1);
+
+        let update = Update::decode_v1(&encode(&doc, &StateVector::default())).unwrap();
+        let items: Vec<_> = update
+            .blocks()
+            .map(|block| match block {
+                UpdateBlock::Item(item) => item,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        let at = |clock| items.iter().find(|i| i.id().clock == clock).unwrap();
+        let a = at(0);
+        assert_eq!(a.len(), 1);
+        assert!(matches!(a.update_parent(), UpdateParent::Root(name) if &**name == "content"));
+        assert!(matches!(a.content(), ItemContent::String(_)));
+        let entry = at(2);
+        assert_eq!(entry.parent_sub().map(|k| &**k), Some("inner"));
+        assert!(matches!(entry.content(), ItemContent::Type(_)));
+        let nested = at(3);
+        assert!(
+            matches!(nested.update_parent(), UpdateParent::Item(holder) if *holder == id(5, 2))
+        );
+        assert_eq!(nested.parent_sub().map(|k| &**k), Some("k"));
+        let c = at(4);
+        // Typed after "ab": the origin names it, so the parent is left out.
+        assert_eq!(c.origin(), Some(&id(5, 1)));
+        assert_eq!(c.right_origin(), None);
+        assert!(matches!(c.update_parent(), UpdateParent::Unknown));
+        assert!(update.delete_set().contains(&id(5, 1)));
+
+        // A diff past `before` carries only the struct typed after it.
+        let late = Update::decode_v1(&encode(&doc, &before)).unwrap();
+        let clocks: Vec<u32> = late
+            .blocks()
+            .map(|block| match block {
+                UpdateBlock::Item(item) => item.id().clock,
+                UpdateBlock::Gc(range) | UpdateBlock::Skip(range) => range.clock,
+            })
+            .collect();
+        assert_eq!(clocks, vec![4]);
+    }
+
+    // Patched for BetterOffice: a gap between two merged updates reads as Skip.
+    #[test]
+    fn reads_skips() {
+        let doc = Doc::with_client_id(3);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "a");
+        let first = encode(&doc, &StateVector::default());
+        let one = doc.transact().state_vector();
+        text.insert(&mut doc.transact_mut(), 1, "b");
+        let two = doc.transact().state_vector();
+        text.insert(&mut doc.transact_mut(), 2, "c");
+        let _ = one;
+        let third = encode(&doc, &two);
+        let merged = Update::merge_updates(vec![
+            Update::decode_v1(&first).unwrap(),
+            Update::decode_v1(&third).unwrap(),
+        ]);
+        let kinds: Vec<_> = merged
+            .blocks()
+            .map(|block| match block {
+                UpdateBlock::Item(item) => ('i', item.id().clock),
+                UpdateBlock::Gc(range) => ('g', range.clock),
+                UpdateBlock::Skip(range) => ('s', range.clock),
+            })
+            .collect();
+        assert_eq!(kinds, vec![('i', 0), ('s', 1), ('i', 2)]);
+    }
+
+    // Patched for BetterOffice: a garbage-collected run reads as Gc or deleted content.
+    #[test]
+    fn reads_gc_runs() {
+        let doc = Doc::with_client_id(9);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "abc");
+        text.remove_range(&mut doc.transact_mut(), 0, 3);
+        let update = Update::decode_v1(&encode(&doc, &StateVector::default())).unwrap();
+        let blocks: Vec<_> = update.blocks().collect();
+        assert_eq!(blocks.len(), 1);
+        match blocks[0] {
+            UpdateBlock::Item(item) => assert!(matches!(item.content(), ItemContent::Deleted(3))),
+            UpdateBlock::Gc(range) => assert_eq!((range.clock, range.len), (0, 3)),
+            UpdateBlock::Skip(_) => panic!("no skip in a whole state"),
+        }
     }
 }

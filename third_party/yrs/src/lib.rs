@@ -714,6 +714,7 @@ pub use crate::types::Observable;
 pub use crate::types::RootRef;
 pub use crate::types::SharedRef;
 pub use crate::update::Update;
+pub use crate::update::UpdateBlock;
 
 #[deprecated(since = "0.19.0", note = "Use `yrs::Out` instead")]
 pub type Value = Out;
