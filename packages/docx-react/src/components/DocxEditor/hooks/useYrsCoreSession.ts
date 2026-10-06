@@ -325,17 +325,20 @@ export function useYrsCoreSession(
     let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
-      warmSource(live);
+      // A failed materialize fails the export, not a projection against the host.
+      if (!compatibilityBaseRef.current) {
+        compatibilityBaseRef.current = live.materializeDocx();
+        sourceDocumentRef.current ??= compatibilityBaseRef.current;
+      }
       const compatibilityBase = compatibilityBaseRef.current;
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
       const dirtyStories = projectionStoriesRef.current;
-      const projected = facade.yrsToDocument(
-        live,
-        base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
-      );
+      const projected = facade.yrsToDocument(live, base, {
+        ...(dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : {}),
+        source: sourceDocumentRef.current ?? undefined,
+      });
       dirtyStories.clear();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
