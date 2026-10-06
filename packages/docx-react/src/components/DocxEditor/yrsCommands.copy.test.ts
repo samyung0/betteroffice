@@ -54,26 +54,14 @@ function copy(session: YrsSession, [from, start]: [number, number], [to, end]: [
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-// As view mode and LibreOffice's text export: a newline where the text continues after the break.
+// Whole documents copy as view mode does (textLayer.test.ts); here, part of one.
 describe('edit-mode copy over a page or column break inside a paragraph', () => {
   test.each(['page', 'column'])('writes a newline at a %s break and stays not plain', async (kind) => {
     const session = await open(p(t('Lead')) + p(t('Aa') + br(kind) + t('Bb')) + p(t('Cc')));
     try {
       // Units: A a [break] B b.
-      expect(copy(session, [0, 0], [2, 2])).toEqual({ text: 'Lead\nAa\nBb\nCc', plain: false });
       expect(copy(session, [1, 1], [1, 4])).toEqual({ text: 'a\nB', plain: false });
       expect(copy(session, [1, 3], [1, 5])).toEqual({ text: 'Bb', plain: true });
-    } finally {
-      session.destroy();
-    }
-  });
-
-  test('writes one newline at a break opening its paragraph', async () => {
-    const session = await open(p(t('Lead')) + p(br('page') + t('Bb')));
-    try {
-      const paragraphs = session.paragraphs('body');
-      const end = session.paragraphSpans('body').find((span) => span.paraId === paragraphs[1]!.paraId)!.length;
-      expect(copy(session, [0, 0], [1, end])).toEqual({ text: 'Lead\nBb', plain: false });
     } finally {
       session.destroy();
     }

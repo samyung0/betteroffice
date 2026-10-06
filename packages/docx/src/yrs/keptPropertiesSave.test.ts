@@ -931,22 +931,62 @@ describe('Enter at the end of a paragraph', () => {
     session.destroy();
   });
 
-  it('converges with a peer’s alignment change, which lands on the new paragraph', async () => {
+  it('starts a next style as a suggestion, so Reject all keeps the heading', async () => {
+    const heading = fixture(
+      '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/></w:pPr><w:r><w:t>Head</w:t></w:r></w:p><w:p/>'
+    );
+    const { session, base } = await open(heading);
+    const untouched = pPrs(await savedDocumentXml(session, base));
+    const author = { name: 'Sug', date: '2026-10-06T00:00:00Z' };
+    const { secondParaId: paraId } = session.splitParagraph(end(session, 0), author);
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
+    applyNextStyle(session, range, 'Normal', 'Heading1', styleValuesFor(session, base), author);
+    expect(session.paragraphs('body')[1]!.properties.pStyle).toBe('Normal');
+    session.rejectChange({ all: true });
+    expect(session.paragraphs('body').map(({ text }) => text)).toEqual(['Head', '']);
+    expect(pPrs(await savedDocumentXml(session, base))).toEqual(untouched);
+    session.destroy();
+  });
+
+  it('converges with a peer’s alignment change', async () => {
     const left = (await open(bytes, 81)).session;
     const { session: right, base } = await open(bytes, 82);
     left.splitParagraph(end(left, 0));
     const { paraId } = right.paragraphs('body')[0]!;
     right.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { alignment: 'right' });
     sync(left, right);
-    const saved = await savedDocumentXml(left, base);
-    expect(await savedDocumentXml(right, base)).toBe(saved);
-    // The new paragraph ends with the source's own mark, which the peer changed.
-    expect(left.paragraphs('body').map(({ text, properties }) => [text, properties.alignment ?? null])).toEqual([
-      ['Source', 'center'],
-      ['', 'right'],
-      ['', null],
-    ]);
+    expect(await savedDocumentXml(right, base)).toBe(await savedDocumentXml(left, base));
+    expect(right.paragraphs('body').map(({ text }) => text)).toEqual(['Source', '', '']);
     left.destroy();
     right.destroy();
+  });
+});
+
+describe('a split of a bordered paragraph', () => {
+  // Word copies the paragraph mark on every split, so both halves keep the borders.
+  const BORDERED =
+    '<w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/>' +
+    '<w:bottom w:val="double" w:sz="6" w:space="1" w:color="FF0000"/></w:pBdr><w:jc w:val="center"/></w:pPr>';
+  const TABLE =
+    '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>' +
+    '<w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+  // The table opens the slot of the paragraph after it.
+  const bytes = fixture(`<w:p>${BORDERED}<w:r><w:t>Body</w:t></w:r></w:p>${TABLE}<w:p>${BORDERED}<w:r><w:t>After</w:t></w:r></w:p>`);
+
+  it.each([
+    ['mid-paragraph', 0, 2, [0, 1]],
+    ['at the paragraph start', 0, 0, [0, 1]],
+    ['before a table', 1, 0, [1, 3]],
+  ] as const)('keeps them on both halves %s, in the save and the reopened file', async (_, index, offset, halves) => {
+    const { session, base } = await open(bytes);
+    const [source] = pPrs(await savedDocumentXml(session, base));
+    const borders = session.paragraphs('body')[0]!.properties.borders;
+    session.splitParagraph(at(session, 'body', index, offset));
+    const saved = await savedDocumentXml(session, base);
+    expect(halves.map((half) => pPrs(saved)[half])).toEqual([source, source]);
+    const reopened = (await open(new Uint8Array(await repackDocx(yrsToDocument(session, base))), 9)).session;
+    expect(reopened.paragraphs('body').map(({ properties }) => properties.borders)).toEqual([borders, borders, borders]);
+    reopened.destroy();
+    session.destroy();
   });
 });

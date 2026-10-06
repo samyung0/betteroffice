@@ -250,6 +250,31 @@ test("Enter before a table leaves the table paragraph's style alone", async () =
   expect(styled[0]).not.toBe(seed.paraId);
 });
 
+test('Enter at the visible end of a paragraph ending in a field, or before comment references, takes the next style', async () => {
+  for (const [payload, caret] of [
+    [{ fieldType: 'SEQ', instruction: ' SEQ Figure ', displayText: '1' }, 5],
+    [{ modelKind: 'commentReference' }, 4],
+  ] as const) {
+    const { session, input, view } = await mount(undefined, undefined, () => 'Normal');
+    const [seed] = session.paragraphs('body');
+    session.applyRawOps('body', [{ op: 'insertEmbed', index: 4, kind: 'field', payload }]);
+    const styled: string[] = [];
+    session.applyParagraphStyle = (range) => {
+      styled.push(range.start.paraId);
+    };
+    act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: caret }));
+    fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter' });
+    await act(async () => {
+      await input.current!.flushPendingInput();
+    });
+    const segments = session.storySegments('body').map((segment) => segment.kind);
+    // The field or reference stays with the text, and the new paragraph takes the next style.
+    expect(segments).toEqual(['text', 'embed', 'pilcrow', 'pilcrow']);
+    expect(styled).toEqual([session.paragraphs('body')[1]!.paraId]);
+    cleanup();
+  }
+});
+
 test('Delete before a field that shows nothing at the story end leaves input working', async () => {
   const { session, input, view } = await mount();
   const [seed] = session.paragraphs('body');

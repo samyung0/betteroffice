@@ -12,7 +12,10 @@ import {
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import { configureDefaultFonts, initWasm, openDocumentViewer } from '@betteroffice/docx/viewer';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { preloadOpcWasm, rezipContainer } from '@betteroffice/docx/wasm/opc';
+import { createYrsSession } from '@betteroffice/docx/yrs';
+import { yrsSelectionText } from './DocxEditor/yrsCommands';
 import { markerText, selectAround, selectStory, textLayerText, useTextLayer } from './textLayer';
 
 const { renderHook } = await import('@testing-library/react');
@@ -351,6 +354,7 @@ describe('text layer over a laid-out document', () => {
     const generated = resolve(import.meta.dir, '../../../docx/src/wasm/generated');
     await initWasm(await readFile(resolve(generated, 'viewer/docx_view_wasm_bg.wasm')));
     await preloadOpcWasm(await readFile(resolve(generated, 'opc/ooxml_opc_bg.wasm')));
+    preloadEditWasm(await readFile(resolve(generated, 'edit/docx_edit_bg.wasm')));
     // Real metrics, so runs are per glyph cluster and lines wrap as in Capy.
     const font = await readFile(
       resolve(import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')
@@ -402,12 +406,47 @@ describe('text layer over a laid-out document', () => {
     );
   });
 
-  test('copies the text around a page or column break inside a paragraph once, in order', async () => {
-    for (const kind of ['page', 'column']) {
-      const body = p(`${t('Aa')}<w:r><w:br w:type="${kind}"/></w:r>${t('Bb')}`) + p(t('Cc'));
-      expect(await copied(p(t('Lead')) + body)).toBe('Lead\nAa\nBb\nCc');
+  /** The editor's copy of the whole body (`yrsSelectionText`). */
+  async function editCopied(body: string): Promise<string> {
+    const session = await createYrsSession({ clientId: 31 });
+    try {
+      session.openDocx(docx(body), true);
+      const paragraphs = session.paragraphs('body');
+      const last = paragraphs.at(-1)!;
+      const end = session.paragraphSpans('body').find((span) => span.paraId === last.paraId)!.length;
+      session.setSelection(
+        { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+        { story: 'body', paraId: last.paraId, offset: end }
+      );
+      return yrsSelectionText(session).text;
+    } finally {
+      session.destroy();
     }
-  });
+  }
+
+  const pb = '<w:r><w:br w:type="page"/></w:r>';
+  const cb = '<w:r><w:br w:type="column"/></w:r>';
+  // A page or column break inside a paragraph copies as a soft line break does, in both modes.
+  test.each([
+    ['a page break', `${t('Aa')}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a column break', `${t('Aa')}${cb}${t('Bb')}`, 'Aa\nBb'],
+    ['two page breaks', `${t('Aa')}${pb}${pb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a page then a column break', `${t('Aa')}${pb}${cb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['two soft breaks', `${t('Aa')}${br}${br}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a soft then a page break', `${t('Aa')}${br}${pb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a page then a soft break', `${t('Aa')}${pb}${br}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a break opening the paragraph', `${pb}${t('Bb')}`, 'Bb'],
+    ['a break ending the paragraph', `${t('Aa')}${pb}`, 'Aa'],
+    ['only a break', pb, ''],
+  ])(
+    'copies %s the same in view and edit mode',
+    async (_, runs, text) => {
+      const body = p(t('Lead')) + p(runs) + p(t('Cc'));
+      expect(await copied(body)).toBe(`Lead\n${text}\nCc`);
+      expect(await editCopied(body)).toBe(`Lead\n${text}\nCc`);
+    },
+    30_000
+  );
 
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');
