@@ -540,21 +540,13 @@ impl WorkbookAuthority {
             base.bootstrap_client_id = bootstrap_client_id;
         }
         if let Some(source_sha) = source_sha {
-            let bind = |fingerprint: &str| {
-                format!(
-                    "{:x}",
-                    Sha256::digest(format!("{source_sha}:{fingerprint}"))
-                )
-            };
             for fingerprints in base.fingerprints.values_mut() {
                 for fingerprint in fingerprints {
-                    *fingerprint = bind(fingerprint);
+                    *fingerprint = bind_source(source_sha, fingerprint);
                 }
             }
-            base.fingerprint = bind(&base.fingerprint);
-            base.bootstrap_client_id = u64::from_str_radix(&base.fingerprint[..13], 16)
-                .map_err(|error| AuthorityError::InvalidState(error.to_string()))?
-                .max(1);
+            base.fingerprint = bind_source(source_sha, &base.fingerprint);
+            base.bootstrap_client_id = source_bootstrap_client_id(&base.fingerprint)?;
         }
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
@@ -566,7 +558,7 @@ impl WorkbookAuthority {
             .collect::<Vec<_>>();
         if client_id.is_some() {
             base.sheets = Arc::new(model.sheets.clone());
-            seed(&bootstrap, &base, model, &keys)
+            stable::seed(&bootstrap, &base.fingerprint, model, &keys)
         } else {
             seed_legacy(&bootstrap, &base, model, &keys)
         }
@@ -602,6 +594,26 @@ impl WorkbookAuthority {
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
         Ok(authority)
+    }
+
+    /// The seed state [`Self::from_source`] hydrates a replica of a source
+    /// package from, given the package's parsed model and SHA-256, without
+    /// the replica: one fingerprint and the seeded topology.
+    pub(crate) fn seed_v1(
+        model: &WorkbookModel,
+        source_sha: &str,
+    ) -> Result<Vec<u8>, AuthorityError> {
+        let (fingerprint, _) = fingerprint_model(model).map_err(AuthorityError::InvalidState)?;
+        let fingerprint = bind_source(source_sha, &fingerprint);
+        let bootstrap = Doc::with_client_id(source_bootstrap_client_id(&fingerprint)?);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        stable::seed(&bootstrap, &fingerprint, model, &keys)
+            .map_err(AuthorityError::InvalidState)?;
+        Ok(bootstrap
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default()))
     }
 
     /// Writes `latest`'s projection into this fresh publication of `captured`.
@@ -1963,13 +1975,18 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
     )
 }
 
-fn seed(
-    doc: &Doc,
-    base: &WorkbookBase,
-    model: &WorkbookModel,
-    keys: &[String],
-) -> Result<(), String> {
-    stable::seed(doc, base, model, keys)
+/// A fingerprint bound to the exact source package it was read from.
+fn bind_source(source_sha: &str, fingerprint: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{source_sha}:{fingerprint}"))
+    )
+}
+
+fn source_bootstrap_client_id(fingerprint: &str) -> Result<u64, AuthorityError> {
+    Ok(u64::from_str_radix(&fingerprint[..13], 16)
+        .map_err(|error| AuthorityError::InvalidState(error.to_string()))?
+        .max(1))
 }
 
 fn seed_legacy(

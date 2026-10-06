@@ -41,8 +41,59 @@ fn seeds_are_golden_deterministic_and_within_budget() {
             .unwrap()
             .encode_state_as_update_v1();
         assert_eq!(seed, again, "{name} seeds differently per replica");
+        assert_eq!(
+            Workbook::seed_collaborative(bytes).unwrap(),
+            seed,
+            "{name} seeds differently without a replica"
+        );
         assert_eq!(format!("{:x}", Sha256::digest(&seed)), hash, "{name}");
         assert!(seed.len() <= budget, "{name} seed is {} bytes", seed.len());
+    }
+}
+
+#[test]
+fn seeds_without_a_replica_match_every_fixture() {
+    for (name, bytes) in [
+        (
+            "charts",
+            &include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx")[..],
+        ),
+        (
+            "defined-names",
+            include_bytes!("../../../packages/xlsx/test-fixtures/defined-names.xlsx"),
+        ),
+        (
+            "unsupported-charts",
+            include_bytes!("../../../packages/xlsx/test-fixtures/unsupported-charts.xlsx"),
+        ),
+        (
+            "sample",
+            include_bytes!("../../../apps/demo/public/sample.xlsx"),
+        ),
+        (
+            "showcase",
+            include_bytes!("../../../apps/demo/public/showcase.xlsx"),
+        ),
+        (
+            "feature-rich",
+            include_bytes!("../../../poc/fixtures/feature-rich.xlsx"),
+        ),
+        (
+            "column-style-undo",
+            include_bytes!("fixtures/column-style-undo.xlsx"),
+        ),
+        (
+            "hidden-dimensions",
+            include_bytes!("fixtures/hidden-dimensions.xlsx"),
+        ),
+    ] {
+        assert_eq!(
+            Workbook::seed_collaborative(bytes).unwrap(),
+            Workbook::open_collaborative(bytes, 11)
+                .unwrap()
+                .encode_state_as_update_v1(),
+            "{name}"
+        );
     }
 }
 

@@ -809,7 +809,7 @@ fn write_names(
 }
 pub(super) fn seed(
     doc: &Doc,
-    base: &WorkbookBase,
+    fingerprint: &str,
     model: &WorkbookModel,
     keys: &[String],
 ) -> Result<(), String> {
@@ -817,7 +817,7 @@ pub(super) fn seed(
     let formats = txn.get_or_insert_map(CELL_FORMATS);
     sync_cell_formats(&formats, &mut txn, &model.styles)?;
     let meta = txn.get_or_insert_map(META);
-    meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
+    meta.insert(&mut txn, BASE_FINGERPRINT, fingerprint);
     meta.insert(&mut txn, "schemaVersion", VERSION);
     meta.insert(&mut txn, STRUCTURE_GENERATION, 0_i64);
     let order = txn.get_or_insert_array(SHEET_ORDER);

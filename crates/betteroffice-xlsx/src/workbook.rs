@@ -363,15 +363,22 @@ impl Workbook {
         Self::open_internal(bytes, true, Some(client_id))
     }
 
+    /// The shared state every replica of `bytes` starts from: the bytes
+    /// `open_collaborative(bytes, _).encode_state_as_update_v1()` gives, built
+    /// from the parsed package without a replica, its projection or graph.
+    pub fn seed_collaborative(bytes: &[u8]) -> Result<Vec<u8>> {
+        let parsed = parse_source(bytes)?;
+        validate_model(&parsed.workbook)?;
+        validate_chart_source(&parsed.workbook, true)?;
+        let seed =
+            WorkbookAuthority::seed_v1(&parsed.workbook, &format!("{:x}", Sha256::digest(bytes)))
+                .map_err(authority_error)?;
+        validate_collaboration_size(&seed)?;
+        Ok(seed)
+    }
+
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
-        let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
-        let mut names = HashSet::with_capacity(parts.len());
-        for (name, _) in &parts {
-            if !names.insert(name) {
-                return Err(Error::DuplicatePart(name.clone()));
-            }
-        }
-        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        let parsed = parse_source(bytes)?;
         let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -3336,6 +3343,17 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
         }
     }
     changed
+}
+
+fn parse_source(bytes: &[u8]) -> Result<xlsx_parse::ParsedWorkbook> {
+    let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
+    let mut names = HashSet::with_capacity(parts.len());
+    for (name, _) in &parts {
+        if !names.insert(name) {
+            return Err(Error::DuplicatePart(name.clone()));
+        }
+    }
+    Ok(xlsx_parse::parse_workbook_with_owned_package(parts)?)
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
