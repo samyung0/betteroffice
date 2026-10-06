@@ -3281,7 +3281,11 @@ mod tests {
                 doc.autofit_table(&direct(), &inner).unwrap();
             }
             doc.autofit_table(&direct(), &table()).unwrap();
-            assert_eq!(column_widths(&doc), vec![312.0, 312.0], "inner auto {inner_auto}");
+            assert_eq!(
+                column_widths(&doc),
+                vec![312.0, 312.0],
+                "inner auto {inner_auto}"
+            );
         }
     }
 
