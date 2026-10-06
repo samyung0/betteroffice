@@ -723,10 +723,10 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const zoomGroup = showZoomControl && (
     <ToolbarGroup label={t('formattingBar.groups.zoom')}>
+      {/* Zoom edits nothing: it stays usable while the editor is read-only. */}
       <ZoomControl
         value={zoom}
         onChange={onZoomChange}
-        disabled={disabled}
         compact
         showSteps={!singleRow}
       />

@@ -38,6 +38,8 @@ export interface DocxMenuModel {
   menus: HostMenu[];
   /** `file` comes with Insert › Image when the host picked the image. */
   run: (id: string, value?: string, file?: File) => void;
+  /** The editor's zoom (1 = 100%), for a host that keeps it across editors. */
+  zoom: number;
 }
 
 /** Commands that live outside the toolbar context. */
@@ -525,9 +527,10 @@ export function HostMenus({
     []
   );
 
+  const zoom = ctx.zoom ?? 1;
   useEffect(() => {
-    onMenus({ menus, run });
-  }, [menus, onMenus, run]);
+    onMenus({ menus, run, zoom });
+  }, [menus, onMenus, run, zoom]);
   useEffect(() => () => onMenus(null), [onMenus]);
   return null;
 }

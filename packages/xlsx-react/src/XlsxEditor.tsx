@@ -168,6 +168,8 @@ export interface XlsxEditorProps {
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
+  /** The zoom it opens at (1 = 100%); the toolbar and `run('zoom:…')` change it. */
+  initialZoom?: number;
 }
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -513,6 +515,7 @@ function XlsxEditorContent({
   showFontPicker = true,
   showFontSizePicker = true,
   showZoomControl = true,
+  initialZoom = 1,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
@@ -574,7 +577,7 @@ function XlsxEditorContent({
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_XLSX_TOOLBAR_HEIGHT);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(initialZoom);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
   // the sheet point at the grid's top-left when the zoom changed: it stays

@@ -16,7 +16,7 @@ import JSZip from 'jszip';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
-import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
+import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -1426,11 +1426,14 @@ describe('XlsxEditor host integration', () => {
     fireEvent.keyDown(surface, { key: 'x' });
     fireEvent.keyDown(surface, { key: 'Delete' });
 
-    // The toolbar and formula bar stay, disabled, so the grid keeps its place.
+    // The toolbar and formula bar stay, disabled, so the grid keeps its place;
+    // the zoom box and its list button stay usable, as zoom edits nothing.
     const toolbar = view.getByTestId('xlsx-toolbar');
     const live = toolbar.querySelectorAll('button:not(:disabled), input:not(:disabled):not([readonly])');
     expect(Array.from(live, (node) => node.getAttribute('data-testid'))).toEqual([
       'xlsx-search-menus',
+      'xlsx-zoom',
+      null,
       'xlsx-toolbar-more',
       'xlsx-export-png',
     ]);
@@ -1750,10 +1753,10 @@ describe('XlsxEditor pending host edits', () => {
 
 describe('XlsxEditor menu commands', () => {
   // Budget: A1 title, A2 "Item", A3..A6 "Line item 1..4"; B2..D2 Q1, Q2, Total.
-  async function mountCommands() {
+  async function mountCommands(props: XlsxEditorProps = {}) {
     let api: XlsxEditorApi | undefined;
     let state: XlsxCommandState | undefined;
-    render(
+    const view = render(
       <XlsxEditor
         file={plain.bytes.slice()}
         onCommandStateChange={(next) => {
@@ -1762,6 +1765,7 @@ describe('XlsxEditor menu commands', () => {
         onReady={(ready) => {
           api = ready;
         }}
+        {...props}
       />
     );
     await waitFor(() => expect(api).toBeDefined());
@@ -1777,7 +1781,15 @@ describe('XlsxEditor menu commands', () => {
       Array.from({ length: rows }, (_, row) => api!.handle.cell(0, row, col).input);
     const row = (at: number, cols = 4) =>
       Array.from({ length: cols }, (_, col) => api!.handle.cell(0, at, col).input);
-    return { api: () => api!, state: () => state!, select, run, column, row };
+    // Types into the toolbar's zoom box and presses Enter.
+    const typeZoom = (value: string) =>
+      act(async () => {
+        const box = view.getByTestId('xlsx-zoom');
+        fireEvent.focus(box);
+        fireEvent.input(box, { target: { value } });
+        fireEvent.keyDown(box, { key: 'Enter' });
+      });
+    return { api: () => api!, state: () => state!, select, run, column, row, typeZoom, view };
   }
 
   it('inserts as many rows as are selected above the selection, as one undo step', async () => {
@@ -1888,6 +1900,29 @@ describe('XlsxEditor menu commands', () => {
       width: VIEWPORT.width / 2,
       height: VIEWPORT.height / 2,
     });
+  });
+
+  it('opens at the zoom it is given, and its zoom box takes a typed zoom as Google Sheets does', async () => {
+    const view = await mountCommands({ initialZoom: 1.5 });
+    const box = view.view.getByTestId('xlsx-zoom') as HTMLInputElement;
+    expect([view.state().zoom, box.value]).toEqual([1.5, '150%']);
+    // Sheets takes 50–200% in whole percents: 300 is 200%, 20 is 50%.
+    for (const [typed, zoom] of [
+      ['300', 2],
+      ['20', 0.5],
+      ['120.6', 1.21],
+      ['abc', 1.21],
+    ] as const) {
+      await view.typeZoom(typed);
+      expect([view.state().zoom, box.value], typed).toEqual([zoom, `${zoom * 100}%`]);
+    }
+  });
+
+  it('keeps the zoom box usable while read-only, as zoom edits nothing', async () => {
+    const view = await mountCommands({ readOnly: true });
+    expect((view.view.getByTestId('xlsx-zoom') as HTMLInputElement).disabled).toBe(false);
+    await view.typeZoom('150');
+    expect(view.state().zoom).toBe(1.5);
   });
 
   it('runs the toolbar commands a menu repeats: merge, wrapping and zoom', async () => {
