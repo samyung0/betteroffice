@@ -549,12 +549,12 @@ impl DeckSession {
     /// Makes every paragraph the range touches a list item, `levels[lvl % n]`
     /// giving each level its marker, or (`None`) a plain paragraph. Markup
     /// follows PowerPoint: a paragraph becoming a list item gets `a:buFont`
-    /// (Arial for a character, the text's for a number) and the `marL`/
-    /// `indent` the range's first list item at its level lays out with
-    /// (nothing where both inherit them), else a hanging marker; one already
-    /// a list item (its own marker, or an inherited one the caller names in
-    /// `listed` by paragraph id) keeps its indents and changes only its
-    /// marker; a plain one gets `a:buNone` and no hanging indent.
+    /// (Arial for a character, the text's for a number) and the indents the
+    /// range's first list item at its level lays out with, else a hanging
+    /// marker; one already a list item (its own marker, or an inherited one
+    /// the caller names in `listed` by paragraph id) keeps its indents and
+    /// changes only its marker; a plain one gets `a:buNone` and no hanging
+    /// indent.
     pub fn set_paragraph_list(
         &self,
         context: &crate::EditCtx,
@@ -579,23 +579,35 @@ impl DeckSession {
                 .is_some_and(|bullet| bullet != Bullet::None)
                 || map_string(pilcrow, txn, PARA_ID).is_some_and(|id| listed.contains(&id))
         };
-        // The first list item at each level, its position and its indents as
-        // laid out (an edit's, else the file's; `None` inherited).
-        let mut items: Vec<(u32, usize, [Option<i64>; 2])> = Vec::new();
+        // The first list item at each level: the indents an edit or its file
+        // sets (`None` inherited) and those it lays out with.
+        let mut items: Vec<(u32, [Option<i64>; 2], [i64; 2])> = Vec::new();
         for (index, pilcrow) in &pilcrows {
             let level = pilcrow_level(pilcrow, &txn);
             if is_listed(pilcrow, &txn) && !items.iter().any(|(at, ..)| *at == level) {
                 let file = file_indents(pilcrow, &txn, story_id, source);
                 let edited = [MARGIN_LEFT, INDENT]
                     .map(|key| map_number(pilcrow, &txn, key).map(|value| value as i64));
-                items.push((
-                    level,
-                    *index,
-                    [edited[0].or(file[0]), edited[1].or(file[1])],
-                ));
+                let set = [edited[0].or(file[0]), edited[1].or(file[1])];
+                let inherited = if set.contains(&None) {
+                    crate::deck::inherited_indents(&self.package, story_id, *index, level)
+                } else {
+                    [None; 2]
+                };
+                let laid_out = [
+                    set[0]
+                        .or(inherited[0])
+                        .unwrap_or_default()
+                        .clamp(0, MAX_MARGIN_EMU),
+                    set[1]
+                        .or(inherited[1])
+                        .unwrap_or_default()
+                        .clamp(-MAX_MARGIN_EMU, MAX_MARGIN_EMU),
+                ];
+                items.push((level, set, laid_out));
             }
         }
-        for (_, pilcrow) in pilcrows {
+        for (index, pilcrow) in pilcrows {
             let level = pilcrow_level(&pilcrow, &txn);
             let step = LEVEL_STEP_EMU * i64::from(level);
             match levels {
@@ -614,24 +626,32 @@ impl DeckSession {
                         let item = items.iter().find(|(at, ..)| *at == level);
                         let file = file_indents(&pilcrow, &txn, story_id, source);
                         let defaults = [step + LIST_HANG_EMU, -LIST_HANG_EMU];
+                        // Where the item inherits and the file sets nothing, this
+                        // paragraph may inherit the same: then nothing is written.
+                        let inherits = |set: &[Option<i64>; 2], at: usize| {
+                            set[at].is_none() && file[at].is_none()
+                        };
+                        let own = item
+                            .filter(|(_, set, _)| inherits(set, 0) || inherits(set, 1))
+                            .map(|_| {
+                                crate::deck::inherited_indents(
+                                    &self.package,
+                                    story_id,
+                                    index,
+                                    level,
+                                )
+                            });
                         for (attribute, key) in [MARGIN_LEFT, INDENT].into_iter().enumerate() {
                             let value = match item {
                                 None => Some(defaults[attribute]),
-                                Some((.., indents)) if indents[attribute].is_some() => {
-                                    indents[attribute]
+                                Some((_, set, laid_out)) => {
+                                    let alike = inherits(set, attribute)
+                                        && own.is_some_and(|own| {
+                                            own[attribute].unwrap_or_default()
+                                                == laid_out[attribute]
+                                        });
+                                    (!alike).then_some(laid_out[attribute])
                                 }
-                                // Inherited by the item and, without a file value, by this one.
-                                Some(_) if file[attribute].is_none() => None,
-                                // The file value would win: write what the item inherits.
-                                Some((_, at, _)) => Some(
-                                    crate::deck::inherited_indents(
-                                        &self.package,
-                                        story_id,
-                                        *at,
-                                        level,
-                                    )[attribute]
-                                        .unwrap_or_default(),
-                                ),
                             };
                             match value {
                                 Some(value) => {

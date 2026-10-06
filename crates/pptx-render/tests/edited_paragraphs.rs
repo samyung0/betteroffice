@@ -86,19 +86,25 @@ fn text_box<'a>(
     list: &'a SurfaceDisplayList,
     story: &str,
 ) -> (&'a [TextParagraph], &'a [PositionedTextLine], TextAnchor) {
-    list.primitives
-        .iter()
-        .find_map(|primitive| match primitive {
-            Primitive::TextBox {
-                story_id: Some(id),
-                paragraphs,
-                lines,
-                anchor,
-                ..
-            } if id == story => Some((paragraphs.as_slice(), lines.as_slice(), *anchor)),
-            _ => None,
-        })
-        .unwrap()
+    find_text_box(&list.primitives, story).unwrap()
+}
+
+/// A story's text box, a table cell's included.
+fn find_text_box<'a>(
+    primitives: &'a [Primitive],
+    story: &str,
+) -> Option<(&'a [TextParagraph], &'a [PositionedTextLine], TextAnchor)> {
+    primitives.iter().find_map(|primitive| match primitive {
+        Primitive::TextBox {
+            story_id: Some(id),
+            paragraphs,
+            lines,
+            anchor,
+            ..
+        } if id == story => Some((paragraphs.as_slice(), lines.as_slice(), *anchor)),
+        Primitive::Table { primitives, .. } => find_text_box(primitives, story),
+        _ => None,
+    })
 }
 
 /// The marker drawn before each paragraph's first line: the runs that cover
@@ -344,4 +350,33 @@ fn powerpoints_plain_paragraph_listed_lines_up_with_an_inherited_item_as_reopene
     let reopened = DeckSession::open(&session.save().unwrap(), 48).unwrap();
     let again = layout(&reopened, None);
     assert_eq!(text_box(&again, &story).1, lines);
+}
+
+/// Lists every paragraph of `shape`'s first story and checks the plain first
+/// paragraph lines up with the item after it, as the reopened file draws it.
+fn assert_plain_lines_up_with_item(shape: &str, client: u64) {
+    let session = DeckSession::open(PLAIN_PARAGRAPH, client).unwrap();
+    let (_, _, story) = story_of(&session, shape);
+    let length = session.story(&story).unwrap().length;
+    session
+        .set_paragraph_list(&context(), &story, 0, length, Some(&discs()), &[])
+        .unwrap();
+    let edited = layout(&session, None);
+    let (_, lines, _) = text_box(&edited, &story);
+    let hangs = hangs(&session, &story, lines);
+    assert_eq!(hangs[0], hangs[1], "{hangs:?}");
+
+    let reopened = DeckSession::open(&session.save().unwrap(), client + 1).unwrap();
+    let again = layout(&reopened, None);
+    assert_eq!(text_box(&again, &story).1, lines);
+}
+
+#[test]
+fn a_paragraph_inheriting_another_layout_paragraph_lines_up_with_the_item() {
+    assert_plain_lines_up_with_item("Positioned bullets", 49);
+}
+
+#[test]
+fn a_table_cell_paragraph_lines_up_with_the_cells_item() {
+    assert_plain_lines_up_with_item("List table", 51);
 }
