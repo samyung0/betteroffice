@@ -30,6 +30,8 @@ export interface YrsCoreSession {
   documentFromYrs(baseDocument?: Document | null): Document | null;
   /** The source package's numbering definitions, which the held host document lacks. */
   sourceNumbering(): NumberingDefinitions | undefined;
+  /** The materialized source package, as the session seeded from it (save projections do not replace it). */
+  sourceDocument(): Document | undefined;
   publishDirectInput(storyId?: string): void;
 }
 
@@ -177,6 +179,12 @@ export function useYrsCoreSession(
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const compatibilityBaseRef = useRef<Document | null>(null);
+  const sourceDocumentRef = useRef<Document | null>(null);
+  // The first base is the materialized source; keep it once projections replace it.
+  const warmSource = (live: YrsSession): void => {
+    warmCompatibilityBase(live, compatibilityBaseRef);
+    sourceDocumentRef.current ??= compatibilityBaseRef.current;
+  };
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
@@ -190,6 +198,7 @@ export function useYrsCoreSession(
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
+    sourceDocumentRef.current = null;
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
@@ -246,7 +255,7 @@ export function useYrsCoreSession(
   useEffect(() => {
     if (!enabled || !session || !seedBytes) return;
     const warm = (): void => {
-      if (sessionRef.current === session) warmCompatibilityBase(session, compatibilityBaseRef);
+      if (sessionRef.current === session) warmSource(session);
     };
     if (typeof requestIdleCallback === 'function') {
       const id = requestIdleCallback(warm);
@@ -316,7 +325,8 @@ export function useYrsCoreSession(
     let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
-      const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
+      warmSource(live);
+      const compatibilityBase = compatibilityBaseRef.current;
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
@@ -345,8 +355,14 @@ export function useYrsCoreSession(
 
   const sourceNumbering = useCallback((): NumberingDefinitions | undefined => {
     const live = sessionRef.current;
-    if (live) warmCompatibilityBase(live, compatibilityBaseRef);
+    if (live) warmSource(live);
     return compatibilityBaseRef.current?.package.numbering;
+  }, []);
+
+  const sourceDocument = useCallback((): Document | undefined => {
+    const live = sessionRef.current;
+    if (live) warmSource(live);
+    return sourceDocumentRef.current ?? undefined;
   }, []);
 
   return {
@@ -358,6 +374,7 @@ export function useYrsCoreSession(
     locToDisplayPosition,
     documentFromYrs,
     sourceNumbering,
+    sourceDocument,
     publishDirectInput,
   };
 }

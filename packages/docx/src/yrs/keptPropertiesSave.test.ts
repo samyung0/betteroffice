@@ -9,6 +9,7 @@ import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createStyleResolver } from '../styles';
 import {
+  applyStyleValues,
   cellParagraphFormatting,
   createYrsSession,
   applyNextStyle,
@@ -109,12 +110,12 @@ function pPrs(xml: string): string[] {
   );
 }
 
-/** Style values as the editor reads them (PagedEditor's `paragraphStyleValues`). */
+/** Style values as the editor reads them (PagedEditor's `paragraphStyleValues`, the materialized source as its cells' source). */
 function styleValuesFor(session: YrsSession, base: Document): ParagraphStyleValues {
   const resolver = createStyleResolver(base.package.styles!);
   return (styleId, story, list = true) =>
     styleParagraphValues(resolver, styleId, {
-      cell: cellParagraphFormatting(session, resolver, story),
+      cell: cellParagraphFormatting(session, resolver, story, base),
       numbering: list ? base.package.numbering : undefined,
       numPr: typeof list === 'object' ? list : undefined,
     });
@@ -448,6 +449,19 @@ describe('cells the table had when it opened, after rows and columns move', () =
     const saved = Object.fromEntries(savedCells(await savedDocumentXml(session, base)));
     expect(saved.H0).toBe('<w:pPr><w:jc w:val="left"/></w:pPr>');
     expect(saved.H1).toBe('');
+    session.destroy();
+  });
+
+  it('take a style picked in them by their seeded look, so the save writes only the style', async () => {
+    const { session, base } = await open(bytes);
+    // B0 becomes the first row, whose look centres; it seeded without.
+    session.deleteRow({ anchor: { ...table, row: 0, column: 0 }, head: { ...table, row: 0, column: 1 } });
+    const story = session.storyIds().find((id) => session.paragraphs(id)[0]?.text === 'B0')!;
+    const { paraId } = session.paragraphs(story)[0]!;
+    applyStyleValues(session, { story, start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, 'Heading1', styleValuesFor(session, base));
+    expect(session.paragraphs(story)[0]!.properties.alignment ?? null).toBeNull();
+    const saved = Object.fromEntries(savedCells(await savedDocumentXml(session, base)));
+    expect(saved.B0).toBe('<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>');
     session.destroy();
   });
 

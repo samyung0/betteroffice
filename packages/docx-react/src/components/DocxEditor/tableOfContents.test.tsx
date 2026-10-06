@@ -128,6 +128,7 @@ function yrsCore(session: YrsSession): YrsCoreSession {
     documentFromYrs: () => null,
     publishDirectInput: () => {},
     sourceNumbering: () => undefined,
+    sourceDocument: () => undefined,
   };
 }
 

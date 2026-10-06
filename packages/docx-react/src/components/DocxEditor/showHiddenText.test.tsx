@@ -57,6 +57,7 @@ function yrsCore(): YrsCoreSession {
     locToDisplayPosition: () => null,
     documentFromYrs: () => null,
     sourceNumbering: () => undefined,
+    sourceDocument: () => undefined,
     publishDirectInput: () => {},
   };
 }
