@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { EditableCombobox } from './EditableCombobox';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
-const { cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 
 afterEach(cleanup);
 // The globals are process-wide; leaving them installed poisons every later suite.
@@ -34,6 +34,18 @@ describe('EditableCombobox', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
 
     expect(commits).toContain('120');
+    expect(input.value).toBe('120%');
+  });
+
+  it('still shows the applied value once the blur that follows Enter commits', async () => {
+    const { getByRole } = render(<ZoomCombobox />);
+    const input = getByRole('combobox') as HTMLInputElement;
+
+    input.focus();
+    fireEvent.input(input, { target: { value: '120' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+
     expect(input.value).toBe('120%');
   });
 });
