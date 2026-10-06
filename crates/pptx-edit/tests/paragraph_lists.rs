@@ -13,6 +13,10 @@ use pptx_parse::{ShapeNode, TextBody};
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const LIST_STYLES: &[u8] =
     include_bytes!("../../pptx-render/tests/fixtures/list-style-bullets.pptx");
+const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
+/// `lecture.pptx` slide 2's body (a Google Slides export): a plain paragraph at
+/// `marL="457200" indent="0"`, then two `●` items at `marL="457200" indent="-317500"`.
+const LECTURE_BODY: &str = "Google Shape;117;p26";
 
 fn context() -> EditCtx {
     EditCtx::local("lists")
@@ -364,7 +368,6 @@ fn lecture_item_properties(bytes: &[u8]) -> pptx_parse::ParagraphProperties {
 
 #[test]
 fn a_new_style_on_an_existing_list_item_keeps_its_indents() {
-    const LECTURE: &[u8] = include_bytes!("../../../poc/fixtures/lecture.pptx");
     let before = lecture_item_properties(LECTURE);
     assert_eq!(
         (before.margin_left, before.indent),
@@ -417,6 +420,303 @@ fn an_inherited_list_item_named_by_the_caller_keeps_its_indents() {
             value: "●".to_owned()
         })
     );
+}
+
+fn squares() -> Vec<Bullet> {
+    vec![Bullet::Character {
+        value: "■".to_owned(),
+    }]
+}
+
+/// Each paragraph's start offset in the story.
+fn paragraph_offsets(session: &DeckSession, story: &str) -> Vec<u32> {
+    let mut offset = 0;
+    session
+        .story(story)
+        .unwrap()
+        .paragraphs
+        .iter()
+        .map(|paragraph| {
+            let start = offset;
+            offset += paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.encode_utf16().count() as u32)
+                .sum::<u32>()
+                + 1;
+            start
+        })
+        .collect()
+}
+
+fn indents(body: &TextBody) -> Vec<(Option<i64>, Option<i64>)> {
+    body.paragraphs
+        .iter()
+        .map(|paragraph| {
+            (
+                paragraph.properties.margin_left,
+                paragraph.properties.indent,
+            )
+        })
+        .collect()
+}
+
+/// `marL`/`indent` as the editor lays each paragraph out (an edit's value,
+/// else its file paragraph's) must be what the saved file holds.
+fn assert_saved_as_edited(session: &DeckSession, story: &str, source: &TextBody, saved: &TextBody) {
+    let edited: Vec<_> = session
+        .story(story)
+        .unwrap()
+        .paragraphs
+        .iter()
+        .map(|paragraph| {
+            let file = paragraph
+                .template_index(story)
+                .map(|index| &source.paragraphs[index].properties);
+            (
+                paragraph
+                    .margin_left
+                    .or(file.and_then(|file| file.margin_left)),
+                paragraph.indent.or(file.and_then(|file| file.indent)),
+            )
+        })
+        .collect();
+    assert_eq!(edited, indents(saved));
+}
+
+#[test]
+fn a_plain_paragraph_listed_with_items_takes_their_indents() {
+    let source = saved_body(LECTURE, LECTURE_BODY);
+    assert_eq!(
+        indents(&source),
+        [
+            (Some(457_200), Some(0)),
+            (Some(457_200), Some(-317_500)),
+            (Some(457_200), Some(-317_500)),
+        ]
+    );
+    let session = DeckSession::open(LECTURE, 50).unwrap();
+    let (_, _, story) = story_of(&session, LECTURE_BODY);
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&squares()), &[])
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let body = saved_body(&saved, LECTURE_BODY);
+    assert_eq!(texts(&body), texts(&source));
+    assert_eq!(indents(&body), [(Some(457_200), Some(-317_500)); 3]);
+    assert!(body.paragraphs.iter().all(|paragraph| {
+        paragraph.properties.bullet
+            == Some(Bullet::Character {
+                value: "■".to_owned(),
+            })
+    }));
+    // The items keep their 14 pt markers.
+    assert_eq!(
+        body.paragraphs[1].properties.bullet_size,
+        source.paragraphs[1].properties.bullet_size
+    );
+    let xml = shape_xml(&saved, "ppt/slides/slide2.xml", LECTURE_BODY);
+    assert_eq!(
+        xml.matches(r#"<a:pPr algn="l" indent="-317500" marL="457200" rtl="0">"#)
+            .count(),
+        3,
+        "{xml}"
+    );
+    assert_saved_as_edited(&session, &story, &source, &body);
+    let reopened = DeckSession::open(&saved, 51).unwrap();
+    let (_, _, story) = story_of(&reopened, LECTURE_BODY);
+    assert_saved_as_edited(&reopened, &story, &body, &body);
+}
+
+#[test]
+fn a_paragraph_listed_with_an_inherited_indent_item_inherits_too() {
+    let source = saved_body(LIST_STYLES, "Inherited bullets");
+    let session = DeckSession::open(LIST_STYLES, 52).unwrap();
+    let (_, _, story) = story_of(&session, "Inherited bullets");
+    // The first item made plain first: an edit's `marL="0" indent="0"`.
+    session
+        .set_paragraph_list(&context(), &story, 0, 0, None, &[])
+        .unwrap();
+    let ids: Vec<_> = session
+        .story(&story)
+        .unwrap()
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.id.clone())
+        .collect();
+    // "Second level" and "Text follows bullet" inherit their markers; the
+    // level-2 paragraph has none.
+    let listed = [ids[1].clone(), ids[3].clone()];
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &listed)
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let body = saved_body(&saved, "Inherited bullets");
+    assert_eq!(texts(&body), texts(&source));
+    assert_eq!(
+        indents(&body),
+        [
+            // Level 0 inherits as "Text follows bullet" does.
+            (None, None),
+            (None, None),
+            // No level-2 item: PowerPoint's hanging indent at that level.
+            (Some(2 * 457_200 + 342_900), Some(-342_900)),
+            (None, None),
+        ]
+    );
+    let bullets: Vec<_> = body
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.properties.bullet.clone())
+        .collect();
+    let character = |value: &str| {
+        Some(Bullet::Character {
+            value: value.to_owned(),
+        })
+    };
+    assert_eq!(
+        bullets,
+        [
+            character("●"),
+            character("○"),
+            character("■"),
+            character("●")
+        ]
+    );
+    let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
+    assert!(
+        xml.contains(r#"<a:pPr><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#),
+        "{xml}"
+    );
+    assert_saved_as_edited(&session, &story, &source, &body);
+}
+
+/// Saving cannot drop a file's `marL`/`indent`, so a paragraph whose own
+/// markup sets the indents an item inherits gets the hanging default.
+#[test]
+fn file_indents_an_inherited_item_lacks_fall_back_to_the_hanging_default() {
+    let session = DeckSession::open(LIST_STYLES, 57).unwrap();
+    let (_, _, story) = story_of(&session, "Inherited bullets");
+    session
+        .set_paragraph_list(&context(), &story, 0, 0, None, &[])
+        .unwrap();
+    // PowerPoint's plain paragraph in a bulleted placeholder.
+    let plain = session.save().unwrap();
+    assert_eq!(
+        indents(&saved_body(&plain, "Inherited bullets"))[0],
+        (Some(0), Some(0))
+    );
+    let session = DeckSession::open(&plain, 58).unwrap();
+    let (_, _, story) = story_of(&session, "Inherited bullets");
+    let ids: Vec<_> = session
+        .story(&story)
+        .unwrap()
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.id.clone())
+        .collect();
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(
+            &context(),
+            &story,
+            0,
+            end,
+            Some(&discs()),
+            &[ids[1].clone(), ids[3].clone()],
+        )
+        .unwrap();
+    let body = saved_body(&session.save().unwrap(), "Inherited bullets");
+    assert_eq!(indents(&body)[0], (Some(342_900), Some(-342_900)));
+    assert_eq!(indents(&body)[3], (None, None));
+}
+
+#[test]
+fn newly_listed_paragraphs_take_the_indents_of_an_item_at_their_level() {
+    let source = saved_body(LECTURE, LECTURE_BODY);
+    let session = DeckSession::open(LECTURE, 53).unwrap();
+    let (_, _, story) = story_of(&session, LECTURE_BODY);
+    let offsets = paragraph_offsets(&session, &story);
+    // The last item and the plain paragraph move to level 1 (`marL` 914400).
+    for offset in [offsets[2], offsets[0]] {
+        session
+            .change_paragraph_level(&context(), &story, offset, offset, 1, Some(&discs()))
+            .unwrap();
+    }
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &[])
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let body = saved_body(&saved, LECTURE_BODY);
+    assert_eq!(texts(&body), texts(&source));
+    // The plain paragraph takes the level-1 item's edited `marL` and file
+    // `indent`, not the level-0 item's.
+    assert_eq!(
+        indents(&body),
+        [
+            (Some(914_400), Some(-317_500)),
+            (Some(457_200), Some(-317_500)),
+            (Some(914_400), Some(-317_500)),
+        ]
+    );
+    let levels: Vec<_> = body
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.properties.level)
+        .collect();
+    assert_eq!(levels, [1, 0, 1]);
+    assert_saved_as_edited(&session, &story, &source, &body);
+}
+
+#[test]
+fn listing_with_items_and_a_concurrent_indent_converge() {
+    let source = saved_body(LECTURE, LECTURE_BODY);
+    let left = DeckSession::open(LECTURE, 54).unwrap();
+    let right = DeckSession::open(LECTURE, 55).unwrap();
+    let (_, _, story) = story_of(&left, LECTURE_BODY);
+    let end = story_length(&left, &story);
+    left.set_paragraph_list(
+        &EditCtx::local("left"),
+        &story,
+        0,
+        end,
+        Some(&squares()),
+        &[],
+    )
+    .unwrap();
+    // The other peer moves the plain paragraph a level in meanwhile.
+    right
+        .change_paragraph_level(&EditCtx::local("right"), &story, 0, 0, 1, None)
+        .unwrap();
+    sync(&left, &right);
+
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let saved = left.save().unwrap();
+    assert_eq!(saved, right.save().unwrap());
+    let body = saved_body(&saved, LECTURE_BODY);
+    assert_eq!(texts(&body), texts(&source));
+    let first = &body.paragraphs[0].properties;
+    // Both edits survive key by key: the level, the marker and the item's
+    // hanging indent; `marL` is whichever peer's write wins.
+    assert_eq!(first.level, 1);
+    assert_eq!(
+        first.bullet,
+        Some(Bullet::Character {
+            value: "■".to_owned()
+        })
+    );
+    assert_eq!(first.indent, Some(-317_500));
+    assert!(matches!(first.margin_left, Some(457_200 | 914_400)));
+    assert_saved_as_edited(&left, &story, &source, &body);
+    let reopened = DeckSession::open(&saved, 56).unwrap();
+    let (_, _, story) = story_of(&reopened, LECTURE_BODY);
+    assert_saved_as_edited(&reopened, &story, &body, &body);
 }
 
 #[test]
