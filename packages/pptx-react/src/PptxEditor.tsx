@@ -214,6 +214,8 @@ export interface PptxEditorProps {
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
+  /** The zoom it opens at (default 'fit'); the toolbar and `view.zoom` change it. */
+  initialZoom?: PptxZoom;
   /** Called whenever what `runCommand` can do changes, for host menus. */
   onCommandState?: (state: PptxCommandState) => void;
   /** Whether the speaker notes panel starts open; it starts hidden. */
@@ -433,6 +435,7 @@ function PptxEditorContent({
   showFontPicker = true,
   showFontSizePicker = true,
   showZoomControl = true,
+  initialZoom = 'fit',
   onCommandState,
   defaultSpeakerNotes = false,
   onSpeakerNotesChange,
@@ -541,7 +544,7 @@ function PptxEditorContent({
   const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
   const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-  const [zoom, setZoom] = useState<PptxZoom>('fit');
+  const [zoom, setZoom] = useState<PptxZoom>(initialZoom);
   const [activeTool, setActiveTool] = useState<PptxEditorTool>('select');
   const [hoverTarget, setHoverTarget] = useState<HoverTarget | null>(null);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });

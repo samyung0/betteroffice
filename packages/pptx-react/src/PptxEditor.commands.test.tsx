@@ -179,6 +179,16 @@ describe('PptxEditor host commands', () => {
     }
   }, 60_000);
 
+  it('opens at the zoom it is given, and its zoom stays usable while read-only', async () => {
+    const { state, view } = await open(true, { initialZoom: 1.5, singleRowToolbar: true });
+    expect(state().zoom).toBe('1.5');
+    const zoom = view.getByTestId('pptx-zoom') as HTMLButtonElement;
+    expect([zoom.disabled, zoom.textContent]).toEqual([false, '150%']);
+    act(() => fireEvent.click(zoom));
+    act(() => fireEvent.click(view.getByRole('menuitem', { name: '200%' })));
+    expect(state().zoom).toBe('2');
+  }, 60_000);
+
   it('validates values and refuses edits when read-only', async () => {
     const { api, run, slideIds, state } = await open(true);
     const ids = slideIds();

@@ -134,6 +134,12 @@ interface ToolbarSection {
 }
 
 const ZOOM_LEVELS = [0.5, 0.75, 0.9, 1, 1.25, 1.5, 2] as const;
+
+/** A typed zoom as Google Sheets takes it: a whole percent, 300 as 200 and 20 as 50. */
+function typedZoom(percent: number): number {
+  return Math.min(200, Math.max(50, Math.round(percent))) / 100;
+}
+
 const DEFAULT_FONT_FAMILIES = [
   'Arial',
   'Calibri',
@@ -623,11 +629,11 @@ export function Toolbar(explicitProps: ToolbarProps) {
       label={t('toolbar.zoomValue', {
         value: `${Math.round(zoom * 100)}%`,
       })}
-      disabled={disabled || !onZoomChange}
+      // Zoom edits nothing: it stays usable while the editor is read-only.
+      disabled={!onZoomChange}
       onCommit={(value) => {
         const percent = Number.parseFloat(value.replace('%', ''));
-        if (Number.isFinite(percent) && percent >= 25 && percent <= 400)
-          onZoomChange?.(percent / 100);
+        if (Number.isFinite(percent)) onZoomChange?.(typedZoom(percent));
       }}
       width={singleRow ? 64 : 76}
       testId="xlsx-zoom"

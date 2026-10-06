@@ -477,6 +477,37 @@ test("a read-only editor's host menus say which items edit and keep the others u
   expect(actions.onEditAction).toHaveBeenCalledTimes(1);
 });
 
+test('a read-only toolbar keeps its zoom dropdown usable, as zoom edits nothing', () => {
+  const { getByTestId } = render(<SingleRow disabled onZoomChange={() => {}} />);
+  const bar = within(getByTestId('formatting-bar'));
+  const zoom = bar.getByRole('combobox', { name: zoomLabel }) as HTMLButtonElement;
+  const font = bar.getByRole('combobox', { name: en.font.selectAriaLabel }) as HTMLButtonElement;
+  expect([zoom.disabled, font.disabled]).toEqual([false, true]);
+});
+
+test('host menus report the zoom, so a host can open the next editor at it', () => {
+  const actions = {
+    onAddComment: () => {},
+    onEditAction: () => {},
+    onInsertImageFile: () => {},
+    onToggleComments: () => {},
+    onToggleRuler: () => {},
+    showComments: false,
+    showRuler: false,
+  };
+  let model: DocxMenuModel | null = null;
+  const toolbar = (zoom: number) => (
+    <EditorToolbar singleRow hostMenus zoom={zoom} onZoomChange={() => {}}>
+      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+    </EditorToolbar>
+  );
+  const { rerender } = render(toolbar(1.5));
+  const zoomOf = () => (model as DocxMenuModel | null)?.zoom;
+  expect(zoomOf()).toBe(1.5);
+  rerender(toolbar(2));
+  expect(zoomOf()).toBe(2);
+});
+
 test('View › Show ruler ticks while the rulers show and toggles them, also read-only', () => {
   const actions = {
     onAddComment: mock(() => {}),

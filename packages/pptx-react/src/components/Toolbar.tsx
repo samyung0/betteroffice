@@ -434,7 +434,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const zoomControl = singleRow ? (
     <ToolbarDropdown
       title={t('toolbar.zoomValue', { value: zoomValue })}
-      disabled={disabled || !onZoomChange}
+      // Zoom edits nothing: it stays usable while the editor is read-only.
+      disabled={!onZoomChange}
       menuWidth={120}
       testId="pptx-zoom"
       trigger={
@@ -463,7 +464,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
       value={zoomValue}
       options={zoomOptions}
       label={t('toolbar.zoomValue', { value: zoomValue })}
-      disabled={disabled || !onZoomChange}
+      disabled={!onZoomChange}
       onCommit={commitZoom}
       width={76}
       testId="pptx-zoom"
