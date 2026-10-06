@@ -290,9 +290,10 @@ impl XlsxSession {
     }
 }
 
-/// `seedOffice` for XLSX.
+/// `seedOffice` for XLSX: the state every replica starts from, built
+/// without opening one.
 pub(crate) fn seed(base: &[u8]) -> Result<Vec<u8>> {
-    Ok(XlsxSession::open(base, None)?.state())
+    Workbook::seed_collaborative(base).map_err(Error::engine)
 }
 
 /// A source opened only to read pending effects (`XlsxEffectsReader`).
