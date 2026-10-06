@@ -287,6 +287,7 @@ pub fn requested_line_metrics(family: &str) -> Option<RequestedLineMetrics> {
 const EAST_ASIAN_PREFIXES: &[&str] = &[
     "noto sans cjk",
     "noto serif cjk",
+    "noto sans mono cjk",
     "noto sans sc",
     "noto sans tc",
     "noto sans hk",
@@ -306,19 +307,33 @@ const EAST_ASIAN_PREFIXES: &[&str] = &[
     "stkaiti",
     "stfangsong",
     "stxihei",
+    "stzhongsong",
+    "stxingkai",
+    "stliti",
+    "stcaiyun",
+    "sthupo",
+    "stxinwei",
+    "lisu",
+    "youyuan",
+    "fzshuti",
+    "fzyaoti",
+    "nanum",
     "apple sd gothic",
+    "applegothic",
     "apple ligothic",
     "apple lisung",
 ];
 
 /// Whether `family` is an East Asian face, which Word's font box also sets as
-/// a run's East Asian font: one of [`EAST_ASIAN_FACES`], a name written in
-/// CJK, kana, Hangul or full-width forms, or a family named for CJK text.
+/// a run's East Asian font: one of [`EAST_ASIAN_FACES`] or a weight or variant
+/// of one (Microsoft YaHei Light, KaiTi_GB2312, SimSun-ExtB), a name written
+/// in CJK, kana, Hangul or full-width forms, or a family named for CJK text.
 pub fn is_east_asian_family(family: &str) -> bool {
     let key = family.trim().to_lowercase();
     EAST_ASIAN_FACES
         .iter()
-        .any(|(names, _)| names.contains(&key.as_str()))
+        .flat_map(|(names, _)| names.iter())
+        .any(|name| key.starts_with(name))
         || key.chars().any(|character| {
             matches!(character as u32,
                 0x1100..=0x11FF | 0x3040..=0x30FF | 0x3130..=0x318F | 0x3400..=0x4DBF
@@ -346,10 +361,25 @@ mod tests {
             "Noto Sans CJK SC",
             "PingFang TC",
             "Hiragino Mincho ProN",
+            "Microsoft YaHei Light",
+            "KaiTi_GB2312",
+            "SimSun-ExtB",
+            "Malgun Gothic Semilight",
+            "STZhongsong",
+            "NanumBarunGothic",
+            "Noto Sans Mono CJK SC",
         ] {
             assert!(is_east_asian_family(family), "{family}");
         }
-        for family in ["Arial", "Calibri", "Times New Roman", "Noto Sans", "Aptos"] {
+        for family in [
+            "Arial",
+            "Calibri",
+            "Times New Roman",
+            "Noto Sans",
+            "Aptos",
+            "Stencil",
+            "Source Sans Pro",
+        ] {
             assert!(!is_east_asian_family(family), "{family}");
         }
     }
