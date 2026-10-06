@@ -1346,6 +1346,13 @@ describe('XlsxEditor with a peer', () => {
         for (const handle of [editor, peer])
           for (let sheet = 0; sheet < handle.sheetInfo().sheetNames.length; sheet += 1)
             expect(handle.cell(sheet, 0, 0).input).not.toBe('draft');
+        // one click on the grid gives it the keys again.
+        fireEvent.mouseDown(surface, pointAt(plain, { row: 1, col: 1 }));
+        fireEvent.mouseUp(surface, pointAt(plain, { row: 1, col: 1 }));
+        await act(async () => {
+          fireEvent.keyDown(document.activeElement!, { key: 'd' });
+        });
+        expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(false);
       } finally {
         cleanup();
         peer.dispose();
