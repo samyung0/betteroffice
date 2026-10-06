@@ -1280,64 +1280,77 @@ describe('XlsxEditor chart objects', () => {
 });
 
 describe('XlsxEditor with a peer', () => {
-  it('drops a half-typed edit whose sheet the peer removes', async () => {
-    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3101 });
-    let mine: WorkbookHandle | undefined;
-    const view = render(
-      <XlsxEditor
-        file={plain.bytes.slice()}
-        collaboration={{ clientId: 3102 }}
-        onReady={(api) => {
-          mine = api.handle;
-        }}
-      />
-    );
-    try {
-      await waitFor(() => expect(mine).toBeDefined());
-      const editor = mine!;
-      editor.onUpdate((update, origin) => {
-        if (origin === 'local') peer.applyUpdate(update);
-      });
-      // the peer's edits reach the editor as a room would deliver them.
-      const fromPeer = (change: () => void) =>
-        act(async () => {
-          const before = editor.encodeStateVector();
-          change();
-          editor.applyUpdate(peer.encodeStateAsUpdate(before));
+  for (const source of ['cell', 'formula bar'] as const)
+    it(`drops a half-typed ${source} edit whose sheet the peer removes, and takes no more keys`, async () => {
+      const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3101 });
+      let mine: WorkbookHandle | undefined;
+      const view = render(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          collaboration={{ clientId: 3102 }}
+          onReady={(api) => {
+            mine = api.handle;
+          }}
+        />
+      );
+      try {
+        await waitFor(() => expect(mine).toBeDefined());
+        const editor = mine!;
+        editor.onUpdate((update, origin) => {
+          if (origin === 'local') peer.applyUpdate(update);
         });
-      await fromPeer(() => {
-        peer.applyOps([{ type: 'addSheet', index: 3, name: 'Added' }]);
-      });
-      const added = view.getAllByRole('tab')[3];
-      expect(added.textContent).toBe('Added');
-      await act(async () => {
-        fireEvent.click(added);
-      });
-      const surface = view.getByTestId('xlsx-scroll');
-      await act(async () => {
-        fireEvent.keyDown(surface, { key: 'd' });
-      });
-      const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
-      fireEvent.change(input, { target: { value: 'draft' } });
+        // the peer's edits reach the editor as a room would deliver them.
+        const fromPeer = (change: () => void) =>
+          act(async () => {
+            const before = editor.encodeStateVector();
+            change();
+            editor.applyUpdate(peer.encodeStateAsUpdate(before));
+          });
+        await fromPeer(() => {
+          peer.applyOps([{ type: 'addSheet', index: 3, name: 'Added' }]);
+        });
+        const added = view.getAllByRole('tab')[3];
+        expect(added.textContent).toBe('Added');
+        await act(async () => {
+          fireEvent.click(added);
+        });
+        const surface = view.getByTestId('xlsx-scroll');
+        const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+        if (source === 'cell') {
+          await act(async () => {
+            fireEvent.keyDown(surface, { key: 'd' });
+          });
+          const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+          expect(document.activeElement === input).toBe(true);
+          fireEvent.change(input, { target: { value: 'draft' } });
+        } else {
+          act(() => formula.focus());
+          fireEvent.change(formula, { target: { value: 'draft' } });
+        }
 
-      // the peer undoes adding the sheet the draft is open on.
-      await fromPeer(() => {
-        peer.undo();
-      });
-      expect(view.getAllByRole('tab')).toHaveLength(3);
-      // Enter where the draft was: it would land it on the sheet now active.
-      await act(async () => {
-        fireEvent.keyDown(view.queryByTestId('xlsx-cell-editor') ?? surface, { key: 'Enter' });
-      });
-      expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(true);
-      for (const handle of [editor, peer])
-        for (let sheet = 0; sheet < handle.sheetInfo().sheetNames.length; sheet += 1)
-          expect(handle.cell(sheet, 0, 0).input).not.toBe('draft');
-    } finally {
-      cleanup();
-      peer.dispose();
-    }
-  });
+        // the peer undoes adding the sheet the draft is open on.
+        await fromPeer(() => {
+          peer.undo();
+        });
+        expect(view.getAllByRole('tab')).toHaveLength(3);
+        expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(true);
+        expect(formula.value).not.toBe('draft');
+        // the keys still being typed go nowhere until a click: neither the
+        // grid nor the formula bar has the focus to take them.
+        // (identity checks stay cheap to print when they fail.)
+        expect(document.activeElement?.getAttribute('data-testid') ?? document.activeElement?.tagName).toBe('BODY');
+        await act(async () => {
+          for (const key of ['x', 'Enter']) fireEvent.keyDown(document.activeElement!, { key });
+        });
+        expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(true);
+        for (const handle of [editor, peer])
+          for (let sheet = 0; sheet < handle.sheetInfo().sheetNames.length; sheet += 1)
+            expect(handle.cell(sheet, 0, 0).input).not.toBe('draft');
+      } finally {
+        cleanup();
+        peer.dispose();
+      }
+    });
 });
 
 describe('XlsxEditor with a peer, before a render', () => {
