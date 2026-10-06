@@ -1316,6 +1316,7 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
 
 #[test]
 fn split_at_end_copies_every_property_but_the_mark_revision_to_the_new_half() {
+    use std::collections::HashMap;
     let (doc, original) = doc_with("heading");
     let dtf: BTreeMap<String, Any> = [
         ("fontFamily".to_string(), Any::from("Georgia")),
@@ -1336,10 +1337,9 @@ fn split_at_end_copies_every_property_but_the_mark_revision_to_the_new_half() {
     )
     .unwrap();
     let change = |id: &str| {
-        Any::Array(Arc::from([Any::Map(Arc::new(std::collections::HashMap::from([(
-            "info".to_owned(),
-            Any::Map(Arc::new(std::collections::HashMap::from([("id".to_owned(), Any::from(id))]))),
-        )])))]))
+        let info = HashMap::from([("id".to_owned(), Any::from(id))]);
+        let change = HashMap::from([("info".to_owned(), Any::Map(Arc::new(info)))]);
+        Any::Array(Arc::from([Any::Map(Arc::new(change))]))
     };
     for (key, value) in [
         ("borders", Any::from("boxed")),
