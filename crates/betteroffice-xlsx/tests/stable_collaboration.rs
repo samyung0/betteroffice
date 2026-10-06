@@ -1706,3 +1706,79 @@ fn a_peer_on_a_sheet_another_peer_undoes_moves_to_a_remaining_one() {
     assert_eq!(info.sheet_names, ["First", "Second"]);
     assert_eq!(info.active_sheet, SheetId(1));
 }
+
+/// Delivers what `from` holds that `to` lacks, as a peer's update arrives.
+fn relay(from: &Workbook, to: &mut Workbook) {
+    let update = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+    to.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+}
+
+fn value_at(book: &Workbook, sheet: u32, address: &str) -> Option<CellValue> {
+    book.model().sheets[sheet as usize]
+        .cell(at(address))
+        .map(|cell| cell.value.clone())
+}
+
+/// Pins today's two-peer Undo (2026-10-06): a peer's cell, format and
+/// overwriting edits leave the local Yrs history as it was, Undo reverses only
+/// the user's own steps, and a step a peer overwrote undoes to the peer's value.
+#[test]
+fn peer_edits_leave_the_local_undo_history_alone() {
+    let options = CalculationOptions::default();
+    let number = |value| Some(CellValue::Number { value });
+    let mut a = peer(4001);
+    let mut b = peer(4002);
+    a.edit_cell(SheetId(0), at("A1"), "11", options).unwrap();
+    a.edit_cell(SheetId(0), at("B1"), "=A1*2", options).unwrap();
+    relay(&a, &mut b);
+    b.edit_cell(SheetId(0), at("A2"), "21", options).unwrap();
+    b.apply_ops(
+        vec![Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:B1").unwrap(),
+            patch: StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        }],
+        options,
+    )
+    .unwrap();
+    relay(&b, &mut a);
+    let depth = |book: &Workbook| {
+        let state = book.history_state();
+        (state.undo_depth, state.redo_depth)
+    };
+    assert_eq!(depth(&a), (2, 0));
+    assert_eq!(value_at(&a, 0, "B1"), number(22.0));
+    assert_eq!(value_at(&a, 1, "A1"), number(21.0));
+    let bold = a.model().sheets[0].cell(at("A1")).unwrap().style;
+    assert!(bold.is_some());
+
+    assert!(a.undo(options).unwrap().applied);
+    assert_eq!(depth(&a), (1, 1));
+    let b1 = a.model().sheets[0].cell(at("B1")).unwrap();
+    assert_eq!(
+        (&b1.value, &b1.formula, b1.style),
+        (&CellValue::Empty, &None, bold)
+    );
+    assert_eq!(value_at(&a, 0, "A2"), number(21.0));
+    assert_eq!(a.model().sheets[0].cell(at("A1")).unwrap().style, bold);
+    relay(&a, &mut b);
+    assert_eq!(a.model(), b.model());
+
+    b.edit_cell(SheetId(0), at("A1"), "31", options).unwrap();
+    relay(&b, &mut a);
+    assert_eq!(depth(&a), (1, 1));
+    // The step a peer overwrote has nothing left to reverse: Undo drops it.
+    assert!(!a.undo(options).unwrap().applied);
+    assert_eq!(depth(&a), (0, 1));
+    assert_eq!(value_at(&a, 0, "A1"), number(31.0));
+    assert!(a.redo(options).unwrap().applied);
+    assert_eq!(depth(&a), (1, 0));
+    assert_eq!(value_at(&a, 0, "B1"), number(62.0));
+    relay(&a, &mut b);
+    assert_eq!(a.model(), b.model());
+    assert_eq!(depth(&b), (3, 0));
+}
