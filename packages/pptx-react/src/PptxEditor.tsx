@@ -4130,8 +4130,9 @@ const styles: Record<string, CSSProperties> = {
     lineHeight: '8px',
   },
   stage: { position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
-  canvasHost: { display: 'flex', flex: 1, minHeight: 0, alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'auto' },
-  canvasFrame: { position: 'relative', flex: '0 0 auto' },
+  // Auto margins centre the slide, and one larger than the host scrolls from its edges.
+  canvasHost: { display: 'flex', flex: 1, minHeight: 0, width: '100%', overflow: 'auto' },
+  canvasFrame: { position: 'relative', flex: '0 0 auto', margin: 'auto' },
   canvas: { display: 'block', flex: '0 0 auto', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' },
   canvasOverlay: { position: 'absolute', inset: 0, display: 'block', pointerEvents: 'none' },
   textEditOutline: {
