@@ -22,7 +22,8 @@ use pptx_parse::{
     CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
     Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
-    TextOverflow, builtin_table_style, effective_color_map,
+    TextOverflow, builtin_table_style, effective_color_map, find_placeholder, inherited_paragraph,
+    master_text_style, paragraph_cascade,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2021,7 +2022,7 @@ impl BodyCascade<'_> {
     ) -> ParagraphProperties {
         let mut properties = self
             .master_slide
-            .and_then(|master| master_style(master, self.placeholder, level))
+            .and_then(|master| master_text_style(master, self.placeholder, level))
             .cloned()
             .unwrap_or_default();
         if let Some(color) = self.style_color {
@@ -2030,23 +2031,13 @@ impl BodyCascade<'_> {
                 .get_or_insert_with(RunProperties::default)
                 .color = Some(color.clone());
         }
-        for (body, paragraph) in [
+        let bodies = [
             (self.master, inherited_paragraph(self.master, index, level)),
             (self.layout, inherited_paragraph(self.layout, index, level)),
             (self.primary, self.primary_paragraph(source)),
-        ] {
-            let Some(body) = body else {
-                continue;
-            };
-            if let Some(source) = &body.default_list_style {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(source) = body.list_style.get(level as usize) {
-                merge_paragraph_properties(&mut properties, source);
-            }
-            if let Some(paragraph) = paragraph {
-                merge_paragraph_properties(&mut properties, &paragraph.properties);
-            }
+        ];
+        for source in paragraph_cascade(bodies, level) {
+            merge_paragraph_properties(&mut properties, source);
         }
         if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
             *restart = self.primary_paragraph(source).is_some_and(|paragraph| {
@@ -2059,19 +2050,6 @@ impl BodyCascade<'_> {
         }
         properties
     }
-}
-
-/// A layout or master body's paragraph for a laid-out one: by position,
-/// else by level.
-fn inherited_paragraph(
-    body: Option<&TextBody>,
-    index: usize,
-    level: u32,
-) -> Option<&pptx_parse::TextParagraph> {
-    let body = body?;
-    body.paragraphs
-        .get(index)
-        .or_else(|| body.paragraphs.get(level as usize))
 }
 
 fn cascade_value<T: Copy>(
@@ -4056,38 +4034,6 @@ fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
     None
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => {
-            normalize_placeholder_type(left.placeholder_type.as_deref())
-                == normalize_placeholder_type(right.placeholder_type.as_deref())
-        }
-    }
-}
-
-fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
 fn node_base(node: &ShapeNode) -> &pptx_parse::ShapeBase {
     match node {
         ShapeNode::Shape(shape) => &shape.base,
@@ -4286,24 +4232,6 @@ fn node_group_transform(node: &ShapeNode) -> Option<&ShapeTransform> {
         ShapeNode::Group(group) => Some(&group.base.transform),
         _ => None,
     }
-}
-
-fn master_style<'a>(
-    master: &'a SlideMaster,
-    placeholder: Option<&Placeholder>,
-    level: u32,
-) -> Option<&'a ParagraphProperties> {
-    let styles = match placeholder {
-        Some(placeholder) => {
-            match normalize_placeholder_type(placeholder.placeholder_type.as_deref()) {
-                "title" => &master.text_styles.title,
-                "body" | "subTitle" => &master.text_styles.body,
-                _ => &master.text_styles.other,
-            }
-        }
-        None => &master.text_styles.other,
-    };
-    styles.get(level as usize).or_else(|| styles.first())
 }
 
 fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &ParagraphProperties) {
@@ -8737,34 +8665,13 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_matching_prefers_indices_and_normalizes_common_types() {
-        let indexed = Placeholder {
-            placeholder_type: Some("body".to_owned()),
-            index: Some(4),
-            orientation: None,
-            size: None,
-        };
-        let same_index = Placeholder {
-            placeholder_type: Some("title".to_owned()),
-            index: Some(4),
-            orientation: None,
-            size: None,
-        };
-        let centered_title = Placeholder {
-            placeholder_type: Some("ctrTitle".to_owned()),
-            index: None,
-            orientation: None,
-            size: None,
-        };
+    fn a_placeholder_without_a_transform_takes_its_layout_placeholders() {
         let title = Placeholder {
             placeholder_type: Some("title".to_owned()),
             index: None,
             orientation: None,
             size: None,
         };
-        assert!(placeholders_match(&indexed, &same_index));
-        assert!(placeholders_match(&centered_title, &title));
-
         let snapshot = ShapeSnapshot {
             id: "placeholder".to_owned(),
             source_id: 1,

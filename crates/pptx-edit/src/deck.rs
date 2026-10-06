@@ -6,8 +6,8 @@ use ooxml_drawingml::{
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{
-    GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
-    TextBody,
+    GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody, find_placeholder,
+    inherited_paragraph, master_for_layout, master_text_style, paragraph_cascade,
 };
 use serde::de::DeserializeOwned;
 use yrs::{
@@ -18,7 +18,7 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
-use crate::save::{find_placeholder, normalize_placeholder_type};
+use crate::save::slide_layout;
 use crate::story::{
     baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story,
     validate_text_style,
@@ -251,11 +251,8 @@ fn source_story<'a>(
     Some((slide, node, body))
 }
 
-/// The `marL` and `indent` a seeded story's paragraph at position `index` and
-/// `level` inherits, merged as `pptx-render` lays it out: the master's text
-/// style, the master's then the layout's matching placeholder (its list styles
-/// and its paragraph at that position, else that level), then the story's own
-/// list styles. A table cell has only its own list styles.
+/// The `marL` and `indent` a seeded story's paragraph at `index` inherits, as
+/// `pptx-render` folds them.
 pub(crate) fn inherited_indents(
     package: &PptxPackage,
     story_id: &str,
@@ -266,7 +263,26 @@ pub(crate) fn inherited_indents(
     let Some((slide, node, body)) = source_story(package, story_id) else {
         return indents;
     };
-    let mut merge = |properties: &ParagraphProperties| {
+    // A table cell has only its own list styles.
+    let (mut style, mut master_body, mut layout_body) = (None, None, None);
+    if let ShapeNode::Shape(shape) = node {
+        let placeholder = shape.base.placeholder.as_ref();
+        let layout = slide_layout(package, slide.layout_part_path.as_deref());
+        let master = master_for_layout(package, layout);
+        let placeholder_body = |shapes| match find_placeholder(shapes, placeholder?)? {
+            ShapeNode::Shape(shape) => shape.text.as_ref(),
+            _ => None,
+        };
+        style = master.and_then(|master| master_text_style(master, placeholder, level));
+        master_body = master.and_then(|master| placeholder_body(&master.shapes));
+        layout_body = layout.and_then(|layout| placeholder_body(&layout.shapes));
+    }
+    let bodies = [
+        (master_body, inherited_paragraph(master_body, index, level)),
+        (layout_body, inherited_paragraph(layout_body, index, level)),
+        (Some(body), None),
+    ];
+    for properties in style.into_iter().chain(paragraph_cascade(bodies, level)) {
         for (value, from) in indents
             .iter_mut()
             .zip([properties.margin_left, properties.indent])
@@ -275,58 +291,8 @@ pub(crate) fn inherited_indents(
                 *value = from;
             }
         }
-    };
-    if let ShapeNode::Shape(shape) = node {
-        let placeholder = shape.base.placeholder.as_ref();
-        let (layout, master) =
-            crate::save::layout_and_master(package, slide.layout_part_path.as_deref());
-        if let Some(master) = master {
-            let styles = match placeholder.map(|placeholder| {
-                normalize_placeholder_type(placeholder.placeholder_type.as_deref())
-            }) {
-                Some("title") => &master.text_styles.title,
-                Some("body" | "subTitle") => &master.text_styles.body,
-                _ => &master.text_styles.other,
-            };
-            if let Some(style) = styles.get(level as usize).or_else(|| styles.first()) {
-                merge(style);
-            }
-        }
-        let inherited = [
-            master.and_then(|master| placeholder_body(&master.shapes, placeholder)),
-            layout.and_then(|layout| placeholder_body(&layout.shapes, placeholder)),
-        ];
-        for inherited in inherited.into_iter().flatten() {
-            level_styles(inherited, level).for_each(&mut merge);
-            if let Some(paragraph) = inherited
-                .paragraphs
-                .get(index)
-                .or_else(|| inherited.paragraphs.get(level as usize))
-            {
-                merge(&paragraph.properties);
-            }
-        }
     }
-    level_styles(body, level).for_each(&mut merge);
     indents
-}
-
-fn level_styles(body: &TextBody, level: u32) -> impl Iterator<Item = &ParagraphProperties> {
-    let level_style = body.list_style.get(level as usize);
-    body.default_list_style
-        .as_deref()
-        .into_iter()
-        .chain(level_style)
-}
-
-fn placeholder_body<'a>(
-    shapes: &'a [ShapeNode],
-    placeholder: Option<&Placeholder>,
-) -> Option<&'a TextBody> {
-    match find_placeholder(shapes, placeholder?)? {
-        ShapeNode::Shape(shape) => shape.text.as_ref(),
-        _ => None,
-    }
 }
 
 fn seeded_slide_id(slide_index: usize, reference_id: u32) -> String {

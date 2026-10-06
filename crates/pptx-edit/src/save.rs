@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, Placeholder,
-    PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform,
-    ShapeWrite, SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
+    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, PptxPackage,
+    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
+    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite, find_placeholder,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -33,7 +33,8 @@ impl<'a> SlideContext<'a> {
             .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
             .map(|slide| slide.shapes.as_slice())
             .unwrap_or_default();
-        let (layout, master) = layout_and_master(package, snapshot.layout_part_path.as_deref());
+        let layout = slide_layout(package, snapshot.layout_part_path.as_deref());
+        let master = pptx_parse::master_for_layout(package, layout);
         Self {
             layout,
             master,
@@ -42,39 +43,19 @@ impl<'a> SlideContext<'a> {
     }
 }
 
-/// A slide's layout and master, as `pptx-render` picks them.
-pub(crate) fn layout_and_master<'a>(
+/// A slide's layout: its own, else the package's first.
+pub(crate) fn slide_layout<'a>(
     package: &'a PptxPackage,
     layout_part_path: Option<&str>,
-) -> (Option<&'a SlideLayout>, Option<&'a SlideMaster>) {
-    let layout = layout_part_path
+) -> Option<&'a SlideLayout> {
+    layout_part_path
         .and_then(|path| {
             package
                 .layouts
                 .iter()
                 .find(|layout| layout.part_path == path)
         })
-        .or_else(|| package.layouts.first());
-    let master = layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first());
-    (layout, master)
+        .or_else(|| package.layouts.first())
 }
 
 impl DeckSession {
@@ -536,45 +517,6 @@ fn inherited_transform<'a>(
         .flatten()
         .map(node_transform)
         .find(|transform| transform.width > 0 && transform.height > 0)
-}
-
-pub(crate) fn find_placeholder<'a>(
-    nodes: &'a [ShapeNode],
-    target: &Placeholder,
-) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
-    match (left.index, right.index) {
-        (Some(left), Some(right)) => left == right,
-        _ => {
-            normalize_placeholder_type(left.placeholder_type.as_deref())
-                == normalize_placeholder_type(right.placeholder_type.as_deref())
-        }
-    }
-}
-
-pub(crate) fn normalize_placeholder_type(value: Option<&str>) -> &str {
-    match value.unwrap_or("body") {
-        "ctrTitle" => "title",
-        "obj" => "body",
-        value => value,
-    }
-}
-
-fn node_placeholder(node: &ShapeNode) -> Option<&Placeholder> {
-    node_base(node).placeholder.as_ref()
 }
 
 fn node_transform(node: &ShapeNode) -> &ShapeTransform {

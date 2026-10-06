@@ -552,6 +552,7 @@ fn a_paragraph_listed_with_an_inherited_indent_item_inherits_too() {
     // level-2 paragraph has none.
     let listed = [ids[1].clone(), ids[3].clone()];
     let end = story_length(&session, &story);
+    session.add_undo_barrier();
     session
         .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &listed)
         .unwrap();
@@ -591,16 +592,24 @@ fn a_paragraph_listed_with_an_inherited_indent_item_inherits_too() {
     );
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
-        xml.contains(r#"<a:pPr><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#),
+        xml.contains(
+            r#"<a:pPr><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#
+        ),
         "{xml}"
     );
     assert_saved_as_edited(&session, &story, &source, &body);
+
+    // One Undo brings the removed keys back with the plain paragraph.
+    assert!(session.undo());
+    let first = &session.story(&story).unwrap().paragraphs[0];
+    assert_eq!((first.margin_left, first.indent), (Some(0), Some(0)));
+    assert_eq!(first.bullet_json.as_deref(), Some(r#"{"type":"none"}"#));
 }
 
 #[test]
 fn powerpoints_plain_paragraph_takes_an_inherited_items_laid_out_indents() {
     // `marL="0" indent="0"` with `a:buNone` beside items inheriting the
-    // layout's 228600/-228600; saving cannot drop the file's zeros.
+    // master's `bodyStyle` 228600/-228600; saving cannot drop the file's zeros.
     let source = saved_body(PLAIN_PARAGRAPH, "Inherited bullets");
     assert_eq!(indents(&source)[0], (Some(0), Some(0)));
     assert_eq!(indents(&source)[3], (None, None));
@@ -639,13 +648,170 @@ fn powerpoints_plain_paragraph_takes_an_inherited_items_laid_out_indents() {
     );
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
-        xml.contains(r#"<a:pPr indent="-228600" marL="228600"><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#),
+        xml.contains(
+            r#"<a:pPr indent="-228600" marL="228600"><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#
+        ),
         "{xml}"
     );
     assert_saved_as_edited(&session, &story, &source, &body);
     let reopened = DeckSession::open(&saved, 58).unwrap();
     let (_, _, story) = story_of(&reopened, "Inherited bullets");
     assert_saved_as_edited(&reopened, &story, &body, &body);
+}
+
+#[test]
+fn a_paragraph_inheriting_another_layout_paragraph_takes_the_items_indents() {
+    // Layout paragraphs are looked up by position: "Plain line" inherits
+    // 114300/-114300 from the first, "Bulleted line" 457200/-228600 from the second.
+    let session = DeckSession::open(PLAIN_PARAGRAPH, 59).unwrap();
+    let (_, _, story) = story_of(&session, "Positioned bullets");
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &[])
+        .unwrap();
+    let saved = session.save().unwrap();
+    let body = saved_body(&saved, "Positioned bullets");
+    assert_eq!(
+        indents(&body),
+        [(Some(457_200), Some(-228_600)), (None, None)]
+    );
+    let source = saved_body(PLAIN_PARAGRAPH, "Positioned bullets");
+    assert_saved_as_edited(&session, &story, &source, &body);
+}
+
+/// The text body of the first table cell of the graphic frame called `name`.
+fn saved_cell(bytes: &[u8], name: &str) -> TextBody {
+    pptx_parse::parse_pptx(bytes)
+        .unwrap()
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .find_map(|node| match node {
+            ShapeNode::GraphicFrame(frame) if frame.base.name == name => match &frame.data {
+                pptx_parse::GraphicFrameData::Table(table) => {
+                    Some(table.rows[0].cells[0].text.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_table_cell_paragraph_takes_its_items_cell_list_style_indents() {
+    // The cell's own `a:lstStyle` sets 171450/-171450; no placeholder or
+    // master style reaches a cell.
+    let session = DeckSession::open(PLAIN_PARAGRAPH, 60).unwrap();
+    let (_, _, story) = story_of(&session, "List table");
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&discs()), &[])
+        .unwrap();
+    let saved = session.save().unwrap();
+    let body = saved_cell(&saved, "List table");
+    assert_eq!(
+        indents(&body),
+        [(Some(171_450), Some(-171_450)), (None, None)]
+    );
+    let source = saved_cell(PLAIN_PARAGRAPH, "List table");
+    assert_saved_as_edited(&session, &story, &source, &body);
+    let reopened = DeckSession::open(&saved, 61).unwrap();
+    let (_, _, story) = story_of(&reopened, "List table");
+    assert_saved_as_edited(&reopened, &story, &body, &body);
+}
+
+/// `lecture.pptx` with slide 2's XML passed through `edit`.
+fn lecture_with(edit: impl Fn(String) -> String) -> Vec<u8> {
+    let parts: Vec<_> = ooxml_opc::unzip_parts(LECTURE)
+        .unwrap()
+        .into_iter()
+        .map(|(path, data)| match path.as_str() {
+            "ppt/slides/slide2.xml" => {
+                let xml = edit(String::from_utf8(data).unwrap());
+                (path, xml.into_bytes())
+            }
+            _ => (path, data),
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn an_out_of_range_item_indent_is_clamped_before_a_peer_gets_it() {
+    // A parseable but out-of-schema `marL="-50000"` on the first item.
+    let bytes = lecture_with(|xml| {
+        xml.replacen(
+            r#"<a:pPr marL="457200" lvl="0" indent="-317500""#,
+            r#"<a:pPr marL="-50000" lvl="0" indent="-317500""#,
+            1,
+        )
+    });
+    let left = DeckSession::open(&bytes, 62).unwrap();
+    let right = DeckSession::open(&bytes, 63).unwrap();
+    let (_, _, story) = story_of(&left, LECTURE_BODY);
+    let end = story_length(&left, &story);
+    left.set_paragraph_list(&context(), &story, 0, end, Some(&squares()), &[])
+        .unwrap();
+    // The story still loads and a peer accepts the update.
+    let first = &left.story(&story).unwrap().paragraphs[0];
+    assert_eq!((first.margin_left, first.indent), (Some(0), Some(-317_500)));
+    sync(&left, &right);
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let body = saved_body(&right.save().unwrap(), LECTURE_BODY);
+    assert_eq!(
+        (
+            body.paragraphs[0].properties.margin_left,
+            body.paragraphs[0].properties.indent
+        ),
+        (Some(0), Some(-317_500))
+    );
+}
+
+#[test]
+fn the_first_item_at_a_level_gives_its_indents_not_the_nearest() {
+    // Slide 2 reordered to item, item, plain, the second item at `marL` 685800.
+    let bytes = lecture_with(|xml| {
+        let plain = xml
+            .find(r#"<a:p><a:pPr marL="457200" lvl="0" indent="0""#)
+            .unwrap();
+        let items = plain
+            + xml[plain..]
+                .find(r#"<a:p><a:pPr marL="457200" lvl="0" indent="-317500""#)
+                .unwrap();
+        let end = xml.find("</p:txBody></p:sp><p:pic>").unwrap();
+        let second = items
+            + 1
+            + xml[items + 1..]
+                .find(r#"<a:p><a:pPr marL="457200" lvl="0" indent="-317500""#)
+                .unwrap();
+        let shifted = xml[second..end].replacen(r#"marL="457200""#, r#"marL="685800""#, 1);
+        format!(
+            "{}{}{}{}{}",
+            &xml[..plain],
+            &xml[items..second],
+            shifted,
+            &xml[plain..items],
+            &xml[end..]
+        )
+    });
+    let source = saved_body(&bytes, LECTURE_BODY);
+    assert_eq!(
+        indents(&source),
+        [
+            (Some(457_200), Some(-317_500)),
+            (Some(685_800), Some(-317_500)),
+            (Some(457_200), Some(0)),
+        ]
+    );
+    let session = DeckSession::open(&bytes, 64).unwrap();
+    let (_, _, story) = story_of(&session, LECTURE_BODY);
+    let end = story_length(&session, &story);
+    session
+        .set_paragraph_list(&context(), &story, 0, end, Some(&squares()), &[])
+        .unwrap();
+    let body = saved_body(&session.save().unwrap(), LECTURE_BODY);
+    assert_eq!(indents(&body)[2], (Some(457_200), Some(-317_500)));
 }
 
 #[test]
