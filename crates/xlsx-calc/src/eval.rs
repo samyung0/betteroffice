@@ -31,14 +31,20 @@ thread_local! {
 }
 
 pub(crate) struct EvaluationBudget {
+    limit: u64,
     remaining: Cell<u64>,
 }
 
 impl EvaluationBudget {
     pub(crate) fn new(limit: u64) -> Self {
         Self {
+            limit,
             remaining: Cell::new(limit),
         }
+    }
+
+    pub(crate) fn spent(&self) -> u64 {
+        self.limit - self.remaining.get()
     }
 
     fn consume(&self, count: u64) -> bool {

@@ -1373,6 +1373,112 @@ pub(super) fn materialize<T: ReadTxn>(
     };
     Ok((model, structure))
 }
+/// A live cell by sheet index, as [`materialize`] projects it.
+pub(super) type ProjectedCell = (SheetId, CellRef, Option<Cell>);
+
+/// What [`materialize`] projects at each live identity in `touched` (cell keys
+/// per sheet key), with the stylesheet it projects. Every touched entry is
+/// checked as `materialize` checks it, and must be spelled as this replica
+/// writes it; anything else is an error for the whole projection to decide.
+pub(super) fn project_cells<T: ReadTxn>(
+    txn: &T,
+    base: &WorkbookBase,
+    touched: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(Stylesheet, Vec<ProjectedCell>), String> {
+    let context = context(txn)?;
+    let (styles, style_indices) =
+        materialize_cell_formats(&map(txn, CELL_FORMATS)?, txn, &base.styles)?;
+    let style = |key: &str| match key {
+        "" => Ok(None),
+        key => style_indices
+            .get(key)
+            .copied()
+            .ok_or_else(|| "unknown cell style".to_string()),
+    };
+    let mut cells = Vec::new();
+    for (key, cell_keys) in touched {
+        let index = context.index(key).ok_or("touched sheet is not shown")?;
+        let sheet = sheet_map(txn, key)?;
+        let contents = nested_map(&sheet, txn, CONTENTS)?;
+        let formats = nested_map(&sheet, txn, STYLES)?;
+        let source_index = base_sheet_index(key);
+        for cell_key in cell_keys {
+            let Some(at) = context.at(key, cell_key)? else {
+                return Err("touched cell is not live".into());
+            };
+            if context.key(key, at)? != *cell_key {
+                return Err("cell identity is not canonical".into());
+            }
+            let content = contents
+                .get(txn, cell_key)
+                .map(decode::<Content>)
+                .transpose()?;
+            let format = formats
+                .get(txn, cell_key)
+                .map(|value| {
+                    value
+                        .cast::<String>()
+                        .map_err(|_| "invalid cell style key".to_string())
+                })
+                .transpose()?;
+            let mut out = Cell::default();
+            if let Some(source_index) = source_index
+                && let Some((row, col)) = source_at(cell_key)?
+                && let Some(cell) = base.sheets[source_index].cell(CellRef::new(row, col))
+            {
+                if content.is_none() {
+                    out.value = cell.value.clone();
+                    if cell.formula.is_some() {
+                        out.formula = Some(
+                            base_bindings(base)?[source_index]
+                                .get(&(row, col))
+                                .ok_or("missing source formula binding")?
+                                .resolve(&context)?,
+                        );
+                    }
+                }
+                if let Some(source_style) = cell.style.filter(|_| format.is_none()) {
+                    out.style = style(&style_key(&base.styles, source_style)?)?;
+                }
+            }
+            if let Some(content) = content {
+                out.value = content.value;
+                out.formula = content
+                    .formula
+                    .map(|formula| formula.resolve(&context))
+                    .transpose()?;
+            }
+            if let Some(format) = format {
+                out.style = style(&format)?;
+            }
+            cells.push((
+                SheetId(index as u32),
+                at,
+                (out != Cell::default()).then_some(out),
+            ));
+        }
+    }
+    Ok((styles, cells))
+}
+
+/// Whether every content and format key reserializes to itself.
+pub(super) fn overrides_canonical<T: ReadTxn>(txn: &T) -> Result<bool, String> {
+    for (_, sheet) in map(txn, SHEETS)?.iter(txn) {
+        let sheet = sheet.cast::<MapRef>().map_err(|_| "invalid sheet record")?;
+        for name in [CONTENTS, STYLES] {
+            for key in nested_map(&sheet, txn, name)?.keys(txn) {
+                let Ok(points) = serde_json::from_str::<(Point, Point)>(key) else {
+                    return Ok(false);
+                };
+                if json(&points)? != key {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn intersects(left: CellRange, right: CellRange) -> bool {
     left.start.row <= right.end.row
         && right.start.row <= left.end.row

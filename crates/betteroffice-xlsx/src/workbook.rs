@@ -1,4 +1,6 @@
 pub(crate) mod rebase;
+#[cfg(test)]
+mod remote_equivalence;
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
@@ -6,8 +8,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
+use xlsx_calc::eval::MAX_RECALCULATION_CELL_VISITS;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
+use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after, recalc_after_reversible};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
@@ -31,8 +34,9 @@ use xlsx_render::{
 };
 
 use crate::authority::{
-    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedCells,
+    StagedLocalUpdate, StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -61,6 +65,9 @@ const MAX_PENDING_COLLABORATION_UPDATES: usize = 4_096;
 pub const MAX_DISPLAY_CELLS: u64 = 250_000;
 pub const MAX_PIXMAP_DIM: u32 = 16_384;
 pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
+/// Whole-recalculation visits up to which an incremental recalc stands in for
+/// one: half the budget, so no recalc the bound admits can be limited.
+const EXACT_RECALC_VISITS: u64 = MAX_RECALCULATION_CELL_VISITS / 2;
 
 #[must_use = "dropping the subscription stops update delivery"]
 pub struct UpdateSubscription {
@@ -302,6 +309,14 @@ pub struct Workbook {
     sheet_info_cache: Mutex<Option<SheetInfoCache>>,
     /// Mutation counter; chart resolutions cache against it.
     model_epoch: u64,
+    /// The epoch at which `model` is what projecting the shared document whole
+    /// and recalculating it gives, with no cycle or limited cell. A remote
+    /// cell edit then recalculates only what the edited cells reach.
+    exact_epoch: Option<u64>,
+    /// Upper bound on the cell visits that whole recalculation would spend.
+    exact_visits: u64,
+    /// Whether every cell override is keyed as this replica writes it.
+    canonical_overrides: bool,
     /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
     /// stored epoch and part-bytes hash.
     chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
@@ -382,6 +397,7 @@ impl Workbook {
     ) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
         workbook.recalculate_all(options);
+        workbook.mark_exact();
         Ok(workbook)
     }
 
@@ -459,6 +475,7 @@ impl Workbook {
             .map(|chart| (chart.frame_id(), chart.anchor))
             .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
+        let authority_canonical = authority.overrides_canonical();
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
                 structure: authority.structure().map_err(authority_error)?,
@@ -508,6 +525,9 @@ impl Workbook {
             opened_anchors,
             sheet_info_cache: Mutex::new(None),
             model_epoch: 0,
+            exact_epoch: None,
+            exact_visits: 0,
+            canonical_overrides: authority_canonical,
             chart_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -548,7 +568,6 @@ impl Workbook {
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
         validate_collaboration_size(update)?;
-        let before = self.model.clone();
         if let Some(index) = self
             .pending_remote_updates
             .iter()
@@ -557,8 +576,18 @@ impl Workbook {
             self.pending_remote_updates.remove(index);
         }
         if self.restore_snapshot(update, options)? {
-            return Ok(self.remote_mutation_result(&before, true));
+            // The adoption diffed the replaced model against the adopted one.
+            return Ok(MutationResult {
+                applied: true,
+                changed: self.last_calculation.changed.clone(),
+                cycle_cells: self.last_calculation.cycle_cells.clone(),
+                limited_cells: self.last_calculation.limited_cells.clone(),
+            });
         }
+        if let Some(result) = self.apply_cell_update(update, options) {
+            return Ok(result);
+        }
+        let before = self.model.clone();
         let staged = self.stage_remote_updates(&[update], None)?;
         if !self.authority.supports_structure() && staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
@@ -615,6 +644,7 @@ impl Workbook {
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
+        self.exact_visits = recalc.visits;
         let active_name = self.active_sheet_name();
         self.authority = candidate;
         self.preserved.resize(model.sheets.len());
@@ -633,6 +663,8 @@ impl Workbook {
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
+        self.canonical_overrides = self.authority.overrides_canonical();
+        self.mark_exact();
         self.emit_update(UpdateEvent {
             update: migrated,
             origin: UpdateOrigin::Local,
@@ -808,6 +840,7 @@ impl Workbook {
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
+        self.exact_visits = recalc.visits;
         self.authority
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
@@ -824,6 +857,8 @@ impl Workbook {
         self.preserved.forget_axes();
         self.authority.clear_history();
         self.edited_since_open = true;
+        self.canonical_overrides = self.authority.overrides_canonical();
+        self.mark_exact();
         self.emit_update(UpdateEvent {
             update,
             origin: UpdateOrigin::Remote,
@@ -846,6 +881,151 @@ impl Workbook {
             cycle_cells: self.last_calculation.cycle_cells.clone(),
             limited_cells: self.last_calculation.limited_cells.clone(),
         }
+    }
+
+    /// Marks the model a whole recalculation of a fresh projection just gave
+    /// as one an incremental remote edit may build on, when it settled cleanly.
+    fn mark_exact(&mut self) {
+        let clean = self.last_calculation.cycle_cells.is_empty()
+            && self.last_calculation.limited_cells.is_empty()
+            && self.exact_visits <= EXACT_RECALC_VISITS;
+        self.exact_epoch = clean.then_some(self.model_epoch);
+    }
+
+    /// A remote update that edits cells alone, applied to those cells and
+    /// recalculated from them: the model, `changed` and side effects equal the
+    /// whole projection and recalculation's. `None`, with nothing changed, for
+    /// anything else, or whenever the shortcut cannot vouch for the result;
+    /// the caller then takes the whole path.
+    fn apply_cell_update(
+        &mut self,
+        update: &[u8],
+        options: CalculationOptions,
+    ) -> Option<MutationResult> {
+        if self.exact_epoch != Some(self.model_epoch)
+            || !self.canonical_overrides
+            || !self.pending_remote_updates.is_empty()
+            || self.graph.is_none()
+        {
+            return None;
+        }
+        let StagedCells {
+            effective,
+            update,
+            cells,
+            styles,
+            state_bytes,
+            state_vector_entries,
+        } = self.authority.stage_cell_update_v1(update)?;
+        if !effective {
+            return Some(MutationResult::default());
+        }
+        validate_collaboration_state(state_bytes, state_vector_entries).ok()?;
+        // A spill owns its rectangle: a whole recalculation lets an anchor
+        // overwrite what was typed under it, which these cells do not reach.
+        if styles.as_ref() != Some(&self.model.styles)
+            || cells.iter().any(|(sheet, ..)| {
+                self.model
+                    .sheet(*sheet)
+                    .is_some_and(|sheet| sheet.array_formulas().next().is_some())
+            })
+        {
+            return None;
+        }
+        for (_, at, cell) in &cells {
+            if let Some(cell) = cell {
+                validate_stored_cell(*at, cell, &self.model.styles).ok()?;
+            }
+        }
+        let mut prior = Vec::with_capacity(cells.len());
+        for (sheet, at, cell) in cells {
+            let target = self.model.sheet_mut(sheet)?;
+            prior.push((sheet, at, target.cell(at).cloned()));
+            target.set_cell(at, cell.unwrap_or_default());
+        }
+        let graph = self.graph.as_mut().expect("checked above");
+        for (sheet, at, _) in &prior {
+            let formula = self
+                .model
+                .sheet(*sheet)
+                .and_then(|s| s.cell(*at)?.formula.as_deref());
+            graph.set_formula(*sheet, *at, formula);
+        }
+        let seeds = prior
+            .iter()
+            .map(|(sheet, at, _)| (*sheet, *at))
+            .collect::<Vec<_>>();
+        let (recalc, journal) =
+            recalc_after_reversible(&mut self.model, graph, &seeds, options.now_serial);
+        let visits = self.exact_visits.saturating_add(recalc.visits);
+        let keep = journal.settled
+            && recalc.cycle_cells.is_empty()
+            && recalc.limited_cells.is_empty()
+            && visits <= EXACT_RECALC_VISITS
+            && self.authority.apply_staged_update_v1(&update).is_ok();
+        if !keep {
+            journal.undo(&mut self.model);
+            for (sheet, at, cell) in prior.iter().rev() {
+                if let Some(target) = self.model.sheet_mut(*sheet) {
+                    target.set_cell(*at, cell.clone().unwrap_or_default());
+                }
+            }
+            for (sheet, at, cell) in &prior {
+                graph.set_formula(
+                    *sheet,
+                    *at,
+                    cell.as_ref().and_then(|c| c.formula.as_deref()),
+                );
+            }
+            graph.refresh_spills(&self.model);
+            return None;
+        }
+        graph.refresh_spills(&self.model);
+        let mut before = BTreeMap::new();
+        for ((sheet, at), cell) in journal.written() {
+            before.insert((sheet.0, at.row, at.col), cell.cloned());
+        }
+        for (sheet, at, cell) in prior {
+            before.insert((sheet.0, at.row, at.col), cell);
+        }
+        let changed = before
+            .into_iter()
+            .filter(|&((sheet, row, col), ref cell)| {
+                self.model
+                    .sheet(SheetId(sheet))
+                    .and_then(|s| s.cell(CellRef::new(row, col)))
+                    != cell.as_ref()
+            })
+            .map(|((sheet, row, col), _)| CellAddress {
+                sheet: SheetId(sheet),
+                cell: CellRef::new(row, col),
+            })
+            .collect::<Vec<_>>();
+        self.bump_model_epoch();
+        self.invalidate_sheet_info();
+        self.last_calculation = CalculationResult {
+            changed: changed.clone(),
+            ..CalculationResult::default()
+        };
+        self.undo.clear();
+        self.preserved_undo.clear();
+        self.preserved_redo.clear();
+        self.preserved.forget_shared_strings();
+        self.preserved.forget_axes();
+        self.authority.clear_history();
+        self.edited_since_open = true;
+        self.exact_visits = visits;
+        self.exact_epoch = Some(self.model_epoch);
+        self.emit_update(UpdateEvent {
+            update,
+            origin: UpdateOrigin::Remote,
+        });
+        Some(MutationResult {
+            applied: true,
+            changed,
+            cycle_cells: Vec::new(),
+            limited_cells: Vec::new(),
+        })
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
@@ -1797,6 +1977,7 @@ impl Workbook {
         self.preserved.forget_axes();
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
+        self.mark_exact();
         let changed = changed_cells_between(&before, &self.model);
         self.emit_update(UpdateEvent {
             update: history.update,
@@ -2646,6 +2827,7 @@ impl Workbook {
         self.edited_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
+        self.exact_visits = result.visits;
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
         result
@@ -3171,35 +3353,7 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
             )));
         }
         for (cell, stored) in sheet.iter_cells() {
-            validate_cell_ref(cell)?;
-            if matches!(stored.value, CellValue::Number { value } if !value.is_finite()) {
-                return Err(Error::InvalidOperation(
-                    "workbook contains a non-finite cell number".to_string(),
-                ));
-            }
-            if matches!(&stored.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
-            {
-                return Err(Error::InvalidOperation(
-                    "workbook contains cell text above Excel's length limit".to_string(),
-                ));
-            }
-            if stored
-                .formula
-                .as_ref()
-                .is_some_and(|formula| formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES)
-            {
-                return Err(Error::InvalidOperation(
-                    "workbook contains a formula above the length limit".to_string(),
-                ));
-            }
-            if stored
-                .style
-                .is_some_and(|style| style as usize >= model.styles.cell_xfs.len().max(1))
-            {
-                return Err(Error::InvalidOperation(
-                    "workbook contains an invalid cell style index".to_string(),
-                ));
-            }
+            validate_stored_cell(cell, stored, &model.styles)?;
         }
         for (&column, &width) in &sheet.col_widths {
             if column >= MAX_COLS || !width.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&width) {
@@ -3226,6 +3380,43 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_stored_cell(
+    cell: CellRef,
+    stored: &xlsx_model::Cell,
+    styles: &Stylesheet,
+) -> Result<()> {
+    validate_cell_ref(cell)?;
+    if matches!(stored.value, CellValue::Number { value } if !value.is_finite()) {
+        return Err(Error::InvalidOperation(
+            "workbook contains a non-finite cell number".to_string(),
+        ));
+    }
+    if matches!(&stored.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
+    {
+        return Err(Error::InvalidOperation(
+            "workbook contains cell text above Excel's length limit".to_string(),
+        ));
+    }
+    if stored
+        .formula
+        .as_ref()
+        .is_some_and(|formula| formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES)
+    {
+        return Err(Error::InvalidOperation(
+            "workbook contains a formula above the length limit".to_string(),
+        ));
+    }
+    if stored
+        .style
+        .is_some_and(|style| style as usize >= styles.cell_xfs.len().max(1))
+    {
+        return Err(Error::InvalidOperation(
+            "workbook contains an invalid cell style index".to_string(),
+        ));
     }
     Ok(())
 }

@@ -21,6 +21,64 @@ pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
     pub limited_cells: Vec<(SheetId, CellRef)>,
+    /// cell visits the recalc spent of its `MAX_RECALCULATION_CELL_VISITS`.
+    pub visits: u64,
+}
+
+/// what a reversible recalc overwrote, so [`RecalcJournal::undo`] can put the
+/// workbook back.
+#[derive(Default)]
+pub struct RecalcJournal {
+    enabled: bool,
+    values: Vec<(Key, Option<Cell>)>,
+    arrays: Vec<(SheetId, CellRef, Option<CellRange>)>,
+    /// whether spills stopped moving before the round limit.
+    pub settled: bool,
+}
+
+impl RecalcJournal {
+    fn value(&mut self, wb: &Workbook, u: Key) {
+        if self.enabled {
+            let cell = wb
+                .sheet(u.0)
+                .and_then(|sheet| sheet.cell(cell_of(u)))
+                .cloned();
+            self.values.push((u, cell));
+        }
+    }
+
+    fn array(&mut self, wb: &Workbook, sheet: SheetId, anchor: CellRef) {
+        if self.enabled {
+            let range = wb.sheet(sheet).and_then(|s| s.array_formula(anchor));
+            self.arrays.push((sheet, anchor, range));
+        }
+    }
+
+    /// each cell the recalc wrote, with what it held before its first write.
+    pub fn written(&self) -> impl Iterator<Item = ((SheetId, CellRef), Option<&Cell>)> {
+        let mut seen = HashSet::new();
+        self.values
+            .iter()
+            .filter(move |(u, _)| seen.insert(*u))
+            .map(|(u, cell)| ((u.0, cell_of(*u)), cell.as_ref()))
+    }
+
+    /// restores every value and spill rectangle the recalc wrote.
+    pub fn undo(self, wb: &mut Workbook) {
+        for (sheet, anchor, range) in self.arrays.into_iter().rev() {
+            if let Some(sheet) = wb.sheet_mut(sheet) {
+                match range {
+                    Some(range) => sheet.set_array_formula(anchor, range),
+                    None => sheet.clear_array_formula(anchor),
+                }
+            }
+        }
+        for (u, cell) in self.values.into_iter().rev() {
+            if let Some(sheet) = wb.sheet_mut(u.0) {
+                sheet.set_cell(cell_of(u), cell.unwrap_or_default());
+            }
+        }
+    }
 }
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
@@ -43,9 +101,33 @@ pub fn recalc_after(
     now_serial: Option<f64>,
 ) -> RecalcResult {
     let recompute = collect_recompute(graph, dirty_seeds);
-    let result = run_recalc(wb, graph, recompute, now_serial);
+    let result = run_recalc(
+        wb,
+        graph,
+        recompute,
+        now_serial,
+        &mut RecalcJournal::default(),
+    );
     graph.refresh_spills(wb);
     result
+}
+
+/// [`recalc_after`] that also returns a journal of everything it wrote. The
+/// graph's spill index is left to the caller: refresh it on keeping the result,
+/// or rebuild the graph on undoing it.
+pub fn recalc_after_reversible(
+    wb: &mut Workbook,
+    graph: &DepGraph,
+    dirty_seeds: &[(SheetId, CellRef)],
+    now_serial: Option<f64>,
+) -> (RecalcResult, RecalcJournal) {
+    let recompute = collect_recompute(graph, dirty_seeds);
+    let mut journal = RecalcJournal {
+        enabled: true,
+        ..RecalcJournal::default()
+    };
+    let result = run_recalc(wb, graph, recompute, now_serial, &mut journal);
+    (result, journal)
 }
 
 /// rebuild the graph from scratch and recalc every formula in dependency order.
@@ -55,7 +137,13 @@ pub fn rebuild_and_recalc_all(
 ) -> (DepGraph, RecalcResult) {
     let mut graph = DepGraph::build(wb);
     let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
-    let result = run_recalc(wb, &graph, recompute, now_serial);
+    let result = run_recalc(
+        wb,
+        &graph,
+        recompute,
+        now_serial,
+        &mut RecalcJournal::default(),
+    );
     graph.refresh_spills(wb);
     (graph, result)
 }
@@ -109,6 +197,7 @@ fn run_recalc(
     graph: &DepGraph,
     recompute: HashSet<Key>,
     now_serial: Option<f64>,
+    journal: &mut RecalcJournal,
 ) -> RecalcResult {
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
@@ -126,12 +215,12 @@ fn run_recalc(
             }
             match value {
                 Some(NodeValue::Scalar(value)) => {
-                    if write_if_changed(wb, *u, value) {
+                    if write_if_changed(wb, *u, value, journal) {
                         changed.push((u.0, cell_of(*u)));
                     }
                 }
                 Some(NodeValue::Spill(spill)) => {
-                    spilled.extend(write_spill(wb, *u, spill, &mut changed));
+                    spilled.extend(write_spill(wb, *u, spill, &mut changed, journal));
                 }
                 None => {}
             }
@@ -144,18 +233,21 @@ fn run_recalc(
             &budget,
             &mut changed,
             &mut limited_cells,
+            journal,
         );
         for u in &circular {
-            if write_if_changed(wb, *u, circular_value(wb, *u)) {
+            if write_if_changed(wb, *u, circular_value(wb, *u), journal) {
                 changed.push((u.0, cell_of(*u)));
             }
             cycle_cells.push((u.0, cell_of(*u)));
         }
         if spilled.is_empty() {
+            journal.settled = true;
             break;
         }
         pending = dependents_closure(graph, &spilled);
         if pending.is_empty() {
+            journal.settled = true;
             break;
         }
     }
@@ -166,6 +258,7 @@ fn run_recalc(
         changed,
         cycle_cells,
         limited_cells,
+        visits: budget.spent(),
     }
 }
 
@@ -288,6 +381,7 @@ enum NodeValue {
 /// even though no cell reads itself. settle what the reads really allow: a
 /// cell whose evaluation touches nothing still unsettled was never in a
 /// cycle. what is left over is.
+#[allow(clippy::too_many_arguments)]
 fn settle_deferred(
     wb: &mut Workbook,
     cycle: &[Key],
@@ -296,6 +390,7 @@ fn settle_deferred(
     budget: &Rc<EvaluationBudget>,
     changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
 ) -> Vec<Key> {
     if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
         return cycle.to_vec();
@@ -324,7 +419,7 @@ fn settle_deferred(
                 limited_cells.push((u.0, cell_of(*u)));
             }
             if let Some(NodeValue::Scalar(value)) = value
-                && write_if_changed(wb, *u, value)
+                && write_if_changed(wb, *u, value, journal)
             {
                 changed.push((u.0, cell_of(*u)));
             }
@@ -483,6 +578,7 @@ fn write_spill(
     u: Key,
     spill: Spill,
     changed: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
 ) -> Vec<(SheetId, CellRef)> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
@@ -503,18 +599,26 @@ fn write_spill(
             if at.row == anchor.row && at.col == anchor.col || range.contains(at) {
                 continue;
             }
-            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed, &mut moved);
+            write_spilled_cell(
+                wb,
+                (u.0, row, col),
+                CellValue::Empty,
+                changed,
+                &mut moved,
+                journal,
+            );
         }
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value) {
+            if write_if_changed(wb, (u.0, row, col), value, journal) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
+        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved, journal);
     }
+    journal.array(wb, u.0, anchor);
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
     }
@@ -560,11 +664,12 @@ fn write_spilled_cell(
     value: CellValue,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value) {
+    if write_if_changed(wb, u, value, journal) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
     }
@@ -577,10 +682,16 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
-fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
+fn write_if_changed(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    journal: &mut RecalcJournal,
+) -> bool {
     if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
+    journal.value(wb, u);
     if let Some(sheet) = wb.sheet_mut(u.0) {
         let at = cell_of(u);
         if let Some(cell) = sheet.cell_mut(at) {

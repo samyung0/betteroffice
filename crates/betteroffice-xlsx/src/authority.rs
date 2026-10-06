@@ -21,6 +21,7 @@ use yrs::block::{
 use yrs::encoding::read::{Error as DecodeError, Read};
 use yrs::encoding::write::Write;
 use yrs::sync::time::Clock;
+use yrs::types::DeepObservable;
 use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
@@ -376,6 +377,60 @@ pub(crate) struct StagedUpdate {
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
     pub(crate) update: Vec<u8>,
+}
+
+/// A cell-only remote update and the cells it projects to.
+pub(crate) struct StagedCells {
+    /// False when the update held nothing this replica lacked.
+    pub(crate) effective: bool,
+    pub(crate) update: Vec<u8>,
+    /// Each touched live cell, by sheet index, as the whole projection has it.
+    pub(crate) cells: Vec<stable::ProjectedCell>,
+    /// The projected stylesheet when the update wrote cell formats.
+    pub(crate) styles: Option<Stylesheet>,
+    pub(crate) state_bytes: usize,
+    pub(crate) state_vector_entries: usize,
+}
+
+/// What a deep observer saw one update change.
+#[derive(Default)]
+struct TouchedCells {
+    /// Cell identity keys written in each sheet's contents or formats.
+    cells: BTreeMap<String, BTreeSet<String>>,
+    formats: bool,
+    other: bool,
+}
+
+impl TouchedCells {
+    fn record(&mut self, root: &str, txn: &TransactionMut<'_>, events: &yrs::types::Events) {
+        for event in events.iter() {
+            let yrs::types::Event::Map(event) = event else {
+                self.other = true;
+                continue;
+            };
+            let path = event.path();
+            match (root, path.len()) {
+                (CELL_FORMATS, 0) => self.formats = true,
+                (SHEETS, 2) => {
+                    let (yrs::types::PathSegment::Key(sheet), yrs::types::PathSegment::Key(map)) =
+                        (&path[0], &path[1])
+                    else {
+                        self.other = true;
+                        continue;
+                    };
+                    if !matches!(map.as_ref(), CONTENTS | STYLES) {
+                        self.other = true;
+                        continue;
+                    }
+                    self.cells
+                        .entry(sheet.to_string())
+                        .or_default()
+                        .extend(event.keys(txn).keys().map(|key| key.to_string()));
+                }
+                _ => self.other = true,
+            }
+        }
+    }
 }
 
 pub(crate) struct StagedLocalUpdate {
@@ -780,6 +835,139 @@ impl WorkbookAuthority {
         })
     }
 
+    /// Refuses an update whose own metadata names another schema or base.
+    fn check_incoming_base(&self, bytes: &[u8]) -> Result<(), AuthorityError> {
+        let incoming_doc = Doc::with_client_id(self.client_id());
+        hydrate_doc(&incoming_doc, bytes).map_err(AuthorityError::InvalidUpdate)?;
+        let txn = incoming_doc.transact();
+        if let Some(meta) = txn.get_map(META) {
+            if let Some(version) = meta
+                .get(&txn, "schemaVersion")
+                .and_then(|value| value.cast::<i64>().ok())
+            {
+                if self.supports_structure() && version != stable::VERSION {
+                    return Err(AuthorityError::InvalidState(
+                        "incoming workbook schema does not match this session".into(),
+                    ));
+                }
+                if let Some(fingerprint) = meta
+                    .get(&txn, BASE_FINGERPRINT)
+                    .and_then(|value| value.cast::<String>().ok())
+                {
+                    if !self.base.accepts_fingerprint(version, &fingerprint) {
+                        return Err(AuthorityError::InvalidState(
+                            "incoming workbook base does not match the exact source package".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stages a remote update that writes nothing but cell contents and formats
+    /// of shown sheets, projecting only those cells instead of the workbook.
+    /// `None` for anything else, or anything in doubt: [`Self::stage_updates_v1`]
+    /// stages those whole and gives every refusal.
+    pub(crate) fn stage_cell_update_v1(&self, update: &[u8]) -> Option<StagedCells> {
+        if !self.supports_structure() || self.check_incoming_base(update).is_err() {
+            return None;
+        }
+        let incoming = decode_update_v1(update).ok()?;
+        let before_snapshot = self.doc.transact().snapshot();
+        for (client, ranges) in incoming.insertions(true).iter() {
+            let mut clock = before_snapshot.state_map.get(client);
+            for range in ranges.iter() {
+                if range.start > clock {
+                    return None;
+                }
+                clock = clock.max(range.end);
+            }
+        }
+        let staged_doc = Doc::with_client_id(self.client_id());
+        hydrate_local_doc(&staged_doc, &self.encode_state_as_update_v1()).ok()?;
+        let roots = |doc: &Doc| {
+            let txn = doc.transact();
+            txn.root_refs()
+                .map(|(name, _)| name.to_owned())
+                .collect::<BTreeSet<_>>()
+        };
+        let touched = Arc::new(std::sync::Mutex::new(TouchedCells::default()));
+        // Typed access gives a hydrated root the type its events need.
+        let subscriptions =
+            {
+                let mut txn = staged_doc.transact_mut();
+                let mut subscriptions = [
+                    SHEETS,
+                    CELL_FORMATS,
+                    META,
+                    stable::CATALOG,
+                    stable::DEFINED_NAMES,
+                ]
+                .into_iter()
+                .map(|name| {
+                    let touched = touched.clone();
+                    txn.get_or_insert_map(name)
+                        .observe_deep(move |txn, events| {
+                            let mut touched = touched.lock().unwrap_or_else(|p| p.into_inner());
+                            touched.record(name, txn, events);
+                        })
+                })
+                .collect::<Vec<_>>();
+                let order = touched.clone();
+                subscriptions.push(txn.get_or_insert_array(SHEET_ORDER).observe_deep(
+                    move |_, _| order.lock().unwrap_or_else(|p| p.into_inner()).other = true,
+                ));
+                subscriptions
+            };
+        let roots_before = roots(&staged_doc);
+        staged_doc
+            .transact_mut_with(REMOTE_ORIGIN)
+            .apply_update(incoming)
+            .ok()?;
+        drop(subscriptions);
+        {
+            let txn = staged_doc.transact();
+            if txn.store().pending_update().is_some() || txn.store().pending_ds().is_some() {
+                return None;
+            }
+        }
+        if roots(&staged_doc) != roots_before {
+            return None;
+        }
+        let touched = std::mem::take(&mut *touched.lock().unwrap_or_else(|p| p.into_inner()));
+        if touched.other {
+            return None;
+        }
+        let after_snapshot = staged_doc.transact().snapshot();
+        let state_vector_entries = after_snapshot.state_map.len();
+        let txn = staged_doc.transact();
+        let (styles, cells) = if after_snapshot == before_snapshot {
+            (None, Vec::new())
+        } else {
+            let (styles, cells) = stable::project_cells(&txn, &self.base, &touched.cells).ok()?;
+            (Some(styles), cells)
+        };
+        let update = txn.encode_diff_v1(&before_snapshot.state_map);
+        let state_bytes = txn.encode_state_as_update_v1(&StateVector::default()).len();
+        Some(StagedCells {
+            effective: after_snapshot != before_snapshot,
+            update,
+            cells,
+            styles,
+            state_bytes,
+            state_vector_entries,
+        })
+    }
+
+    /// Whether every cell override names its cell by the identity this replica
+    /// writes. Keys spelled otherwise still project, but only the whole
+    /// projection finds them, so [`Self::stage_cell_update_v1`] needs this.
+    pub(crate) fn overrides_canonical(&self) -> bool {
+        self.supports_structure()
+            && stable::overrides_canonical(&self.doc.transact()).unwrap_or(false)
+    }
+
     /// `baseline` may carry this replica's already-encoded current state.
     pub(crate) fn stage_updates_v1(
         &self,
@@ -792,32 +980,7 @@ impl WorkbookAuthority {
             ));
         }
         for bytes in updates {
-            let incoming_doc = Doc::with_client_id(self.client_id());
-            hydrate_doc(&incoming_doc, bytes).map_err(AuthorityError::InvalidUpdate)?;
-            let txn = incoming_doc.transact();
-            if let Some(meta) = txn.get_map(META) {
-                if let Some(version) = meta
-                    .get(&txn, "schemaVersion")
-                    .and_then(|value| value.cast::<i64>().ok())
-                {
-                    if self.supports_structure() && version != stable::VERSION {
-                        return Err(AuthorityError::InvalidState(
-                            "incoming workbook schema does not match this session".into(),
-                        ));
-                    }
-                    if let Some(fingerprint) = meta
-                        .get(&txn, BASE_FINGERPRINT)
-                        .and_then(|value| value.cast::<String>().ok())
-                    {
-                        if !self.base.accepts_fingerprint(version, &fingerprint) {
-                            return Err(AuthorityError::InvalidState(
-                                "incoming workbook base does not match the exact source package"
-                                    .into(),
-                            ));
-                        }
-                    }
-                }
-            }
+            self.check_incoming_base(bytes)?;
         }
         let decoded = updates
             .iter()
