@@ -161,6 +161,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-office-service"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "betteroffice-docx-edit",
+ "betteroffice-docx-parse",
+ "betteroffice-opc",
+ "betteroffice-pptx-edit",
+ "betteroffice-xlsx",
+ "indexmap",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "yrs",
+]
+
+[[package]]
 name = "betteroffice-ooxml-fidelity"
 version = "0.2.0"
 dependencies = [

@@ -1,0 +1,31 @@
+[package]
+name = "betteroffice-office-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Native checkpoint service over the Office engines: seed, effects, edit commands, export and publication rebase."
+
+[lib]
+name = "office_service"
+
+[[bin]]
+name = "office-service"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+betteroffice-xlsx.workspace = true
+# `tiff` matches the docx edit and parse wasm builds, which transcode TIFF media for display.
+docx-edit = { workspace = true, features = ["tiff"] }
+docx-parse.workspace = true
+indexmap = "2"
+ooxml-opc.workspace = true
+pptx-edit.workspace = true
+ryu-js = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+yrs = "0.27.3"
