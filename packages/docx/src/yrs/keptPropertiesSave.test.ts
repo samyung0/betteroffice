@@ -11,7 +11,9 @@ import { createStyleResolver } from '../styles';
 import {
   cellParagraphFormatting,
   createYrsSession,
+  applyNextStyle,
   endEmptyListItem,
+  inOneUndoStep,
   styleNewCells,
   styleParagraphValues,
   type ParagraphStyleValues,
@@ -30,6 +32,8 @@ const STYLES =
   `<w:styles xmlns:w="${W}"><w:docDefaults><w:pPrDefault><w:pPr>` +
   '<w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>' +
   '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+  '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>' +
+  '<w:pPr><w:keepNext/><w:outlineLvl w:val="0"/></w:pPr></w:style>' +
   '<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/>' +
   '<w:pPr><w:ind w:left="720"/><w:contextualSpacing/></w:pPr></w:style>' +
   '<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/><w:basedOn w:val="Normal"/>' +
@@ -40,7 +44,8 @@ const STYLES =
 const NUMBERING =
   `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
   '<w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>' +
-  '</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
+  '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>' +
+  '</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>';
 
 function fixture(body: string): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
@@ -107,6 +112,7 @@ function styleValuesFor(session: YrsSession, base: Document): ParagraphStyleValu
     styleParagraphValues(resolver, styleId, {
       cell: cellParagraphFormatting(session, resolver, story),
       numbering: list ? base.package.numbering : undefined,
+      numPr: typeof list === 'object' ? list : undefined,
     });
 }
 
@@ -221,8 +227,11 @@ describe('Enter in a paragraph with a tracked revision', () => {
     ]);
     const [copy, source] = saved.slice(0, 2);
     expect(source).toBe(`<w:pPr><w:jc w:val="center"/>${strip(CHANGE)}</w:pPr>`);
-    // The copy is numbered above the document's largest revision id, 8.
-    expect(copy).toBe(source!.replace('w:id="5"', 'w:id="9"'));
+    // The copy saves above the document's largest revision id, 8, within int32.
+    const [id] = revisionIds(copy!).map(Number);
+    expect(id).toBeGreaterThan(8);
+    expect(id).toBeLessThan(2 ** 31);
+    expect(copy).toBe(source!.replace('w:id="5"', `w:id="${id}"`));
     session.destroy();
   });
 
@@ -234,7 +243,9 @@ describe('Enter in a paragraph with a tracked revision', () => {
     sync(left, right);
     const saved = await savedDocumentXml(left, base);
     expect(await savedDocumentXml(right, base)).toBe(saved);
-    expect(pPrs(saved).slice(0, 3).flatMap(revisionIds).sort()).toEqual(['10', '5', '9']);
+    const ids = pPrs(saved).slice(0, 3).flatMap(revisionIds).map(Number);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids.filter((id) => id > 8)).toHaveLength(2);
     left.destroy();
     right.destroy();
   });
@@ -552,5 +563,123 @@ describe('Enter in a list', () => {
     expect(left.paragraphs('body')[1]!.text).toBe('x');
     left.destroy();
     right.destroy();
+  });
+});
+
+describe('revision ids the editor makes', () => {
+  const BY = 'w:author="Rev" w:date="2026-01-01T00:00:00Z"';
+  const changed = (id: number) =>
+    `<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="${id}" ${BY}><w:pPr><w:jc w:val="left"/></w:pPr></w:pPrChange></w:pPr><w:r><w:t>Changed para</w:t></w:r></w:p>`;
+
+  it('save above every revision id the source holds, the same in every save, without reading the session’s revisions', async () => {
+    // The largest id is a table property change, which the session lists nowhere.
+    const bytes = fixture(
+      changed(5) +
+        changed(6) +
+        `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblPrChange w:id="50" ${BY}><w:tblPr/></w:tblPrChange></w:tblPr>` +
+        '<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>'
+    );
+    const { session, base } = await open(bytes);
+    session.listRevisions = () => {
+      throw new Error('the save read every revision');
+    };
+    session.splitParagraph(at(session, 'body', 0, 3));
+    const first = revisionIds(pPrs(await savedDocumentXml(session, base))[0]!).map(Number);
+    session.splitParagraph(at(session, 'body', 2, 3));
+    const second = pPrs(await savedDocumentXml(session, base)).slice(0, 4).flatMap(revisionIds).map(Number);
+    expect(first[0]).toBeGreaterThan(50);
+    expect(second[0]).toBe(first[0]!);
+    expect(second[2]).toBeGreaterThan(50);
+    expect(second[2]).not.toBe(first[0]);
+    session.destroy();
+  });
+
+  it('cost no more as the document holds more revisions', async () => {
+    let body = '';
+    for (let index = 0; index < 300; index += 1) {
+      body +=
+        `<w:p><w:ins w:id="${3 * index + 1}" ${BY}><w:r><w:t>one </w:t></w:r></w:ins>` +
+        `<w:del w:id="${3 * index + 2}" ${BY}><w:r><w:delText>two </w:delText></w:r></w:del>` +
+        `<w:ins w:id="${3 * index + 3}" ${BY}><w:r><w:t>three</w:t></w:r></w:ins></w:p>`;
+    }
+    const { session, base } = await open(fixture(body + '<w:p/>'));
+    yrsToDocument(session, base);
+    session.insertText(at(session, 'body', 150, 0), 'x');
+    const started = performance.now();
+    yrsToDocument(session, base);
+    // Reading the session's 900 revisions took about 2 s; the save alone takes about 15 ms.
+    expect(performance.now() - started).toBeLessThan(500);
+    session.destroy();
+  });
+});
+
+describe('cells a table op makes', () => {
+  const tc = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+  const bytes = fixture(
+    '<w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/><w:tblLook w:val="04A0" w:firstRow="1"/></w:tblPr>' +
+      `<w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>${tc('H0')}${tc('H1')}</w:tr></w:tbl><w:p/>`
+  );
+
+  it('go with their styling in one Undo', async () => {
+    const { session, base } = await open(bytes);
+    session.beginUndoCapture();
+    const cells = () => session.storyIds().filter((story) => story.startsWith('body:t0:')).length;
+    inOneUndoStep(session, () => {
+      const receipt = session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+      styleNewCells(session, receipt.createdStoryIds, styleValuesFor(session, base));
+    });
+    expect(cells()).toBe(4);
+    expect(session.undo()).toBe(true);
+    expect(cells()).toBe(2);
+    expect(session.undoCaptureMode()).toBe('auto');
+    session.destroy();
+  });
+});
+
+describe('Enter around list items', () => {
+  const N = (level: number, numId = 1) => `<w:numPr><w:ilvl w:val="${level}"/><w:numId w:val="${numId}"/></w:numPr>`;
+  const bytes = fixture(
+    `<w:p><w:pPr><w:pStyle w:val="Heading1"/>${N(0)}</w:pPr><w:r><w:t>Head</w:t></w:r></w:p>` +
+      `<w:p><w:pPr><w:pStyle w:val="ListParagraph"/>${N(0)}</w:pPr><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>` +
+      `<w:p><w:pPr><w:pStyle w:val="ListParagraph"/>${N(0)}</w:pPr><w:r><w:br/></w:r></w:p>` +
+      `<w:p><w:pPr><w:pStyle w:val="ListParagraph"/>${N(1)}</w:pPr></w:p>` +
+      `<w:p><w:pPr><w:pStyle w:val="ListBullet"/>${N(0, 2)}</w:pPr></w:p><w:p/>`
+  );
+
+  it('starts the next style clean after a heading numbered on itself', async () => {
+    const { session, base } = await open(bytes);
+    const values = styleValuesFor(session, base);
+    const { secondParaId: paraId } = session.splitParagraph(at(session, 'body', 0, 4));
+    applyNextStyle(
+      session,
+      { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+      'Normal',
+      'Heading1',
+      values
+    );
+    const properties = session.paragraphs('body')[1]!.properties;
+    expect([properties.pStyle, properties.numPr ?? null, properties.listMarker ?? null]).toEqual(['Normal', null, null]);
+    expect(pPrs(await savedDocumentXml(session, base))[1]).toBe('<w:pPr><w:pStyle w:val="Normal"/></w:pPr>');
+    session.destroy();
+  });
+
+  it('keeps an item holding only a field or a break, moves a nested item up, and turns a style’s list off', async () => {
+    const { session, base } = await open(bytes);
+    const values = styleValuesFor(session, base);
+    const end = (index: number) => endEmptyListItem(session, 'body', session.paragraphs('body')[index]!.paraId, values);
+    expect([end(1), end(2)]).toEqual([false, false]);
+    expect(end(3)).toBe(true);
+    const nested = session.paragraphs('body')[3]!.properties;
+    expect([nested.numPr, nested.listMarker, nested.indentLeft]).toEqual([{ numId: 1, ilvl: 0 }, '•', 720]);
+    expect(end(3)).toBe(true);
+    expect(session.paragraphs('body')[3]!.properties.numPr ?? null).toBe(null);
+    // ListBullet gives a list, so ending the item's own list turns the style's off too.
+    expect(end(4)).toBe(true);
+    const saved = pPrs(await savedDocumentXml(session, base));
+    expect(saved.slice(3, 5)).toEqual([
+      '<w:pPr><w:pStyle w:val="ListParagraph"/></w:pPr>',
+      '<w:pPr><w:pStyle w:val="ListBullet"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="0"/></w:numPr></w:pPr>',
+    ]);
+    session.destroy();
   });
 });
