@@ -34,6 +34,7 @@ import {
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { YrsEditorCommand } from '../yrsCommands';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
@@ -57,6 +58,8 @@ interface HandleSpec {
   leftTwips?: number;
   rightTwips?: number;
   widthTwips?: number;
+  /** Every column as drawn: a drag writes them all, so none snaps back. */
+  columnsTwips: number[];
 }
 
 interface ProjectedHandle {
@@ -78,10 +81,33 @@ export interface CanvasTableResizeOverlayProps {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   displayListQueries: DisplayListQueries;
   positionProjection: YrsPositionProjection | null;
+  /** The layout the display list draws; its table fragments give the drawn columns. */
+  layout?: Layout | null;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   readOnly?: boolean;
   sidebarOpen: boolean;
   zoom: number;
+}
+
+/**
+ * The drawn column widths (twips) of the body table starting at `pmStart`,
+ * which differ from the stored grid when the layout sizes it from content
+ * (Auto-fit); null when the layout has none for that table.
+ */
+export function drawnColumnsTwips(
+  layout: Layout | null | undefined,
+  pmStart: number,
+  columns: number
+): number[] | null {
+  for (const page of layout?.pages ?? []) {
+    for (const fragment of page.fragments) {
+      if (fragment.kind !== 'table' || fragment.pmStart !== pmStart) continue;
+      const widths = fragment.columnWidths;
+      if (widths?.length !== columns) return null;
+      return widths.map((px) => Math.round(px * TWIPS_PER_PIXEL));
+    }
+  }
+  return null;
 }
 
 export function CanvasTableResizeOverlay({
@@ -89,6 +115,7 @@ export function CanvasTableResizeOverlay({
   canvasHostRef,
   displayListQueries,
   positionProjection,
+  layout = null,
   applyYrsCommand,
   readOnly = false,
   sidebarOpen,
@@ -130,7 +157,9 @@ export function CanvasTableResizeOverlay({
     )) {
       const table = tableAt.get(frag.tableKey);
       if (!table || table.widthsTwips.length === 0) continue;
-      const { pmStart, widthsTwips, rowCount } = table;
+      const { pmStart, rowCount } = table;
+      const widthsTwips =
+        drawnColumnsTwips(layout, pmStart, table.widthsTwips.length) ?? table.widthsTwips;
 
       const widthsPx = widthsTwips.map((w) => w / TWIPS_PER_PIXEL);
       const top = frag.originY;
@@ -152,6 +181,7 @@ export function CanvasTableResizeOverlay({
           colIdx: col,
           leftTwips: widthsTwips[col],
           rightTwips: widthsTwips[col + 1],
+          columnsTwips: widthsTwips,
         });
       }
 
@@ -172,11 +202,12 @@ export function CanvasTableResizeOverlay({
           pmStart,
           colIdx: widthsPx.length - 1,
           widthTwips: widthsTwips[widthsTwips.length - 1],
+          columnsTwips: widthsTwips,
         });
       }
     }
     return out;
-  }, [displayListQueries, positionProjection, readOnly]);
+  }, [displayListQueries, layout, positionProjection, readOnly]);
 
   // Project page-local specs onto the visible canvas via the live canvas rects.
   const [projected, setProjected] = useState<ProjectedHandle[]>([]);
@@ -259,22 +290,18 @@ export function CanvasTableResizeOverlay({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       handleEl.classList.remove('dragging');
-      if (spec.type === 'col') {
-        applyYrsCommand({
-          type: 'tableColumnWidths',
-          pmStart: spec.pmStart,
-          widths: [
-            { column: spec.colIdx!, widthTwips: left },
-            { column: spec.colIdx! + 1, widthTwips: right },
-          ],
-        });
-      } else {
-        applyYrsCommand({
-          type: 'tableColumnWidths',
-          pmStart: spec.pmStart,
-          widths: [{ column: spec.colIdx!, widthTwips: width }],
-        });
-      }
+      const dragged: Record<number, number> =
+        spec.type === 'col'
+          ? { [spec.colIdx!]: left, [spec.colIdx! + 1]: right }
+          : { [spec.colIdx!]: width };
+      applyYrsCommand({
+        type: 'tableColumnWidths',
+        pmStart: spec.pmStart,
+        widths: spec.columnsTwips.map((widthTwips, column) => ({
+          column,
+          widthTwips: dragged[column] ?? widthTwips,
+        })),
+      });
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);

@@ -1997,6 +1997,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               canvasHostRef={interactionPageHostRef}
               displayListQueries={displayListQueries}
               positionProjection={getYrsPositionProjection('body')}
+              layout={layout}
               applyYrsCommand={applyYrsCommand}
               readOnly={readOnly}
               sidebarOpen={commentsSidebarOpen}

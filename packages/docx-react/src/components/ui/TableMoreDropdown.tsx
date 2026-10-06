@@ -1,8 +1,9 @@
 /**
  * TableMoreDropdown - Compact dropdown for less-used table actions
  *
- * Contains: insert, merge/split, vertical and table alignment, header row,
- * wrap text, distribute columns, auto-fit, select, delete and table
+ * Google Docs' table menu: insert, delete, merge/split, distribute columns,
+ * auto-fit, header row, wrap text, select and table properties. Vertical and
+ * table alignment live in Format › Table, as Google keeps them in Table
  * properties.
  */
 
@@ -25,8 +26,6 @@ export interface TableMoreDropdownProps {
     columnCount?: number;
     canSplitCell?: boolean;
     hasMultiCellSelection?: boolean;
-    tableAlignment?: 'left' | 'center' | 'right';
-    verticalAlign?: 'top' | 'center' | 'bottom';
     wrapText?: boolean;
     headerRow?: boolean;
   } | null;
@@ -50,13 +49,6 @@ const separatorStyles: CSSProperties = {
   height: 1,
   backgroundColor: 'var(--doc-border)',
   margin: '4px 0',
-};
-
-const labelStyles: CSSProperties = {
-  padding: '6px 14px 2px',
-  fontSize: 11,
-  fontWeight: 500,
-  color: 'var(--doc-text-muted)',
 };
 
 const checkStyles: CSSProperties = {
@@ -136,16 +128,9 @@ export function TableMoreDropdown({
       </button>
     );
   };
-  const label = (text: string) => (
-    <div className="docx-popover-label" style={labelStyles}>
-      {text}
-    </div>
-  );
   const separator = (
     <div className="docx-popover-separator" style={separatorStyles} role="separator" />
   );
-  const verticalAlign = tableContext?.verticalAlign ?? 'top';
-  const tableAlignment = tableContext?.tableAlignment ?? 'left';
 
   const button = (
     <Button
@@ -190,7 +175,7 @@ export function TableMoreDropdown({
           role="menu"
           onMouseDown={(e) => e.stopPropagation()}
         >
-          {/* Insert actions */}
+          {/* Google Docs' table menu order: insert, delete, then the rest. */}
           {menuItem('addRowAbove', 'add', t('table.insertRowAbove'), 'addRowAbove')}
           {menuItem('addRowBelow', 'add', t('table.insertRowBelow'), 'addRowBelow')}
           {menuItem('addColumnLeft', 'add', t('table.insertColumnLeft'), 'addColumnLeft')}
@@ -198,72 +183,6 @@ export function TableMoreDropdown({
 
           {separator}
 
-          {/* Merge/Split */}
-          {menuItem('mergeCells', 'call_merge', t('table.mergeCells'), 'mergeCells', {
-            itemDisabled: !tableContext?.hasMultiCellSelection,
-          })}
-          {menuItem('splitCell', 'call_split', t('table.splitCell'), 'splitCell', {
-            itemDisabled: !tableContext?.canSplitCell,
-          })}
-
-          {separator}
-
-          {label(t('tableAdvanced.verticalAlignment'))}
-          {(
-            [
-              ['top', 'vertical_align_top', 'tableAdvanced.top'],
-              ['center', 'vertical_align_center', 'tableAdvanced.middle'],
-              ['bottom', 'vertical_align_bottom', 'tableAdvanced.bottom'],
-            ] as const
-          ).map(([align, icon, key]) =>
-            menuItem(`vertical-${align}`, icon, t(key), { type: 'cellVerticalAlign', align }, {
-              checked: verticalAlign === align,
-            })
-          )}
-          {label(t('tableAdvanced.tableAlignment'))}
-          {(
-            [
-              ['left', 'format_align_left', 'hostMenus.left'],
-              ['center', 'format_align_center', 'hostMenus.center'],
-              ['right', 'format_align_right', 'hostMenus.right'],
-            ] as const
-          ).map(([alignment, icon, key]) =>
-            menuItem(`align-${alignment}`, icon, t(key), { type: 'tableAlignment', alignment }, {
-              checked: tableAlignment === alignment,
-            })
-          )}
-
-          {separator}
-
-          {menuItem(
-            'header-row',
-            'table_rows',
-            t('tableAdvanced.pinHeaderRow'),
-            { type: 'pinHeaderRow', pinned: !tableContext?.headerRow },
-            { checked: !!tableContext?.headerRow }
-          )}
-          {menuItem(
-            'wrap-text',
-            'wrap_text',
-            t('tableAdvanced.wrapText'),
-            { type: 'wrapText', wrap: tableContext?.wrapText === false },
-            { checked: tableContext?.wrapText !== false }
-          )}
-          {menuItem('distribute', 'view_column', t('tableAdvanced.distributeColumns'), {
-            type: 'distributeColumns',
-          })}
-          {menuItem('autofit', 'fit_width', t('tableAdvanced.autoFit'), {
-            type: 'autoFitContents',
-          })}
-
-          {separator}
-
-          {/* Select */}
-          {menuItem('selectTable', 'select_all', t('table.selectTable'), 'selectTable')}
-
-          {separator}
-
-          {/* Delete actions */}
           {menuItem('deleteRow', 'delete', t('table.deleteRow'), 'deleteRow', {
             danger: true,
             itemDisabled: (tableContext?.rowCount ?? 0) <= 1,
@@ -278,6 +197,39 @@ export function TableMoreDropdown({
 
           {separator}
 
+          {menuItem('mergeCells', 'call_merge', t('table.mergeCells'), 'mergeCells', {
+            itemDisabled: !tableContext?.hasMultiCellSelection,
+          })}
+          {menuItem('splitCell', 'call_split', t('table.splitCell'), 'splitCell', {
+            itemDisabled: !tableContext?.canSplitCell,
+          })}
+
+          {separator}
+
+          {menuItem('distribute', 'view_column', t('tableAdvanced.distributeColumns'), {
+            type: 'distributeColumns',
+          })}
+          {menuItem('autofit', 'fit_width', t('tableAdvanced.autoFit'), {
+            type: 'autoFitContents',
+          })}
+          {menuItem(
+            'header-row',
+            'table_rows',
+            t('tableAdvanced.pinHeaderRow'),
+            { type: 'pinHeaderRow', pinned: !tableContext?.headerRow },
+            { checked: !!tableContext?.headerRow }
+          )}
+          {menuItem(
+            'wrap-text',
+            'wrap_text',
+            t('tableAdvanced.wrapText'),
+            { type: 'wrapText', wrap: tableContext?.wrapText === false },
+            { checked: tableContext?.wrapText !== false }
+          )}
+
+          {separator}
+
+          {menuItem('selectTable', 'select_all', t('table.selectTable'), 'selectTable')}
           {menuItem('properties', 'settings', t('tableAdvanced.tableProperties'), {
             type: 'openTableProperties',
           })}

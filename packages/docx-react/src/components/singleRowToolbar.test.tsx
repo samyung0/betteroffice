@@ -574,6 +574,16 @@ test('Format › Table holds the six table items with their state and runs them'
     'table-header-row',
   ]);
   for (const item of items.values()) expect(item.kind === 'item' && item.edits).toBe(true);
+  // The two alignments are exclusive choices.
+  const radios = [...items.values()].filter((item) => item.kind === 'item' && item.radio);
+  expect(radios.map((item) => item.kind === 'item' && item.id)).toEqual([
+    'table-valign:top',
+    'table-valign:center',
+    'table-valign:bottom',
+    'table-align:left',
+    'table-align:center',
+    'table-align:right',
+  ]);
 
   reported.run('table-valign:center');
   reported.run('table-align:right');

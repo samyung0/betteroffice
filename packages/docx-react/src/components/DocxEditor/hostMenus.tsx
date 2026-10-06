@@ -19,6 +19,8 @@ export type HostMenuEntry =
       edits: boolean;
       shortcut?: string;
       checked?: boolean;
+      /** One of an exclusive set (drawn as a radio item); needs `checked`. */
+      radio?: boolean;
       disabled?: boolean;
     }
   | { kind: 'separator' }
@@ -275,28 +277,34 @@ export function HostMenus({
               submenu('table-vertical-align', t('tableAdvanced.verticalAlignment'), [
                 item('table-valign:top', t('tableAdvanced.top'), {
                   edits: true,
+                  radio: true,
                   checked: (table.verticalAlign ?? 'top') === 'top',
                 }),
                 item('table-valign:center', t('tableAdvanced.middle'), {
                   edits: true,
+                  radio: true,
                   checked: table.verticalAlign === 'center',
                 }),
                 item('table-valign:bottom', t('tableAdvanced.bottom'), {
                   edits: true,
+                  radio: true,
                   checked: table.verticalAlign === 'bottom',
                 }),
               ]),
               submenu('table-alignment', t('tableAdvanced.tableAlignment'), [
                 item('table-align:left', t('hostMenus.left'), {
                   edits: true,
+                  radio: true,
                   checked: (table.tableAlignment ?? 'left') === 'left',
                 }),
                 item('table-align:center', t('hostMenus.center'), {
                   edits: true,
+                  radio: true,
                   checked: table.tableAlignment === 'center',
                 }),
                 item('table-align:right', t('hostMenus.right'), {
                   edits: true,
+                  radio: true,
                   checked: table.tableAlignment === 'right',
                 }),
               ]),

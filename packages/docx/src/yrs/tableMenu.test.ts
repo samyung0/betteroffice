@@ -96,6 +96,34 @@ function payload(session: YrsSession) {
   };
 }
 
+/** Two replicas of the fixture, the second seeded from the first. */
+async function peers(leftId: number, rightId: number): Promise<[YrsSession, YrsSession]> {
+  const left = await open(leftId);
+  const right = await createYrsSession({ clientId: rightId });
+  right.applyUpdate(left.encodeStateAsUpdate());
+  return [left, right];
+}
+
+function sync(left: YrsSession, right: YrsSession): void {
+  left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
+  right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
+}
+
+/** Every row's cells cover exactly the grid (the fixture has no merges). */
+function consistent(table: ReturnType<typeof payload>): boolean {
+  return table.rows.every(
+    (row) =>
+      row.cells.reduce((sum, cell) => sum + Number(cell.tcPr.colspan ?? 1), 0) === table.grid.length
+  );
+}
+
+/** A peer's structural edits that race the table menu's. */
+const STRUCTURAL: Array<[string, (session: YrsSession) => void]> = [
+  ['adds a row', (session) => session.insertRow(at(1, 0), 'below')],
+  ['adds a column', (session) => session.insertColumn(at(0, 1), 'right')],
+  ['deletes a column', (session) => session.deleteColumn(range(0, 1))],
+];
+
 interface Item {
   name: string;
   run: (session: YrsSession) => void;
@@ -228,37 +256,50 @@ describe('the DOCX table menu', () => {
       }
     });
 
-    it(`${item.name}: converges with a peer typing in a cell and with a peer adding a row`, async () => {
-      const left = await open(61301 + index);
-      const right = await createYrsSession({ clientId: 61401 + index });
-      const sync = () => {
-        left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
-        right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
-      };
+    it(`${item.name}: keeps a peer's typing made at the same time`, async () => {
+      const [left, right] = await peers(61301 + index, 61401 + index);
       try {
-        right.applyUpdate(left.encodeStateAsUpdate());
         const story = 'body:t0:r1c1';
         const paraId = right.paragraphs(story)[0].paraId;
         right.insertText({ story, paraId, offset: 1 }, ' typed');
         item.run(left);
-        sync();
+        sync(left, right);
         expect(payload(right)).toEqual(payload(left));
         const [both] = tablesXml(await saved(right, source));
         for (const pattern of item.xml) expect(both).toMatch(pattern);
         expect(both).toContain('B typed');
-
-        // A row added at the same time as a change to the rows keeps one of
-        // the two (the rows are one value); both peers hold the same table.
-        item.run(left);
-        right.insertRow(at(1, 0), 'below');
-        sync();
-        expect(payload(right)).toEqual(payload(left));
-        expect(tablesXml(await saved(left, source))).toEqual(tablesXml(await saved(right, source)));
       } finally {
         left.destroy();
         right.destroy();
       }
     });
+
+    for (const [change, structural] of STRUCTURAL) {
+      it(`${item.name}: racing a peer that ${change} keeps one of the two whole`, async () => {
+        // Both client-id orders, so either edit can win the rows.
+        for (const [a, b] of [
+          [61501, 61502],
+          [61502, 61501],
+        ]) {
+          const [left, right] = await peers(a + index * 10, b + index * 10);
+          try {
+            item.run(left);
+            structural(right);
+            sync(left, right);
+            expect(payload(right)).toEqual(payload(left));
+            expect(consistent(payload(left))).toBe(true);
+            const [edited] = tablesXml(await saved(left, source));
+            const columns = edited.match(/<w:gridCol /g)?.length;
+            for (const row of edited.match(/<w:tr>[\s\S]*?<\/w:tr>/g) ?? []) {
+              expect(row.match(/<w:tc>/g)?.length).toBe(columns);
+            }
+          } finally {
+            left.destroy();
+            right.destroy();
+          }
+        }
+      });
+    }
   }
 
   it('keeps a peer’s added row when the table is aligned at the same time', async () => {
