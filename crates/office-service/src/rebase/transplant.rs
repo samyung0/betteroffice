@@ -822,7 +822,7 @@ fn land_later(
                     };
                     let landed =
                         land_delta(&edited_txn, f, delta, &had, &id, &step.place(), &rewrite)?;
-                    text.apply_delta(&mut txn, landed);
+                    text.apply_delta_as_yjs(&mut txn, landed);
                 }
                 (StepKind::Array { target: source }, Out::YArray(array)) => {
                     let length = array.len(&txn);

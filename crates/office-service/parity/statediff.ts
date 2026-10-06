@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 
+import { createHash } from "node:crypto";
+const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const [dir, binary, file, method, nth] = process.argv.slice(2);
 const blob = (sha: string) => new Uint8Array(readFileSync(join(dir, "blobs", sha)));
 const wire = (value: any): any =>
@@ -88,3 +90,61 @@ const describe = (state: Uint8Array, keys: string[]) => {
 const extra = [...b.deleted].filter((key) => !a.deleted.has(key)).slice(0, 6);
 console.log("-- TS view of native-only deletions");
 describe(ts, extra);
+
+function documentContent(state: Uint8Array): string {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, state);
+  const value = (item: unknown): unknown => {
+    if (item instanceof Y.Text) {
+      // Adjacent runs with equal attributes read as one run.
+      const runs: Array<[unknown, unknown]> = [];
+      for (const op of item.toDelta() as Array<{ insert: unknown; attributes?: unknown }>) {
+        const attributes = value(op.attributes ?? null);
+        const last = runs.at(-1);
+        if (typeof op.insert === "string" && last && typeof last[0] === "string" && JSON.stringify(last[1]) === JSON.stringify(attributes))
+          last[0] += op.insert;
+        else runs.push([value(op.insert), attributes]);
+      }
+      return runs;
+    }
+    if (item instanceof Y.Map) return Object.fromEntries([...item.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
+    if (item instanceof Y.Array) return item.toArray().map(value);
+    if (item instanceof Uint8Array) {
+      try {
+        const position = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(item), doc);
+        return position ? `@${position.index}:${position.assoc}` : "@unresolved";
+      } catch {
+        return `bytes:${sha(item)}`;
+      }
+    }
+    if (Array.isArray(item)) return item.map(value);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
+    return item;
+  };
+  const roots: Record<string, unknown> = {};
+  for (const name of [...doc.share.keys()].sort()) {
+    const map = doc.getMap(name);
+    roots[name] = map.size ? value(map) : null;
+  }
+  return JSON.stringify(roots);
+}
+const [p, q] = [documentContent(ts), documentContent(native)];
+let at = 0;
+while (at < p.length && p[at] === q[at]) at++;
+console.log("document differs at", at, "of", p.length);
+console.log(" TS    ", p.slice(Math.max(0, at - 300), at + 200));
+console.log(" native", q.slice(Math.max(0, at - 300), at + 200));
+const structural = (x: any, y: any, path: string): boolean => {
+  if (JSON.stringify(x) === JSON.stringify(y)) return false;
+  if (Array.isArray(x) && Array.isArray(y)) {
+    for (let i = 0; i < Math.max(x.length, y.length); i++) if (structural(x[i], y[i], `${path}[${i}]`)) return true;
+    return false;
+  }
+  if (x && y && typeof x === "object" && typeof y === "object") {
+    for (const key of new Set([...Object.keys(x), ...Object.keys(y)])) if (structural(x[key], y[key], `${path}.${key}`)) return true;
+    return false;
+  }
+  console.log("first structural difference at", path, "\n TS    ", JSON.stringify(x)?.slice(0, 300), "\n native", JSON.stringify(y)?.slice(0, 300));
+  return true;
+};
+structural(JSON.parse(p), JSON.parse(q), "");
