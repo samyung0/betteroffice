@@ -6,15 +6,25 @@
 use std::io::{BufRead, Write};
 use std::time::Instant;
 
+/// Engine calls recurse over document trees; give them the stack a deep
+/// document needs rather than the platform's main-thread default.
+const STACK_BYTES: usize = 256 << 20;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("serve") => serve(),
-        Some("bench") => bench(&args[2..]),
-        _ => {
-            eprintln!("usage: office-service serve | bench <request.json> [runs]");
-            std::process::exit(2);
-        }
+    let worker = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(move || match args.get(1).map(String::as_str) {
+            Some("serve") => serve(),
+            Some("bench") => bench(&args[2..]),
+            _ => {
+                eprintln!("usage: office-service serve | bench <request.json> [runs]");
+                std::process::exit(2);
+            }
+        })
+        .expect("engine thread starts");
+    if worker.join().is_err() {
+        std::process::exit(101);
     }
 }
 
