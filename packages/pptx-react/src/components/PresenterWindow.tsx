@@ -56,12 +56,14 @@ export function PresenterWindow({
     return () => target.removeEventListener('resize', onResize);
   }, [target]);
 
+  // Ticks in the notes window, which stays visible while the slides' window
+  // may be hidden and its timers throttled.
   useEffect(() => {
     setNow(Date.now());
     if (!running) return;
-    const tick = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(tick);
-  }, [running, timer]);
+    const tick = target.setInterval(() => setNow(Date.now()), 1000);
+    return () => target.clearInterval(tick);
+  }, [running, target, timer]);
 
   const current = Math.max(200, Math.min(520, (width - 60) * 0.58));
   const hasNext = index < slideCount - 1;

@@ -139,13 +139,17 @@ it('runs the show when the browser blocks the notes window, with a notice that o
   expect(view.getByText('1 / 3')).toBeTruthy();
 });
 
-it('times from the start of the show, with pause, resume and reset', async () => {
+it('times from the start of the show, with pause, resume and reset, ticking in the notes window', async () => {
   let now = 0;
   const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  const tabTicks = spyOn(window, 'setInterval');
   try {
-    const { attach, inPopup } = setup();
+    const { attach, inPopup, popup } = setup();
+    const notesTicks = spyOn(popup, 'setInterval');
     now = 30_000;
     attach();
+    expect(notesTicks).toHaveBeenCalled();
+    expect(tabTicks).not.toHaveBeenCalled();
     const timer = () => inPopup('[role="timer"]')?.textContent;
     expect(timer()).toBe('0:30');
     now = 65_000;
@@ -162,6 +166,7 @@ it('times from the start of the show, with pause, resume and reset', async () =>
     await waitFor(() => expect(timer()).toBe('0:02'), { timeout: 2_500 });
   } finally {
     clock.mockRestore();
+    tabTicks.mockRestore();
   }
 });
 
