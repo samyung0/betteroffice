@@ -403,9 +403,10 @@ export class EditSession {
     insert_section_break(story: string, para_id: string, offset: number, break_type: string): void;
     /**
      * Inserts a `rows` x `columns` table at `(story, para_id, offset)`,
-     * creating one story per cell. Errors when either dimension is zero.
+     * creating one story per cell. `compatibility_mode` is the document's
+     * (12, Word 2007's, when absent). Errors when either dimension is zero.
      */
-    insert_table(story: string, para_id: string, offset: number, rows: number, columns: number, author_name?: string | null, author_date?: string | null): string;
+    insert_table(story: string, para_id: string, offset: number, rows: number, columns: number, author_name?: string | null, author_date?: string | null, compatibility_mode?: number | null): string;
     /**
      * Inserts `text` at `(story, para_id, offset)`, or after the tables and
      * breaks that open that paragraph slot when the location is ahead of
@@ -1132,7 +1133,7 @@ export interface InitOutput {
     readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
     readonly editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
-    readonly editsession_insert_table: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly editsession_insert_table: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];

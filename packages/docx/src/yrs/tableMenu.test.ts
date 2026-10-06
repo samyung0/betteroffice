@@ -8,7 +8,12 @@ import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { readDocxContainer } from '../docx/zipContainer';
 import type { Document, Table } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsSession, type YrsTableRange } from './index';
+import {
+  compatibilityModeFromDocument,
+  createYrsSession,
+  type YrsSession,
+  type YrsTableRange,
+} from './index';
 import { yrsToDocument } from './yrsToDocument';
 
 // The table menu's six items: what Word writes for each, a reopen showing the
@@ -36,7 +41,9 @@ const UNTOUCHED =
   `<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell(2000, 'X', '<w:noWrap/>')}${cell(2000, 'Y', '<w:vAlign w:val="bottom"/>')}</w:tr></w:tbl>`;
 const BODY = `<w:p><w:r><w:t>Before</w:t></w:r></w:p>${EDITED}<w:p/>${UNTOUCHED}<w:p/>`;
 
-function fixture(): Uint8Array<ArrayBuffer> {
+/** The fixture, or `body` in a document whose settings give `compatibilityMode`. */
+function fixture(body = BODY, compatibilityMode?: number): Uint8Array<ArrayBuffer> {
+  const settings = compatibilityMode !== undefined;
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -44,7 +51,11 @@ function fixture(): Uint8Array<ArrayBuffer> {
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
         '<Default Extension="xml" ContentType="application/xml"/>' +
-        `<Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/></Types>`
+        `<Override PartName="/word/document.xml" ContentType="${OFFICE}.document.main+xml"/>` +
+        (settings
+          ? `<Override PartName="/word/settings.xml" ContentType="${OFFICE}.settings+xml"/>`
+          : '') +
+        '</Types>'
     )
   );
   parts.set(
@@ -56,8 +67,24 @@ function fixture(): Uint8Array<ArrayBuffer> {
   );
   parts.set(
     'word/document.xml',
-    toBytes(`<w:document xmlns:w="${W}"><w:body>${BODY}<w:sectPr/></w:body></w:document>`)
+    toBytes(`<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr/></w:body></w:document>`)
   );
+  if (settings) {
+    parts.set(
+      'word/_rels/document.xml.rels',
+      toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          `<Relationship Id="settings" Type="${R}/settings" Target="settings.xml"/></Relationships>`
+      )
+    );
+    parts.set(
+      'word/settings.xml',
+      toBytes(
+        `<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode" ` +
+          `w:uri="http://schemas.microsoft.com/office/word" w:val="${compatibilityMode}"/></w:compat></w:settings>`
+      )
+    );
+  }
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -275,7 +302,7 @@ describe('the DOCX table menu', () => {
     });
 
     for (const [change, structural] of STRUCTURAL) {
-      it(`${item.name}: racing a peer that ${change} keeps one of the two whole`, async () => {
+      it(`${item.name}: racing a peer that ${change} converges on a consistent table`, async () => {
         // Both client-id orders, so either edit can win the rows.
         for (const [a, b] of [
           [61501, 61502],
@@ -318,6 +345,41 @@ describe('the DOCX table menu', () => {
     } finally {
       left.destroy();
       right.destroy();
+    }
+  });
+
+  it('gives a new table the document’s compatibility mode, so a reopen draws it alike', async () => {
+    for (const mode of [15, 14]) {
+      const bytes = fixture('<w:p><w:r><w:t>Body</w:t></w:r></w:p>', mode);
+      const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+      expect(compatibilityModeFromDocument(parsed)).toBe(mode);
+      const session = await open(61700 + mode, bytes);
+      const lowered = (replica: YrsSession) => {
+        const table = (replica.yrsBlocksForStory('body') as Array<Record<string, unknown>>).find(
+          (block) => block.kind === 'table'
+        );
+        return {
+          mode: table?.compatibilityMode,
+          margin: Math.round(Number(table?.cellMarginLeft) * 10) / 10,
+        };
+      };
+      let reopened: YrsSession | undefined;
+      try {
+        const anchor = session.paragraphs('body')[0];
+        session.insertTable(
+          { story: 'body', paraId: anchor.paraId, offset: 0 },
+          1,
+          1,
+          undefined,
+          compatibilityModeFromDocument(parsed)
+        );
+        expect(lowered(session)).toEqual({ mode, margin: 7.2 });
+        reopened = await open(61800 + mode, new Uint8Array(await saved(session, parsed)));
+        expect(lowered(reopened)).toEqual(lowered(session));
+      } finally {
+        session.destroy();
+        reopened?.destroy();
+      }
     }
   });
 

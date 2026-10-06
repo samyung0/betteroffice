@@ -3172,7 +3172,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_op_racing_a_column_op_keeps_one_of_them_whole() {
+    fn a_row_op_racing_a_column_op_leaves_a_consistent_table() {
         type Op = fn(&EditingDoc);
         let row_ops: [Op; 4] = [
             |doc| {
