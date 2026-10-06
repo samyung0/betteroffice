@@ -465,6 +465,20 @@ describe('cells the table had when it opened, after rows and columns move', () =
     session.destroy();
   });
 
+  it('save against the source on a later export whose base is the previous one', async () => {
+    const { session, base } = await open(bytes);
+    session.insertRow({ ...table, row: 0, column: 0 }, 'above');
+    // As the editor's exporter does: each export's base is the previous projection.
+    const first = yrsToDocument(session, base, { source: base });
+    const story = session.storyIds().find((id) => session.paragraphs(id)[0]?.text === 'H0')!;
+    session.insertText(at(session, story, 0, 2), '!');
+    const second = yrsToDocument(session, first, { source: base });
+    const files = unzipContainer(new Uint8Array(await repackDocx(second))) as Record<string, Uint8Array>;
+    const saved = Object.fromEntries(savedCells(new TextDecoder().decode(files['word/document.xml'])));
+    expect(saved['H0!']).toBe('');
+    session.destroy();
+  });
+
   it('saves the same for each peer when the other moved the rows', async () => {
     const left = (await open(bytes, 83)).session;
     const { session: right, base } = await open(bytes, 84);

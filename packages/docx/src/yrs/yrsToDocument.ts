@@ -2595,13 +2595,15 @@ class SaveContext {
     base: Document,
     private readonly onEmbed?: YrsToDocumentOptions['onEmbed'],
     private readonly onParagraph?: YrsToDocumentOptions['onParagraph'],
-    trackStories = false
+    trackStories = false,
+    source?: Document
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
     this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
-    this.source = sourceStories(base);
-    this.baseStories = this.source.stories;
+    const read = sourceStories(base);
+    this.baseStories = read.stories;
+    this.source = source ? sourceStories(source) : read;
     this.seedSources = collectSeedSources(session, base, this.baseStories);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
@@ -3304,6 +3306,8 @@ export interface YrsToDocumentOptions {
   onEmbed?: (storyId: string, offset: number, content: ParagraphContent | BlockContent) => void;
   /** Projected paragraph and the native pilcrow offset that owns it. */
   onParagraph?: (storyId: string, offset: number, paragraph: Paragraph, logicalId: string) => void;
+  /** The materialized source the session seeded from, when `base` is a later projection: cells compare against its looks. */
+  source?: Document;
 }
 
 export function yrsToDocument(
@@ -3316,7 +3320,8 @@ export function yrsToDocument(
     base,
     options.onEmbed,
     options.onParagraph,
-    options.onStory !== undefined
+    options.onStory !== undefined,
+    options.source
   );
   return projectDocument(context, base, options);
 }
