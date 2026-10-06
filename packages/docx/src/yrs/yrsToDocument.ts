@@ -518,18 +518,6 @@ function appendTextRun(target: Run, source: Run): void {
   }
 }
 
-function fnv53(value: string): number {
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of new TextEncoder().encode(value)) {
-    hash = (hash ^ BigInt(byte)) * 0x100000001b3n;
-    hash &= 0xffffffffffffffffn;
-  }
-  return Number(hash & ((1n << 53n) - 1n));
-}
-
-/** The largest revision `w:id` of the base being projected. */
-let revisionBase: number | undefined;
-
 function fnv32(value: string): number {
   let hash = 0x811c9dc5;
   for (const byte of new TextEncoder().encode(value)) hash = Math.imul(hash ^ byte, 0x01000193);
@@ -537,60 +525,18 @@ function fnv32(value: string): number {
 }
 
 /**
- * The `w:id` a revision id saves as. An editor id (`client:clock`) saves
- * above the largest id the source holds, hashed so it keeps its number in
- * every save and on every peer, within int32.
+ * The `w:id` a revision id saves as. An editor id (`client:clock`) saves as
+ * 2^30 plus a 30-bit hash of it, so it keeps its number in every save and
+ * on every peer, and stays within int32 above the small ids Word writes.
  */
 function revisionId(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
-    if (revisionBase === undefined) return fnv53(value);
-    const span = Math.max(1, Math.min(2 ** 30, 2 ** 31 - 2 - revisionBase));
-    return revisionBase + 1 + (fnv32(value) % span);
+    return 2 ** 30 + (fnv32(value) % 2 ** 30);
   }
   return 0;
-}
-
-const largestRevisionIds = new WeakMap<object, number>();
-
-/** The largest revision id the base's source holds, read once per source package. */
-function largestRevisionId(base: Document): number {
-  const key = base.originalBuffer ?? base.package;
-  let largest = largestRevisionIds.get(key);
-  if (largest === undefined) {
-    largest = largestIdIn(base.package);
-    largestRevisionIds.set(key, largest);
-  }
-  return largest;
-}
-
-/**
- * The largest id of a revision record (`{id, author}`: tracked text, marks,
- * property changes of paragraphs, runs, tables, rows, cells and sections,
- * comment bodies) or of a `w:id` in markup kept raw, under `value`.
- */
-function largestIdIn(value: unknown): number {
-  let largest = 0;
-  const stack: unknown[] = [value];
-  while (stack.length > 0) {
-    const next = stack.pop();
-    if (typeof next === 'string') {
-      if (next.includes('w:id="')) {
-        for (const match of next.matchAll(/w:id="(\d+)"/g)) largest = Math.max(largest, Number(match[1]));
-      }
-    } else if (next instanceof Map) {
-      for (const entry of next.values()) stack.push(entry);
-    } else if (Array.isArray(next)) {
-      for (const entry of next) stack.push(entry);
-    } else if (next !== null && typeof next === 'object' && !ArrayBuffer.isView(next) && !(next instanceof ArrayBuffer)) {
-      const record = next as Record<string, unknown>;
-      if (typeof record.id === 'number' && typeof record.author === 'string') largest = Math.max(largest, record.id);
-      for (const entry of Object.values(record)) stack.push(entry);
-    }
-  }
-  return largest;
 }
 
 function trackedInfo(raw: unknown, _pmShape = false): TrackedChangeInfo | null {
@@ -2685,7 +2631,6 @@ class SaveContext {
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
   private readonly memo: SessionProjectionMemo;
-  readonly revisionBase: number;
   private readonly bypassMemo: boolean;
   /** Comments some story holds a reference mark for; read when a save first needs it. */
   private referencedComments?: Set<number>;
@@ -2705,7 +2650,6 @@ class SaveContext {
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
     this.memo = sessionProjectionMemo(session);
-    this.revisionBase = largestRevisionId(base);
     // Hooked projections (checkpoint export, rebase) run once and must see
     // every block, so they neither read nor fill the session cache.
     this.bypassMemo = trackStories || onEmbed !== undefined || onParagraph !== undefined;
@@ -3410,13 +3354,7 @@ export function yrsToDocument(
     options.onParagraph,
     options.onStory !== undefined
   );
-  const outer = revisionBase;
-  revisionBase = context.revisionBase;
-  try {
-    return projectDocument(context, base, options);
-  } finally {
-    revisionBase = outer;
-  }
+  return projectDocument(context, base, options);
 }
 
 function projectDocument(context: SaveContext, base: Document, options: YrsToDocumentOptions): Document {

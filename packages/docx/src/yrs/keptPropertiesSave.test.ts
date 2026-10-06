@@ -227,9 +227,9 @@ describe('Enter in a paragraph with a tracked revision', () => {
     ]);
     const [copy, source] = saved.slice(0, 2);
     expect(source).toBe(`<w:pPr><w:jc w:val="center"/>${strip(CHANGE)}</w:pPr>`);
-    // The copy saves above the document's largest revision id, 8, within int32.
+    // The copy saves in the upper half of int32, above the small ids Word writes.
     const [id] = revisionIds(copy!).map(Number);
-    expect(id).toBeGreaterThan(8);
+    expect(id).toBeGreaterThanOrEqual(2 ** 30);
     expect(id).toBeLessThan(2 ** 31);
     expect(copy).toBe(source!.replace('w:id="5"', `w:id="${id}"`));
     session.destroy();
@@ -245,7 +245,7 @@ describe('Enter in a paragraph with a tracked revision', () => {
     expect(await savedDocumentXml(right, base)).toBe(saved);
     const ids = pPrs(saved).slice(0, 3).flatMap(revisionIds).map(Number);
     expect(new Set(ids).size).toBe(3);
-    expect(ids.filter((id) => id > 8)).toHaveLength(2);
+    expect(ids.filter((id) => id >= 2 ** 30)).toHaveLength(2);
     left.destroy();
     right.destroy();
   });
@@ -571,14 +571,8 @@ describe('revision ids the editor makes', () => {
   const changed = (id: number) =>
     `<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="${id}" ${BY}><w:pPr><w:jc w:val="left"/></w:pPr></w:pPrChange></w:pPr><w:r><w:t>Changed para</w:t></w:r></w:p>`;
 
-  it('save above every revision id the source holds, the same in every save, without reading the session’s revisions', async () => {
-    // The largest id is a table property change, which the session lists nowhere.
-    const bytes = fixture(
-      changed(5) +
-        changed(6) +
-        `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblPrChange w:id="50" ${BY}><w:tblPr/></w:tblPrChange></w:tblPr>` +
-        '<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>'
-    );
+  it('save in the upper half of int32, the same in every save, without reading the session’s revisions', async () => {
+    const bytes = fixture(changed(5) + changed(6) + '<w:p/>');
     const { session, base } = await open(bytes);
     session.listRevisions = () => {
       throw new Error('the save read every revision');
@@ -587,9 +581,11 @@ describe('revision ids the editor makes', () => {
     const first = revisionIds(pPrs(await savedDocumentXml(session, base))[0]!).map(Number);
     session.splitParagraph(at(session, 'body', 2, 3));
     const second = pPrs(await savedDocumentXml(session, base)).slice(0, 4).flatMap(revisionIds).map(Number);
-    expect(first[0]).toBeGreaterThan(50);
+    for (const id of [first[0]!, second[2]!]) {
+      expect(id).toBeGreaterThanOrEqual(2 ** 30);
+      expect(id).toBeLessThan(2 ** 31);
+    }
     expect(second[0]).toBe(first[0]!);
-    expect(second[2]).toBeGreaterThan(50);
     expect(second[2]).not.toBe(first[0]);
     session.destroy();
   });
