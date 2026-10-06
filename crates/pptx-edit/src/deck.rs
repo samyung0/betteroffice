@@ -5,7 +5,10 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody};
+use pptx_parse::{
+    GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
+    TextBody,
+};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -15,6 +18,7 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
+use crate::save::{find_placeholder, normalize_placeholder_type};
 use crate::story::{
     baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story,
     validate_text_style,
@@ -205,6 +209,14 @@ pub(crate) fn source_text_body<'a>(
     package: &'a PptxPackage,
     story_id: &str,
 ) -> Option<&'a TextBody> {
+    source_story(package, story_id).map(|(_, _, body)| body)
+}
+
+/// The slide, node and text body of a seeded story.
+fn source_story<'a>(
+    package: &'a PptxPackage,
+    story_id: &str,
+) -> Option<(&'a Slide, &'a ShapeNode, &'a TextBody)> {
     let rest = story_id.strip_prefix("story:slide:")?;
     let (slide_index, rest) = rest.split_once(':')?;
     let slide = package.slides.get(slide_index.parse::<usize>().ok()?)?;
@@ -220,7 +232,8 @@ pub(crate) fn source_text_body<'a>(
         };
         node = Some(found);
     }
-    match (node?, suffix.split(':').collect::<Vec<_>>().as_slice()) {
+    let node = node?;
+    let body = match (node, suffix.split(':').collect::<Vec<_>>().as_slice()) {
         (ShapeNode::Shape(shape), ["0"]) => shape.text.as_ref(),
         (ShapeNode::GraphicFrame(frame), ["table", row, cell]) => match &frame.data {
             GraphicFrameData::Table(table) => Some(
@@ -233,6 +246,85 @@ pub(crate) fn source_text_body<'a>(
             ),
             _ => None,
         },
+        _ => None,
+    }?;
+    Some((slide, node, body))
+}
+
+/// The `marL` and `indent` a seeded story's paragraph at position `index` and
+/// `level` inherits, merged as `pptx-render` lays it out: the master's text
+/// style, the master's then the layout's matching placeholder (its list styles
+/// and its paragraph at that position, else that level), then the story's own
+/// list styles. A table cell has only its own list styles.
+pub(crate) fn inherited_indents(
+    package: &PptxPackage,
+    story_id: &str,
+    index: usize,
+    level: u32,
+) -> [Option<i64>; 2] {
+    let mut indents = [None; 2];
+    let Some((slide, node, body)) = source_story(package, story_id) else {
+        return indents;
+    };
+    let mut merge = |properties: &ParagraphProperties| {
+        for (value, from) in indents
+            .iter_mut()
+            .zip([properties.margin_left, properties.indent])
+        {
+            if from.is_some() {
+                *value = from;
+            }
+        }
+    };
+    if let ShapeNode::Shape(shape) = node {
+        let placeholder = shape.base.placeholder.as_ref();
+        let (layout, master) =
+            crate::save::layout_and_master(package, slide.layout_part_path.as_deref());
+        if let Some(master) = master {
+            let styles = match placeholder.map(|placeholder| {
+                normalize_placeholder_type(placeholder.placeholder_type.as_deref())
+            }) {
+                Some("title") => &master.text_styles.title,
+                Some("body" | "subTitle") => &master.text_styles.body,
+                _ => &master.text_styles.other,
+            };
+            if let Some(style) = styles.get(level as usize).or_else(|| styles.first()) {
+                merge(style);
+            }
+        }
+        let inherited = [
+            master.and_then(|master| placeholder_body(&master.shapes, placeholder)),
+            layout.and_then(|layout| placeholder_body(&layout.shapes, placeholder)),
+        ];
+        for inherited in inherited.into_iter().flatten() {
+            level_styles(inherited, level).for_each(&mut merge);
+            if let Some(paragraph) = inherited
+                .paragraphs
+                .get(index)
+                .or_else(|| inherited.paragraphs.get(level as usize))
+            {
+                merge(&paragraph.properties);
+            }
+        }
+    }
+    level_styles(body, level).for_each(&mut merge);
+    indents
+}
+
+fn level_styles(body: &TextBody, level: u32) -> impl Iterator<Item = &ParagraphProperties> {
+    let level_style = body.list_style.get(level as usize);
+    body.default_list_style
+        .as_deref()
+        .into_iter()
+        .chain(level_style)
+}
+
+fn placeholder_body<'a>(
+    shapes: &'a [ShapeNode],
+    placeholder: Option<&Placeholder>,
+) -> Option<&'a TextBody> {
+    match find_placeholder(shapes, placeholder?)? {
+        ShapeNode::Shape(shape) => shape.text.as_ref(),
         _ => None,
     }
 }
