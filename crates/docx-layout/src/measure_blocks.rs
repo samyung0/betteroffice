@@ -2107,6 +2107,68 @@ mod tests {
     }
 
     #[test]
+    fn an_auto_fitted_cell_with_a_floating_picture_keeps_the_grid() {
+        let table = |image: serde_json::Value, text: &str| {
+            let auto = json!({"widthType": "auto", "widthValue": 0});
+            let mut first = json!({"id": "c0", "blocks": [{"kind": "paragraph", "id": "p0",
+                "runs": [image, {"kind": "text", "text": text}]}]});
+            let mut second = json!({"id": "c1", "blocks": [{"kind": "paragraph", "id": "p1",
+                "runs": [{"kind": "text", "text": "x"}]}]});
+            for cell in [&mut first, &mut second] {
+                cell.as_object_mut()
+                    .unwrap()
+                    .extend(auto.as_object().unwrap().clone());
+            }
+            serde_json::from_value::<LayoutBlock>(json!({
+                "kind": "table", "id": "t", "columnWidths": [312, 312],
+                "rows": [{"id": "r", "cells": [first, second]}]
+            }))
+            .unwrap()
+        };
+        let widths = |mut block: LayoutBlock| {
+            let BlockExtent::Table(extent) =
+                measure_block(&mut block, 624.0, &MeasurementConfig::default()).unwrap()
+            else {
+                panic!("expected a table extent")
+            };
+            extent
+                .column_widths
+                .iter()
+                .map(|width| width.round())
+                .collect::<Vec<_>>()
+        };
+        let picture = |extra: serde_json::Value| {
+            let mut image = json!({"kind": "image", "src": "pic", "width": 250, "height": 100});
+            image
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            image
+        };
+        // An anchored picture adds nothing to its cell's line, so the table
+        // keeps its grid rather than drawing the picture over the next column.
+        for floating in [
+            json!({"wrapType": "square", "position": {"horizontal": {"relativeTo": "column", "posOffset": 0}}}),
+            json!({"wrapType": "inFront"}),
+            json!({"displayMode": "float"}),
+        ] {
+            assert_eq!(
+                widths(table(picture(floating.clone()), "")),
+                vec![312.0, 312.0],
+                "{floating}"
+            );
+            assert_eq!(
+                widths(table(picture(floating.clone()), "Pic")),
+                vec![312.0, 312.0],
+                "{floating}"
+            );
+        }
+        // An inline picture is measured, so its column fits it.
+        let inline = widths(table(picture(json!({})), ""));
+        assert!(inline[0] >= 250.0 && inline[1] < 312.0, "{inline:?}");
+    }
+
+    #[test]
     fn nested_text_anchored_tables_share_measure_paint_and_break_positions() {
         let font = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"

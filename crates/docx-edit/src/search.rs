@@ -309,7 +309,7 @@ mod tests {
         doc.split_paragraph(&ctx, Position::new("body", 14), None)
             .unwrap();
         let table = doc
-            .insert_table(&ctx, Position::new("body", 14), 12, 1)
+            .insert_table(&ctx, Position::new("body", 14), 12, 1, 12)
             .unwrap();
         for (index, story) in table.created_story_ids.iter().enumerate() {
             doc.insert_text(
@@ -321,7 +321,13 @@ mod tests {
             .unwrap();
         }
         let nested = doc
-            .insert_table(&ctx, Position::new(&table.created_story_ids[0], 11), 1, 1)
+            .insert_table(
+                &ctx,
+                Position::new(&table.created_story_ids[0], 11),
+                1,
+                1,
+                12,
+            )
             .unwrap();
         doc.insert_text(
             &ctx,

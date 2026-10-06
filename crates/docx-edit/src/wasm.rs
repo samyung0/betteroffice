@@ -2412,7 +2412,8 @@ impl EditSession {
     // unknown table or a cell outside the grid.
 
     /// Inserts a `rows` x `columns` table at `(story, para_id, offset)`,
-    /// creating one story per cell. Errors when either dimension is zero.
+    /// creating one story per cell. `compatibility_mode` is the document's
+    /// (12, Word 2007's, when absent). Errors when either dimension is zero.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_table(
         &self,
@@ -2423,13 +2424,20 @@ impl EditSession {
         columns: u32,
         author_name: Option<String>,
         author_date: Option<String>,
+        compatibility_mode: Option<u8>,
     ) -> Result<String, JsValue> {
         let index = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
             .engine
             .doc()
-            .insert_table(&ctx, Position::new(story, index), rows, columns)
+            .insert_table(
+                &ctx,
+                Position::new(story, index),
+                rows,
+                columns,
+                compatibility_mode.unwrap_or(12),
+            )
             .map_err(js_err)?;
         serde_json::to_string(&receipt).map_err(js_err)
     }

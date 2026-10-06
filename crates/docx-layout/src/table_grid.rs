@@ -366,17 +366,32 @@ fn cell_preferred_px(cell: &crate::types::TableCell, parent_width: f64) -> Optio
     )
 }
 
-/// A cell holding only paragraphs, whose content width a line measure gives.
+/// A picture placed outside the line (anchored, wrapped or floated).
+fn floating_image(image: &crate::types::ImageRun) -> bool {
+    image.position.is_some()
+        || image.display_mode.as_deref() == Some("float")
+        || image
+            .wrap_type
+            .as_deref()
+            .is_some_and(|wrap| wrap != "inline")
+}
+
+/// A cell holding only paragraphs of inline content, whose width a line
+/// measure gives (a nested table or floating picture adds nothing to it).
 pub fn paragraphs_only(cell: &crate::types::TableCell) -> bool {
-    cell.blocks
-        .iter()
-        .all(|block| matches!(block, crate::types::LayoutBlock::Paragraph(_)))
+    cell.blocks.iter().all(|block| {
+        matches!(block, crate::types::LayoutBlock::Paragraph(paragraph)
+        if !paragraph.runs.iter().any(|run| {
+            matches!(run, crate::types::Run::Image(image) if floating_image(image))
+        }))
+    })
 }
 
 /// What Word's AutoFit Contents leaves: no fixed layout, no preferred table
 /// width and every cell's `w:tcW` explicitly `auto`, so Word sizes every
 /// column from content. (Cells that state no width at all keep the grid, and
-/// so does a table holding a nested table or other block.)
+/// so does a table holding a nested table, a floating picture or another
+/// block.)
 pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
     !table_block.rows.is_empty()
         && !fixed_layout(table_block)

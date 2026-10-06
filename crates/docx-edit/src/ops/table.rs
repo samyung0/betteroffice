@@ -1094,13 +1094,16 @@ impl EditingDoc {
     /// Inserts a rectangular structural table at a story position. Each cell
     /// receives an independent one-paragraph story. In suggesting mode every
     /// row carries the same `trIns` revision, so one resolve action accepts or
-    /// rejects the complete table insertion.
+    /// rejects the complete table insertion. `compatibility_mode` is the
+    /// document's (`w:compatSetting`), stamped as the seed stamps its tables,
+    /// so the table sits where it will after a reopen.
     pub fn insert_table(
         &self,
         ctx: &EditCtx,
         at: Position,
         rows: u32,
         columns: u32,
+        compatibility_mode: u8,
     ) -> OpResult<TableReceipt> {
         if rows == 0 || columns == 0 {
             return Err(invalid("table dimensions must be positive"));
@@ -1157,7 +1160,7 @@ impl EditingDoc {
             table_rows.push(RowData { tr_pr, cells });
         }
         let width = (9360.0 / columns as f64).floor().max(1.0);
-        let data = TableData {
+        let mut data = TableData {
             // Word's Normal Table pads cells 108 twips left and right.
             tbl_pr: HashMap::from([
                 ("width".to_owned(), Any::Number(9360.0)),
@@ -1173,6 +1176,13 @@ impl EditingDoc {
             grid: vec![Any::Number(width); columns as usize],
             rows: table_rows,
         };
+        // The seed leaves Word 2007's mode (12) implicit; so does this.
+        if compatibility_mode != 12 {
+            data.tbl_pr.insert(
+                "compatibilityMode".to_owned(),
+                Any::Number(compatibility_mode as f64),
+            );
+        }
         let table = story.insert_embed_with_attributes(
             &mut txn,
             at.index,
@@ -2160,7 +2170,7 @@ mod tests {
     fn inserted(ctx: &EditCtx, rows: u32, columns: u32) -> EditingDoc {
         let doc = EditingDoc::new(74);
         doc.create_story("body", "", "Normal", "left").unwrap();
-        doc.insert_table(ctx, Position::new("body", 0), rows, columns)
+        doc.insert_table(ctx, Position::new("body", 0), rows, columns, 12)
             .unwrap();
         doc
     }
@@ -2253,7 +2263,7 @@ mod tests {
         let accepted = EditingDoc::new(72);
         accepted.create_story("body", "", "Normal", "left").unwrap();
         let inserted = accepted
-            .insert_table(&suggesting(), Position::new("body", 0), 3, 2)
+            .insert_table(&suggesting(), Position::new("body", 0), 3, 2, 12)
             .unwrap();
         assert_eq!((inserted.rows, inserted.columns), (3, 2));
         assert_eq!(inserted.created_story_ids.len(), 6);
@@ -2289,7 +2299,7 @@ mod tests {
         let rejected = EditingDoc::new(73);
         rejected.create_story("body", "", "Normal", "left").unwrap();
         let inserted = rejected
-            .insert_table(&suggesting(), Position::new("body", 0), 2, 2)
+            .insert_table(&suggesting(), Position::new("body", 0), 2, 2, 12)
             .unwrap();
         rejected
             .reject_change(
@@ -3209,7 +3219,7 @@ mod tests {
                 for (left_id, right_id) in [(80, 81), (81, 80)] {
                     let left = EditingDoc::new(left_id);
                     left.create_story("body", "", "Normal", "left").unwrap();
-                    left.insert_table(&direct(), Position::new("body", 0), 2, 3)
+                    left.insert_table(&direct(), Position::new("body", 0), 2, 3, 12)
                         .unwrap();
                     left.set_column_width(&direct(), &cell(0, 0), 1000.0)
                         .unwrap();
@@ -3275,7 +3285,7 @@ mod tests {
         for inner_auto in [false, true] {
             let doc = inserted(&direct(), 1, 2);
             type_in(&doc, 0, 1, "Label");
-            doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2)
+            doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2, 12)
                 .unwrap();
             if inner_auto {
                 doc.autofit_table(&direct(), &inner).unwrap();
@@ -3308,6 +3318,34 @@ mod tests {
         let drawn: Vec<f64> = fragment.iter().map(|width| width.round()).collect();
         assert_eq!(drawn, column_widths(&doc));
         assert!(drawn[0] < drawn[1], "{drawn:?}");
+    }
+
+    #[test]
+    fn an_inserted_table_takes_the_document_s_compatibility_mode() {
+        let at_mode = |mode: u8| {
+            let doc = EditingDoc::new(74);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.insert_table(&direct(), Position::new("body", 0), 1, 1, mode)
+                .unwrap();
+            type_in(&doc, 0, 0, "A");
+            doc
+        };
+        let (word_2013, word_2010) = (at_mode(15), at_mode(14));
+        assert_eq!(table_value(&word_2013).0["compatibilityMode"], 15);
+        assert!(
+            table_value(&at_mode(12))
+                .0
+                .get("compatibilityMode")
+                .is_none()
+        );
+        // Word 2013+ draws the border at the margin; before, the table hangs
+        // into the margin by its cell margin, so the text sits at the margin.
+        let text_x = |doc: &EditingDoc| runs(doc, "A")[0].1;
+        assert_eq!(
+            ((text_x(&word_2013) - text_x(&word_2010)) * 10.0).round(),
+            72.0
+        );
+        assert_eq!(text_x(&word_2010), text_x(&at_mode(12)));
     }
 
     #[test]

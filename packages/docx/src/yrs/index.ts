@@ -39,7 +39,7 @@ export {
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
-export { documentToYrs, styleParagraphValues } from './documentToYrs';
+export { compatibilityModeFromDocument, documentToYrs, styleParagraphValues } from './documentToYrs';
 export {
   applyNextStyle,
   applyStyleValues,
@@ -895,8 +895,18 @@ export interface YrsSession extends CollaborationReplica {
   deleteStory(storyId: string): void;
   /** Inserts a row above or below the cell that `at` resolves into. */
   insertRow(at: YrsCellLoc, side: 'above' | 'below', suggesting?: YrsAuthor): YrsTableReceipt;
-  /** Inserts a rectangular structural table at a paragraph-keyed location. */
-  insertTable(at: YrsLoc, rows: number, columns: number, suggesting?: YrsAuthor): YrsTableReceipt;
+  /**
+   * Inserts a rectangular structural table at a paragraph-keyed location.
+   * `compatibilityMode` is the document's (`compatibilityModeFromDocument`),
+   * stamped on the table as the seed stamps its tables; 12 when omitted.
+   */
+  insertTable(
+    at: YrsLoc,
+    rows: number,
+    columns: number,
+    suggesting?: YrsAuthor,
+    compatibilityMode?: number
+  ): YrsTableReceipt;
   /** Inserts a column left or right of the cell that `at` resolves into. */
   insertColumn(at: YrsCellLoc, side: 'left' | 'right'): YrsTableReceipt;
   /** Deletes every row covered by an explicit rectangular cell range. */
@@ -1600,7 +1610,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       markDirty(storyId);
       return mutate(() => session.delete_story(storyId));
     },
-    insertTable: (at, rows, columns, suggesting) => {
+    insertTable: (at, rows, columns, suggesting, compatibilityMode) => {
       ensureUndo(at.story);
       return mutate(
         () =>
@@ -1613,7 +1623,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
                 rows,
                 columns,
                 suggesting?.name,
-                suggesting?.date
+                suggesting?.date,
+                compatibilityMode
               )
             ) as YrsTableReceipt
           )

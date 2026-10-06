@@ -137,7 +137,8 @@ function covering(context: LoweringContext, plan: number): number[] {
   return context.openComments.filter(([, home]) => home === plan).map(([id]) => id);
 }
 
-function compatibilityModeFromDocument(document: Document): number {
+/** The document's Word compatibility mode (`w:compatSetting`), 12 when absent. */
+export function compatibilityModeFromDocument(document: Document): number {
   const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
   return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }

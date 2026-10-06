@@ -73,6 +73,7 @@ import {
   styleNewCells,
   cellParagraphFormatting,
   commentSharedId,
+  compatibilityModeFromDocument,
   styleParagraphValues,
   yrsLocToDisplayPosition as yrsLocToLocalDisplayPosition,
   type YrsInlineFormatDelta,
@@ -1216,7 +1217,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 tableAt,
                 command.rows,
                 command.columns,
-                structuralAuthor
+                structuralAuthor,
+                document ? compatibilityModeFromDocument(document) : undefined
               );
               styleNewCells(session, inserted.createdStoryIds, paragraphStyleValues);
               return inserted;
@@ -1363,6 +1365,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [
         activeYrsRootStory,
         author,
+        document,
         getLatestLayout,
         handleYrsStateChange,
         isSuggesting,

@@ -2436,7 +2436,7 @@ fn a_merge_never_joins_two_tables() {
     let (doc, _) = block_slot("table");
     doc.split_paragraph(&ctx(), Position::new("body", 8), None)
         .unwrap();
-    doc.insert_table(&ctx(), Position::new("body", 9), 1, 1)
+    doc.insert_table(&ctx(), Position::new("body", 9), 1, 1, 12)
         .unwrap();
     assert_eq!(slot_units(&doc), "Before¶[table]¶[table]After¶");
     let ids = para_ids(&doc);
@@ -2501,7 +2501,7 @@ fn block_slot(kind: &str) -> (EditingDoc, ParagraphId) {
         .split_paragraph(&ctx(), Position::new("body", 6), None)
         .unwrap();
     if kind == "table" {
-        doc.insert_table(&ctx(), Position::new("body", 7), 1, 1)
+        doc.insert_table(&ctx(), Position::new("body", 7), 1, 1, 12)
             .unwrap();
     } else {
         doc.insert_embed(&ctx(), Position::new("body", 7), kind, vec![])
