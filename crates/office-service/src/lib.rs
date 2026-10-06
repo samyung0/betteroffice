@@ -156,10 +156,15 @@ pub fn seed(format: Format, base: &[u8]) -> Result<Vec<u8>> {
 
 /// Semantic comparison data only; media is represented by its content hash.
 pub fn baseline(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<BaselineEntry>> {
-    guard(|| {
-        let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
-        Ok(session.entries()?.into_iter().map(Item::baseline).collect())
-    })
+    guard(|| baseline_unguarded(base, checkpoint))
+}
+
+pub(crate) fn baseline_unguarded(
+    base: &[u8],
+    checkpoint: Checkpoint,
+) -> Result<Vec<BaselineEntry>> {
+    let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
+    Ok(session.entries()?.into_iter().map(Item::baseline).collect())
 }
 
 pub fn compare(base: &[u8], from: Checkpoint, to: Checkpoint) -> Result<Vec<NetEffect>> {

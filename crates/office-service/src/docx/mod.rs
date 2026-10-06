@@ -25,6 +25,7 @@ use crate::types::{
     Asset, Command, Determinism, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target,
 };
 
+pub(crate) use comments::comment_ooxml_ids;
 pub(crate) use item::clear_unit_breaks;
 use project::{Hooks, SaveContext, project_document};
 
@@ -574,7 +575,6 @@ impl DocxSession {
     }
 
     /// The projected document with `onParagraph` (office-checkpoint.ts `docxRawInlines`).
-    #[allow(dead_code)] // The DOCX rebase reads it.
     pub(crate) fn raw_inlines(&mut self) -> Result<HashMap<String, String>> {
         let base = self.base_document();
         let hooks = Hooks {
@@ -607,7 +607,6 @@ impl DocxSession {
         Ok(paragraphs)
     }
 
-    #[allow(dead_code)] // The DOCX rebase reads it.
     pub(crate) fn engine(&self) -> &EngineSession {
         &self.engine
     }

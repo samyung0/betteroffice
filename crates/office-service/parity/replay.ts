@@ -194,7 +194,10 @@ for (const file of files) {
       buffered += new TextDecoder().decode(value);
     }
   };
+  const seen = new Map<string, number>();
   for (const call of calls) {
+    const nth = seen.get(call.method) ?? 0;
+    seen.set(call.method, nth + 1);
     if (only && call.method !== only && !["configureOfficeReplicas", "dropOfficeReplica"].includes(call.method)) continue;
     const format = formatOf(call);
     if (formats && format && !formats.includes(format)) continue;
@@ -210,7 +213,7 @@ for (const file of files) {
     const answer = JSON.parse(await nextLine()) as { value?: Json; error?: string; kind?: string };
     const [outcome, detail] = compare(call, answer);
     count(call.method, outcome);
-    if (detail) report.push(`${outcome} ${call.method} (${file})\n  ${detail}\n`);
+    if (detail) report.push(`${outcome} ${call.method} #${nth} (${file})\n  ${detail}\n`);
   }
   child.stdin.end();
   await child.exited;
