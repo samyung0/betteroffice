@@ -3,6 +3,8 @@ import { afterAll, afterEach, expect, it, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm, openPresentation, type SlideDisplayList } from '@betteroffice/pptx/viewer';
+import { Window as HappyWindow } from 'happy-dom';
+import { NotesWindow } from '../notesWindow';
 import { PresentationOverlay, type PresentationSource } from './PresentationOverlay';
 import { DRAWN_ICON_NAMES, IconSetContext, type IconSet } from './ui/ToolbarIcon';
 
@@ -65,17 +67,12 @@ it('only presents the latest slide when an earlier image resolves late', async (
         slideCount={2}
         startIndex={0}
         resolveImage={(id) => (id === '0' ? pending : images[1])}
-        label="Presentation"
-        counterLabel={(current, total) => `${current} / ${total}`}
-        exitLabel="Exit"
-        previousLabel="Previous"
-        nextLabel="Next"
         onExit={() => {}}
         onError={(error) => errors.push(error)}
       />
     );
     const displayed = view.container.querySelector('canvas')!;
-    fireEvent.click(view.getByRole('button', { name: 'Next' }));
+    fireEvent.click(view.getByRole('button', { name: 'Next slide' }));
     await waitFor(() => expect(draws.get(displayed)?.length).toBe(1));
     const painted = draws.get(displayed)![0][0] as HTMLCanvasElement;
     expect(draws.get(painted)?.[0][0]).toBe(images[1]);
@@ -108,11 +105,6 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
     slideCount: 3,
     startIndex: 2,
     resolveImage: () => null,
-    label: 'Presentation',
-    counterLabel: (current: number, total: number) => `${current} / ${total}`,
-    exitLabel: 'Exit',
-    previousLabel: 'Previous',
-    nextLabel: 'Next',
     onExit: () => {
       exits++;
     },
@@ -122,9 +114,9 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
   expect(view.getByText('3 / 3')).toBeTruthy();
   view.rerender(<PresentationOverlay {...props} slideCount={1} />);
   expect(view.getByText('1 / 1')).toBeTruthy();
-  expect((view.getByRole('button', { name: 'Next' }) as HTMLButtonElement).disabled).toBe(
-    true
-  );
+  expect(
+    (view.getByRole('button', { name: 'Next slide' }) as HTMLButtonElement).disabled
+  ).toBe(true);
   const dialog = view.getByRole('dialog');
   fireEvent.keyDown(dialog, { key: 'Escape' });
   expect(exits).toBe(1);
@@ -133,7 +125,7 @@ it('clamps navigation after slides are deleted and restores keyboard focus on ex
   focusTarget.remove();
 });
 
-it("draws the host's icons for its controls", () => {
+it("draws the host's icons for its controls, in both windows", () => {
   const icons = Object.fromEntries(
     DRAWN_ICON_NAMES.map((name) => [
       name,
@@ -142,6 +134,7 @@ it("draws the host's icons for its controls", () => {
       },
     ])
   ) as unknown as IconSet;
+  const notes = new NotesWindow({ open: () => {}, close: () => {} });
   const view = render(
     <IconSetContext.Provider value={icons}>
       <PresentationOverlay
@@ -149,19 +142,42 @@ it("draws the host's icons for its controls", () => {
         slideCount={2}
         startIndex={0}
         resolveImage={() => null}
-        label="Presentation"
-        counterLabel={(current, total) => `${current} / ${total}`}
-        exitLabel="Exit"
-        previousLabel="Previous"
-        nextLabel="Next"
+        notesWindow={notes}
         onExit={() => {}}
         onError={() => {}}
       />
     </IconSetContext.Provider>
   );
+  const drawn = (root: ParentNode) =>
+    [...root.querySelectorAll('[data-host-icon]')].map((icon) => icon.getAttribute('data-host-icon'));
   expect(view.container.querySelector('svg')).toBeNull();
-  for (const name of DRAWN_ICON_NAMES)
-    expect(view.container.querySelector(`[data-host-icon="${name}"]`)).not.toBeNull();
+  // Windowed (no full screen here), with the notes window to open from ⋮.
+  const seen = new Set(drawn(view.container));
+  expect(new Set(drawn(view.container))).toEqual(
+    new Set([
+      'presentationExit',
+      'presentationPrevious',
+      'presentationNext',
+      'presentationFullscreen',
+      'presentationMore',
+    ])
+  );
+  const popup = new HappyWindow({ url: 'about:blank' }) as unknown as Window;
+  act(() => notes.set(popup));
+  expect(popup.document.body.querySelector('svg')).toBeNull();
+  expect(new Set(drawn(popup.document.body))).toEqual(
+    new Set([
+      'presenterPause',
+      'presenterReset',
+      'presenterNotesSize',
+      'presentationPrevious',
+      'presentationNext',
+    ])
+  );
+  for (const name of drawn(popup.document.body)) seen.add(name);
+  fireEvent.click(popup.document.body.querySelector('[aria-label="Pause timer"]')!);
+  for (const name of [...drawn(view.container), ...drawn(popup.document.body)]) seen.add(name);
+  expect(seen).toEqual(new Set(DRAWN_ICON_NAMES));
 });
 
 it('presents a deck through the viewer handle', async () => {
@@ -198,18 +214,13 @@ it('presents a deck through the viewer handle', async () => {
         slideCount={slideCount}
         startIndex={0}
         resolveImage={() => null}
-        label="Presentation"
-        counterLabel={(current, total) => `${current} / ${total}`}
-        exitLabel="Exit"
-        previousLabel="Previous"
-        nextLabel="Next"
         onExit={() => {}}
         onError={(error) => errors.push(error)}
       />
     );
     const displayed = view.container.querySelector('canvas')!;
     await waitFor(() => expect(draws.get(displayed)).toBe(1));
-    fireEvent.click(view.getByRole('button', { name: 'Next' }));
+    fireEvent.click(view.getByRole('button', { name: 'Next slide' }));
     await waitFor(() => expect(draws.get(displayed)).toBe(2));
     expect(view.getByText(`2 / ${slideCount}`)).toBeTruthy();
     expect(errors).toEqual([]);

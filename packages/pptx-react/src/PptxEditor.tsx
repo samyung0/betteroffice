@@ -46,6 +46,7 @@ import type {
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
 import { PresentationOverlay } from './components/PresentationOverlay';
+import { type NotesWindow, ownNotesWindow } from './notesWindow';
 import type {
   FormattingAction,
   PptxEditorTool,
@@ -219,6 +220,16 @@ export interface PptxEditorProps {
   defaultSpeakerNotes?: boolean;
   /** Called when the Notes button or `view.speakerNotes` shows or hides the notes. */
   onSpeakerNotesChange?: (visible: boolean) => void;
+  /**
+   * Presenter view's speaker notes window; by default the editor opens its
+   * own pop-up (`ownNotesWindow`). A sandboxed host hands over the one it opened.
+   */
+  notesWindow?: NotesWindow;
+  /** The notes window's text size in px (`NOTES_SIZES`); 24 by default. */
+  defaultPresenterNotesSize?: number;
+  onPresenterNotesSizeChange?: (size: number) => void;
+  /** Called as a show starts and ends, e.g. for a host to give its frame the page. */
+  onPresentingChange?: (presenting: boolean) => void;
 }
 
 interface EditorModel {
@@ -425,6 +436,10 @@ function PptxEditorContent({
   onCommandState,
   defaultSpeakerNotes = false,
   onSpeakerNotesChange,
+  notesWindow: hostNotesWindow,
+  defaultPresenterNotesSize,
+  onPresenterNotesSizeChange,
+  onPresentingChange,
 }: Omit<PptxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -535,7 +550,19 @@ function PptxEditorContent({
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
-  const [presenting, setPresenting] = useState(false);
+  // The slide a show starts from; null while not presenting.
+  const [presenting, setPresenting] = useState<number | null>(null);
+  const [ownNotes] = useState(() => ownNotesWindow());
+  const notesWindow = hostNotesWindow ?? ownNotes;
+  const presentingChangeRef = useRef(onPresentingChange);
+  presentingChangeRef.current = onPresentingChange;
+  const isPresenting = presenting !== null;
+  useEffect(() => {
+    if (isPresenting) presentingChangeRef.current?.(true);
+    return () => {
+      if (isPresenting) presentingChangeRef.current?.(false);
+    };
+  }, [isPresenting]);
   const [speakerNotes, setSpeakerNotes] = useState(defaultSpeakerNotes);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen] = useState(false);
@@ -807,7 +834,7 @@ function PptxEditorContent({
     setResizeDelta(null);
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
-    setPresenting(false);
+    setPresenting(null);
     setProposals([]);
     setProposalsOpen(false);
     pointerGestureRef.current = null;
@@ -2626,9 +2653,9 @@ function PptxEditorContent({
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
 
-  const startPresenting = () => {
+  const startPresenting = (from = currentSlide) => {
     if (slideCount === 0) return;
-    setPresenting(true);
+    setPresenting(from);
   };
 
   // Export the current slide through the same canvas painter the editor draws
@@ -2885,6 +2912,7 @@ function PptxEditorContent({
     'edit.selectAll': Boolean(model?.frame) && !canvasReview.reviewing,
     'edit.delete': editable && objectsActive && selection === null,
     'view.present': slideCount > 0,
+    'view.presenterView': slideCount > 0,
     'view.zoom': Boolean(model),
     'view.speakerNotes': Boolean(model),
     'insert.textBox': editable && slideCount > 0,
@@ -2943,7 +2971,11 @@ function PptxEditorContent({
     else if (id === 'edit.redo') history('redo');
     else if (id === 'edit.selectAll') selectAll();
     else if (id === 'edit.delete') deleteShape();
-    else if (id === 'view.present') startPresenting();
+    else if (id === 'view.present') startPresenting(value === 'start' ? 0 : currentSlide);
+    else if (id === 'view.presenterView') {
+      startPresenting();
+      notesWindow.open();
+    }
     else if (id === 'view.speakerNotes') toggleSpeakerNotes();
     else if (id === 'view.zoom') {
       const scale = Number(value);
@@ -3170,7 +3202,7 @@ function PptxEditorContent({
         {showPresentButton && (
           <button
             type="button"
-            onClick={startPresenting}
+            onClick={() => startPresenting()}
             disabled={slideCount === 0}
             data-testid="pptx-present"
             style={styles.presentButton}
@@ -3519,20 +3551,22 @@ function PptxEditorContent({
           }}
         />
       ) : null}
-      {presenting && slideCount > 0 && handleRef.current ? (
+      {presenting !== null && slideCount > 0 && handleRef.current ? (
         <PresentationOverlay
           handle={handleRef.current}
           slideCount={slideCount}
-          startIndex={currentSlide}
+          startIndex={presenting}
           resolveImage={(assetId) =>
             resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
           }
-          counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
-          label={t('presentation.label')}
-          exitLabel={t('presentation.exit')}
-          previousLabel={t('presentation.previousSlide')}
-          nextLabel={t('presentation.nextSlide')}
-          onExit={() => setPresenting(false)}
+          notesWindow={notesWindow}
+          notesFor={(index) => model?.snapshot.slides[index]?.notes ?? ''}
+          defaultNotesSize={defaultPresenterNotesSize}
+          onNotesSizeChange={onPresenterNotesSizeChange}
+          onExit={(index) => {
+            setPresenting(null);
+            goToSlide(index + 1);
+          }}
           onError={reportError}
         />
       ) : null}

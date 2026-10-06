@@ -8,6 +8,14 @@ export type {
   PptxTextSelectionTarget,
 } from './PptxEditor';
 export {
+  NotesWindow,
+  NOTES_WINDOW_FEATURES,
+  ownNotesWindow,
+  type NotesWindowHost,
+  type NotesWindowState,
+} from './notesWindow';
+export { DEFAULT_NOTES_SIZE, NOTES_SIZES, PRESENT_ITEMS, notesSize } from './presenter';
+export {
   PPTX_COMMAND_EDITS,
   PPTX_COMMAND_IDS,
   type PptxCommandId,

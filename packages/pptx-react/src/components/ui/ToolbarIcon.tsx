@@ -52,11 +52,17 @@ export interface IconProps {
   style?: CSSProperties;
 }
 
-/** The presenter's controls, which it otherwise draws itself. */
+/** The show's and the notes window's controls, which they otherwise draw themselves. */
 export const DRAWN_ICON_NAMES = [
   'presentationExit',
   'presentationPrevious',
   'presentationNext',
+  'presentationFullscreen',
+  'presentationMore',
+  'presenterPause',
+  'presenterResume',
+  'presenterReset',
+  'presenterNotesSize',
 ] as const;
 
 export type DrawnIconName = (typeof DRAWN_ICON_NAMES)[number];

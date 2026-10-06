@@ -1,9 +1,10 @@
 /**
  * Commands a host's menus run through `PptxEditorApi.runCommand`. A few take a
- * value: `view.zoom` ('fit' or a scale such as '1.5'), `insert.shape` (a
- * preset geometry), `slide.newWithLayout` (a layout part path, '' for none),
- * `format.borderWeight` (points, '' for no border), `format.lineSpacing` (a
- * share: '1', '1.15', '1.5', '2'), `format.bulletedList` and
+ * value: `view.present` ('start' presents from the first slide, otherwise
+ * from the current one), `view.zoom` ('fit' or a scale such as '1.5'),
+ * `insert.shape` (a preset geometry), `slide.newWithLayout` (a layout part
+ * path, '' for none), `format.borderWeight` (points, '' for no border),
+ * `format.lineSpacing` (a share: '1', '1.15', '1.5', '2'), `format.bulletedList` and
  * `format.numberedList` (a style from `BULLET_PRESETS`/`NUMBER_PRESETS`;
  * without one they toggle the list), `arrange.align` ('left', 'center',
  * 'right', 'top', 'middle', 'bottom'), `arrange.distribute` and
@@ -17,6 +18,7 @@ export const PPTX_COMMAND_IDS = [
   'edit.selectAll',
   'edit.delete',
   'view.present',
+  'view.presenterView',
   'view.zoom',
   'view.speakerNotes',
   'insert.textBox',
@@ -73,6 +75,7 @@ export const PPTX_COMMAND_EDITS: Record<PptxCommandId, boolean> = {
   'edit.selectAll': false,
   'edit.delete': true,
   'view.present': false,
+  'view.presenterView': false,
   'view.zoom': false,
   'view.speakerNotes': false,
   'insert.textBox': true,
