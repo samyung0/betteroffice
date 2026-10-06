@@ -1159,6 +1159,36 @@ impl WorkbookAuthority {
         })
     }
 
+    /// [`Self::stage_local_ops_v1`] for a batch of `SetCell`s, projecting only
+    /// the written cells: the same update and state, and those cells as the
+    /// whole projection has them. `None` for any other batch.
+    pub(crate) fn stage_local_cells_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+    ) -> Result<Option<StagedCells>, AuthorityError> {
+        if !self.supports_structure() || !ops.iter().all(|op| matches!(op, Op::SetCell { .. })) {
+            return Ok(None);
+        }
+        let staged_doc = Doc::with_client_id(self.client_id());
+        hydrate_local_doc(&staged_doc, &self.encode_state_as_update_v1())
+            .map_err(AuthorityError::InvalidState)?;
+        let state_vector = staged_doc.transact().state_vector();
+        let touched = stable::apply_cells(&staged_doc, &self.base, ops, origin)
+            .map_err(AuthorityError::InvalidState)?;
+        let txn = staged_doc.transact();
+        let (styles, cells) = stable::project_cells(&txn, &self.base, &touched)
+            .map_err(AuthorityError::InvalidState)?;
+        Ok(Some(StagedCells {
+            effective: true,
+            update: txn.encode_diff_v1(&state_vector),
+            cells,
+            styles: Some(styles),
+            state_bytes: txn.encode_state_as_update_v1(&StateVector::default()).len(),
+            state_vector_entries: txn.state_vector().len(),
+        }))
+    }
+
     pub(crate) fn apply_local_update_v1(
         &mut self,
         update: &[u8],

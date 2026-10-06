@@ -317,6 +317,9 @@ pub struct Workbook {
     exact_visits: u64,
     /// Whether every cell override is keyed as this replica writes it.
     canonical_overrides: bool,
+    /// Commits every local edit through the whole projection.
+    #[cfg(test)]
+    whole_local_commits: bool,
     /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
     /// stored epoch and part-bytes hash.
     chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
@@ -528,6 +531,8 @@ impl Workbook {
             exact_epoch: None,
             exact_visits: 0,
             canonical_overrides: authority_canonical,
+            #[cfg(test)]
+            whole_local_commits: false,
             chart_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -890,6 +895,40 @@ impl Workbook {
             && self.last_calculation.limited_cells.is_empty()
             && self.exact_visits <= EXACT_RECALC_VISITS;
         self.exact_epoch = clean.then_some(self.model_epoch);
+    }
+
+    /// Whether an incremental recalculation may build on the model: a clean
+    /// whole one gave it and nothing spills.
+    fn is_exact(&self) -> bool {
+        self.exact_epoch == Some(self.model_epoch) && !has_array_formulas(&self.model)
+    }
+
+    /// After a user's cell edit recalculated from the edited cells, keeps the
+    /// model exact when it was, the cells hold the formulas the graph read,
+    /// and the recalc settled without a cycle, limit or spill within the bound.
+    fn keep_exact(
+        &mut self,
+        exact: bool,
+        edited: &[(SheetId, CellRef, Option<String>)],
+        result: &RecalcResult,
+    ) {
+        let visits = self.exact_visits.saturating_add(result.visits);
+        let keep = exact
+            && result.cycle_cells.is_empty()
+            && result.limited_cells.is_empty()
+            && visits <= EXACT_RECALC_VISITS
+            && !has_array_formulas(&self.model)
+            && edited.iter().all(|(sheet, at, formula)| {
+                self.model
+                    .sheet(*sheet)
+                    .and_then(|sheet| sheet.cell(*at))
+                    .and_then(|cell| cell.formula.as_ref())
+                    == formula.as_ref()
+            });
+        if keep {
+            self.exact_visits = visits;
+            self.exact_epoch = Some(self.model_epoch);
+        }
     }
 
     /// A remote update that edits cells alone, applied to those cells and
@@ -1621,6 +1660,7 @@ impl Workbook {
         }
         mark(EditStage::Validated);
         self.ensure_graph();
+        let exact = self.is_exact();
         let formula = state.formula.clone();
         let ops = vec![Op::SetCell {
             sheet,
@@ -1642,6 +1682,7 @@ impl Workbook {
             options.now_serial,
         );
         mark(EditStage::Recalculated);
+        self.keep_exact(exact, &[(sheet, cell, formula)], &result);
         Ok(self.mutation_result(true, result, &seeds))
     }
 
@@ -1691,6 +1732,7 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
+        let exact = self.is_exact();
         self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
@@ -1709,6 +1751,7 @@ impl Workbook {
             &seeds,
             options.now_serial,
         );
+        self.keep_exact(exact, &touched, &result);
         Ok(self.mutation_result(true, result, &seeds))
     }
 
@@ -2571,7 +2614,33 @@ impl Workbook {
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(ops);
-        if self.is_collaborative() {
+        if let Some(staged) = self.stage_local_cells(ops)? {
+            self.authority
+                .apply_local_update_v1(&staged.update, SyncOrigin::User)
+                .map_err(authority_error)?;
+            for (sheet, at, mut cell) in staged.cells {
+                let target = self
+                    .model
+                    .sheet_mut(sheet)
+                    .ok_or_else(|| Error::InvalidOperation("missing projected sheet".into()))?;
+                // The whole path's `retain_formula_caches`, for these cells.
+                if let (Some(cell), Some(current)) = (cell.as_mut(), target.cell(at))
+                    && cell.formula.is_some()
+                    && cell.formula == current.formula
+                {
+                    cell.value = current.value.clone();
+                }
+                target.set_cell(at, cell.unwrap_or_default());
+            }
+            // What installing a projection resets.
+            self.preserved.forget_shared_strings();
+            self.bump_model_epoch();
+            self.update_sheet_info_cache(ops, &prior_styles);
+            self.emit_update(UpdateEvent {
+                update: staged.update,
+                origin: UpdateOrigin::Local,
+            });
+        } else if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
@@ -2665,6 +2734,33 @@ impl Workbook {
         }
         self.edited_since_open = true;
         Ok(())
+    }
+
+    /// A user's batch of `SetCell`s staged without projecting the workbook,
+    /// when the cells it projects leave the model the whole projection would:
+    /// no spill whose cells that projection resets, no keys it alone finds.
+    fn stage_local_cells(&self, ops: &[Op]) -> Result<Option<StagedCells>> {
+        #[cfg(test)]
+        if self.whole_local_commits {
+            return Ok(None);
+        }
+        if !self.is_collaborative() || !self.canonical_overrides || has_array_formulas(&self.model)
+        {
+            return Ok(None);
+        }
+        let Some(staged) = self
+            .authority
+            .stage_local_cells_v1(ops, SyncOrigin::User)
+            .map_err(authority_error)?
+        else {
+            return Ok(None);
+        };
+        if staged.styles.as_ref() != Some(&self.model.styles) {
+            return Ok(None);
+        }
+        validate_collaboration_size(&staged.update)?;
+        validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
+        Ok(Some(staged))
     }
 
     fn stage_local_update(&self, ops: &[Op], origin: SyncOrigin) -> Result<StagedLocalUpdate> {
@@ -3174,6 +3270,13 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
             sheet.set_array_formula(at, range);
         }
     }
+}
+
+fn has_array_formulas(model: &WorkbookModel) -> bool {
+    model
+        .sheets
+        .iter()
+        .any(|sheet| sheet.array_formulas().next().is_some())
 }
 
 fn retain_formula_caches(current: &WorkbookModel, projected: &mut WorkbookModel) {

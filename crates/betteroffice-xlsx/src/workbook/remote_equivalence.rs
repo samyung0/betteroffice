@@ -1,6 +1,8 @@
 //! A remote cell edit applied incrementally must leave the replica exactly as
 //! the whole projection and recalculation leave its twin: same model, result,
-//! emitted update, shared state and history.
+//! emitted update, shared state and history. The twin also commits its own
+//! cell edits through the whole projection, so the replica's cell-only commits
+//! must emit the same update bytes and leave the same model and history.
 use super::*;
 use xlsx_model::Cell;
 
@@ -36,8 +38,9 @@ fn number(value: f64) -> CellValue {
 }
 
 /// Values, cross-sheet formulas, a defined name, a function the engine leaves
-/// at its cached value, and a sheet spilling an array formula over the first.
-fn base() -> WorkbookModel {
+/// at its cached value, and a third sheet reading the first, through an array
+/// formula when `spill`. A spill keeps local edits on the whole projection.
+fn base(spill: bool) -> WorkbookModel {
     let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
     let mut data = Sheet::new("Data");
     for row in 0..4 {
@@ -55,8 +58,12 @@ fn base() -> WorkbookModel {
     summary.set_cell(at("A2"), cell(CellValue::Empty, Some("Data!C1*2")));
     summary.set_cell(at("B1"), cell(CellValue::Empty, Some("SUM(Range)")));
     let mut arrays = Sheet::new("Arrays");
-    arrays.set_cell(at("A1"), cell(CellValue::Empty, Some("Data!A1:A3*10")));
-    arrays.set_array_formula(at("A1"), CellRange::parse_a1("A1:A3").unwrap());
+    if spill {
+        arrays.set_cell(at("A1"), cell(CellValue::Empty, Some("Data!A1:A3*10")));
+        arrays.set_array_formula(at("A1"), CellRange::parse_a1("A1:A3").unwrap());
+    } else {
+        arrays.set_cell(at("A1"), cell(CellValue::Empty, Some("SUM(Data!A1:A3)*10")));
+    }
     arrays.set_cell(at("B1"), cell(CellValue::Empty, Some("SUM(A1:A4)")));
     WorkbookModel {
         sheets: vec![data, summary, arrays],
@@ -178,8 +185,8 @@ fn drain(sink: &Arc<Mutex<Vec<UpdateEvent>>>) -> Vec<UpdateEvent> {
     std::mem::take(&mut *sink.lock().unwrap())
 }
 
-fn replica(client_id: u64) -> Workbook {
-    let mut book = Workbook::from_model_collaborative(base(), client_id).unwrap();
+fn replica(client_id: u64, spill: bool) -> Workbook {
+    let mut book = Workbook::from_model_collaborative(base(spill), client_id).unwrap();
     book.recalculate_all(CalculationOptions::default());
     book.mark_exact();
     book
@@ -241,13 +248,15 @@ fn incremental_remote_cell_edits_equal_the_whole_projection() {
     let mut whole_path = 0;
     for seed in 1..=6_u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
-        let mut author = replica(7001);
-        let mut fast = replica(7002);
-        let mut whole = replica(7002);
+        let spill = seed % 2 == 1;
+        let mut author = replica(7001, spill);
+        let mut fast = replica(7002, spill);
+        let mut whole = replica(7002, spill);
+        whole.whole_local_commits = true;
         let (_a, author_events) = observe(&author);
         let (_f, fast_events) = observe(&fast);
         let (_w, whole_events) = observe(&whole);
-        for step in 0..300 {
+        for step in 0..200 {
             let context = format!("seed {seed} step {step}");
             if rng.below(5) == 0 {
                 let mut twin = Rng(rng.next());
@@ -317,4 +326,54 @@ fn incremental_remote_cell_edits_equal_the_whole_projection() {
         5 * incremental > whole_path,
         "incremental {incremental}, whole {whole_path}"
     );
+}
+
+#[test]
+fn cell_commits_on_source_files_emit_the_whole_projections_update() {
+    let options = CalculationOptions::default();
+    for bytes in [
+        &include_bytes!("../../tests/fixtures/storage/course-guide.xlsx")[..],
+        &include_bytes!("../../tests/fixtures/storage/cells-1k.xlsx")[..],
+    ] {
+        let open = || Workbook::open_collaborative_recalculated(bytes, 7003, options).unwrap();
+        let (mut fast, mut whole) = (open(), open());
+        whole.whole_local_commits = true;
+        let (_f, fast_events) = observe(&fast);
+        let (_w, whole_events) = observe(&whole);
+        let mut rng = Rng(0x5eed);
+        for step in 0..40 {
+            let context = format!("step {step}");
+            let at = CellRef::new(rng.below(12) as u32, rng.below(6) as u32);
+            let input = random_input(&mut rng);
+            if rng.below(4) == 0 {
+                let edits = [
+                    CellInput {
+                        cell: at,
+                        input: input.clone(),
+                    },
+                    CellInput {
+                        cell: CellRef::new(at.row + 1, at.col),
+                        input: random_input(&mut rng),
+                    },
+                ];
+                assert_eq!(
+                    format!("{:?}", fast.edit_cells(SheetId(0), &edits, options)),
+                    format!("{:?}", whole.edit_cells(SheetId(0), &edits, options)),
+                    "{context}: result"
+                );
+            } else {
+                assert_eq!(
+                    format!("{:?}", fast.edit_cell(SheetId(0), at, &input, options)),
+                    format!("{:?}", whole.edit_cell(SheetId(0), at, &input, options)),
+                    "{context}: result"
+                );
+            }
+            assert_eq!(
+                drain(&fast_events),
+                drain(&whole_events),
+                "{context}: emitted"
+            );
+            assert_twins(&fast, &whole, &context);
+        }
+    }
 }

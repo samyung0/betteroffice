@@ -1738,6 +1738,68 @@ pub(super) fn apply(
     Ok(())
 }
 
+/// [`apply`] for a batch of `SetCell`s that projects only their targets
+/// instead of the workbook. Each op reads its target as `apply` does, so the
+/// writes, and the update, are the same. Returns the written cell keys per
+/// sheet key.
+pub(super) fn apply_cells(
+    doc: &Doc,
+    base: &WorkbookBase,
+    ops: &[Op],
+    origin: SyncOrigin,
+) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut touched = BTreeMap::<String, BTreeSet<String>>::new();
+    let (context, styles, mut current) = {
+        let txn = doc.transact();
+        let context = context(&txn)?;
+        for op in ops {
+            let Op::SetCell { sheet, at, .. } = op else {
+                return Err("not a cell batch".into());
+            };
+            let key = context.sheet(*sheet)?;
+            touched
+                .entry(key.to_owned())
+                .or_default()
+                .insert(context.key(key, *at)?);
+        }
+        let (styles, cells) = project_cells(&txn, base, &touched)?;
+        let current = cells
+            .into_iter()
+            .map(|(sheet, at, cell)| ((sheet, at.row, at.col), cell))
+            .collect::<HashMap<_, _>>();
+        (context, styles, current)
+    };
+    for op in ops {
+        let Op::SetCell { sheet, at, cell } = op else {
+            return Err("not a cell batch".into());
+        };
+        let mut txn = doc.transact_mut_with(origin.as_str());
+        let formats = map(&txn, CELL_FORMATS)?;
+        sync_cell_formats(&formats, &mut txn, &styles)?;
+        let key = context.sheet(*sheet)?;
+        let target = sheet_map(&txn, key)?;
+        let slot = current.entry((*sheet, at.row, at.col)).or_default();
+        let format = slot.as_ref().and_then(|cell| cell.style) != cell.style;
+        let content = slot.as_ref().is_none_or(|old| {
+            old.formula != cell.formula || (cell.formula.is_none() && old.value != cell.value)
+        });
+        let written: Cell = cell.clone().into();
+        write_cell(
+            &mut txn,
+            &target,
+            key,
+            *at,
+            &written,
+            &context,
+            &styles,
+            base,
+            (content, format),
+        )?;
+        *slot = (written != Cell::default()).then_some(written);
+    }
+    Ok(touched)
+}
+
 /// Sheet containers are durable identities. Adding a sheet records its order entry
 /// in Undo, but its original map containers must survive so remote edits and redo
 /// can still address them after the sheet is hidden.
