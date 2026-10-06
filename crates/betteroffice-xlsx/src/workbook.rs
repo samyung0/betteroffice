@@ -711,12 +711,11 @@ impl Workbook {
                 let position = structure.sheet_keys.iter().position(|item| item == &key);
                 if position.is_none_or(|position| {
                     structure.sheet_names[position] != *original || position != index
-                }) {
-                    if let Some(part) = package.reference_naming_sheet(original) {
-                        return Err(Error::InvalidOperation(format!(
-                            "structural update strands preserved part {part}"
-                        )));
-                    }
+                }) && let Some(part) = package.reference_naming_sheet(original)
+                {
+                    return Err(Error::InvalidOperation(format!(
+                        "structural update strands preserved part {part}"
+                    )));
                 }
                 if let Some((rows, cols)) = structure.axis_changes.get(&key) {
                     let part = rows

@@ -1102,13 +1102,14 @@ mod tests {
     #[test]
     fn recalculated_sessions_restore_rebased_checkpoints_with_their_later_edits() {
         let source = formula_xlsx();
-        let now = Some(36526.0);
+        let serial = 36526.0;
+        let now = Some(serial);
         let mut original = Session::open_collaborative(&source, 7061, now).unwrap();
         original
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"20"}"#, now)
             .unwrap();
         let captured = original.encode_state_as_update();
-        let published = original.save_at(now.unwrap()).unwrap();
+        let published = original.save_at(serial).unwrap();
         original
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"30"}"#, now)
             .unwrap();

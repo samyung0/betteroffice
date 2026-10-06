@@ -852,26 +852,24 @@ impl WorkbookAuthority {
         let incoming_doc = Doc::with_client_id(self.client_id());
         hydrate_doc(&incoming_doc, bytes).map_err(AuthorityError::InvalidUpdate)?;
         let txn = incoming_doc.transact();
-        if let Some(meta) = txn.get_map(META) {
-            if let Some(version) = meta
+        if let Some(meta) = txn.get_map(META)
+            && let Some(version) = meta
                 .get(&txn, "schemaVersion")
                 .and_then(|value| value.cast::<i64>().ok())
+        {
+            if self.supports_structure() && version != stable::VERSION {
+                return Err(AuthorityError::InvalidState(
+                    "incoming workbook schema does not match this session".into(),
+                ));
+            }
+            if let Some(fingerprint) = meta
+                .get(&txn, BASE_FINGERPRINT)
+                .and_then(|value| value.cast::<String>().ok())
+                && !self.base.accepts_fingerprint(version, &fingerprint)
             {
-                if self.supports_structure() && version != stable::VERSION {
-                    return Err(AuthorityError::InvalidState(
-                        "incoming workbook schema does not match this session".into(),
-                    ));
-                }
-                if let Some(fingerprint) = meta
-                    .get(&txn, BASE_FINGERPRINT)
-                    .and_then(|value| value.cast::<String>().ok())
-                {
-                    if !self.base.accepts_fingerprint(version, &fingerprint) {
-                        return Err(AuthorityError::InvalidState(
-                            "incoming workbook base does not match the exact source package".into(),
-                        ));
-                    }
-                }
+                return Err(AuthorityError::InvalidState(
+                    "incoming workbook base does not match the exact source package".into(),
+                ));
             }
         }
         Ok(())

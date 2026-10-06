@@ -395,10 +395,13 @@ impl Formula {
         })
     }
     fn resolve(&self, context: &Context) -> Result<String, String> {
-        if let Some(fingerprint) = &self.opaque_context {
-            if *fingerprint != context_fingerprint(context)? {
-                return Err("formula uses reference syntax that cannot follow collaborative structural edits".into());
-            }
+        if let Some(fingerprint) = &self.opaque_context
+            && *fingerprint != context_fingerprint(context)?
+        {
+            return Err(
+                "formula uses reference syntax that cannot follow collaborative structural edits"
+                    .into(),
+            );
         }
         let mut out = String::new();
         let mut cursor = 0;
@@ -1497,14 +1500,12 @@ pub(super) fn apply(
         if let Op::SetChartAnchor {
             sheet, frame, to, ..
         } = op
-        {
-            if before
+            && before
                 .sheet(*sheet)
                 .and_then(|sheet| sheet.charts.iter().find(|chart| chart.frame_id() == *frame))
                 .is_some_and(|chart| chart.anchor == *to)
-            {
-                continue;
-            }
+        {
+            continue;
         }
         let mut after = before.clone();
         xlsx_ops::apply(&mut after, op).map_err(|error| error.to_string())?;
@@ -1661,7 +1662,7 @@ pub(super) fn apply(
                             .iter(&txn)
                             .filter_map(|(id, value)| {
                                 match decode::<BoundRange>(value)
-                                    .and_then(|bound| Ok(bound.resolve(&context, key)))
+                                    .map(|bound| bound.resolve(&context, key))
                                 {
                                     Ok(Some(old))
                                         if (matches!(op, Op::MergeCells { .. })
