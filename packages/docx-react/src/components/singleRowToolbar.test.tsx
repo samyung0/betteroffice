@@ -9,6 +9,7 @@ import type { ComponentProps } from 'react';
 import { EditorToolbar } from './EditorToolbar';
 import { DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { FindReplaceDialog } from './dialogs/FindReplaceDialog';
+import { ZoomControl } from './ui/ZoomControl';
 import { HostMenus, type DocxMenuModel, type HostMenuEntry } from './DocxEditor/hostMenus';
 import {
   DrawnIcon,
@@ -483,6 +484,13 @@ test('a read-only toolbar keeps its zoom dropdown usable, as zoom edits nothing'
   const zoom = bar.getByRole('combobox', { name: zoomLabel }) as HTMLButtonElement;
   const font = bar.getByRole('combobox', { name: en.font.selectAriaLabel }) as HTMLButtonElement;
   expect([zoom.disabled, font.disabled]).toEqual([false, true]);
+});
+
+test("the zoom dropdown offers the View › Zoom menu's levels, 90% included", () => {
+  const onChange = mock(() => {});
+  const { getByRole } = render(<ZoomControl value={0.75} onChange={onChange} />);
+  fireEvent.click(getByRole('button', { name: en.zoom.zoomIn }));
+  expect(onChange).toHaveBeenCalledWith(0.9);
 });
 
 test('host menus report the zoom, so a host can open the next editor at it', () => {
