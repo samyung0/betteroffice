@@ -535,6 +535,7 @@ function XlsxEditorContent({
   const paintedRef = useRef<Painted | null>(null);
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
+  const formulaInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
   const clickStartRef = useRef<CellAddr | null>(null);
   // an in-flight chart drag: which chart, and where the pointer went down.
@@ -816,14 +817,14 @@ function XlsxEditorContent({
                 draft.sheet = info.activeSheet;
               else if (origin === 'remote' && draft) {
                 pendingDraftRef.current = null;
-                const input = editorInputRef.current;
-                const focused = input !== null && input === document.activeElement;
+                // nothing keeps the focus, so the keys still being typed do
+                // nothing until a click instead of editing the sheet now active.
                 suppressBlurRef.current = true;
-                input?.blur();
+                editorInputRef.current?.blur();
                 suppressBlurRef.current = false;
+                formulaInputRef.current?.blur();
                 setEditing(null);
                 setFormulaDraft(null);
-                if (focused) scrollRef.current?.focus({ preventScroll: true });
               }
               setSheetInfo(info);
               setRevision((current) => current + 1);
@@ -2497,6 +2498,7 @@ function XlsxEditorContent({
                 fx
               </span>
               <input
+                ref={formulaInputRef}
                 data-testid="xlsx-formula-input"
                 value={formulaValue}
                 placeholder={t('toolbar.formulaPlaceholder')}
