@@ -13,7 +13,7 @@ mod styles;
 
 use std::collections::HashMap;
 
-use docx_edit::{EditCtx, EngineSession, StoryRange};
+use docx_edit::{EditCtx, EngineSession, StoryRange, UndoSession};
 
 use crate::common::{asset_from_data_url, changed_span, check_replacement};
 use crate::env;
@@ -30,6 +30,9 @@ use project::{Hooks, SaveContext, project_document};
 
 pub(crate) struct DocxSession {
     engine: EngineSession,
+    /// The TS facade tracks Undo before an edit, which keeps deleted items
+    /// from garbage collection; the state must keep them too.
+    undo: UndoSession,
     base: Vec<u8>,
     /// The materialized source package (`materializeDocx`), read on first use.
     document: Option<V>,
@@ -228,6 +231,7 @@ impl DocxSession {
         Ok(Self {
             document: Some(decode_document(&envelope)?),
             engine,
+            undo: UndoSession::new(),
             base: base.to_vec(),
             projected: None,
         })
@@ -524,6 +528,8 @@ impl DocxSession {
         }
         let text = check_replacement(&paragraph.text, command, "DOCX")?.to_owned();
         let span = changed_span(&paragraph.text, &text);
+        self.undo.track(self.engine.doc());
+        self.undo.select_story(&story);
         if span.start < span.end || !span.text.is_empty() {
             let range = StoryRange::new(
                 story.as_str(),
