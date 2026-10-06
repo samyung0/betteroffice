@@ -824,6 +824,46 @@ impl Item {
         &self.id
     }
 
+    /// Patched for BetterOffice: read-only views of an item's links and
+    /// content, for callers that inspect a document's structure without
+    /// changing it (the collaboration server's note limits and edit guards).
+    pub fn origin(&self) -> Option<&ID> {
+        self.origin.as_ref()
+    }
+
+    /// Patched for BetterOffice: see [Item::origin].
+    pub fn right_origin(&self) -> Option<&ID> {
+        self.right_origin.as_ref()
+    }
+
+    /// Patched for BetterOffice: see [Item::origin].
+    pub fn left(&self) -> Option<ItemPtr> {
+        self.left
+    }
+
+    /// Patched for BetterOffice: see [Item::origin].
+    pub fn right(&self) -> Option<ItemPtr> {
+        self.right
+    }
+
+    /// Patched for BetterOffice: the map key of an entry item.
+    pub fn parent_sub(&self) -> Option<&Arc<str>> {
+        self.parent_sub.as_ref()
+    }
+
+    /// Patched for BetterOffice: see [Item::origin].
+    pub fn content(&self) -> &ItemContent {
+        &self.content
+    }
+
+    /// Patched for BetterOffice: the branch holding an integrated item.
+    pub fn parent_branch(&self) -> Option<BranchPtr> {
+        match &self.parent {
+            TypePtr::Branch(branch) => Some(*branch),
+            _ => None,
+        }
+    }
+
     #[inline]
     pub fn range(&self) -> BlockRange {
         BlockRange::new(self.id, self.len)

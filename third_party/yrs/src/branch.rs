@@ -287,6 +287,24 @@ impl Branch {
     }
 
     /// Returns an identifier of an underlying complex data type (eg. is it an Array or a Map).
+    /// Patched for BetterOffice: the first item of a sequence (text, array,
+    /// XML children), for read-only structure walks.
+    pub fn start(&self) -> Option<ItemPtr> {
+        self.start
+    }
+
+    /// Patched for BetterOffice: the item holding a nested branch (`None` for
+    /// a root).
+    pub fn item(&self) -> Option<ItemPtr> {
+        self.item
+    }
+
+    /// Patched for BetterOffice: the current item of each map key (also a
+    /// deleted one), for read-only structure walks.
+    pub fn map_items(&self) -> impl Iterator<Item = (&Arc<str>, ItemPtr)> {
+        self.map.iter().map(|(key, item)| (key, *item))
+    }
+
     pub fn type_ref(&self) -> &TypeRef {
         &self.type_ref
     }

@@ -1,4 +1,4 @@
-use crate::block::{Block, ClientID, ItemContent, ItemPtr};
+use crate::block::{Block, BlockRange, ClientID, ItemContent, ItemPtr};
 use crate::block_store::BlockStore;
 use crate::branch::{Branch, BranchPtr};
 use crate::doc::{DocAddr, Options};
@@ -365,6 +365,20 @@ impl Store {
         SubdocGuids(self.subdocs.values())
     }
 
+    /// Patched for BetterOffice: the item holding `id`, unless that unit was
+    /// garbage-collected or is not held.
+    pub fn get_item(&self, id: &ID) -> Option<ItemPtr> {
+        self.blocks.get_item(id)
+    }
+
+    /// Patched for BetterOffice: the range of the block holding `id` (an item
+    /// or a garbage-collected run) and its item, if it is one.
+    pub fn get_block_range(&self, id: &ID) -> Option<(BlockRange, Option<ItemPtr>)> {
+        let block = self.blocks.get_block(id)?;
+        let block = block.as_ref();
+        Some((block.range(), block.as_item()))
+    }
+
     /// Patched for BetterOffice: the ID and parent of the first live, countable
     /// item right of the item holding `id` (also a deleted one), found by
     /// walking right from it instead of computing an index.
@@ -634,5 +648,50 @@ impl StoreEvents {
 
     pub fn emit_before_observer_calls(&mut self, txn: &TransactionMut) {
         self.before_observer_calls_events.trigger(|fun| fun(txn));
+    }
+}
+
+#[cfg(test)]
+mod inspection_test {
+    use crate::block::ItemContent;
+    use crate::types::text::Text;
+    use crate::{ClientID, Doc, GetString, ReadTxn, Transact, ID};
+
+    fn id(client: u64, clock: u32) -> ID {
+        ID::new(ClientID::new(client), clock)
+    }
+
+    // Patched for BetterOffice: the read-only accessors walk what the store holds.
+    #[test]
+    fn reads_items_links_and_blocks() {
+        let doc = Doc::with_client_id(7);
+        let text = doc.get_or_insert_text("t");
+        let mut txn = doc.transact_mut();
+        text.insert(&mut txn, 0, "abc");
+        text.insert(&mut txn, 3, "def");
+        text.remove_range(&mut txn, 1, 1);
+        drop(txn);
+        let txn = doc.transact();
+        assert_eq!(text.get_string(&txn), "acdef");
+        let store = txn.store();
+        let first = store.get_item(&id(7, 0)).unwrap();
+        assert_eq!(first.origin(), None);
+        assert!(matches!(first.content(), ItemContent::String(_)));
+        let branch = first.parent_branch().unwrap();
+        assert_eq!(branch.start(), Some(first));
+        assert!(branch.item().is_none());
+        let deleted = first.right().unwrap();
+        assert!(deleted.is_deleted());
+        assert_eq!(deleted.origin(), Some(&id(7, 0)));
+        assert_eq!(deleted.left(), Some(first));
+        // "c" and "def" squashed into one item after the transaction.
+        let last = store.get_item(&id(7, 4)).unwrap();
+        assert_eq!(last.id(), &id(7, 2));
+        assert_eq!(last.origin(), Some(&id(7, 1)));
+        assert_eq!(last.right_origin(), None);
+        let (range, item) = store.get_block_range(&id(7, 4)).unwrap();
+        assert_eq!((range.clock, range.len), (2, 4));
+        assert_eq!(item, Some(last));
+        assert!(store.get_item(&id(8, 0)).is_none());
     }
 }
