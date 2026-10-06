@@ -3393,7 +3393,6 @@ mod tests {
             .split_paragraph(
                 &crate::EditCtx::local("", ""),
                 crate::Position::new("body", 5),
-                None,
             )
             .unwrap();
         let request = serde_json::json!({
@@ -3735,7 +3734,7 @@ mod tests {
             if index + 1 < PARAGRAPHS {
                 engine
                     .doc()
-                    .split_paragraph(&ctx, crate::Position::new("body", cursor), None)
+                    .split_paragraph(&ctx, crate::Position::new("body", cursor))
                     .unwrap();
                 cursor += 1;
             }
@@ -4224,7 +4223,6 @@ mod tests {
             .split_paragraph(
                 &crate::EditCtx::local("", ""),
                 crate::Position::new("body", 5),
-                None,
             )
             .unwrap();
         let request = serde_json::json!({
@@ -4291,7 +4289,7 @@ mod tests {
             .unwrap();
         engine
             .doc()
-            .split_paragraph(&ctx, crate::Position::new("body", 5), None)
+            .split_paragraph(&ctx, crate::Position::new("body", 5))
             .unwrap();
         let para_ids: Vec<String> = engine
             .with_lowered_story("body", &RenderEnv::default(), |blocks| {

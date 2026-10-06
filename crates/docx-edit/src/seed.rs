@@ -4620,7 +4620,7 @@ mod tests {
         let cached_pilcrow = 2 + "Cached second".encode_utf16().count() as u32;
         let ctx = EditCtx::local("Ada".to_owned(), "2026-01-01T00:00:00Z".to_owned());
         document
-            .split_paragraph(&ctx, crate::Position::new("body", cached_pilcrow), None)
+            .split_paragraph(&ctx, crate::Position::new("body", cached_pilcrow))
             .unwrap();
         document
             .insert_text(

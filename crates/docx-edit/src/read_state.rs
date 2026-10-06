@@ -503,7 +503,7 @@ mod tests {
     fn paragraph_state_and_multi_paragraph_flag() {
         let doc = seed("first second");
         let split = doc
-            .split_paragraph(&local(), Position::new("body", 5), None)
+            .split_paragraph(&local(), Position::new("body", 5))
             .unwrap();
         doc.set_paragraph_attr(&split.first_para_id, "pStyle", Any::from("Heading1"))
             .unwrap();
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn paragraph_mark_revision_is_listed_with_its_kind() {
         let doc = seed("one two");
-        doc.split_paragraph(&suggesting("Alice"), Position::new("body", 3), None)
+        doc.split_paragraph(&suggesting("Alice"), Position::new("body", 3))
             .unwrap();
         let revisions = doc.list_revisions().unwrap();
         assert_eq!(revisions.len(), 1);

@@ -445,7 +445,7 @@ impl EditingDoc {
                 len: self.story_len(BODY)?,
             })?;
         let index = if at.index > para.0 {
-            self.split_paragraph(ctx, at.clone(), None)?;
+            self.split_paragraph(ctx, at.clone())?;
             at.index + 1
         } else {
             para.0
@@ -487,7 +487,7 @@ impl EditingDoc {
             .map(|para| para.node_start)
             .unwrap_or(field.start);
         let field = if head < field.start {
-            self.split_paragraph(ctx, Position::new(BODY, field.start), None)?;
+            self.split_paragraph(ctx, Position::new(BODY, field.start))?;
             // The new mark went in ahead of the field, which now opens the next paragraph.
             let Some(field) = self
                 .toc_fields(BODY)?
@@ -1584,8 +1584,7 @@ mod tests {
                     .unwrap();
             } else {
                 let at = index_of(&b, "Some text.") + 10;
-                b.split_paragraph(&ctx(), Position::new(BODY, at), None)
-                    .unwrap();
+                b.split_paragraph(&ctx(), Position::new(BODY, at)).unwrap();
                 b.insert_text(
                     &ctx(),
                     Position::new(BODY, at + 1),

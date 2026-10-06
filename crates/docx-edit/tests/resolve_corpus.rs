@@ -117,7 +117,7 @@ fn reject_deletion_restores_plain_text() {
 fn accept_ppr_ins_clears_the_marker_and_keeps_the_split() {
     let doc = seed("HelloWorld");
     let split = doc
-        .split_paragraph(&suggesting("Ada"), Position::new("body", 5), None)
+        .split_paragraph(&suggesting("Ada"), Position::new("body", 5))
         .unwrap();
     let id = split.revision_ids[0].clone();
     assert_eq!(change_count(&doc), 1); // one paragraph-mark insertion
@@ -138,7 +138,7 @@ fn accept_ppr_ins_clears_the_marker_and_keeps_the_split() {
 fn reject_ppr_ins_joins_back_and_the_second_mark_survives() {
     let doc = seed("HelloWorld");
     let split = doc
-        .split_paragraph(&suggesting("Ada"), Position::new("body", 5), None)
+        .split_paragraph(&suggesting("Ada"), Position::new("body", 5))
         .unwrap();
     let id = split.revision_ids[0].clone();
 
@@ -157,7 +157,7 @@ fn reject_ppr_ins_joins_back_and_the_second_mark_survives() {
 fn accept_ppr_del_joins_and_the_second_paragraphs_ppr_wins() {
     let doc = seed("HelloWorld");
     let split = doc
-        .split_paragraph(&local(), Position::new("body", 5), None)
+        .split_paragraph(&local(), Position::new("body", 5))
         .unwrap();
     doc.set_paragraph_attr(&split.second_para_id, "alignment", Any::from("center"))
         .unwrap();
@@ -189,7 +189,7 @@ fn accept_ppr_del_joins_and_the_second_paragraphs_ppr_wins() {
 fn reject_ppr_del_clears_the_marker_and_keeps_the_split() {
     let doc = seed("HelloWorld");
     let split = doc
-        .split_paragraph(&local(), Position::new("body", 5), None)
+        .split_paragraph(&local(), Position::new("body", 5))
         .unwrap();
     let receipt = doc
         .merge_paragraphs(

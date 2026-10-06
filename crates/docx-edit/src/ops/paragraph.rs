@@ -15,8 +15,7 @@
 //! opposite rule, for the reasons its own module docs give.
 //!
 //! Style resolution stays outside the CRDT. Ops that apply a style take
-//! host-resolved values (a [`ResolvedStyleProjection`] for a split's next
-//! style) rather than reading `styles.xml`.
+//! host-resolved values rather than reading `styles.xml`.
 //!
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
@@ -100,8 +99,7 @@ pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
     "listStartOverride",
 ];
 
-const BORDERS: &str = "borders";
-/// The source formatting a save compares against; it names borders too.
+/// The source formatting a save compares against.
 const ORIGINAL_FORMATTING: &str = "_originalFormatting";
 /// The source paragraph's runs, which a save restores when its text is unchanged.
 const ORIGINAL_RUN_BOUNDARIES: &str = "_originalRunBoundaries";
@@ -180,20 +178,6 @@ pub struct ParaAttrDelta {
     /// readers treat as unset but which wins over a concurrent write as a value
     /// does. Schema-managed identity keys are rejected.
     pub other: BTreeMap<String, Option<Any>>,
-}
-
-/// A split's next style (`w:next`) already resolved by the host, injected
-/// because the `styles.xml` cascade lives outside the CRDT.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ResolvedStyleProjection {
-    pub style_id: String,
-    /// Host-verified existence. `false` yields [`OpError::UnknownStyle`]
-    /// before any mutation.
-    pub known: bool,
-    /// Values for the [`STYLE_CONTROLLED_PARA_ATTRS`] keys — a missing or null
-    /// entry clears that attribute — plus any list attributes when the style
-    /// defines numbering.
-    pub paragraph_attrs: BTreeMap<String, Any>,
 }
 
 struct TargetPara {
@@ -324,51 +308,6 @@ fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: O
     }
 }
 
-/// Writes a style's paragraph-attribute projection: each
-/// [`STYLE_CONTROLLED_PARA_ATTRS`] key is reset to the projection's value or
-/// cleared when it has none, and any extra key (list attributes) is applied as
-/// given. Errors on a schema-managed identity key.
-fn apply_paragraph_attr_projection(
-    txn: &mut TransactionMut<'_>,
-    map: &MapRef,
-    attrs: &BTreeMap<String, Any>,
-) -> OpResult<()> {
-    for key in STYLE_CONTROLLED_PARA_ATTRS {
-        set_or_remove(txn, map, key, attrs.get(key).cloned());
-    }
-    for (key, value) in attrs {
-        if STYLE_CONTROLLED_PARA_ATTRS.contains(&key.as_str()) {
-            continue;
-        }
-        if matches!(key.as_str(), PARA_ID | KIND_KEY) {
-            return Err(OpError::ReservedKey(key.clone()));
-        }
-        set_or_remove(txn, map, key, Some(value.clone()));
-    }
-    if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
-        let mut original = (*original).clone();
-        for key in [
-            "spaceBefore",
-            "spaceAfter",
-            "spaceBeforeLines",
-            "spaceAfterLines",
-            "beforeAutospacing",
-            "afterAutospacing",
-        ] {
-            match attrs.get(key) {
-                Some(value) if *value != Any::Null => {
-                    original.insert(key.to_owned(), value.clone());
-                }
-                _ => {
-                    original.remove(key);
-                }
-            }
-        }
-        map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
-    }
-    Ok(())
-}
-
 /// `pPrChange` records under new revision ids.
 fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -> Any {
     let Any::Array(changes) = changes else {
@@ -394,29 +333,6 @@ fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -
     )
 }
 
-/// `_originalFormatting` without its borders.
-fn original_without_borders(value: &Any) -> Option<Any> {
-    match value {
-        Any::Map(original) if original.contains_key(BORDERS) => {
-            let mut original = (**original).clone();
-            original.remove(BORDERS);
-            Some(Any::Map(Arc::new(original)))
-        }
-        _ => None,
-    }
-}
-
-/// Drops a mark's borders, in its properties and its source formatting alike,
-/// so a save does not write them back from the source.
-fn remove_borders(txn: &mut TransactionMut<'_>, map: &MapRef) {
-    map.remove(txn, BORDERS);
-    if let Some(Out::Any(original)) = map.get(txn, ORIGINAL_FORMATTING)
-        && let Some(original) = original_without_borders(&original)
-    {
-        map.insert(txn, ORIGINAL_FORMATTING, original);
-    }
-}
-
 /// Whether `chunk` is the reference field of a comment, which shows nothing.
 fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
     matches!(&chunk.kind, ChunkKind::Embed(Some(map))
@@ -426,49 +342,31 @@ fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
 impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
-    /// The new pilcrow terminates the FIRST half, carrying the source
-    /// paragraph's properties (but the section it ends) and its ORIGINAL
-    /// paraId. Where the source mark keeps its own properties (a split
-    /// mid-paragraph or before a block), the new mark leaves out the source
-    /// mark's tracked insertion or deletion, and its copy of a tracked
-    /// property change takes new revision ids. The original
-    /// pilcrow is re-minted with a fresh paraId and becomes the second half's
-    /// mark. What the second half then keeps depends on where the split fell:
-    ///
-    /// - mid-paragraph: it keeps its own properties but borders;
-    /// - at the paragraph end, so the second half is empty: it keeps all of
-    ///   them, as Word copies the paragraph mark, but the mark's tracked
-    ///   insertion or deletion and the source's run cache, which stay with
-    ///   the text, and its copy of a tracked property change takes new
-    ///   revision ids;
-    /// - at the end WITH a `next_style`: it switches to that style's
-    ///   projection outright instead, without borders.
-    ///
-    /// A section the paragraph ends stays
-    /// with the second half's mark, which still ends it: the new mark never
-    /// takes `sectPr` or `sectionBreakType`. Suggesting mode stamps the inserted
-    /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
-    /// author when there is one.
+    /// Both halves keep the paragraph's properties, borders included, as Word
+    /// copies the paragraph mark. The new pilcrow terminates the FIRST half
+    /// and takes the ORIGINAL paraId; the original pilcrow is re-minted with a
+    /// fresh paraId and ends the second half. A section the paragraph ends
+    /// stays with the original mark, which still ends it: the new mark never
+    /// takes `sectPr` or `sectionBreakType`. Where the original mark keeps its
+    /// own paragraph (a split mid-paragraph or before a block), the new mark
+    /// leaves out its tracked insertion or deletion, and its copy of a tracked
+    /// property change takes new revision ids. At the paragraph end, so the
+    /// second half is empty, the mark revision and the source runs go with
+    /// the text's paragraph instead, and the empty one's property change takes
+    /// the new ids. Comment references show nothing, so Enter before ones that
+    /// end the paragraph splits after them: it is Enter at the end, and they
+    /// stay with the text. Suggesting mode stamps the inserted pilcrow `ins`
+    /// and `pPrIns`, reusing an adjacent revision by the same author when there
+    /// is one.
     ///
     /// At the start of a slot that opens with a table, block content control
     /// or break, the split inserts an empty paragraph before the block
     /// instead, as Word does: the new mark takes the fresh paraId and the
-    /// properties but borders, and the block's paragraph keeps its own, so
-    /// removing the new paragraph restores the document.
+    /// properties, and the block's paragraph keeps its own, so removing the
+    /// new paragraph restores the document.
     ///
-    /// Errors when `next_style` is not known, before any mutation, and when
-    /// `at` does not address a position inside a story.
-    pub fn split_paragraph(
-        &self,
-        ctx: &EditCtx,
-        mut at: Position,
-        next_style: Option<&ResolvedStyleProjection>,
-    ) -> OpResult<SplitReceipt> {
-        if let Some(projection) = next_style
-            && !projection.known
-        {
-            return Err(OpError::UnknownStyle(projection.style_id.clone()));
-        }
+    /// Errors when `at` does not address a position inside a story.
+    pub fn split_paragraph(&self, ctx: &EditCtx, mut at: Position) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
         let slot = self
             .segment_index(&at.story)?
@@ -493,6 +391,17 @@ impl EditingDoc {
                 before_block = false;
             }
         }
+        let (orig_index, orig_map) =
+            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
+                story: at.story.clone(),
+                index: at.index,
+            })?;
+        if snapshot_range(&story, &txn, at.index, orig_index)
+            .iter()
+            .all(|chunk| is_comment_reference(chunk, &txn))
+        {
+            at.index = orig_index;
+        }
         let chunks = snapshot_range(
             &story,
             &txn,
@@ -506,11 +415,6 @@ impl EditingDoc {
                 })
                 .unwrap_or_else(|| self.next_id())
         });
-        let (orig_index, orig_map) =
-            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
-                story: at.story.clone(),
-                index: at.index,
-            })?;
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
 
@@ -530,21 +434,18 @@ impl EditingDoc {
             &first_para_id
         };
         new_pilcrow.insert(&mut txn, PARA_ID, new_para_id.as_str());
-        // Where the source mark keeps its properties, the new mark is a plain
+        // Where the source mark keeps its paragraph, the new mark is a plain
         // one, as in Word: the source mark's own insertion or deletion stays
         // on it, and the new mark's copy of a tracked property change is a
         // change of its own.
         let source_keeps = before_block || !second_half_empty;
         for (key, value) in &props {
             if SECTION_KEYS.contains(&key.as_str())
-                || (before_block && key == BORDERS)
                 || (source_keeps && (key == PPR_INS || key == PPR_DEL))
             {
                 continue;
             }
-            let value = if before_block && key == ORIGINAL_FORMATTING {
-                original_without_borders(value).unwrap_or_else(|| value.clone())
-            } else if source_keeps && key == PPR_CHANGE {
+            let value = if source_keeps && key == PPR_CHANGE {
                 with_fresh_revision_ids(value, || self.next_id())
             } else {
                 value.clone()
@@ -563,39 +464,23 @@ impl EditingDoc {
                 first_para_id: second_para_id,
                 second_para_id: first_para_id,
                 revision_ids: revision_id.into_iter().collect(),
+                at_end: false,
             });
         }
 
-        // The original pilcrow now terminates the second half: re-mint its identity, then apply
-        // post-split inheritance.
+        // The original pilcrow now terminates the second half: re-mint its identity.
         orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
-            if let Some(next) = next_style {
-                // A `w:next` switch starts from nothing: drop the source
-                // properties before writing the projection.
-                for (key, _) in &props {
-                    if !SECTION_KEYS.contains(&key.as_str()) {
-                        orig_map.remove(&mut txn, key);
-                    }
-                }
-                orig_map.insert(&mut txn, "pStyle", next.style_id.as_str());
-                apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
-                orig_map.remove(&mut txn, BORDERS);
-            } else {
-                // The new paragraph is a copy, as in Word: the mark revision went
-                // to the text's mark with the run cache, and its property change
-                // becomes one of its own.
-                for key in [PPR_INS, PPR_DEL, ORIGINAL_RUN_BOUNDARIES] {
-                    orig_map.remove(&mut txn, key);
-                }
-                if let Some((_, changes)) = props.iter().find(|(key, _)| key == PPR_CHANGE) {
-                    let changes = with_fresh_revision_ids(changes, || self.next_id());
-                    orig_map.insert(&mut txn, PPR_CHANGE, changes);
-                }
+            // The new paragraph is a copy: the mark revision went to the text's
+            // mark with the run cache, and its property change becomes one of
+            // its own.
+            for key in [PPR_INS, PPR_DEL, ORIGINAL_RUN_BOUNDARIES] {
+                orig_map.remove(&mut txn, key);
             }
-        } else {
-            // A mid-paragraph split keeps the second half's pPr but its borders.
-            remove_borders(&mut txn, &orig_map);
+            if let Some((_, changes)) = props.iter().find(|(key, _)| key == PPR_CHANGE) {
+                let changes = with_fresh_revision_ids(changes, || self.next_id());
+                orig_map.insert(&mut txn, PPR_CHANGE, changes);
+            }
         }
         if !ctx.is_suggesting() {
             crate::ops::field_changes::split_field(
@@ -611,6 +496,7 @@ impl EditingDoc {
             first_para_id,
             second_para_id,
             revision_ids: revision_id.into_iter().collect(),
+            at_end: second_half_empty,
         })
     }
 

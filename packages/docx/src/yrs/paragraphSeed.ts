@@ -308,14 +308,19 @@ export function applyNextStyle(
   range: YrsStoryRange,
   nextStyleId: string,
   currentStyleId: string | null,
-  styleValues: ParagraphStyleValues
+  styleValues: ParagraphStyleValues,
+  suggesting?: YrsAuthor
 ): void {
   const copied = Object.keys(session.selectionContext(range).paragraphProperties);
   const other = Object.fromEntries(copied.filter((key) => !KEPT_FOR_NEXT_STYLE.has(key)).map((key) => [key, null]));
-  session.setParagraphAttrs(range, { ...NO_LIST, other });
-  session.applyParagraphStyle(range, nextStyleId, styleValues(nextStyleId, range.story), {
-    [currentStyleId ?? '']: styleValues(currentStyleId, range.story),
-  });
+  session.setParagraphAttrs(range, { ...NO_LIST, other }, suggesting);
+  session.applyParagraphStyle(
+    range,
+    nextStyleId,
+    styleValues(nextStyleId, range.story),
+    { [currentStyleId ?? '']: styleValues(currentStyleId, range.story) },
+    suggesting
+  );
 }
 
 /**

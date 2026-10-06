@@ -226,6 +226,20 @@ function selectedText(run: HTMLElement, range: Range | null): string {
   return node.data.slice(start, end);
 }
 
+/**
+ * Newlines between two blocks: one between paragraphs, and one for each break
+ * between two parts of a paragraph a page or column break splits, whose ids
+ * (`id#n`) count the blocks before them.
+ */
+function paragraphBreaks(previous: string | null, next: string | null): number {
+  const part = (id: string | null): [string | null, number] => {
+    const match = id?.match(/^(.*)#(\d+)$/);
+    return match ? [match[1]!, Number(match[2])] : [id, 0];
+  };
+  const [[from, at], [to, until]] = [part(previous), part(next)];
+  return from === to && until > at ? until - at : 1;
+}
+
 function separator(previous: Piece, next: Piece): string {
   const tabs = '\t'.repeat(next.tabsBefore);
   // what ends the previous run's line: its trailing tabs, then its breaks
@@ -236,7 +250,9 @@ function separator(previous: Piece, next: Piece): string {
     return breaks + (sameRow ? '\t' : '\n') + tabs;
   }
   // A paragraph split across pages keeps its block id on both.
-  if (previous.blockId !== next.blockId) return `${breaks}\n${tabs}`;
+  if (previous.blockId !== next.blockId) {
+    return `${breaks}${'\n'.repeat(paragraphBreaks(previous.blockId, next.blockId))}${tabs}`;
+  }
   if (previous.listMarker) return `\t${tabs}`;
   return breaks + '\n'.repeat(next.breaksBefore) + tabs;
 }

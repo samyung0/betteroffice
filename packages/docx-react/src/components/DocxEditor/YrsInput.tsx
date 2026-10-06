@@ -642,19 +642,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const inheritedStored = storedFormattingByParagraphRef.current.get(
         `${current.story}\u0000${current.paraId}`
       );
-      const receipt = session.splitParagraph(current, suggestingAuthor());
+      const author = suggestingAuthor();
+      const receipt = session.splitParagraph(current, author);
       const currentStyleId =
         typeof currentParagraph?.properties.pStyle === 'string'
           ? currentParagraph.properties.pStyle
           : null;
-      // Enter before a table or break inserts a paragraph ahead of the caret's
-      // own, which keeps its id and must keep its style.
-      const nextStyleId =
-        currentParagraph &&
-        current.offset === currentParagraph.text.length &&
-        receipt.secondParaId !== current.paraId
-          ? (nextParagraphStyle?.(currentStyleId) ?? null)
-          : null;
+      // The engine decides what is the paragraph's end (a field ending it
+      // counts, comment references after it do not).
+      const nextStyleId = receipt.atEnd ? (nextParagraphStyle?.(currentStyleId) ?? null) : null;
       if (nextStyleId && paragraphStyleValues) {
         // The new paragraph carries the current one's style, so its values are known.
         applyNextStyle(
@@ -666,7 +662,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           },
           nextStyleId,
           currentStyleId,
-          paragraphStyleValues
+          paragraphStyleValues,
+          author
         );
       } else if (currentParagraph?.text && inheritedStored) {
         storedFormattingByParagraphRef.current.set(

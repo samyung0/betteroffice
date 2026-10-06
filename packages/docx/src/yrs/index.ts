@@ -391,6 +391,8 @@ export interface YrsSplitReceipt {
   firstParaId: string;
   secondParaId: string;
   revisionId: string | null;
+  /** The split fell at the paragraph's end (comment references aside): the second half is the new empty paragraph. */
+  atEnd: boolean;
 }
 
 /** Low-level UTF-16 story operation for {@link YrsSession.applyRawOps}. */

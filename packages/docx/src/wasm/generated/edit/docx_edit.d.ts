@@ -827,11 +827,11 @@ export class EditSession {
     /**
      * Splits a paragraph at `(story, para_id, offset)` by inserting one
      * pilcrow. The FIRST half keeps the original paraId and the second is
-     * re-minted. A split at the paragraph end gives the empty second half
-     * a copy of the paragraph's properties, as Word does; a mid-paragraph
-     * split keeps its properties but borders. Suggesting
-     * mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
-     * `{"firstParaId","secondParaId","revisionId": string|null}`.
+     * re-minted; both keep the paragraph's properties, as Word does.
+     * Suggesting mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
+     * `{"firstParaId","secondParaId","revisionId": string|null,"atEnd"}`,
+     * `atEnd` when the split fell at the paragraph's end (comment
+     * references aside), so the second half is the new empty paragraph.
      */
     split_paragraph(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
     /**

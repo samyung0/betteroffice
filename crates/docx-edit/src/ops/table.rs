@@ -2961,7 +2961,7 @@ mod tests {
         type_in(&doc, 0, 0, "A");
         type_in(&doc, 0, 1, "B");
         for _ in 0..3 {
-            doc.split_paragraph(&direct(), Position::new("body:t0:r0c1", 1), None)
+            doc.split_paragraph(&direct(), Position::new("body:t0:r0c1", 1))
                 .unwrap();
         }
         let top = runs(&doc, "A")[0].2;

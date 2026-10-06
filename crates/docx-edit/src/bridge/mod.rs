@@ -2703,8 +2703,11 @@ fn flush_paragraph_parts(
             LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
         )
     });
-    let mut part = 0_usize;
-    let mut emit = |runs, start: u32, width: u32| {
+    // A part is numbered by the blocks between it and the first part, so a
+    // copy writes a newline for each break between two parts.
+    let mut first_part = None;
+    let mut emit = |runs, start: u32, width: u32, blocks_before: usize| {
+        let part = blocks_before - *first_part.get_or_insert(blocks_before);
         let mut continuation = ListState::default();
         let mut paragraph = flush_paragraph(
             runs,
@@ -2739,12 +2742,12 @@ fn flush_paragraph_parts(
                 spacing.before_lines = None;
             }
         }
-        part += 1;
         LayoutBlock::Paragraph(paragraph)
     };
     let mut segment_start = 0_u32;
     let mut ends_in_break = false;
-    for drawing in drawings {
+    let count = drawings.len();
+    for (blocks_before, drawing) in drawings.into_iter().enumerate() {
         ends_in_break = matches!(
             drawing.block,
             LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
@@ -2761,6 +2764,7 @@ fn flush_paragraph_parts(
                 segment,
                 segment_start,
                 drawing.pm_offset - segment_start,
+                blocks_before,
             ));
         }
         blocks.push(drawing.block);
@@ -2776,6 +2780,7 @@ fn flush_paragraph_parts(
             raw_runs,
             segment_start,
             paragraph_pm_units - segment_start,
+            count,
         ));
     }
     // The paragraph mark, and after a break its space-after, belong to the
@@ -5829,7 +5834,6 @@ mod tests {
             .split_paragraph(
                 &EditCtx::local("Bob", DATE).suggesting(),
                 Position::new("body", 10),
-                None,
             )
             .unwrap();
         // The first half keeps its ID and the second receives a new one.
@@ -6067,11 +6071,11 @@ mod tests {
             .unwrap();
         let direct = EditCtx::local("", DATE);
         let split = doc
-            .split_paragraph(&direct, Position::new("body", 3), None)
+            .split_paragraph(&direct, Position::new("body", 3))
             .unwrap();
         let first = split.first_para_id.clone();
         let split_two = doc
-            .split_paragraph(&direct, Position::new("body", 7), None)
+            .split_paragraph(&direct, Position::new("body", 7))
             .unwrap();
         let second = split_two.first_para_id.clone();
         assert_eq!(first, "47:0");

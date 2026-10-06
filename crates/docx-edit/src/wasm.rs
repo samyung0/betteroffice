@@ -2766,11 +2766,11 @@ impl EditSession {
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
     /// pilcrow. The FIRST half keeps the original paraId and the second is
-    /// re-minted. A split at the paragraph end gives the empty second half
-    /// a copy of the paragraph's properties, as Word does; a mid-paragraph
-    /// split keeps its properties but borders. Suggesting
-    /// mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
-    /// `{"firstParaId","secondParaId","revisionId": string|null}`.
+    /// re-minted; both keep the paragraph's properties, as Word does.
+    /// Suggesting mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
+    /// `{"firstParaId","secondParaId","revisionId": string|null,"atEnd"}`,
+    /// `atEnd` when the split fell at the paragraph's end (comment
+    /// references aside), so the second half is the new empty paragraph.
     pub fn split_paragraph(
         &self,
         story: &str,
@@ -2784,12 +2784,13 @@ impl EditSession {
         let receipt = self
             .engine
             .doc()
-            .split_paragraph(&ctx, Position::new(story, at), None)
+            .split_paragraph(&ctx, Position::new(story, at))
             .map_err(js_err)?;
         Ok(json!({
             "firstParaId": receipt.first_para_id,
             "secondParaId": receipt.second_para_id,
             "revisionId": receipt.revision_ids.into_iter().next(),
+            "atEnd": receipt.at_end,
         })
         .to_string())
     }

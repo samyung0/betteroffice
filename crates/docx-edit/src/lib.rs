@@ -90,8 +90,8 @@ pub use format::{
 };
 pub use op::{Loc, LocRange, OpError, OpResult, Receipt, SplitReceipt};
 pub use ops::paragraph::{
-    INDENT_STEP_TWIPS, MergeDirection, ParaAttrDelta, ParaSelector, ResolvedStyleProjection,
-    STYLE_CONTROLLED_PARA_ATTRS, STYLE_NUMBERING_ATTRS, TabStop,
+    INDENT_STEP_TWIPS, MergeDirection, ParaAttrDelta, ParaSelector, STYLE_CONTROLLED_PARA_ATTRS,
+    STYLE_NUMBERING_ATTRS, TabStop,
 };
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
@@ -1382,7 +1382,7 @@ mod tests {
     fn split_merge_are_clean_sequence_ops_under_concurrency() {
         let (a, b) = peers("left suffix", 1, 2);
         let split = a
-            .split_paragraph(&local("A"), Position::new("body", 5), None)
+            .split_paragraph(&local("A"), Position::new("body", 5))
             .unwrap();
         b.insert_text(
             &local("B"),
@@ -1469,7 +1469,7 @@ mod tests {
             (6, 23)
         );
 
-        a.split_paragraph(&local("A"), Position::new("body", 11), None)
+        a.split_paragraph(&local("A"), Position::new("body", 11))
             .unwrap();
         let before_delete = resolved(&a, &comment_id);
         assert_eq!((before_delete.start, before_delete.end), (6, 24));
