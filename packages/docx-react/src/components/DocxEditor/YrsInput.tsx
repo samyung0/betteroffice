@@ -631,6 +631,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       // Enter in a list item that was empty before it ends the list, as in Word.
       if (
         !selectedStart &&
+        currentParagraph?.text === '' &&
+        currentParagraph.properties.numPr &&
         paragraphStyleValues &&
         endEmptyListItem(session, current.story, current.paraId, paragraphStyleValues, suggestingAuthor())
       ) {
