@@ -1315,12 +1315,10 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
 }
 
 #[test]
-fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
+fn split_at_end_copies_every_property_but_the_mark_revision_to_the_new_half() {
     let (doc, original) = doc_with("heading");
     let dtf: BTreeMap<String, Any> = [
         ("fontFamily".to_string(), Any::from("Georgia")),
-        ("fontSize".to_string(), Any::Number(48.0)),
-        ("color".to_string(), Any::from("336699")),
         ("bold".to_string(), Any::Bool(true)),
     ]
     .into_iter()
@@ -1337,27 +1335,54 @@ fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
         },
     )
     .unwrap();
-    // Split at the end of the paragraph text → empty second half.
+    let change = |id: &str| {
+        Any::Array(Arc::from([Any::Map(Arc::new(std::collections::HashMap::from([(
+            "info".to_owned(),
+            Any::Map(Arc::new(std::collections::HashMap::from([("id".to_owned(), Any::from(id))]))),
+        )])))]))
+    };
+    for (key, value) in [
+        ("borders", Any::from("boxed")),
+        ("pageBreakBefore", Any::Bool(true)),
+        ("keepNext", Any::Bool(true)),
+        ("_originalFormatting", Any::from("source")),
+        ("_originalRunBoundaries", Any::from("runs")),
+        ("pPrIns", Any::from("mark")),
+        ("pPrChange", change("5")),
+    ] {
+        doc.set_paragraph_attr(&original, key, value).unwrap();
+    }
+    // Split at the end of the paragraph text: an empty second half.
     doc.split_paragraph(&ctx(), Position::new("body", 7), None)
         .unwrap();
     let paragraphs = doc.paragraphs("body").unwrap();
     assert_eq!(paragraphs[1].text, "");
-    let second = &paragraphs[1].properties;
-    // Inherited subset kept: pStyle, spaceAfter; alignment (not in the subset) dropped.
-    assert_eq!(second.get("pStyle"), Some(&Any::from("Normal")));
-    assert_eq!(second.get("spaceAfter"), Some(&Any::Number(240.0)));
-    assert_eq!(second.get("alignment"), None);
-    // dtf reduced to the font/size/color carry — bold dropped.
-    let dtf = second.get("defaultTextFormatting").expect("dtf kept");
-    assert_eq!(map_get(dtf, "fontFamily"), Some(&Any::from("Georgia")));
-    assert_eq!(map_get(dtf, "fontSize"), Some(&Any::Number(48.0)));
-    assert_eq!(map_get(dtf, "color"), Some(&Any::from("336699")));
-    assert_eq!(map_get(dtf, "bold"), None);
-    // First half untouched.
-    assert_eq!(
-        paragraphs[0].properties.get("alignment"),
-        Some(&Any::from("center"))
-    );
+    let (first, second) = (&paragraphs[0].properties, &paragraphs[1].properties);
+    for key in [
+        "pStyle",
+        "alignment",
+        "spaceAfter",
+        "defaultTextFormatting",
+        "borders",
+        "pageBreakBefore",
+        "keepNext",
+        "_originalFormatting",
+    ] {
+        assert_eq!(second.get(key), first.get(key), "{key}");
+        assert!(active(second, key), "{key}");
+    }
+    // The mark revision stays with the text, the run cache with its runs, and
+    // the copied property change takes a new revision id.
+    assert!(active(first, "pPrIns") && !active(second, "pPrIns"));
+    assert!(active(first, "_originalRunBoundaries") && !active(second, "_originalRunBoundaries"));
+    let id = |props: &BTreeMap<String, Any>| match props.get("pPrChange") {
+        Some(Any::Array(changes)) => map_get(&changes[0], "info")
+            .and_then(|info| map_get(info, "id"))
+            .cloned(),
+        _ => None,
+    };
+    assert_eq!(id(first), Some(Any::from("5")));
+    assert!(id(second).is_some_and(|id| id != Any::from("5")));
 }
 
 #[test]
@@ -2960,7 +2985,7 @@ fn undoing_a_comment_removal_restores_the_comment_with_its_field() {
 }
 
 #[test]
-fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new_half() {
+fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_a_split_half() {
     let section = || {
         let attr = |key: &str, value: Any| RawOp::SetEmbedAttr {
             index: 9,
@@ -3005,8 +3030,12 @@ fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new
             second.contains_key("sectPr") && second.contains_key("sectionBreakType"),
             "{at}"
         );
-        assert!(
-            !second.contains_key("borders") && !original_borders(&second),
+        // Mid-paragraph the second half drops its borders; at the end it is a
+        // copy of the paragraph, borders included, as in Word.
+        let ends = at == 9;
+        assert_eq!(
+            second.contains_key("borders") && original_borders(&second),
+            ends,
             "{at}"
         );
     }

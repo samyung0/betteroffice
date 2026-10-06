@@ -790,3 +790,163 @@ describe('Enter around list items', () => {
     session.destroy();
   });
 });
+
+describe('Enter at the end of a paragraph', () => {
+  // Word copies the paragraph mark, so the new paragraph has every direct pPr
+  // the paragraph has, the mark's run properties too. The oracle is the pPr the
+  // save writes for the untouched paragraph.
+  const DIRECT =
+    '<w:pPr><w:keepNext/><w:keepLines/><w:pageBreakBefore/><w:widowControl w:val="0"/><w:suppressLineNumbers/>' +
+    '<w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/><w:bottom w:val="double" w:sz="6" w:space="1" w:color="FF0000"/></w:pBdr>' +
+    '<w:shd w:val="clear" w:color="auto" w:fill="DDEEFF"/><w:tabs><w:tab w:val="center" w:pos="4320"/></w:tabs>' +
+    '<w:kinsoku w:val="0"/><w:snapToGrid w:val="0"/><w:spacing w:before="120" w:after="60"/>' +
+    '<w:ind w:left="360" w:right="240" w:firstLine="180"/><w:contextualSpacing/><w:jc w:val="center"/>' +
+    '<w:textAlignment w:val="center"/><w:outlineLvl w:val="2"/><w:rPr><w:b/><w:color w:val="FF0000"/></w:rPr></w:pPr>';
+  const COPIED = [
+    'pStyle',
+    'alignment',
+    'spaceBefore',
+    'spaceAfter',
+    'indentLeft',
+    'indentRight',
+    'indentFirstLine',
+    'hangingIndent',
+    'borders',
+    'shading',
+    'tabs',
+    'keepNext',
+    'keepLines',
+    'widowControl',
+    'pageBreakBefore',
+    'contextualSpacing',
+    'outlineLevel',
+    'snapToGrid',
+    'defaultTextFormatting',
+    '_originalFormatting',
+  ];
+  const copied = (properties: Record<string, unknown>) =>
+    Object.fromEntries(COPIED.map((key) => [key, properties[key] ?? null]));
+  const bytes = fixture(`<w:p>${DIRECT}<w:r><w:t>Source</w:t></w:r></w:p><w:p/>`);
+  const end = (session: YrsSession, index: number) =>
+    at(session, 'body', index, session.paragraphs('body')[index]!.text.length);
+
+  async function savedBytes(session: YrsSession, base: Document): Promise<Uint8Array<ArrayBuffer>> {
+    return new Uint8Array(await repackDocx(yrsToDocument(session, base)));
+  }
+
+  it('copies every direct property, the mark’s run properties and the kept pPr children', async () => {
+    const { session, base } = await open(bytes);
+    const [source] = pPrs(await savedDocumentXml(session, base));
+    expect(source).toContain('<w:pBdr>');
+    session.splitParagraph(end(session, 0));
+    const [first, added] = session.paragraphs('body');
+    expect(added!.text).toBe('');
+    expect(copied(added!.properties)).toEqual(copied(first!.properties));
+    expect(added!.properties.defaultTextFormatting).toMatchObject({ bold: true, color: { rgb: 'FF0000' } });
+
+    const saved = await savedBytes(session, base);
+    const xml = new TextDecoder().decode((unzipContainer(saved) as Record<string, Uint8Array>)['word/document.xml']);
+    expect(pPrs(xml).slice(0, 2)).toEqual([source, source]);
+    // Reopening the file gives the new paragraph what the editor holds.
+    const reopened = (await open(saved, 9)).session;
+    expect(copied(reopened.paragraphs('body')[1]!.properties)).toEqual(copied(added!.properties));
+    reopened.destroy();
+    session.destroy();
+  });
+
+  it('undoes in one step', async () => {
+    const { session, base } = await open(bytes);
+    const untouched = await savedDocumentXml(session, base);
+    const before = session.paragraphs('body')[0]!.properties;
+    session.beginUndoCapture();
+    session.splitParagraph(end(session, 0));
+    expect(session.undo()).toBe(true);
+    expect(session.paragraphs('body').map(({ text }) => text)).toEqual(['Source', '']);
+    expect(session.paragraphs('body')[0]!.properties).toEqual(before);
+    expect(await savedDocumentXml(session, base)).toBe(untouched);
+    session.destroy();
+  });
+
+  it('leaves the section with the mark that ends it', async () => {
+    const sectioned = fixture(
+      '<w:p><w:pPr><w:jc w:val="right"/><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Section end</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>Next</w:t></w:r></w:p>'
+    );
+    const { session, base } = await open(sectioned);
+    const [source] = pPrs(await savedDocumentXml(session, base));
+    expect(source).toContain('<w:sectPr');
+    session.splitParagraph(end(session, 0));
+    expect(pPrs(await savedDocumentXml(session, base)).slice(0, 2)).toEqual([
+      '<w:pPr><w:jc w:val="right"/></w:pPr>',
+      source,
+    ]);
+    session.destroy();
+  });
+
+  it('keeps a tracked mark revision with the text and gives the copied property change its own id', async () => {
+    const BY = 'w:author="Rev" w:date="2026-01-01T00:00:00Z"';
+    const CHANGE = `<w:pPrChange w:id="5" ${BY}><w:pPr><w:jc w:val="left"/></w:pPr></w:pPrChange>`;
+    const tracked = fixture(
+      `<w:p><w:pPr><w:jc w:val="center"/>${CHANGE}</w:pPr><w:r><w:t>Changed para</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:rPr><w:ins w:id="7" ${BY}/></w:rPr></w:pPr><w:r><w:t>Inserted mark</w:t></w:r></w:p>` +
+        `<w:p><w:pPr><w:rPr><w:del w:id="8" ${BY}/></w:rPr></w:pPr><w:r><w:t>Deleted mark</w:t></w:r></w:p>` +
+        '<w:p/>'
+    );
+    const { session, base } = await open(tracked);
+    for (const index of [2, 1, 0]) session.splitParagraph(end(session, index));
+    const saved = pPrs(await savedDocumentXml(session, base)).map(strip);
+    expect(saved.slice(2)).toEqual([
+      '<w:pPr><w:rPr><w:ins w:id="7"/></w:rPr></w:pPr>',
+      '',
+      '<w:pPr><w:rPr><w:del w:id="8"/></w:rPr></w:pPr>',
+      '',
+      '',
+    ]);
+    const [source, copy] = saved.slice(0, 2);
+    expect(source).toBe(`<w:pPr><w:jc w:val="center"/>${strip(CHANGE)}</w:pPr>`);
+    const [id] = revisionIds(copy!).map(Number);
+    expect(id).toBeGreaterThanOrEqual(2 ** 30);
+    expect(copy).toBe(source!.replace('w:id="5"', `w:id="${id}"`));
+    session.destroy();
+  });
+
+  it('starts a different next style clean, in one Undo step', async () => {
+    const heading = fixture(
+      '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr>' +
+        '<w:kinsoku w:val="0"/><w:spacing w:after="0"/><w:jc w:val="center"/><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>Head</w:t></w:r></w:p><w:p/>'
+    );
+    const { session, base } = await open(heading);
+    const untouched = await savedDocumentXml(session, base);
+    session.beginUndoCapture();
+    const { secondParaId: paraId } = session.splitParagraph(end(session, 0));
+    const range = { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
+    applyNextStyle(session, range, 'Normal', 'Heading1', styleValuesFor(session, base));
+    const properties = session.paragraphs('body')[1]!.properties;
+    expect([properties.pStyle, properties.alignment ?? null, properties.borders ?? null]).toEqual(['Normal', null, null]);
+    expect(properties._originalFormatting ?? null).toBe(null);
+    expect((properties.defaultTextFormatting as Record<string, unknown> | undefined)?.bold ?? null).toBe(null);
+    expect(pPrs(await savedDocumentXml(session, base))[1]).toBe('<w:pPr><w:pStyle w:val="Normal"/></w:pPr>');
+    expect(session.undo()).toBe(true);
+    expect(await savedDocumentXml(session, base)).toBe(untouched);
+    session.destroy();
+  });
+
+  it('converges with a peer’s alignment change, which lands on the new paragraph', async () => {
+    const left = (await open(bytes, 81)).session;
+    const { session: right, base } = await open(bytes, 82);
+    left.splitParagraph(end(left, 0));
+    const { paraId } = right.paragraphs('body')[0]!;
+    right.setParagraphAttrs({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, { alignment: 'right' });
+    sync(left, right);
+    const saved = await savedDocumentXml(left, base);
+    expect(await savedDocumentXml(right, base)).toBe(saved);
+    // The new paragraph ends with the source's own mark, which the peer changed.
+    expect(left.paragraphs('body').map(({ text, properties }) => [text, properties.alignment ?? null])).toEqual([
+      ['Source', 'center'],
+      ['', 'right'],
+      ['', null],
+    ]);
+    left.destroy();
+    right.destroy();
+  });
+});
