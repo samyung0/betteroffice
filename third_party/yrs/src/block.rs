@@ -1731,6 +1731,30 @@ impl Deref for SplittableString {
     }
 }
 
+/// Patched for BetterOffice: a split at a UTF-16 offset inside a surrogate
+/// pair replaces each half with U+FFFD, as Yjs's `ContentString.splice` and
+/// its encoder do (yjs#248). Splitting at the nearest character boundary
+/// instead left an item whose string is one UTF-16 unit longer or shorter
+/// than its clock range, which another peer decodes into different content.
+pub(crate) fn split_str_utf16_lossy(str: &str, offset: usize) -> (String, String) {
+    let mut units = 0;
+    for (index, c) in str.char_indices() {
+        if units >= offset {
+            return (str[..index].to_string(), str[index..].to_string());
+        }
+        let width = c.len_utf16();
+        if units + width > offset {
+            let rest = &str[index + c.len_utf8()..];
+            return (
+                format!("{}\u{FFFD}", &str[..index]),
+                format!("\u{FFFD}{rest}"),
+            );
+        }
+        units += width;
+    }
+    (str.to_string(), String::new())
+}
+
 pub(crate) fn split_str(str: &str, offset: usize, kind: OffsetKind) -> (&str, &str) {
     fn map_utf16_offset(str: &str, offset: u32) -> u32 {
         let mut off = 0;
@@ -1954,20 +1978,19 @@ impl ItemContent {
             ItemContent::Deleted(_) => encoder.write_len(end - start + 1),
             ItemContent::Binary(buf) => encoder.write_buf(buf),
             ItemContent::String(s) => {
+                // Patched for BetterOffice: a slice boundary inside a
+                // surrogate pair writes U+FFFD for the half (split_str_utf16_lossy).
                 let slice = if start != 0 {
-                    let (_, right) = split_str(&s, start as usize, OffsetKind::Utf16);
-                    right
+                    split_str_utf16_lossy(&s, start as usize).1
                 } else {
-                    &s
+                    s.to_string()
                 };
                 let slice = if end != 0 {
-                    let (left, _) =
-                        split_str(&slice, (end - start + 1) as usize, OffsetKind::Utf16);
-                    left
+                    split_str_utf16_lossy(&slice, (end - start + 1) as usize).0
                 } else {
                     slice
                 };
-                encoder.write_string(slice)
+                encoder.write_string(&slice)
             }
             ItemContent::Embed(s) => encoder.write_json(s),
             ItemContent::JSON(s) => {
@@ -2080,9 +2103,17 @@ impl ItemContent {
             }
             ItemContent::String(string) => {
                 // compute offset given in unicode code points into byte position
-                let (left, right) = split_str(&string, offset, encoding);
-                let left: SplittableString = left.into();
-                let right: SplittableString = right.into();
+                let (left, right): (SplittableString, SplittableString) = match encoding {
+                    // Patched for BetterOffice: see split_str_utf16_lossy.
+                    OffsetKind::Utf16 => {
+                        let (left, right) = split_str_utf16_lossy(&string, offset);
+                        (left.as_str().into(), right.as_str().into())
+                    }
+                    _ => {
+                        let (left, right) = split_str(&string, offset, encoding);
+                        (left.into(), right.into())
+                    }
+                };
 
                 //TODO: do we need that in Rust?
                 //let split_point = left.chars().last().unwrap();
@@ -2443,7 +2474,7 @@ impl std::fmt::Display for ItemPtr {
 
 #[cfg(test)]
 mod test {
-    use crate::block::{split_str, SplittableString};
+    use crate::block::{split_str, split_str_utf16_lossy, SplittableString};
     use crate::doc::OffsetKind;
     use std::ops::Deref;
 
@@ -2467,6 +2498,33 @@ mod test {
 
         assert_eq!(s.len(OffsetKind::Bytes), 60, "wrong byte length");
         assert_eq!(s.len(OffsetKind::Utf16), 29, "wrong UTF-16 length");
+    }
+
+    // Patched for BetterOffice: Yjs replaces a split surrogate pair's halves.
+    #[test]
+    fn splitting_a_surrogate_pair_writes_replacement_characters() {
+        use crate::updates::decoder::Decode;
+        use crate::{Doc, GetString, ReadTxn, StateVector, Text, Transact, Update};
+        assert_eq!(
+            split_str_utf16_lossy("a😀b", 2),
+            ("a\u{FFFD}".to_string(), "\u{FFFD}b".to_string())
+        );
+        assert_eq!(split_str_utf16_lossy("a😀b", 3), ("a😀".to_string(), "b".to_string()));
+        let mut options = crate::Options::with_client_id(crate::block::ClientID::new(1));
+        options.offset_kind = OffsetKind::Utf16;
+        let doc = Doc::with_options(options.clone());
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "a😀b");
+        text.insert(&mut doc.transact_mut(), 2, "X");
+        assert_eq!(text.get_string(&doc.transact()), "a\u{FFFD}X\u{FFFD}b");
+        let state = doc.transact().encode_state_as_update_v1(&StateVector::default());
+        options.client_id = crate::block::ClientID::new(2);
+        let copy = Doc::with_options(options);
+        let copied = copy.get_or_insert_text("t");
+        copy.transact_mut()
+            .apply_update(Update::decode_v1(&state).unwrap())
+            .unwrap();
+        assert_eq!(copied.get_string(&copy.transact()), "a\u{FFFD}X\u{FFFD}b");
     }
 
     #[test]
