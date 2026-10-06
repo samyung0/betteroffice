@@ -388,7 +388,8 @@ fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
     let changed = |txn: &TransactionMut<'_>, key: &str, value: &Any| !matches!(map.get(txn, key), Some(Out::Any(current)) if current == *value);
     // `tblPr` is written only when it changed, so table alignment and a peer's
     // row insert both survive. `grid` and `rows` describe one grid and are
-    // written together, so a race keeps one op whole, never half of each.
+    // written together, so a race keeps one op's grid and rows, never half of
+    // each.
     let tbl_pr = to_any_map(data.tbl_pr.clone());
     let grid = to_any_array(data.grid.clone());
     let rows = to_any_array(rows);
