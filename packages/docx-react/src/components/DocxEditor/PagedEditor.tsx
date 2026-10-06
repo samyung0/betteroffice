@@ -522,17 +522,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
     } = props;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
-    const { session: yrsCoreSession, sourceNumbering } = yrsCore;
+    const { session: yrsCoreSession, sourceNumbering, sourceDocument } = yrsCore;
     const paragraphStyleValues = useCallback<ParagraphStyleValues>(
       (styleId, story, list = true) =>
         styleParagraphValues(yrsStyleResolver, styleId, {
           cell: yrsCoreSession
-            ? cellParagraphFormatting(yrsCoreSession, yrsStyleResolver, story)
+            ? cellParagraphFormatting(yrsCoreSession, yrsStyleResolver, story, sourceDocument())
             : undefined,
           numbering: list ? sourceNumbering() : undefined,
           numPr: typeof list === 'object' ? list : undefined,
         }),
-      [sourceNumbering, yrsCoreSession, yrsStyleResolver]
+      [sourceDocument, sourceNumbering, yrsCoreSession, yrsStyleResolver]
     );
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container

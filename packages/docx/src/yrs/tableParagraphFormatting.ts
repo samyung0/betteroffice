@@ -1,4 +1,7 @@
 import type {
+  BlockContent,
+  Document,
+  Paragraph,
   ParagraphFormatting,
   Table,
   TableCellFormatting,
@@ -159,18 +162,118 @@ export function enclosingCellStory(story: string): string | undefined {
   return CELL_STORY.test(id) ? id : undefined;
 }
 
+/** A seeded cell story's source: its table, row, first grid column, the column past its last and the table's column count. */
+export interface SourceCell {
+  table: Table;
+  row: number;
+  column: number;
+  end: number;
+  columns: number;
+}
+
+/** A source document's blocks by the story id the seed gives each, and its cell stories' source cells. */
+export interface SourceStories {
+  stories: Map<string, readonly BlockContent[]>;
+  cells: Map<string, SourceCell>;
+}
+
+/**
+ * Reads `document` as the seed numbers its stories. A vMerge continuation cell
+ * the seed folds into its restart gets no id, as in the seed.
+ */
+export function sourceStories(document: Document): SourceStories {
+  const stories = new Map<string, readonly BlockContent[]>();
+  const cells = new Map<string, SourceCell>();
+  const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
+    stories.set(storyId, blocks);
+    let tableIndex = 0;
+    let sdtIndex = 0;
+    for (const block of blocks) {
+      if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
+        continue;
+      }
+      if (block.type !== 'table') continue;
+      const currentTableIndex = tableIndex++;
+      const spans = calculateRowSpans(block);
+      const columns = tableColumnCount(block);
+      block.rows.forEach((row, rowIndex) => {
+        let column = 0;
+        let cellIndex = 0;
+        for (const cell of row.cells) {
+          const start = column;
+          column += cell.formatting?.gridSpan ?? 1;
+          if (spans.get(`${rowIndex}-${start}`)?.skip) continue;
+          const id = `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex++}`;
+          cells.set(id, { table: block, row: rowIndex, column: start, end: column, columns });
+          visit(id, cell.content);
+        }
+      });
+    }
+  };
+  visit('body', document.package.document.content);
+  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
+  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
+  for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
+  return { stories, cells };
+}
+
+/**
+ * The source cell a cell story seeded from. A table made in the session can
+ * take a deleted table's story ids, so the story must still hold one of the
+ * source cell's paragraphs.
+ */
+export function heldSourceCell(
+  session: Pick<YrsSession, 'paragraphs'>,
+  source: SourceStories,
+  story: string | undefined
+): SourceCell | undefined {
+  const cell = story === undefined ? undefined : source.cells.get(story);
+  if (!cell) return undefined;
+  const ids = new Set(
+    (source.stories.get(story!) ?? [])
+      .filter((block): block is Paragraph => block.type === 'paragraph')
+      .map((block, index) => block.paraId ?? `${story}:p${index}`)
+  );
+  return session.paragraphs(story!).some(({ paraId }) => ids.has(paraId)) ? cell : undefined;
+}
+
+/** The table-style paragraph formatting the seed gave a source cell. */
+export function sourceCellFormatting(cell: SourceCell, styles: StyleResolver): ParagraphFormatting | undefined {
+  const fallback = styles.getDefaultTableStyle();
+  const styleId = cell.table.formatting?.styleId ?? fallback?.styleId;
+  const style = (styleId ? styles.getStyle(styleId) : undefined) ?? fallback;
+  return tableCellParagraphFormatting(cell.table, style, cell.row, cell.column, cell.end, cell.columns);
+}
+
+const sourceReads = new WeakMap<Document, SourceStories>();
+
 /**
  * The table-style paragraph formatting a paragraph in `story` gets from the
- * table cell holding it, read from the session's current table, so cells
- * added or moved in the session (by a peer too) get their own.
+ * table cell holding it. With the materialized `source`, a cell the table had
+ * at open keeps what the seed gave it, as the editor shows it and the save
+ * compares it after rows or columns move; any other cell reads the session's
+ * current table, so cells added or moved in the session (by a peer too) get
+ * their own.
  */
 export function cellParagraphFormatting(
   session: YrsSession,
   styles: StyleResolver | null,
-  story: string
+  story: string,
+  source?: Document | null
 ): ParagraphFormatting | undefined {
   const cell = enclosingCellStory(story);
   if (!cell || !styles) return undefined;
+  if (source) {
+    let read = sourceReads.get(source);
+    if (!read) {
+      read = sourceStories(source);
+      sourceReads.set(source, read);
+    }
+    const seeded = heldSourceCell(session, read, cell);
+    if (seeded) return sourceCellFormatting(seeded, styles);
+  }
   const parent = cell.replace(CELL_STORY, '');
   let payloads = tableReads?.tables.get(parent);
   if (!payloads) {

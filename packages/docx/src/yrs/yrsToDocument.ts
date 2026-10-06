@@ -54,11 +54,13 @@ import type {
 import type { YrsSession } from './index';
 import { seededParagraphProperties, styleListRendering } from './paragraphSeed';
 import {
-  calculateRowSpans,
   enclosingCellStory,
-  tableCellParagraphFormatting,
-  tableColumnCount,
+  heldSourceCell,
+  sourceCellFormatting,
+  sourceStories,
   tablePayloadCellFormatting,
+  type SourceCell,
+  type SourceStories,
 } from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
 
@@ -2378,58 +2380,6 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
   return paragraphs;
 }
 
-/** A seeded cell story's source: its table, row, first grid column and the column past its last. */
-interface BaseCell {
-  table: Table;
-  row: number;
-  column: number;
-  end: number;
-}
-
-/**
- * Each story's source blocks by the id the seed gave it. A vMerge
- * continuation cell the seed folds into its restart gets no id, as in the seed.
- */
-function collectBaseStories(
-  document: Document,
-  cells: Map<string, BaseCell>
-): Map<string, readonly BlockContent[]> {
-  const stories = new Map<string, readonly BlockContent[]>();
-  const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
-    stories.set(storyId, blocks);
-    let tableIndex = 0;
-    let sdtIndex = 0;
-    for (const block of blocks) {
-      if (block.type === 'blockSdt') {
-        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
-        continue;
-      }
-      if (block.type !== 'table') continue;
-      const currentTableIndex = tableIndex++;
-      const spans = calculateRowSpans(block);
-      block.rows.forEach((row, rowIndex) => {
-        let column = 0;
-        let cellIndex = 0;
-        for (const cell of row.cells) {
-          const start = column;
-          column += cell.formatting?.gridSpan ?? 1;
-          if (spans.get(`${rowIndex}-${start}`)?.skip) continue;
-          const id = `${storyId}:t${currentTableIndex}:r${rowIndex}c${cellIndex++}`;
-          cells.set(id, { table: block, row: rowIndex, column: start, end: column });
-          visit(id, cell.content);
-        }
-      });
-    }
-  };
-
-  visit('body', document.package.document.content);
-  for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
-  for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
-  for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
-  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
-  return stories;
-}
-
 /** What a seed resolved paragraph properties from besides the paragraph's own pPr. */
 interface SeedSources {
   styles: StyleResolver | null;
@@ -2625,7 +2575,7 @@ class SaveContext {
   /** Every `w14:paraId` the base holds, then each one minted by {@link savedParaId}. */
   private readonly paraIds: Set<number>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
-  private readonly baseCells = new Map<string, BaseCell>();
+  private readonly source: SourceStories;
   private readonly seedSources: SeedSources;
   /** Table-style paragraph formatting per cell story, from each table as the walk reaches it. */
   private readonly cellFormatting = new Map<string, ParagraphFormatting>();
@@ -2650,7 +2600,8 @@ class SaveContext {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
     this.paraIds = new Set([...this.baseParagraphs.keys()].map((id) => parseInt(id, 16)));
-    this.baseStories = collectBaseStories(base, this.baseCells);
+    this.source = sourceStories(base);
+    this.baseStories = this.source.stories;
     this.seedSources = collectSeedSources(session, base, this.baseStories);
     this.projectedComments = projectYrsComments(session, base.package.document.comments);
     this.comments = commentRanges(session, this.projectedComments);
@@ -2717,14 +2668,10 @@ class SaveContext {
   private cellContext(cellStory: string, styles: StyleResolver): ParagraphFormatting | undefined {
     if (!this.cellContexts.has(cellStory)) {
       const current = this.cellFormatting.get(cellStory);
-      const base = this.baseCells.get(cellStory);
+      const base = this.source.cells.get(cellStory);
       let context = current;
       if (base) {
-        const { table, row, column, end } = base;
-        const fallback = styles.getDefaultTableStyle();
-        const styleId = table.formatting?.styleId ?? fallback?.styleId;
-        const style = (styleId ? styles.getStyle(styleId) : undefined) ?? fallback;
-        const seeded = tableCellParagraphFormatting(table, style, row, column, end, tableColumnCount(table));
+        const seeded = sourceCellFormatting(base, styles);
         // Only a cell whose look moved needs the costlier source check.
         if (!sameJson(seeded, current) && this.sourceCell(cellStory)) context = seeded;
       }
@@ -2765,20 +2712,8 @@ class SaveContext {
       : [];
   }
 
-  /**
-   * The source cell a cell story seeded from. A table made in the session can
-   * take a deleted table's story ids, so the story must still hold one of the
-   * source cell's paragraphs.
-   */
-  private sourceCell(story: string | undefined): BaseCell | undefined {
-    const cell = story === undefined ? undefined : this.baseCells.get(story);
-    if (!cell) return undefined;
-    const source = new Set(
-      (this.baseStories.get(story!) ?? [])
-        .filter((block): block is Paragraph => block.type === 'paragraph')
-        .map((block, index) => block.paraId ?? `${story}:p${index}`)
-    );
-    return this.session.paragraphs(story!).some(({ paraId }) => source.has(paraId)) ? cell : undefined;
+  private sourceCell(story: string | undefined): SourceCell | undefined {
+    return heldSourceCell(this.session, this.source, story);
   }
 
   private storyIsClean(storyId: string): boolean {
