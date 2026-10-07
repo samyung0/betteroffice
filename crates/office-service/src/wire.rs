@@ -111,6 +111,14 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
             let to: Vec<BaselineEntry> = typed(arg(args, 1))?;
             value(crate::compare_baselines(&from, &to))
         }
+        "saveEffects" => {
+            let indexed: Vec<BaselineEntry> = typed(arg(args, 1))?;
+            value(crate::save_effects(
+                &base()?,
+                &indexed,
+                checkpoint(2)?.view(),
+            )?)
+        }
         "compare" => value(crate::compare(
             &base()?,
             checkpoint(1)?.view(),

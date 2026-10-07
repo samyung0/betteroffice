@@ -126,3 +126,118 @@ pub fn compare_baselines(from: &[BaselineEntry], to: &[BaselineEntry]) -> Vec<Ne
     }
     effects
 }
+
+/// `compare_baselines` without the `move` of an entry an edit merely
+/// shifted (#6): its position is an index in a story, slide or shape
+/// (`<container>:<n>`), the same container in both, and its order among the
+/// entries both baselines hold in that container is unchanged. A paragraph
+/// typed into or inserted before others moves every later one's index or
+/// offset; that is no change of its own.
+pub fn unshifted_effects(from: &[BaselineEntry], to: &[BaselineEntry]) -> Vec<NetEffect> {
+    use std::collections::HashMap;
+    fn container(position: &str) -> Option<&str> {
+        let (container, index) = position.rsplit_once(':')?;
+        (!index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())).then_some(container)
+    }
+    let (before, after): (HashMap<&str, &BaselineEntry>, HashMap<&str, &BaselineEntry>) = (
+        from.iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect(),
+        to.iter().map(|entry| (entry.id.as_str(), entry)).collect(),
+    );
+    // Each entry's rank among the entries of its container both hold.
+    let ranks = |entries: &[BaselineEntry], other: &HashMap<&str, &BaselineEntry>| {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        let mut ranks: HashMap<String, usize> = HashMap::new();
+        for entry in entries {
+            let Some(held) = other.get(entry.id.as_str()) else {
+                continue;
+            };
+            let Some(place) = container(&entry.position) else {
+                continue;
+            };
+            if container(&held.position) != Some(place) {
+                continue;
+            }
+            let count = counts.entry(place).or_default();
+            ranks.insert(entry.id.clone(), *count);
+            *count += 1;
+        }
+        ranks
+    };
+    let (old, new) = (ranks(from, &after), ranks(to, &before));
+    compare_baselines(from, to)
+        .into_iter()
+        .filter(|effect| {
+            effect.operation != Operation::Move
+                || !old
+                    .get(&effect.id)
+                    .is_some_and(|rank| new.get(&effect.id) == Some(rank))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, value: &str, position: &str) -> BaselineEntry {
+        BaselineEntry {
+            id: id.into(),
+            kind: EffectKind::Text,
+            label: id.into(),
+            value: value.into(),
+            position: position.into(),
+            asset_ref: None,
+            image_sha256: None,
+        }
+    }
+
+    fn operations(effects: Vec<NetEffect>) -> Vec<(String, Operation)> {
+        effects
+            .into_iter()
+            .map(|effect| (effect.id, effect.operation))
+            .collect()
+    }
+
+    /// A paragraph inserted before others and text typed before a field
+    /// shift their indexes and offsets: only the insertion is an effect.
+    #[test]
+    fn shifted_entries_are_no_moves() {
+        let from = [
+            entry("p1", "a", "body:0"),
+            entry("field", "2026", "body:5"),
+            entry("p2", "b", "body:1"),
+        ];
+        let to = [
+            entry("p0", "new", "body:0"),
+            entry("p1", "a", "body:1"),
+            entry("field", "2026", "body:9"),
+            entry("p2", "b", "body:2"),
+        ];
+        assert_eq!(
+            operations(unshifted_effects(&from, &to)),
+            [("p0".into(), Operation::Add)]
+        );
+        assert_eq!(compare_baselines(&from, &to).len(), 4);
+    }
+
+    /// Entries whose order changed, or that left their story, still move.
+    #[test]
+    fn reordered_entries_move() {
+        let from = [
+            entry("p1", "a", "body:0"),
+            entry("p2", "b", "body:1"),
+            entry("p3", "c", "body:2"),
+        ];
+        let to = [
+            entry("p2", "b", "body:0"),
+            entry("p1", "a", "body:1"),
+            entry("p3", "c", "hf:rId1:0"),
+        ];
+        assert_eq!(
+            operations(unshifted_effects(&from, &to)),
+            operations(compare_baselines(&from, &to))
+        );
+    }
+}

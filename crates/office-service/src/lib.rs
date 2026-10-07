@@ -23,7 +23,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub use common::sha256_hex;
 pub use error::{EditCode, Error, Result};
 pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxReplicas};
-pub use session::compare_baselines;
+pub use session::{compare_baselines, unshifted_effects};
 pub use types::*;
 
 use common::assert_checkpoint;
@@ -165,6 +165,18 @@ pub(crate) fn baseline_unguarded(
 ) -> Result<Vec<BaselineEntry>> {
     let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
     Ok(session.entries()?.into_iter().map(Item::baseline).collect())
+}
+
+/// DOCX and PPTX save effects (#6): the checkpoint against the indexed
+/// baseline, without the `move` of entries an edit merely shifted
+/// ([`unshifted_effects`]). The Capy save path compares the same baselines
+/// with `compareBaselines`.
+pub fn save_effects(
+    base: &[u8],
+    indexed: &[BaselineEntry],
+    checkpoint: Checkpoint,
+) -> Result<Vec<NetEffect>> {
+    Ok(unshifted_effects(indexed, &baseline(base, checkpoint)?))
 }
 
 pub fn compare(base: &[u8], from: Checkpoint, to: Checkpoint) -> Result<Vec<NetEffect>> {
