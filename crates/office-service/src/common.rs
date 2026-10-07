@@ -39,7 +39,6 @@ pub(crate) fn assert_checkpoint(
 }
 
 /// office-checkpoint.ts `assetFromDataUrl` for a string `src`.
-#[allow(dead_code)] // The DOCX entries use it; they land with the DOCX port.
 pub(crate) fn asset_from_data_url(src: &str) -> Result<Asset> {
     let unsupported =
         || Error::Engine("Image object does not contain supported embedded image bytes".into());

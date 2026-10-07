@@ -126,17 +126,34 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
         )?),
         "xlsxPendingEffects" => {
             let (base, checkpoint) = (base()?, checkpoint(1)?);
-            match arg(args, 2).as_str() {
-                Some(room) => value(replicas().effects(&base, checkpoint.view(), room)?),
-                None => value(crate::xlsx_pending_effects(&base, checkpoint.view())?),
+            match arg(args, 2) {
+                Value::String(room) if !room.is_empty() => {
+                    value(replicas().effects(&base, checkpoint.view(), room)?)
+                }
+                Value::Null | Value::String(_) => {
+                    value(crate::xlsx_pending_effects(&base, checkpoint.view())?)
+                }
+                _ => Err(Error::Invalid("Expected a room name".into())),
             }
         }
         "configureOfficeReplicas" => {
-            replicas().configure(arg(args, 0).as_u64().unwrap_or_default());
+            // JS `Number.isSafeInteger(budget) && budget >= 0`.
+            const SAFE: f64 = 9_007_199_254_740_991.0;
+            let budget = arg(args, 0)
+                .as_f64()
+                .filter(|budget| budget.fract() == 0.0 && (0.0..=SAFE).contains(budget))
+                .map(|budget| budget as u64)
+                .ok_or_else(|| {
+                    Error::Invalid("Expected a nonnegative replica budget in bytes".into())
+                })?;
+            replicas().configure(budget);
             Ok(Value::Null)
         }
         "dropOfficeReplica" => {
-            replicas().drop_room(arg(args, 0).as_str().unwrap_or_default());
+            let room = arg(args, 0)
+                .as_str()
+                .ok_or_else(|| Error::Invalid("Expected a room name".into()))?;
+            replicas().drop_room(room);
             Ok(Value::Null)
         }
         "officeReplicaStats" => {
