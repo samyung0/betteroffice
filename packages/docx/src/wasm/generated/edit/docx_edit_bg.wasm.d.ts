@@ -77,6 +77,7 @@ export const editsession_new: (a: number) => [number, number, number];
 export const editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_paragraph_unit_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_redo: (a: number) => number;
 export const editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

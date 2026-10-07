@@ -489,3 +489,22 @@ test('a continued field with no end marker is the field only to its paragraph en
   expect(await cut(first.paraId, 1, 5)).toEqual(['Seed', 'line two']);
   expect(await cut(second, 0, 5)).toEqual(['Seed', 'two']);
 });
+
+// Se[break]ed: arrows step over the break as one unit, word steps stop at it.
+test('arrow keys step through a paragraph holding a break unit by unit', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  session.applyRawOps('body', [{ op: 'insertEmbed', index: 2, kind: 'break', payload: {} }]);
+  const textarea = view.getByTestId('yrs-input');
+  const press = async (from: number, key: string, ctrlKey = false) => {
+    act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: from }));
+    fireEvent.keyDown(textarea, { key, ctrlKey });
+    await flush(input);
+    return session.selection()?.head.offset;
+  };
+
+  expect(await press(4, 'ArrowRight')).toBe(5);
+  expect(await press(3, 'ArrowLeft')).toBe(2);
+  expect(await press(0, 'ArrowRight', true)).toBe(3);
+  expect(await press(5, 'ArrowLeft', true)).toBe(3);
+});

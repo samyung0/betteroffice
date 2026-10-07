@@ -569,6 +569,10 @@ export class EditSession {
      */
     paragraph_spans(story: string): string;
     /**
+     * [`EditingDoc::paragraph_unit_text`].
+     */
+    paragraph_unit_text(story: string, para_id: string): string;
+    /**
      * `[{"paraId","text","properties"}, …]` in document order. `text` is the
      * paragraph's plain text without its pilcrow; `properties` is the
      * pilcrow's authored property map (`pStyle`, `alignment` and whatever
@@ -1155,6 +1159,7 @@ export interface InitOutput {
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_unit_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];

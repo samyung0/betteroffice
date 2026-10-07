@@ -3799,6 +3799,14 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// [`EditingDoc::paragraph_unit_text`].
+    pub fn paragraph_unit_text(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
+        self.engine
+            .doc()
+            .paragraph_unit_text(story, para_id)
+            .map_err(js_err)
+    }
+
     pub fn list_comments(&self) -> Result<String, JsValue> {
         let comments = self.engine.doc().list_comments().map_err(js_err)?;
         let values: Vec<Value> = comments

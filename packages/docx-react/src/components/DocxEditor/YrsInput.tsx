@@ -848,7 +848,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const index = map.paragraphs.findIndex((entry) => entry.paraId === head.paraId);
         if (index < 0) return;
         const entry = map.paragraphs[index];
-        const text = session.paragraphs(activeStory)[index]?.text ?? '';
+        const text = session.paragraphUnitText(activeStory, entry.paraId);
         let next = head;
         if (direction === 'home') {
           const target = wholeDocument ? map.paragraphs[0] : entry;
