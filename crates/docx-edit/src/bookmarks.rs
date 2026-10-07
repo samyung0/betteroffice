@@ -177,6 +177,43 @@ pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> 
             }
         }
     }
+    ordered(result)
+}
+
+/// `positions` of every story, reading the anchors once.
+pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u32, Any)>> {
+    let Some(root) = txn.get_map(ROOT) else {
+        return HashMap::new();
+    };
+    let mut stories: HashMap<String, Vec<(u32, Any)>> = HashMap::new();
+    for (_, value) in root.iter(txn) {
+        let Out::YMap(entry) = value else {
+            continue;
+        };
+        let (Some(Out::Any(data)), Some(Out::Any(Any::Array(anchors)))) =
+            (entry.get(txn, "data"), entry.get(txn, "anchors"))
+        else {
+            continue;
+        };
+        for encoded in anchors.iter() {
+            if let Ok(anchor) = decode_anchor(encoded)
+                && let Some(at) = anchor.start.get_offset(txn)
+            {
+                stories
+                    .entry(anchor.story)
+                    .or_default()
+                    .push((at.index, data.clone()));
+            }
+        }
+    }
+    stories
+        .into_iter()
+        .map(|(story, markers)| (story, ordered(markers)))
+        .collect()
+}
+
+/// One story's markers in save order.
+fn ordered(mut result: Vec<(u32, Any)>) -> Vec<(u32, Any)> {
     // Deleting a range can collapse its opposite-facing anchors. Typing in
     // that gap must keep an empty bookmark, never invert its start and end.
     let ends: HashMap<i64, u32> = result
@@ -309,7 +346,15 @@ pub(crate) fn paragraph_properties<T: ReadTxn>(
     story_id: &str,
     story: &TextRef,
 ) -> HashMap<String, Any> {
-    let markers = positions(txn, story_id);
+    paragraph_properties_at(txn, story, &positions(txn, story_id))
+}
+
+/// `paragraph_properties` with the story's `positions`.
+pub(crate) fn paragraph_properties_at<T: ReadTxn>(
+    txn: &T,
+    story: &TextRef,
+    markers: &[(u32, Any)],
+) -> HashMap<String, Any> {
     if markers.is_empty() {
         return HashMap::new();
     }

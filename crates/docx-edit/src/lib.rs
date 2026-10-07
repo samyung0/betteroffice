@@ -721,28 +721,26 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
-        let mut segments: Vec<StorySegment> = Vec::new();
-        for diff in story.diff(&txn, YChange::identity) {
-            let mut content = segment_content(diff.insert, &txn);
-            if let SegmentContent::Pilcrow(properties) = &mut content {
-                bookmarks::project(&mut properties.values, &properties.para_id, &bookmarks);
-            }
-            let attributes = ordered_attrs(diff.attributes.as_deref());
-            // Formatting a run back to its neighbour's attributes leaves a
-            // boundary yrs keeps; the text reads as one run.
-            if let (SegmentContent::Text(text), Some(previous)) = (&content, segments.last_mut())
-                && let SegmentContent::Text(before) = &mut previous.content
-                && previous.attributes == attributes
-            {
-                before.push_str(text);
-                continue;
-            }
-            segments.push(StorySegment {
-                content,
-                attributes,
-            });
-        }
-        Ok(segments)
+        Ok(segments_of(&txn, &story, &bookmarks))
+    }
+
+    /// `story_segments` of every story, reading the bookmark anchors once:
+    /// one story's read scans every bookmark of the document.
+    pub fn all_story_segments(&self) -> HashMap<String, Vec<StorySegment>> {
+        let txn = self.doc.transact();
+        let Some(stories) = txn.get_map(STORIES) else {
+            return HashMap::new();
+        };
+        let mut markers = bookmarks::positions_by_story(&txn);
+        stories
+            .iter(&txn)
+            .filter_map(|(id, value)| {
+                let story = value.cast::<TextRef>().ok()?;
+                let markers = markers.remove(id).unwrap_or_default();
+                let bookmarks = bookmarks::paragraph_properties_at(&txn, &story, &markers);
+                Some((id.to_owned(), segments_of(&txn, &story, &bookmarks)))
+            })
+            .collect()
     }
 
     /// The payloads of `story_id`'s embeds of `kind` in order, read without
@@ -891,6 +889,35 @@ pub(crate) fn decode_update_v1(bytes: &[u8]) -> EditResult<Update> {
         )));
     }
     Update::decode_v1(bytes).map_err(|error| EditError::InvalidUpdate(error.to_string()))
+}
+
+fn segments_of<T: ReadTxn>(
+    txn: &T,
+    story: &TextRef,
+    bookmarks: &HashMap<String, Any>,
+) -> Vec<StorySegment> {
+    let mut segments: Vec<StorySegment> = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        let mut content = segment_content(diff.insert, txn);
+        if let SegmentContent::Pilcrow(properties) = &mut content {
+            bookmarks::project(&mut properties.values, &properties.para_id, bookmarks);
+        }
+        let attributes = ordered_attrs(diff.attributes.as_deref());
+        // Formatting a run back to its neighbour's attributes leaves a
+        // boundary yrs keeps; the text reads as one run.
+        if let (SegmentContent::Text(text), Some(previous)) = (&content, segments.last_mut())
+            && let SegmentContent::Text(before) = &mut previous.content
+            && previous.attributes == attributes
+        {
+            before.push_str(text);
+            continue;
+        }
+        segments.push(StorySegment {
+            content,
+            attributes,
+        });
+    }
+    segments
 }
 
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {

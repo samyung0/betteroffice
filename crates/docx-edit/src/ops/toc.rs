@@ -1453,6 +1453,20 @@ mod tests {
         assert_eq!(doc.toc_fields(BODY).unwrap().len(), 1);
     }
 
+    /// Reading every story at once places the TOC's bookmarks as reading
+    /// each story does.
+    #[test]
+    fn all_story_segments_read_as_each_story() {
+        let doc = open(&package(&body(), false), 22);
+        doc.insert_toc(&ctx(), Position::new(BODY, 0), &layout(&PAGES))
+            .unwrap();
+        let all = doc.all_story_segments();
+        assert!(!all.is_empty());
+        for (story, segments) in all {
+            assert_eq!(segments, doc.story_segments(&story).unwrap(), "{story}");
+        }
+    }
+
     /// A reused bookmark name holding markup characters stays one name.
     #[test]
     fn a_bookmark_name_with_markup_characters_links() {
