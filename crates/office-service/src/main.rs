@@ -1,7 +1,8 @@
 //! `office-service serve`: one JSON request per stdin line, one answer per
-//! stdout line (see `wire`). `office-service bench <request.json> [runs]`:
-//! process CPU time, wall time and memory high-water of each run of one
-//! request, as JSON lines on stdout.
+//! stdout line (see `wire`). `office-service bench <request.json>...`: runs
+//! the requests in order in this process (a replica hit after its miss) and
+//! prints each one's process CPU time, wall time and memory high-water as a
+//! JSON line on stdout.
 
 use std::io::{BufRead, Write};
 use std::time::Instant;
@@ -18,7 +19,7 @@ fn main() {
             Some("serve") => serve(),
             Some("bench") => bench(&args[2..]),
             _ => {
-                eprintln!("usage: office-service serve | bench <request.json> [runs]");
+                eprintln!("usage: office-service serve | bench <request.json>...");
                 std::process::exit(2);
             }
         })
@@ -44,18 +45,17 @@ fn serve() {
     }
 }
 
-fn bench(args: &[String]) {
-    let Some(path) = args.first() else {
-        eprintln!("usage: office-service bench <request.json> [runs]");
+fn bench(paths: &[String]) {
+    if paths.is_empty() {
+        eprintln!("usage: office-service bench <request.json>...");
         std::process::exit(2);
-    };
-    let runs: usize = args.get(1).and_then(|runs| runs.parse().ok()).unwrap_or(1);
-    let request = std::fs::read(path).unwrap_or_else(|error| {
-        eprintln!("{path}: {error}");
-        std::process::exit(2);
-    });
+    }
     let (_, rss_before) = usage::memory();
-    for run in 0..runs {
+    for (run, path) in paths.iter().enumerate() {
+        let request = std::fs::read(path).unwrap_or_else(|error| {
+            eprintln!("{path}: {error}");
+            std::process::exit(2);
+        });
         let cpu = usage::cpu_ms();
         let wall = Instant::now();
         let answer = office_service::wire::call(&request);
@@ -69,6 +69,7 @@ fn bench(args: &[String]) {
             "{}",
             serde_json::json!({
                 "run": run,
+                "request": path,
                 "cpuMs": cpu_ms.round(),
                 "wallMs": wall_ms.round(),
                 "peakMiB": (peak as f64 / 1048576.0 * 10.0).round() / 10.0,
