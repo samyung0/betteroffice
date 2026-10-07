@@ -414,7 +414,6 @@ struct PaginationState {
 #[derive(Debug, Default)]
 struct DisplayState {
     list: Option<DisplayList>,
-    resident_input: Option<docx_layout::display_list::ResidentDisplayInput>,
     frame_epoch: u64,
     display_builds: u64,
     binary_frame_epoch: u64,
@@ -1776,6 +1775,13 @@ impl EngineSession {
         Ok(())
     }
 
+    /// Paginates an input whose clean extents moved out of the retained arena.
+    /// A failure drops that arena, so the next edit takes a full pass.
+    fn paginate_resident(&self, resident: ResidentLayoutInput) -> Result<(), String> {
+        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)
+            .inspect_err(|_| self.pagination.borrow_mut().input = None)
+    }
+
     /// Whether the current resident state can complete a plain body-text edit
     /// without consulting the host. This is checked before the document
     /// mutation so `apply_input` cannot discover a missing measurement
@@ -1861,6 +1867,9 @@ impl EngineSession {
     /// blocks reuse their retained extents (with fresh absolute positions),
     /// changed paragraph blocks are re-measured through `measure_dirty`
     /// (`(block_index, block_key, previous_block, next_block) -> extent`).
+    /// Reused extents move out of the retained arena once every block has
+    /// passed, so a refusal leaves the arena whole; the caller drops the arena
+    /// if the pagination that consumes the result fails.
     fn resident_layout_input_from_blocks(
         &self,
         blocks: &[LayoutBlock],
@@ -1871,103 +1880,142 @@ impl EngineSession {
             &mut LayoutBlock,
         ) -> Result<BlockExtent, String>,
     ) -> Result<ResidentLayoutInput, String> {
-        let pagination = self.pagination.borrow();
-        let previous = pagination
-            .input
-            .as_ref()
-            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
-        let previous_fingerprints = &pagination.block_fingerprints;
-        let paragraph_merge = blocks.len().checked_add(1) == Some(previous.measured.len());
-        if blocks.len() != previous.measured.len() && !paragraph_merge {
-            return Err("resident plain-text input changed the block structure".to_owned());
+        enum Slot {
+            Reuse(usize),
+            Measured(MeasuredBlock),
         }
-        if previous.measured.len() != previous_fingerprints.len() {
-            return Err("resident pagination fingerprints are not built".to_owned());
-        }
-
-        let mut previous_blocks = previous.measured.iter().zip(previous_fingerprints);
-        let mut skipped_merged_paragraph = false;
-        let mut measured = Vec::with_capacity(blocks.len());
+        let mut slots = Vec::with_capacity(blocks.len());
         let mut block_fingerprints = Vec::with_capacity(blocks.len());
         let mut resident_measure_calls = 0_u64;
         let mut resident_reused_blocks = 0_u64;
-        for (block_index, next_block) in blocks.iter().enumerate() {
-            let mut previous_entry = previous_blocks.next().ok_or_else(|| {
-                "resident plain-text input changed the block structure".to_owned()
-            })?;
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
-                if skipped_merged_paragraph || paragraph_identity(&previous_entry.0.block).is_none()
+        {
+            let pagination = self.pagination.borrow();
+            let previous = pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+            let previous_fingerprints = &pagination.block_fingerprints;
+            let paragraph_merge = blocks.len().checked_add(1) == Some(previous.measured.len());
+            if blocks.len() != previous.measured.len() && !paragraph_merge {
+                return Err("resident plain-text input changed the block structure".to_owned());
+            }
+            if previous.measured.len() != previous_fingerprints.len() {
+                return Err("resident pagination fingerprints are not built".to_owned());
+            }
+
+            let mut previous_blocks = previous
+                .measured
+                .iter()
+                .zip(previous_fingerprints)
+                .enumerate();
+            let mut skipped_merged_paragraph = false;
+            for (block_index, next_block) in blocks.iter().enumerate() {
+                let mut previous_entry = previous_blocks.next().ok_or_else(|| {
+                    "resident plain-text input changed the block structure".to_owned()
+                })?;
+                if paragraph_merge
+                    && !resident_block_slots_match(&previous_entry.1.0.block, next_block)
+                {
+                    if skipped_merged_paragraph
+                        || paragraph_identity(&previous_entry.1.0.block).is_none()
+                    {
+                        return Err(
+                            "resident plain-text input changed the block structure".to_owned()
+                        );
+                    }
+                    skipped_merged_paragraph = true;
+                    previous_entry = previous_blocks.next().ok_or_else(|| {
+                        "resident plain-text input changed the block structure".to_owned()
+                    })?;
+                }
+                if paragraph_merge
+                    && !resident_block_slots_match(&previous_entry.1.0.block, next_block)
+                {
+                    return Err(
+                        "resident plain-text input changed stable block identity".to_owned()
+                    );
+                }
+                let (previous_index, (previous_measured, previous_fingerprint)) = previous_entry;
+                let (Some((next_id, _)), Some((previous_id, _))) = (
+                    paragraph_identity(next_block),
+                    paragraph_identity(&previous_measured.block),
+                ) else {
+                    if *next_block != previous_measured.block {
+                        return Err(
+                            "resident plain-text input changed a non-paragraph block".to_owned()
+                        );
+                    }
+                    slots.push(Slot::Reuse(previous_index));
+                    block_fingerprints.push(*previous_fingerprint);
+                    resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
+                    continue;
+                };
+                let key = block_key(next_id);
+                if key != block_key(previous_id) {
+                    return Err(
+                        "resident plain-text input changed stable block identity".to_owned()
+                    );
+                }
+                if *next_block == previous_measured.block {
+                    slots.push(Slot::Reuse(previous_index));
+                    block_fingerprints.push(*previous_fingerprint);
+                    resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
+                    continue;
+                }
+
+                let mut next_measured_block = next_block.clone();
+                let measure = measure_dirty(
+                    block_index,
+                    &key,
+                    &previous_measured.block,
+                    &mut next_measured_block,
+                )?;
+                let measured_block = MeasuredBlock {
+                    block: next_measured_block,
+                    measure,
+                };
+                block_fingerprints.push(measured_fingerprint(&measured_block)?);
+                slots.push(Slot::Measured(measured_block));
+                resident_measure_calls = resident_measure_calls.wrapping_add(1);
+            }
+            if let Some((_, (removed, _))) = previous_blocks.next() {
+                if !paragraph_merge
+                    || skipped_merged_paragraph
+                    || paragraph_identity(&removed.block).is_none()
+                    || previous_blocks.next().is_some()
                 {
                     return Err("resident plain-text input changed the block structure".to_owned());
                 }
                 skipped_merged_paragraph = true;
-                previous_entry = previous_blocks.next().ok_or_else(|| {
-                    "resident plain-text input changed the block structure".to_owned()
-                })?;
             }
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
-                return Err("resident plain-text input changed stable block identity".to_owned());
-            }
-            let (previous_measured, previous_fingerprint) = previous_entry;
-            let (Some((next_id, _)), Some((previous_id, _))) = (
-                paragraph_identity(next_block),
-                paragraph_identity(&previous_measured.block),
-            ) else {
-                if *next_block != previous_measured.block {
-                    return Err(
-                        "resident plain-text input changed a non-paragraph block".to_owned()
-                    );
-                }
-                measured.push(MeasuredBlock {
-                    block: next_block.clone(),
-                    measure: previous_measured.measure.clone(),
-                });
-                block_fingerprints.push(*previous_fingerprint);
-                resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
-                continue;
-            };
-            let key = block_key(next_id);
-            if key != block_key(previous_id) {
-                return Err("resident plain-text input changed stable block identity".to_owned());
-            }
-            if *next_block == previous_measured.block {
-                measured.push(MeasuredBlock {
-                    block: next_block.clone(),
-                    measure: previous_measured.measure.clone(),
-                });
-                block_fingerprints.push(*previous_fingerprint);
-                resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
-                continue;
-            }
-
-            let mut next_measured_block = next_block.clone();
-            let measure = measure_dirty(
-                block_index,
-                &key,
-                &previous_measured.block,
-                &mut next_measured_block,
-            )?;
-            let measured_block = MeasuredBlock {
-                block: next_measured_block,
-                measure,
-            };
-            block_fingerprints.push(measured_fingerprint(&measured_block)?);
-            measured.push(measured_block);
-            resident_measure_calls = resident_measure_calls.wrapping_add(1);
-        }
-        if let Some((removed, _)) = previous_blocks.next() {
-            if !paragraph_merge
-                || skipped_merged_paragraph
-                || paragraph_identity(&removed.block).is_none()
-                || previous_blocks.next().is_some()
-            {
+            if paragraph_merge && !skipped_merged_paragraph {
                 return Err("resident plain-text input changed the block structure".to_owned());
             }
-            skipped_merged_paragraph = true;
         }
-        if paragraph_merge && !skipped_merged_paragraph {
-            return Err("resident plain-text input changed the block structure".to_owned());
-        }
+
+        let mut pagination = self.pagination.borrow_mut();
+        let previous = pagination
+            .input
+            .as_mut()
+            .expect("resident pagination input checked above");
+        let measured = slots
+            .into_iter()
+            .zip(blocks)
+            .map(|(slot, next_block)| match slot {
+                Slot::Reuse(index) => MeasuredBlock {
+                    block: next_block.clone(),
+                    measure: std::mem::replace(
+                        &mut previous.measured[index].measure,
+                        BlockExtent::Unsupported,
+                    ),
+                },
+                Slot::Measured(measured) => measured,
+            })
+            .collect();
+        let options = previous.options.clone();
+        // The retained arena gave up its extents: nothing may reuse it again.
+        pagination.measured_with = None;
+        drop(pagination);
 
         let mut measurement = self.measurement.borrow_mut();
         measurement.resident_measure_calls = measurement
@@ -1977,10 +2025,7 @@ impl EngineSession {
             .resident_reused_blocks
             .wrapping_add(resident_reused_blocks);
         Ok(ResidentLayoutInput {
-            input: LayoutInput {
-                measured,
-                options: previous.options.clone(),
-            },
+            input: LayoutInput { measured, options },
             block_fingerprints,
         })
     }
@@ -2146,10 +2191,14 @@ impl EngineSession {
                 self.apply_and_layout_regions_full()?;
             }
             let extras = self.resident_region_display_extras()?;
-            return self.build_display_list_frame(&extras, expected_frame_epoch);
+            return self.build_display_list_frame_observed(
+                &extras,
+                expected_frame_epoch,
+                &mut || {},
+            );
         }
         let resident = self.resident_layout_input(story)?;
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.paginate_resident(resident)?;
         let extras = self
             .display
             .borrow()
@@ -2287,7 +2336,7 @@ impl EngineSession {
             Err(reason) => return Ok(Err(reason)),
         };
         phase(RegionResidentPhase::Measured);
-        self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
+        self.paginate_resident(resident)?;
         let mut pagination = self.pagination.borrow_mut();
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
@@ -2311,7 +2360,14 @@ impl EngineSession {
             .extras_json
             .clone()
             .ok_or_else(|| "resident display extras are not built".to_owned())?;
-        let mut value: serde_json::Value = serde_json::from_str(&extras)
+        self.region_display_extras(&extras)
+    }
+
+    /// `extras` with the retained region pass's headers/footers in place of
+    /// its own, re-serialized: a host frame and the next key then hash the
+    /// same bytes, so the key keeps the incremental display path.
+    fn region_display_extras(&self, extras: &str) -> Result<String, String> {
+        let mut value: serde_json::Value = serde_json::from_str(extras)
             .map_err(|error| format!("parse display extras: {error}"))?;
         let fields = value
             .as_object_mut()
@@ -2375,10 +2431,7 @@ impl EngineSession {
             profile.measure_ms = finished - started;
             started = finished;
 
-            self.layout_document_value_with_fingerprints(
-                resident.input,
-                resident.block_fingerprints,
-            )?;
+            self.paginate_resident(resident)?;
             let finished = now();
             profile.paginate_ms = finished - started;
             started = finished;
@@ -2418,7 +2471,6 @@ impl EngineSession {
             serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();
         display.list = Some(list);
-        display.resident_input = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
         Ok(display_json)
@@ -2426,12 +2478,22 @@ impl EngineSession {
 
     /// Build the retained display list and return a binary FrameDelta v1.
     /// `expected_frame_epoch` is the last frame the host actually applied. A
-    /// mismatch automatically widens to a full recovery frame.
+    /// mismatch automatically widens to a full recovery frame. After a region
+    /// pass, its retained headers/footers replace those in `extras_json`, as
+    /// on every key.
     pub fn build_display_list_frame(
         &self,
         extras_json: &str,
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
+        if self.regions.borrow().is_some() {
+            let extras = self.region_display_extras(extras_json)?;
+            return self.build_display_list_frame_observed(
+                &extras,
+                expected_frame_epoch,
+                &mut || {},
+            );
+        }
         self.build_display_list_frame_observed(extras_json, expected_frame_epoch, &mut || {})
     }
 
@@ -2453,54 +2515,33 @@ impl EngineSession {
                 .as_ref()
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
-            if pagination.last_incremental && display.extras_fingerprint == extras_fingerprint {
-                let rebuilt_pages = pagination
-                    .rebuilt_page_end
-                    .saturating_sub(pagination.rebuilt_page_start);
-                let incremental = if let DisplayState {
-                    list: Some(previous),
-                    resident_input: Some(resident_input),
-                    ..
-                } = &mut *display
-                {
-                    docx_layout::update_resident_display_list_incremental_observed(
-                        input,
-                        layout,
-                        resident_input,
-                        previous,
-                        pagination.rebuilt_page_start,
-                        pagination.rebuilt_page_end,
-                        &pagination.position_deltas,
-                        observe_display_phase,
-                    )?
-                } else {
-                    false
-                };
-                if !incremental {
-                    let (resident_input, list) = docx_layout::build_resident_display_list_observed(
+            let rebuilt = pagination.rebuilt_page_start..pagination.rebuilt_page_end;
+            let incremental = pagination.last_incremental
+                && display.extras_fingerprint == extras_fingerprint
+                && rebuilt.start <= rebuilt.end
+                && rebuilt.end <= layout.pages.len()
+                && match display.list.as_mut() {
+                    Some(previous) => docx_layout::update_resident_display_pages_observed(
                         input,
                         layout,
                         extras_json,
+                        previous,
+                        rebuilt.clone(),
+                        &pagination.position_deltas,
                         observe_display_phase,
-                    )?;
-                    display.resident_input = Some(resident_input);
-                    display.list = Some(list);
-                }
-                (
-                    incremental,
-                    rebuilt_pages,
-                    pagination.rebuilt_page_start,
-                    pagination.rebuilt_page_end,
-                )
+                    )?,
+                    None => false,
+                };
+            if incremental {
+                (true, rebuilt.len(), rebuilt.start, rebuilt.end)
             } else {
-                let (resident_input, list) = docx_layout::build_resident_display_list_observed(
+                display.list = Some(docx_layout::build_resident_display_pages_observed(
                     input,
                     layout,
                     extras_json,
+                    0..layout.pages.len(),
                     observe_display_phase,
-                )?;
-                display.resident_input = Some(resident_input);
-                display.list = Some(list);
+                )?);
                 (false, layout.pages.len(), 0, layout.pages.len())
             }
         };
@@ -3278,7 +3319,9 @@ mod tests {
 
     /// Hosts list the final section twice, and typing before a page break
     /// shifts the break's story-index id: neither leaves the fast path, and the
-    /// result equals a fresh engine's full pass over the same document.
+    /// result equals a fresh engine's full pass over the same document. The
+    /// host's extras arrive in its own key order, which must not cost the key
+    /// its incremental display build.
     #[test]
     fn region_fast_path_survives_a_repeated_final_section_and_a_shifted_page_break() {
         const FONT: &[u8] =
@@ -3307,7 +3350,8 @@ mod tests {
             "renderEnv": {}
         })
         .to_string();
-        let extras = serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string();
+        let extras =
+            format!(r#"{{"resolvedCommentIds":[],"fontChains":{{"calibri|0|0":[{font_id}]}}}}"#);
         let ctx = crate::EditCtx::local("", "");
         let engine_with = |typed: bool| {
             let engine = EngineSession::new(140);

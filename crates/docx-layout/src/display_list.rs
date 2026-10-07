@@ -1182,23 +1182,6 @@ pub struct BuildInput {
     comment_threads: Vec<CommentThreadIn>,
 }
 
-/// Parsed display input retained by the editing engine across edits. Its fields
-/// stay private so the display-input contract can evolve without becoming a
-/// second public layout model.
-pub struct ResidentDisplayInput {
-    input: BuildInput,
-}
-
-impl std::fmt::Debug for ResidentDisplayInput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResidentDisplayInput")
-            .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len())
-            .finish_non_exhaustive()
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BuildInputWire {
@@ -10226,274 +10209,136 @@ pub fn build_display_list_value_from_resident_with_fonts(
     extras: &str,
     fonts: &ooxml_text::FontStore,
 ) -> Result<DisplayList, String> {
-    build_display_list_value_from_resident_with_fonts_observed(
+    build_resident_display_pages_with_fonts_observed(
         pagination,
         layout,
         extras,
         fonts,
+        0..layout.pages.len(),
         &mut || {},
     )
 }
 
-pub fn build_display_list_value_from_resident_with_fonts_observed(
+/// Pages converted into the display input at a time, which bounds the
+/// transient copy of typed pagination state a whole-list build holds.
+const RESIDENT_DISPLAY_BATCH: usize = 8;
+
+/// Builds display pages `pages` straight from typed pagination state. Each
+/// batch converts only its pages and the blocks they place, then drops them,
+/// so no second copy of the measured arena or the layout outlives the build.
+/// `observe_phase` fires after the first batch is converted and after the
+/// last one is built.
+pub fn build_resident_display_pages_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
     extras: &str,
     fonts: &ooxml_text::FontStore,
+    pages: std::ops::Range<usize>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<DisplayList, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let list = build_display_list(&parsed, fonts);
-    observe_phase();
-    Ok(list)
-}
-
-/// Build and retain the parsed display-input mirror alongside its first list.
-/// Incremental engine frames can then refresh only the pages they rebuild.
-pub fn build_resident_display_list_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    observe_phase: &mut impl FnMut(),
-) -> Result<(ResidentDisplayInput, DisplayList), String> {
-    let input = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let list = build_display_list(&input, fonts);
-    observe_phase();
-    Ok((ResidentDisplayInput { input }, list))
-}
-
-fn resident_build_input(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-) -> Result<BuildInput, String> {
+    if pages.start > pages.end || pages.end > layout.pages.len() {
+        return Err("resident display page range is invalid".to_owned());
+    }
     let mut wire: serde_json::Map<String, Value> =
         serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
-    wire.insert(
-        "measured".to_owned(),
-        serde_json::to_value(&pagination.measured)
-            .map_err(|e| format!("encode resident measured blocks: {e}"))?,
-    );
     wire.insert(
         "options".to_owned(),
         serde_json::to_value(&pagination.options)
             .map_err(|e| format!("encode resident layout options: {e}"))?,
     );
-    wire.insert(
-        "layout".to_owned(),
-        serde_json::to_value(layout).map_err(|e| format!("encode resident layout: {e}"))?,
-    );
+    // Pages and the blocks they place come from pagination, never the extras.
+    wire.insert("layout".to_owned(), serde_json::json!({}));
+    wire.insert("measured".to_owned(), serde_json::json!([]));
     let mut wire = Value::Object(wire);
     normalize_integral_json_numbers(&mut wire);
-    serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))
-}
-
-/// Rebuild only pages dirtied by incremental pagination, retain the remaining
-/// typed display pages, and patch absolute body positions on the converged
-/// suffix. The caller gates extras/page-count changes before selecting this
-/// path; violations widen to a full display build here as a final safeguard.
-pub fn build_display_list_value_from_resident_incremental_with_fonts(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    previous: &DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-) -> Result<DisplayList, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    if previous.pages.len() != parsed.layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > parsed.layout.pages.len()
-    {
-        return Ok(build_display_list(&parsed, fonts));
-    }
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&parsed, fonts, Some(&selected));
-    let mut rebuilt_by_index: HashMap<usize, DisplayPage> = rebuilt
-        .pages
-        .into_iter()
-        .map(|page| (page.page_index as usize, page))
+    let mut input: BuildInput =
+        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
+    input.layout.pages = std::iter::repeat_with(PageIn::default)
+        .take(layout.pages.len())
         .collect();
-    let mut pages = Vec::with_capacity(previous.pages.len());
-    for (page_index, previous_page) in previous.pages.iter().enumerate() {
-        if let Some(page) = rebuilt_by_index.remove(&page_index) {
-            pages.push(page);
-            continue;
+
+    let mut list = DisplayList {
+        contract_version: input.contract_version,
+        pages: Vec::with_capacity(pages.len()),
+    };
+    let mut converted = false;
+    let mut start = pages.start;
+    while start < pages.end {
+        let batch = start..(start + RESIDENT_DISPLAY_BATCH).min(pages.end);
+        let mut keys = HashSet::new();
+        for index in batch.clone() {
+            let page: PageIn =
+                convert_resident_value(&layout.pages[index], "resident display layout page")?;
+            keys.extend(page.fragments.iter().filter_map(fragment_block_key));
+            input.layout.pages[index] = page;
         }
-        let mut page = previous_page.clone();
-        page.page_index = page_index as u64;
-        if page_index >= rebuilt_page_end {
-            shift_page_body_positions(&mut page, position_deltas);
+        for measured in &pagination.measured {
+            if crate_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref())) {
+                input.measured.push(convert_resident_value(
+                    measured,
+                    "resident display measured block",
+                )?);
+            }
         }
-        pages.push(page);
+        if !converted {
+            converted = true;
+            observe_phase();
+        }
+        let selected: HashSet<usize> = batch.clone().collect();
+        list.pages
+            .extend(build_display_list_selected(&input, fonts, Some(&selected)).pages);
+        for index in batch.clone() {
+            input.layout.pages[index] = PageIn::default();
+        }
+        input.measured.clear();
+        start = batch.end;
     }
-    Ok(DisplayList {
-        contract_version: rebuilt.contract_version,
-        pages,
-    })
+    if !converted {
+        observe_phase();
+    }
+    observe_phase();
+    Ok(list)
 }
 
-/// In-place counterpart to
-/// [`build_display_list_value_from_resident_incremental_with_fonts`]. Engine
-/// sessions already own the previous display arena, so unchanged pages do not
-/// need to be deep-cloned for every keystroke. Dirty pages are replaced after
-/// they have been built successfully; the converged suffix receives only its
-/// absolute-position adjustment.
-pub fn update_display_list_value_from_resident_incremental_with_fonts(
+/// Rebuilds the pages pagination dirtied in `previous` and patches absolute
+/// body positions on the converged suffix after them. `Ok(false)` leaves
+/// `previous` untouched when its page count no longer matches the layout.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_pages_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
     extras: &str,
     fonts: &ooxml_text::FontStore,
     previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
+    rebuilt_pages: std::ops::Range<usize>,
     position_deltas: &HashMap<String, i64>,
+    observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
-    update_display_list_value_from_resident_incremental_with_fonts_observed(
+    if previous.pages.len() != layout.pages.len() {
+        return Ok(false);
+    }
+    let rebuilt = build_resident_display_pages_with_fonts_observed(
         pagination,
         layout,
         extras,
         fonts,
-        previous,
-        rebuilt_page_start,
-        rebuilt_page_end,
-        position_deltas,
-        &mut || {},
-    )
-}
-
-pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    if previous.pages.len() != parsed.layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > parsed.layout.pages.len()
-    {
-        *previous = build_display_list(&parsed, fonts);
-        observe_phase();
-        return Ok(false);
-    }
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&parsed, fonts, Some(&selected));
-    observe_phase();
-    previous.contract_version = rebuilt.contract_version;
-    for page in rebuilt.pages {
-        let page_index = page.page_index as usize;
-        previous.pages[page_index] = page;
-    }
-    for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
-        page.page_index = page_index as u64;
-        shift_page_body_positions(page, position_deltas);
-    }
-    Ok(true)
-}
-
-/// Incremental engine path backed by a retained parsed display input. Only
-/// rebuilt layout pages and the measured blocks referenced by those pages
-/// cross the typed-layout compatibility adapter on each edit.
-pub fn update_resident_display_list_incremental_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    fonts: &ooxml_text::FontStore,
-    resident: &mut ResidentDisplayInput,
-    previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    if previous.pages.len() != layout.pages.len()
-        || resident.input.layout.pages.len() != layout.pages.len()
-    {
-        return Ok(false);
-    }
-    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
-        return Err("resident display incremental page range is invalid".to_owned());
-    }
-
-    refresh_resident_display_pages(
-        &mut resident.input,
-        pagination,
-        layout,
-        rebuilt_page_start..rebuilt_page_end,
+        rebuilt_pages.clone(),
+        observe_phase,
     )?;
-    observe_phase();
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&selected));
-    observe_phase();
     previous.contract_version = rebuilt.contract_version;
-    for page in rebuilt.pages {
-        let page_index = page.page_index as usize;
+    for (page_index, page) in rebuilt_pages.clone().zip(rebuilt.pages) {
         previous.pages[page_index] = page;
     }
-    for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
+    for (page_index, page) in previous
+        .pages
+        .iter_mut()
+        .enumerate()
+        .skip(rebuilt_pages.end)
+    {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
     }
     Ok(true)
-}
-
-fn refresh_resident_display_pages(
-    input: &mut BuildInput,
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    rebuilt_pages: std::ops::Range<usize>,
-) -> Result<(), String> {
-    let mut selected_blocks = HashSet::new();
-    for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
-        for fragment in &page.fragments {
-            if let Some(key) = fragment_block_key(fragment) {
-                selected_blocks.insert(key);
-            }
-        }
-        input.layout.pages[page_index] = page;
-    }
-
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
-        .collect();
-    let mut pending_blocks = selected_blocks;
-    for measured in &pagination.measured {
-        let key = crate_block_key(&measured.block);
-        if !pending_blocks.remove(&key) {
-            continue;
-        }
-        let index = current_indices
-            .get(&key)
-            .copied()
-            .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
-    }
-    if let Some(key) = pending_blocks.into_iter().next() {
-        return Err(format!(
-            "resident pagination measured block {key:?} is missing"
-        ));
-    }
-    Ok(())
 }
 
 fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
@@ -10506,38 +10351,25 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     serde_json::from_value(value).map_err(|error| format!("parse {label}: {error}"))
 }
 
-fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
-    match block {
-        crate::types::LayoutBlock::Paragraph(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Table(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Image(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::TextBox(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Shape(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Chart(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::SectionBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::PageBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::ColumnBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Unsupported => "unsupported".to_owned(),
-    }
-}
-
-fn crate_block_id_key(id: &crate::types::BlockId) -> String {
-    match id {
-        crate::types::BlockId::Str(value) => value.clone(),
-        crate::types::BlockId::Num(value) => value.to_string(),
-    }
-}
-
-fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
-    match &measured.block {
-        BlockIn::Paragraph(value) => Some(block_key(&value.id)),
-        BlockIn::Table(value) => Some(block_key(&value.id)),
-        BlockIn::Image(value) => Some(block_key(&value.id)),
-        BlockIn::TextBox(value) => Some(block_key(&value.id)),
-        BlockIn::Shape(value) => Some(block_key(&value.id)),
-        BlockIn::Chart(value) => Some(block_key(&value.id)),
-        BlockIn::Unsupported => None,
-    }
+/// Key of a block a layout fragment can place.
+fn crate_block_key(block: &crate::types::LayoutBlock) -> Option<std::borrow::Cow<'_, str>> {
+    use crate::types::{BlockId, LayoutBlock};
+    let id = match block {
+        LayoutBlock::Paragraph(value) => &value.id,
+        LayoutBlock::Table(value) => &value.id,
+        LayoutBlock::Image(value) => &value.id,
+        LayoutBlock::TextBox(value) => &value.id,
+        LayoutBlock::Shape(value) => &value.id,
+        LayoutBlock::Chart(value) => &value.id,
+        LayoutBlock::SectionBreak(_)
+        | LayoutBlock::PageBreak(_)
+        | LayoutBlock::ColumnBreak(_)
+        | LayoutBlock::Unsupported => return None,
+    };
+    Some(match id {
+        BlockId::Str(value) => std::borrow::Cow::Borrowed(value),
+        BlockId::Num(value) => std::borrow::Cow::Owned(value.to_string()),
+    })
 }
 
 fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
@@ -10553,6 +10385,9 @@ fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
 }
 
 fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i64>) {
+    if deltas.is_empty() {
+        return;
+    }
     for primitive in &mut page.primitives {
         let attrs = match primitive {
             Primitive::Text(value) => &mut value.attrs,
@@ -10563,11 +10398,12 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             Primitive::Shape(value) => &mut value.attrs,
             Primitive::Decoration(value) => &mut value.attrs,
         };
-        let key = attrs
-            .block_key
-            .clone()
-            .or_else(|| attrs.block_id.as_ref().map(ToString::to_string));
-        let Some(delta) = key.as_ref().and_then(|key| deltas.get(key)).copied() else {
+        let delta = match (&attrs.block_key, &attrs.block_id) {
+            (Some(key), _) => deltas.get(key.as_str()),
+            (None, Some(id)) => deltas.get(id.to_string().as_str()),
+            (None, None) => None,
+        };
+        let Some(&delta) = delta else {
             continue;
         };
         attrs.doc_start = attrs.doc_start.map(|value| value + delta);
@@ -10663,6 +10499,75 @@ mod tests {
         let chains: HashMap<String, Vec<u32>> =
             serde_json::from_value(value["fontChains"].clone()).unwrap();
         assert_eq!(chains["calibri|0|0"], vec![1]);
+    }
+
+    #[test]
+    fn resident_pages_build_in_batches_like_the_json_envelope() {
+        let measured: Vec<Value> = (0..40)
+            .map(|index| {
+                let text = format!("para {index}");
+                let start = index * 10;
+                serde_json::json!({
+                    "block": {
+                        "kind": "paragraph",
+                        "id": format!("p{index}"),
+                        "runs": [{
+                            "kind": "text",
+                            "text": text,
+                            "pmStart": start + 1,
+                            "pmEnd": start + 1 + text.len()
+                        }],
+                        "pmStart": start,
+                        "pmEnd": start + 2 + text.len()
+                    },
+                    "measure": {
+                        "kind": "paragraph",
+                        "totalHeight": 20,
+                        "lines": [{
+                            "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": text.len(),
+                            "width": 40, "ascent": 14, "descent": 4, "lineHeight": 20
+                        }]
+                    }
+                })
+            })
+            .collect();
+        let mut input: crate::types::Input = serde_json::from_value(serde_json::json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 300, "h": 100},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            }
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut input).unwrap();
+        assert!(layout.pages.len() > RESIDENT_DISPLAY_BATCH);
+        let fonts = ooxml_text::FontStore::new();
+        let envelope = serde_json::json!({
+            "measured": input.measured,
+            "options": input.options,
+            "layout": layout
+        })
+        .to_string();
+
+        let expected = build_display_list_value_with_fonts(&envelope, &fonts).unwrap();
+        assert_eq!(
+            build_display_list_value_from_resident_with_fonts(&input, &layout, "{}", &fonts)
+                .unwrap(),
+            expected
+        );
+        // Blocks or pages riding in the extras never stand in for pagination's.
+        let mut stale: Value = serde_json::from_str(&envelope).unwrap();
+        stale["measured"][0]["block"]["runs"][0]["text"] = "stale".into();
+        assert_eq!(
+            build_display_list_value_from_resident_with_fonts(
+                &input,
+                &layout,
+                &stale.to_string(),
+                &fonts
+            )
+            .unwrap(),
+            expected
+        );
     }
     use serde_json::json;
 

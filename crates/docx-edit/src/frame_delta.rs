@@ -176,13 +176,17 @@ fn encode_frame_delta_inner(
                 if old.visual_fingerprint == page.snapshot.visual_fingerprint
                     && old.primitive_ids == page.snapshot.primitive_ids
                 {
-                    let patches = position_patches(old, &page.snapshot);
-                    if patches.is_empty() {
-                        ops.push(PageOp::Upsert(page));
-                    } else if let Some(runs) = position_shift_runs(old, &page.snapshot) {
+                    // Runs exist only when some position changed, so a page that
+                    // shifts never builds the per-primitive patch list.
+                    if let Some(runs) = position_shift_runs(old, &page.snapshot) {
                         ops.push(PageOp::ShiftPositions(page, runs));
                     } else {
-                        ops.push(PageOp::PatchPositions(page, patches));
+                        let patches = position_patches(old, &page.snapshot);
+                        if patches.is_empty() {
+                            ops.push(PageOp::Upsert(page));
+                        } else {
+                            ops.push(PageOp::PatchPositions(page, patches));
+                        }
                     }
                 } else {
                     ops.push(PageOp::Upsert(page));

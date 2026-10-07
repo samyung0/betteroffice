@@ -208,143 +208,47 @@ pub fn build_display_list_value_from_resident(
     })
 }
 
-pub fn build_display_list_value_from_resident_observed(
+/// Builds display pages `pages` from typed pagination state (see
+/// [`display_list::build_resident_display_pages_with_fonts_observed`]).
+pub fn build_resident_display_pages_observed(
     pagination: &types::Input,
     layout: &types::Layout,
     extras: &str,
+    pages: std::ops::Range<usize>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<display_list::DisplayList, String> {
     MEASURE_FONTS.with(|store| {
-        display_list::build_display_list_value_from_resident_with_fonts_observed(
+        display_list::build_resident_display_pages_with_fonts_observed(
             pagination,
             layout,
             extras,
             &store.borrow(),
+            pages,
             observe_phase,
         )
     })
 }
 
-/// Build a display list while retaining its parsed compatibility input for
-/// page-scoped refreshes on subsequent resident edits.
-pub fn build_resident_display_list_observed(
-    pagination: &types::Input,
-    layout: &types::Layout,
-    extras: &str,
-    observe_phase: &mut impl FnMut(),
-) -> Result<
-    (
-        display_list::ResidentDisplayInput,
-        display_list::DisplayList,
-    ),
-    String,
-> {
-    MEASURE_FONTS.with(|store| {
-        display_list::build_resident_display_list_with_fonts_observed(
-            pagination,
-            layout,
-            extras,
-            &store.borrow(),
-            observe_phase,
-        )
-    })
-}
-
-/// Incremental resident display build. Only the pagination-dirtied page range
-/// is recompiled; converged suffix pages are retained with body positions
-/// patched from stable block-id deltas.
-pub fn build_display_list_value_from_resident_incremental(
-    pagination: &types::Input,
-    layout: &types::Layout,
-    extras: &str,
-    previous: &display_list::DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &std::collections::HashMap<String, i64>,
-) -> Result<display_list::DisplayList, String> {
-    MEASURE_FONTS.with(|store| {
-        display_list::build_display_list_value_from_resident_incremental_with_fonts(
-            pagination,
-            layout,
-            extras,
-            &store.borrow(),
-            previous,
-            rebuilt_page_start,
-            rebuilt_page_end,
-            position_deltas,
-        )
-    })
-}
-
-/// Update an engine-owned display arena without cloning clean pages.
-pub fn update_display_list_value_from_resident_incremental(
+/// Rebuilds the pagination-dirtied pages of an engine-owned list in place and
+/// shifts the converged suffix's body positions by stable block-id deltas.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_pages_observed(
     pagination: &types::Input,
     layout: &types::Layout,
     extras: &str,
     previous: &mut display_list::DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
+    rebuilt_pages: std::ops::Range<usize>,
     position_deltas: &std::collections::HashMap<String, i64>,
+    observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
     MEASURE_FONTS.with(|store| {
-        display_list::update_display_list_value_from_resident_incremental_with_fonts(
+        display_list::update_resident_display_pages_with_fonts_observed(
             pagination,
             layout,
             extras,
             &store.borrow(),
             previous,
-            rebuilt_page_start,
-            rebuilt_page_end,
-            position_deltas,
-        )
-    })
-}
-
-pub fn update_display_list_value_from_resident_incremental_observed(
-    pagination: &types::Input,
-    layout: &types::Layout,
-    extras: &str,
-    previous: &mut display_list::DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &std::collections::HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    MEASURE_FONTS.with(|store| {
-        display_list::update_display_list_value_from_resident_incremental_with_fonts_observed(
-            pagination,
-            layout,
-            extras,
-            &store.borrow(),
-            previous,
-            rebuilt_page_start,
-            rebuilt_page_end,
-            position_deltas,
-            observe_phase,
-        )
-    })
-}
-
-/// Page-scoped update using the engine's retained parsed display input.
-pub fn update_resident_display_list_incremental_observed(
-    pagination: &types::Input,
-    layout: &types::Layout,
-    resident: &mut display_list::ResidentDisplayInput,
-    previous: &mut display_list::DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &std::collections::HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    MEASURE_FONTS.with(|store| {
-        display_list::update_resident_display_list_incremental_with_fonts_observed(
-            pagination,
-            layout,
-            &store.borrow(),
-            resident,
-            previous,
-            rebuilt_page_start,
-            rebuilt_page_end,
+            rebuilt_pages,
             position_deltas,
             observe_phase,
         )
