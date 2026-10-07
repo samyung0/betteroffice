@@ -3,7 +3,8 @@
 //   bun crates/office-service/parity/replay.ts <recording dir> <office-service binary> [--report <file>] [--only <method>]
 // Seeds and other bytes must be identical; JSON results equal ignoring key
 // order; exports that differ as zips are compared part by part; rebased
-// states that differ as bytes are compared as decoded Yjs content.
+// states that differ as bytes are compared as decoded Yjs content, then as
+// the documents they read as.
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -122,6 +123,50 @@ function yjsContent(state: Uint8Array): string {
   return JSON.stringify({ units, deleted, roots: normal(roots as Json) });
 }
 
+/**
+ * What a state reads as: every text's delta with attributes, every map's
+ * entries, with relative positions resolved to indexes. Equal documents can
+ * still differ in which redundant format items are deleted: yrs's cleanup
+ * after a transaction compares attribute values deeply, Yjs by identity.
+ */
+function documentContent(state: Uint8Array): string {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, state);
+  const value = (item: unknown): unknown => {
+    if (item instanceof Y.Text) {
+      // Adjacent runs with equal attributes read as one run.
+      const runs: Array<[unknown, unknown]> = [];
+      for (const op of item.toDelta() as Array<{ insert: unknown; attributes?: unknown }>) {
+        const attributes = value(op.attributes ?? null);
+        const last = runs.at(-1);
+        if (typeof op.insert === "string" && last && typeof last[0] === "string" && JSON.stringify(last[1]) === JSON.stringify(attributes))
+          last[0] += op.insert;
+        else runs.push([value(op.insert), attributes]);
+      }
+      return runs;
+    }
+    if (item instanceof Y.Map) return Object.fromEntries([...item.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
+    if (item instanceof Y.Array) return item.toArray().map(value);
+    if (item instanceof Uint8Array) {
+      try {
+        const position = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(item), doc);
+        return position ? `@${position.index}:${position.assoc}` : "@unresolved";
+      } catch {
+        return `bytes:${sha(item)}`;
+      }
+    }
+    if (Array.isArray(item)) return item.map(value);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
+    return item;
+  };
+  const roots: Record<string, unknown> = {};
+  for (const name of [...doc.share.keys()].sort()) {
+    const map = doc.getMap(name);
+    roots[name] = map.size ? value(map) : null;
+  }
+  return JSON.stringify(roots);
+}
+
 interface Recorded {
   method: string;
   args: Json[];
@@ -163,9 +208,10 @@ function compare(call: Recorded, answer: { value?: Json; error?: string; kind?: 
     const { state: as, ...arest } = a;
     if (JSON.stringify(normal(erest)) !== JSON.stringify(normal(arest)))
       return ["differ", `TS ${JSON.stringify(normal(erest)).slice(0, 2000)}\n  native ${JSON.stringify(normal(arest)).slice(0, 2000)}`];
-    return yjsContent(bytesOf(es)) === yjsContent(bytesOf(as))
-      ? ["content-equal"]
-      : ["differ", "the states hold different Yjs content"];
+    if (yjsContent(bytesOf(es)) === yjsContent(bytesOf(as))) return ["content-equal"];
+    return documentContent(bytesOf(es)) === documentContent(bytesOf(as))
+      ? ["document-equal"]
+      : ["differ", "the states hold different documents"];
   }
   return ["differ", `TS ${JSON.stringify(normal(expected)).slice(0, 3000)}\n  native ${JSON.stringify(normal(actual)).slice(0, 3000)}`];
 }
