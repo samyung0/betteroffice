@@ -195,32 +195,6 @@ fn replica(client_id: u64, spill: bool) -> Workbook {
     book
 }
 
-/// What a replica holds however it recalculated: formulas, formats and typed
-/// values, without formula results or the cells under a spill.
-fn typed(model: &WorkbookModel) -> Vec<Vec<(CellRef, Cell)>> {
-    model
-        .sheets
-        .iter()
-        .map(|sheet| {
-            sheet
-                .iter_cells()
-                .filter(|(at, _)| {
-                    !sheet
-                        .array_formulas()
-                        .any(|(anchor, range)| anchor != *at && range.contains(*at))
-                })
-                .map(|(at, cell)| {
-                    let mut cell = cell.clone();
-                    if cell.formula.is_some() {
-                        cell.value = CellValue::Empty;
-                    }
-                    (at, cell)
-                })
-                .collect()
-        })
-        .collect()
-}
-
 fn assert_twins(fast: &Workbook, whole: &Workbook, context: &str) {
     assert_eq!(fast.model, whole.model, "{context}: model");
     assert_eq!(
@@ -308,20 +282,25 @@ fn incremental_remote_cell_edits_equal_the_whole_projection() {
                 assert_twins(&fast, &whole, &context);
             }
         }
-        // The author recalculates its own edits from the edited cells alone:
-        // cells downstream of a cycle and spilled cells may differ from what a
-        // whole recalculation gives, so only the shared state and the typed
-        // content are bound to agree with it.
+        // The author recalculated its own edits from the edited cells alone,
+        // the peers each update whole: both must give the same workbook.
         assert_eq!(
             author.encode_state_vector_v1(),
             fast.encode_state_vector_v1(),
             "seed {seed}: shared state converged"
         );
-        assert_eq!(
-            typed(&author.model),
-            typed(&fast.model),
-            "seed {seed}: typed content converged"
-        );
+        if author.model != fast.model {
+            for at in changed_cells_between(&author.model, &fast.model) {
+                eprintln!(
+                    "seed {seed} {}!{}: author {:?} peer {:?}",
+                    at.sheet.0,
+                    at.cell.to_a1(),
+                    author.model.sheet(at.sheet).and_then(|s| s.cell(at.cell)),
+                    fast.model.sheet(at.sheet).and_then(|s| s.cell(at.cell))
+                );
+            }
+        }
+        assert_eq!(author.model, fast.model, "seed {seed}: converged");
     }
     // A cycle anywhere sends every update down the whole path, and the random
     // formulas make many.
@@ -378,5 +357,41 @@ fn cell_commits_on_source_files_emit_the_whole_projections_update() {
             );
             assert_twins(&fast, &whole, &context);
         }
+    }
+}
+
+/// A local edit keeps what array formulas spill, through either commit, and
+/// an edit under a spill recomputes its anchor: a replica that projects the
+/// same state whole agrees after every edit.
+#[test]
+fn local_edits_keep_spilled_values_as_a_whole_recalculation_does() {
+    let options = CalculationOptions::default();
+    let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
+    for whole_local_commits in [false, true] {
+        let mut book = replica(7004, true);
+        book.whole_local_commits = whole_local_commits;
+        let arrays = SheetId(2);
+        for (sheet, cell, input) in [
+            (SheetId(0), "A2", "7"),
+            (SheetId(0), "F6", "1"),
+            (arrays, "A3", "x"),
+            (arrays, "D4", "=A2+1"),
+        ] {
+            book.edit_cell(sheet, at(cell), input, options).unwrap();
+            let mut fresh = replica(7005, true);
+            fresh
+                .apply_update_v1(&book.encode_state_as_update_v1(), options)
+                .unwrap();
+            assert_eq!(book.model, fresh.model, "{cell} {input}");
+        }
+        let value = |cell: &str| {
+            book.model
+                .sheet(arrays)
+                .and_then(|sheet| sheet.cell(at(cell)))
+                .map(|cell| cell.value.clone())
+        };
+        assert_eq!(value("A2"), Some(number(70.0)));
+        assert_eq!(value("A3"), Some(number(30.0)));
+        assert_eq!(value("D4"), Some(number(71.0)));
     }
 }

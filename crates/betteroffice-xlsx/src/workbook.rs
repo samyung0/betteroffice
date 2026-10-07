@@ -1673,7 +1673,7 @@ impl Workbook {
             at: cell,
             cell: state,
         }];
-        self.commit_user(&ops, None)?;
+        let respill = self.commit_user(&ops, None)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
             cell,
@@ -1684,7 +1684,7 @@ impl Workbook {
         let result = recalc_after(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
-            &seeds,
+            &[&seeds[..], &respill[..]].concat(),
             options.now_serial,
         );
         mark(EditStage::Recalculated);
@@ -1739,7 +1739,7 @@ impl Workbook {
         }
         self.ensure_graph();
         let exact = self.is_exact();
-        self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
+        let respill = self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -1754,7 +1754,7 @@ impl Workbook {
         let result = recalc_after(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
-            &seeds,
+            &[&seeds[..], &respill[..]].concat(),
             options.now_serial,
         );
         self.keep_exact(exact, &touched, &result);
@@ -2190,7 +2190,7 @@ impl Workbook {
             }
         }
         self.ensure_graph();
-        self.commit_agent(&ops, proposal.agent_id)?;
+        let respill = self.commit_agent(&ops, proposal.agent_id)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -2205,7 +2205,7 @@ impl Workbook {
         let result = recalc_after(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
-            &seeds,
+            &[&seeds[..], &respill[..]].concat(),
             options.now_serial,
         );
         let mutation = self.mutation_result(true, result, &seeds);
@@ -2615,8 +2615,15 @@ impl Workbook {
         Ok(())
     }
 
-    fn commit_user(&mut self, ops: &[Op], staged: Option<StagedApply>) -> Result<()> {
+    /// Commits a user's ops; returns the array anchors whose spill a cell edit
+    /// reached, which the caller's recalc must include.
+    fn commit_user(
+        &mut self,
+        ops: &[Op],
+        staged: Option<StagedApply>,
+    ) -> Result<Vec<(SheetId, CellRef)>> {
         self.bump_model_epoch();
+        let mut respill = Vec::new();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(ops);
@@ -2654,6 +2661,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.retain_array_formulas(&mut model);
+            respill = retain_spills(&self.model, &mut model, ops);
             self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2693,11 +2701,13 @@ impl Workbook {
             self.preserved_redo.clear();
         }
         self.edited_since_open = true;
-        Ok(())
+        Ok(respill)
     }
 
-    fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+    /// [`Self::commit_user`] for an agent's accepted proposal.
+    fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<Vec<(SheetId, CellRef)>> {
         self.bump_model_epoch();
+        let mut respill = Vec::new();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         let prior_styles = self.pre_edit_cell_styles(ops);
@@ -2709,6 +2719,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.retain_array_formulas(&mut model);
+            respill = retain_spills(&self.model, &mut model, ops);
             self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
@@ -2739,18 +2750,24 @@ impl Workbook {
             self.preserved_redo.clear();
         }
         self.edited_since_open = true;
-        Ok(())
+        Ok(respill)
     }
 
     /// A user's batch of `SetCell`s staged without projecting the workbook,
     /// when the cells it projects leave the model the whole projection would:
-    /// no spill whose cells that projection resets, no keys it alone finds.
+    /// no edited cell under a spill, whose anchor that commit recalculates, no
+    /// keys the projection alone finds.
     fn stage_local_cells(&self, ops: &[Op]) -> Result<Option<StagedCells>> {
         #[cfg(test)]
         if self.whole_local_commits {
             return Ok(None);
         }
-        if !self.is_collaborative() || !self.canonical_overrides || has_array_formulas(&self.model)
+        if !self.is_collaborative()
+            || !self.canonical_overrides
+            || ops.iter().any(|op| match op {
+                Op::SetCell { sheet, at, .. } => in_array(&self.model, *sheet, *at),
+                _ => false,
+            })
         {
             return Ok(None);
         }
@@ -3276,6 +3293,81 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
             sheet.set_array_formula(at, range);
         }
     }
+}
+
+/// Whether `at` anchors or lies under an array formula's rectangle.
+fn in_array(model: &WorkbookModel, sheet: SheetId, at: CellRef) -> bool {
+    model
+        .sheet(sheet)
+        .is_some_and(|sheet| sheet.array_formulas().any(|(_, range)| range.contains(at)))
+}
+
+/// Carries spills over a fresh projection of a cell-edit batch, as
+/// `retain_formula_caches` carries formula results: an array whose anchor
+/// keeps its formula keeps its rectangle and the values under it and under the
+/// rectangle the projection records. An array an edited cell lies under keeps
+/// the projection's rectangle instead, and its anchor is returned to be
+/// recalculated as a whole recalculation would. A batch with any other op
+/// moves rectangles, so nothing is carried.
+fn retain_spills(
+    current: &WorkbookModel,
+    projected: &mut WorkbookModel,
+    ops: &[Op],
+) -> Vec<(SheetId, CellRef)> {
+    let mut edited = HashSet::new();
+    for op in ops {
+        let Op::SetCell { sheet, at, .. } = op else {
+            return Vec::new();
+        };
+        edited.insert((sheet.0, at.row, at.col));
+    }
+    let mut respill = Vec::new();
+    for (index, sheet) in projected.sheets.iter_mut().enumerate() {
+        let Some(source) = current.sheets.get(index) else {
+            continue;
+        };
+        let id = SheetId(index as u32);
+        for (anchor, range) in source.array_formulas().collect::<Vec<_>>() {
+            let formula = source.cell(anchor).and_then(|cell| cell.formula.as_deref());
+            if formula.is_none()
+                || sheet.cell(anchor).and_then(|cell| cell.formula.as_deref()) != formula
+            {
+                continue;
+            }
+            if edited
+                .iter()
+                .any(|&(edited, row, col)| edited == id.0 && range.contains(CellRef::new(row, col)))
+            {
+                respill.push((id, anchor));
+                continue;
+            }
+            let recorded = sheet.array_formula(anchor);
+            sheet.set_array_formula(anchor, range);
+            let covered = recorded.into_iter().chain([range]);
+            for rectangle in covered {
+                for row in rectangle.start.row..=rectangle.end.row {
+                    for col in rectangle.start.col..=rectangle.end.col {
+                        let at = CellRef::new(row, col);
+                        if at == anchor
+                            || sheet
+                                .cell(at)
+                                .and_then(|cell| cell.formula.as_deref())
+                                .is_some_and(|formula| !formula.trim().is_empty())
+                        {
+                            continue;
+                        }
+                        let mut cell = sheet.cell(at).cloned().unwrap_or_default();
+                        cell.value = source
+                            .cell(at)
+                            .map(|cell| cell.value.clone())
+                            .unwrap_or_default();
+                        sheet.set_cell(at, cell);
+                    }
+                }
+            }
+        }
+    }
+    respill
 }
 
 fn has_array_formulas(model: &WorkbookModel) -> bool {
