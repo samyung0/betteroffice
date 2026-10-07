@@ -75,8 +75,9 @@ struct ResidentRegionState {
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
-    /// resident-body or the document shape rules the fast path out.
-    fast_path: Option<RegionFastPathState>,
+    /// resident-body or the document shape rules the fast path out; the
+    /// error names why.
+    fast_path: Result<RegionFastPathState, &'static str>,
 }
 
 /// Retained region-pass configuration consumed by
@@ -451,6 +452,10 @@ pub struct EngineStats {
     pub display_builds: u64,
     pub incremental_display_builds: u64,
     pub rebuilt_display_pages: u64,
+    /// Body edits the resident region fast path absorbed.
+    pub region_fast_path_hits: u64,
+    /// Why the last body edit fell back to the full region pass.
+    pub region_fast_path_fallback: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -518,6 +523,7 @@ pub struct EngineSession {
     /// `media:<part>` image sources for these; an unknown part stays
     /// unresolved and paints nothing.
     media: RefCell<HashMap<String, String>>,
+    region_fast_path: Cell<(u64, Option<&'static str>)>,
 }
 
 /// Resolves `media:<part>` image sources in lowered blocks.
@@ -893,6 +899,7 @@ impl EngineSession {
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
             media: RefCell::new(HashMap::new()),
+            region_fast_path: Cell::new((0, None)),
         }
     }
 
@@ -1050,6 +1057,8 @@ impl EngineSession {
             display_builds: display.display_builds,
             incremental_display_builds: display.incremental_display_builds,
             rebuilt_display_pages: display.rebuilt_display_pages,
+            region_fast_path_hits: self.region_fast_path.get().0,
+            region_fast_path_fallback: self.region_fast_path.get().1,
         }
     }
 
@@ -1369,6 +1378,10 @@ impl EngineSession {
         // The note fixpoint replays `base_input`; `input` itself moves into
         // pagination and is never cloned again.
         let base_input = input.clone();
+        let body_has_section_break = input
+            .measured
+            .iter()
+            .any(|measured| matches!(measured.block, LayoutBlock::SectionBreak(_)));
         self.layout_document_value_with_fingerprints(input, block_fingerprints)?;
         let mut initial_layout = self
             .pagination
@@ -1449,18 +1462,27 @@ impl EngineSession {
         // boundary without changing the total page count, which changes
         // section-relative page labels and the PAGE/NUMPAGES field widths
         // baked into the retained headers/footers payload. With one section,
-        // an unchanged page count implies unchanged labels.
-        let single_section = regions.sections.len() <= 1;
+        // an unchanged page count implies unchanged labels. A body without
+        // section breaks is one section whatever the request lists: hosts
+        // send the final section after the parsed list that already ends
+        // with it.
+        let single_section = regions.sections.len() <= 1 || !body_has_section_break;
         drop(pagination);
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json.to_owned(),
             headers_footers,
-            fast_path: (resident_body && single_section).then(|| RegionFastPathState {
-                regions: Rc::new(regions),
-                measurement: Rc::new(measurement),
-                measurement_fingerprint,
-                notes_clear,
-            }),
+            fast_path: if !resident_body {
+                Err("not resident body")
+            } else if !single_section {
+                Err("sections")
+            } else {
+                Ok(RegionFastPathState {
+                    regions: Rc::new(regions),
+                    measurement: Rc::new(measurement),
+                    measurement_fingerprint,
+                    notes_clear,
+                })
+            },
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
         self.pagination.borrow_mut().measured_with =
@@ -2161,29 +2183,45 @@ impl EngineSession {
         story: &str,
         phase: &mut impl FnMut(RegionResidentPhase),
     ) -> Result<bool, String> {
+        let outcome = self.region_fast_path_attempt(story, phase)?;
+        let (hits, _) = self.region_fast_path.get();
+        self.region_fast_path.set(match outcome {
+            Ok(()) => (hits.wrapping_add(1), None),
+            Err(reason) => (hits, Some(reason)),
+        });
+        Ok(outcome.is_ok())
+    }
+
+    /// The fast path itself; `Ok(Err(reason))` names why it refused.
+    fn region_fast_path_attempt(
+        &self,
+        story: &str,
+        phase: &mut impl FnMut(RegionResidentPhase),
+    ) -> Result<Result<(), &'static str>, String> {
         if story != "body" {
-            return Ok(false);
+            return Ok(Err("story"));
         }
         let fast_config = {
             let state = self.regions.borrow();
-            state.as_ref().and_then(|state| {
-                let fast = state.fast_path.as_ref()?;
-                fast.notes_clear.then(|| {
-                    (
-                        Rc::clone(&fast.regions),
-                        Rc::clone(&fast.measurement),
-                        fast.measurement_fingerprint,
-                    )
-                })
-            })
+            match state.as_ref().map(|state| state.fast_path.as_ref()) {
+                None => Err("no region state"),
+                Some(Err(reason)) => Err(*reason),
+                Some(Ok(fast)) if !fast.notes_clear => Err("notes"),
+                Some(Ok(fast)) => Ok((
+                    Rc::clone(&fast.regions),
+                    Rc::clone(&fast.measurement),
+                    fast.measurement_fingerprint,
+                )),
+            }
         };
-        let Some((regions, measurement, measurement_fingerprint)) = fast_config else {
-            return Ok(false);
+        let (regions, measurement, measurement_fingerprint) = match fast_config {
+            Ok(config) => config,
+            Err(reason) => return Ok(Err(reason)),
         };
         let env = {
             let render = self.render.borrow();
             let Some(lowered) = render.stories.get(story) else {
-                return Ok(false);
+                return Ok(Err("not lowered"));
             };
             lowered.env.clone()
         };
@@ -2192,13 +2230,13 @@ impl EngineSession {
                 story,
                 &env,
                 &mut || phase(RegionResidentPhase::Lowered),
-                |blocks| -> Result<Option<(ResidentLayoutInput, usize)>, String> {
+                |blocks| -> Result<Result<(ResidentLayoutInput, usize), &'static str>, String> {
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout)) =
                             (pagination.input.as_ref(), pagination.layout.as_ref())
                         else {
-                            return Ok(None);
+                            return Ok(Err("no layout"));
                         };
                         (
                             region_measurement_widths(blocks.iter(), input, &regions),
@@ -2206,6 +2244,13 @@ impl EngineSession {
                             layout.pages.len(),
                         )
                     };
+                    if regions.sections.len() > 1
+                        && blocks
+                            .iter()
+                            .any(|block| matches!(block, LayoutBlock::SectionBreak(_)))
+                    {
+                        return Ok(Err("sections"));
+                    }
                     let default_width = widths.first().copied().unwrap_or(0.0);
                     if docx_layout::measure_blocks::has_floating_zones(
                         blocks,
@@ -2213,7 +2258,7 @@ impl EngineSession {
                         measurement.as_ref(),
                         Some(&geometry),
                     )? {
-                        return Ok(None);
+                        return Ok(Err("floating zones"));
                     }
                     match self.resident_layout_input_from_blocks(
                         blocks,
@@ -2231,15 +2276,15 @@ impl EngineSession {
                             )
                         },
                     ) {
-                        Ok(resident) => Ok(Some((resident, previous_pages))),
-                        Err(_) => Ok(None),
+                        Ok(resident) => Ok(Ok((resident, previous_pages))),
+                        Err(_) => Ok(Err("resident input")),
                     }
                 },
             )
             .map_err(|error| error.to_string())??;
         let (resident, previous_pages) = match outcome {
-            Some(resident) => resident,
-            None => return Ok(false),
+            Ok(resident) => resident,
+            Err(reason) => return Ok(Err(reason)),
         };
         phase(RegionResidentPhase::Measured);
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
@@ -2252,7 +2297,11 @@ impl EngineSession {
             .as_mut()
             .expect("layout retained after successful pagination");
         apply_document_regions(layout, &regions);
-        Ok(layout.pages.len() == previous_pages)
+        Ok(if layout.pages.len() == previous_pages {
+            Ok(())
+        } else {
+            Err("page count")
+        })
     }
 
     fn resident_region_display_extras(&self) -> Result<String, String> {
@@ -2671,6 +2720,8 @@ mod tests {
                 display_builds: 0,
                 incremental_display_builds: 0,
                 rebuilt_display_pages: 0,
+                region_fast_path_hits: 0,
+                region_fast_path_fallback: None,
             }
         );
 
@@ -3222,6 +3273,99 @@ mod tests {
         assert_eq!(
             fast_json, full_json,
             "resident region fast path state is byte-identical to a full pass"
+        );
+    }
+
+    /// Hosts list the final section twice, and typing before a page break
+    /// shifts the break's story-index id: neither leaves the fast path, and the
+    /// result equals a fresh engine's full pass over the same document.
+    #[test]
+    fn region_fast_path_survives_a_repeated_final_section_and_a_shifted_page_break() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let section = serde_json::json!({
+            "sectionId": "main",
+            "properties": {
+                "pageWidth": 4320,
+                "pageHeight": 2880,
+                "marginTop": 300,
+                "marginRight": 300,
+                "marginBottom": 300,
+                "marginLeft": 300
+            }
+        });
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [section, section]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let extras = serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string();
+        let ctx = crate::EditCtx::local("", "");
+        let engine_with = |typed: bool| {
+            let engine = EngineSession::new(140);
+            let doc = engine.doc();
+            doc.create_story("body", "AlphaBravo", "Normal", "left")
+                .unwrap();
+            doc.split_paragraph(&ctx, crate::Position::new("body", 5), None)
+                .unwrap();
+            doc.insert_embed(&ctx, crate::Position::new("body", 6), "pageBreak", vec![])
+                .unwrap();
+            if typed {
+                doc.insert_text(
+                    &ctx,
+                    crate::Position::new("body", 2),
+                    "xx",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            }
+            engine.layout_document_with_regions_json(&request).unwrap();
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            engine
+        };
+
+        let engine = engine_with(false);
+        assert_eq!(engine.stats().retained_pages, 2);
+        engine
+            .doc()
+            .insert_text(
+                &ctx,
+                crate::Position::new("body", 2),
+                "xx",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.apply_and_layout("body", 1).unwrap();
+        let stats = engine.stats();
+        assert_eq!(stats.region_fast_path_hits, 1);
+        assert_eq!(stats.region_fast_path_fallback, None);
+        assert_eq!(stats.incremental_display_builds, 1);
+
+        let fresh = engine_with(true);
+        let layout_json = |engine: &EngineSession| {
+            let pagination = engine.pagination.borrow();
+            let regions_state = engine.regions.borrow();
+            serialize_region_layout(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                regions_state.as_ref().unwrap().headers_footers.as_ref(),
+                true,
+            )
+            .unwrap()
+        };
+        assert!(layout_json(&engine).contains("body:pageBreak:8"));
+        assert_eq!(layout_json(&engine), layout_json(&fresh));
+        assert_eq!(
+            engine.with_display_list(Clone::clone),
+            fresh.with_display_list(Clone::clone)
         );
     }
 

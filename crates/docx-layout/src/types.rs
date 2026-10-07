@@ -1658,8 +1658,9 @@ impl PartialEq for PageBreakBlock {
             pm_end: _,
             keeps_leading_spacing: _,
         } = other;
+        // A break's id is its story index, an absolute position like
+        // `pm_start`, so it is masked too.
         self.sdt_groups == other.sdt_groups
-            && self.id == other.id
             && self.keeps_leading_spacing == other.keeps_leading_spacing
     }
 }
@@ -1672,7 +1673,8 @@ impl PartialEq for ColumnBreakBlock {
             pm_start: _,
             pm_end: _,
         } = other;
-        self.sdt_groups == other.sdt_groups && self.id == other.id
+        // The id is the break's story index (see `PageBreakBlock`).
+        self.sdt_groups == other.sdt_groups
     }
 }
 
