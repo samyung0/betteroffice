@@ -946,7 +946,15 @@ impl WorkbookAuthority {
             return None;
         }
         let touched = std::mem::take(&mut *touched.lock().unwrap_or_else(|p| p.into_inner()));
-        if touched.other {
+        // Removing an override on a source array anchor brings its range back
+        // in the whole projection, which the touched cells alone do not show.
+        if touched.other
+            || touched.cells.keys().any(|key| {
+                base_sheet_index(key)
+                    .and_then(|index| self.base.sheets.get(index))
+                    .is_some_and(|sheet| sheet.array_formulas().next().is_some())
+            })
+        {
             return None;
         }
         let after_snapshot = staged_doc.transact().snapshot();

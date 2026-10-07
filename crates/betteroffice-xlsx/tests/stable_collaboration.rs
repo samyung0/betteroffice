@@ -1782,3 +1782,72 @@ fn peer_edits_leave_the_local_undo_history_alone() {
     assert_eq!(a.model(), b.model());
     assert_eq!(depth(&b), (3, 0));
 }
+
+/// A source with Excel's cached values: a CSE array over A1:A3 whose interior
+/// holds the cached results, and a one-cell CSE array at C1.
+fn array_source() -> WorkbookModel {
+    let number = |value: f64| Cell {
+        value: CellValue::Number { value },
+        ..Cell::default()
+    };
+    let mut data = Sheet::new("Data");
+    for row in 0..3 {
+        data.set_cell(CellRef::new(row, 0), number(f64::from(row + 1)));
+    }
+    let mut arrays = Sheet::new("Arrays");
+    arrays.set_cell(
+        at("A1"),
+        Cell {
+            formula: Some("Data!A1:A3*10".into()),
+            ..number(10.0)
+        },
+    );
+    arrays.set_cell(at("A2"), number(20.0));
+    arrays.set_cell(at("A3"), number(30.0));
+    arrays.set_array_formula(at("A1"), CellRange::parse_a1("A1:A3").unwrap());
+    arrays.set_cell(
+        at("C1"),
+        Cell {
+            formula: Some("SUM(Data!A1:A3*2)".into()),
+            ..number(12.0)
+        },
+    );
+    arrays.set_array_formula(at("C1"), CellRange::parse_a1("C1:C1").unwrap());
+    WorkbookModel {
+        sheets: vec![data, arrays],
+        ..WorkbookModel::default()
+    }
+}
+
+#[test]
+fn a_peer_undo_restoring_a_source_array_reaches_co_editors_whole() {
+    let options = CalculationOptions::default();
+    let mut a = Workbook::from_model_collaborative(array_source(), 101).unwrap();
+    let mut b = Workbook::from_model_collaborative(array_source(), 102).unwrap();
+    // One whole remote path leaves `a` able to take cell edits incrementally.
+    b.edit_cell(SheetId(0), at("E5"), "1", options).unwrap();
+    relay(&b, &mut a);
+    b.edit_cell(SheetId(1), at("A1"), "5", options).unwrap();
+    relay(&b, &mut a);
+    b.edit_cell(SheetId(1), at("C1"), "7", options).unwrap();
+    relay(&b, &mut a);
+    assert!(b.undo(options).unwrap().applied);
+    relay(&b, &mut a);
+    assert!(b.undo(options).unwrap().applied);
+    relay(&b, &mut a);
+    let mut fresh = Workbook::from_model_collaborative(array_source(), 103).unwrap();
+    fresh
+        .apply_update_v1(&b.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(fresh.model(), b.model());
+    assert_eq!(a.model(), fresh.model());
+    let arrays = &a.model().sheets[1];
+    assert_eq!(
+        arrays.array_formula(at("A1")),
+        Some(CellRange::parse_a1("A1:A3").unwrap())
+    );
+    assert_eq!(
+        arrays.cell(at("A1")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 10.0 })
+    );
+}

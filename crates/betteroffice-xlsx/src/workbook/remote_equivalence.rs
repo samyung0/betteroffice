@@ -59,7 +59,10 @@ fn base(spill: bool) -> WorkbookModel {
     summary.set_cell(at("B1"), cell(CellValue::Empty, Some("SUM(Range)")));
     let mut arrays = Sheet::new("Arrays");
     if spill {
-        arrays.set_cell(at("A1"), cell(CellValue::Empty, Some("Data!A1:A3*10")));
+        // Cached results under the array, as a saved file holds them.
+        arrays.set_cell(at("A1"), cell(number(10.0), Some("Data!A1:A3*10")));
+        arrays.set_cell(at("A2"), cell(number(20.0), None));
+        arrays.set_cell(at("A3"), cell(number(30.0), None));
         arrays.set_array_formula(at("A1"), CellRange::parse_a1("A1:A3").unwrap());
     } else {
         arrays.set_cell(at("A1"), cell(CellValue::Empty, Some("SUM(Data!A1:A3)*10")));
