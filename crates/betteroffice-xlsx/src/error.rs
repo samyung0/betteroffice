@@ -23,8 +23,6 @@ pub enum Error {
         max: usize,
     },
     NotCollaborative,
-    CollaborativeStructureOperation,
-    CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
     NoSheets,
@@ -92,12 +90,6 @@ impl fmt::Display for Error {
             ),
             Self::NotCollaborative => {
                 f.write_str("remote updates require a collaborative workbook")
-            }
-            Self::CollaborativeStructureOperation => {
-                f.write_str("structural operations are unavailable in collaborative mode")
-            }
-            Self::CollaborativeStructureChanged => {
-                f.write_str("remote update changes the frozen workbook structure")
             }
             Self::Spreadsheet(error) => error.fmt(f),
             Self::Operation(error) => error.fmt(f),

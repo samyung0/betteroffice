@@ -36,7 +36,6 @@ use xlsx_render::{
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedCells,
     StagedLocalUpdate, StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
-    is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -386,7 +385,6 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
-            parsed.legacy_styles.as_ref(),
             Some(&format!("{:x}", Sha256::digest(bytes))),
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
@@ -435,7 +433,6 @@ impl Workbook {
             client_id,
             &[],
             None,
-            None,
         )
     }
 
@@ -447,7 +444,6 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
-        legacy_styles: Option<&Stylesheet>,
         source_sha: Option<&str>,
     ) -> Result<Self> {
         validate_model(&model)?;
@@ -460,14 +456,9 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let authority = WorkbookAuthority::from_source(
-            &model,
-            client_id,
-            legacy_dimensions,
-            legacy_styles,
-            source_sha,
-        )
-        .map_err(authority_error)?;
+        let authority =
+            WorkbookAuthority::from_source(&model, client_id, legacy_dimensions, source_sha)
+                .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
@@ -575,10 +566,9 @@ impl Workbook {
         update: &[u8],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        let structure = match &self.mode {
-            WorkbookMode::Collaborative { structure } => structure.clone(),
-            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
-        };
+        if !self.is_collaborative() {
+            return Err(Error::NotCollaborative);
+        }
         validate_collaboration_size(update)?;
         if let Some(index) = self
             .pending_remote_updates
@@ -601,9 +591,6 @@ impl Workbook {
         }
         let before = self.model.clone();
         let staged = self.stage_remote_updates(&[update], None)?;
-        if !self.authority.supports_structure() && staged.structure != structure {
-            return Err(Error::CollaborativeStructureChanged);
-        }
         if staged.pending {
             self.validate_pending_remote_update(update)?;
             let mut applied = if staged.effective {
@@ -612,11 +599,11 @@ impl Workbook {
                 false
             };
             self.pending_remote_updates.push(update.to_vec());
-            applied |= self.resolve_pending_remote_updates(&structure, options)?;
+            applied |= self.resolve_pending_remote_updates(options)?;
             return Ok(self.remote_mutation_result(&before, applied));
         }
         let mut applied = self.apply_staged_remote_update(staged, options)?.applied;
-        applied |= self.resolve_pending_remote_updates(&structure, options)?;
+        applied |= self.resolve_pending_remote_updates(options)?;
         Ok(self.remote_mutation_result(&before, applied))
     }
 
@@ -635,20 +622,15 @@ impl Workbook {
         if !self.authority.is_pristine() {
             return Ok(false);
         }
-        let WorkbookMode::Collaborative { structure: frozen } = &self.mode else {
+        if !self.is_collaborative() {
             return Ok(false);
-        };
-        let frozen = frozen.clone();
+        }
         let candidate = match self.authority.snapshot_replacement(update) {
             SnapshotAdoption::NotApplicable => return Ok(false),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
             SnapshotAdoption::Replacement(adopted) => *adopted,
         };
         let (candidate, mut model, structure) = candidate;
-        if !candidate.supports_structure() && !structure.describes_same_workbook(&frozen) {
-            return Err(Error::CollaborativeStructureChanged);
-        }
-        self.retain_array_formulas(&mut model);
         self.gate_incoming(&model, &structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
@@ -765,11 +747,7 @@ impl Workbook {
         Ok(())
     }
 
-    fn resolve_pending_remote_updates(
-        &mut self,
-        structure: &WorkbookStructure,
-        options: CalculationOptions,
-    ) -> Result<bool> {
+    fn resolve_pending_remote_updates(&mut self, options: CalculationOptions) -> Result<bool> {
         let mut applied = false;
         let mut index = 0;
         // Re-encoding this replica's state for each pending retry reads the
@@ -783,11 +761,6 @@ impl Workbook {
                 Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
             );
             match staged {
-                Ok(staged)
-                    if !self.authority.supports_structure() && &staged.structure != structure =>
-                {
-                    self.pending_remote_updates.remove(index);
-                }
                 Ok(staged) if staged.pending => {
                     if staged.effective {
                         applied |= self.apply_staged_remote_update(staged, options)?.applied;
@@ -846,7 +819,6 @@ impl Workbook {
 
         let commit_update = staged.commit_update;
         let mut model = staged.model;
-        self.retain_array_formulas(&mut model);
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
@@ -1244,24 +1216,16 @@ impl Workbook {
         state: &[u8],
         options: CalculationOptions,
     ) -> Result<Option<String>> {
-        let WorkbookMode::Collaborative { structure: frozen } = &self.mode else {
+        if !self.is_collaborative() {
             return Err(Error::NotCollaborative);
-        };
-        validate_collaboration_size(state)?;
-        // Only an older schema's apply keeps array ranges from the opened
-        // projection.
-        if !self.authority.supports_structure() {
-            return Ok(None);
         }
+        validate_collaboration_size(state)?;
         let candidate = match self.authority.snapshot_replacement(state) {
             SnapshotAdoption::NotApplicable => return Ok(None),
             SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
             SnapshotAdoption::Replacement(adopted) => *adopted,
         };
         let (candidate, mut model, structure) = candidate;
-        if !candidate.supports_structure() && !structure.describes_same_workbook(frozen) {
-            return Err(Error::CollaborativeStructureChanged);
-        }
         self.gate_incoming(&model, &structure)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         validate_collaboration_state(
@@ -1788,12 +1752,6 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative()
-            && !self.authority.supports_structure()
-            && ops.iter().any(is_structural_op)
-        {
-            return Err(Error::CollaborativeStructureOperation);
-        }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         let mut names = self.sheet_names();
@@ -2007,18 +1965,12 @@ impl Workbook {
         let Some(history) = history else {
             return Ok(MutationResult::default());
         };
-        let structure = match &self.mode {
-            WorkbookMode::Collaborative { structure } => structure,
-            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
-        };
-        if !self.authority.supports_structure() && &history.structure != structure {
-            return Err(Error::CollaborativeStructureChanged);
+        if !self.is_collaborative() {
+            return Err(Error::NotCollaborative);
         }
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
-        let mut restored = history.model;
-        self.retain_array_formulas(&mut restored);
-        self.install_model(restored)?;
+        self.install_model(history.model)?;
         self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
@@ -2660,7 +2612,6 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
-            self.retain_array_formulas(&mut model);
             respill = retain_spills(&self.model, &mut model, ops);
             self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
@@ -2718,7 +2669,6 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
-            self.retain_array_formulas(&mut model);
             respill = retain_spills(&self.model, &mut model, ops);
             self.install_model_with(model, Some(staged.structure))?;
             self.update_sheet_info_cache(ops, &prior_styles);
@@ -2790,17 +2740,13 @@ impl Workbook {
     }
 
     fn stage_local_update(&self, ops: &[Op], origin: SyncOrigin) -> Result<StagedLocalUpdate> {
-        let structure = match &self.mode {
-            WorkbookMode::Collaborative { structure } => structure,
-            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
-        };
+        if !self.is_collaborative() {
+            return Err(Error::NotCollaborative);
+        }
         let staged = self
             .authority
             .stage_local_ops_v1(ops, origin)
             .map_err(authority_error)?;
-        if !self.authority.supports_structure() && &staged.structure != structure {
-            return Err(Error::CollaborativeStructureChanged);
-        }
         validate_collaboration_size(&staged.update)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         Ok(staged)
@@ -3008,7 +2954,7 @@ impl Workbook {
             self.moved_references_since_open |= self.moves_referenced_cells(&names, op);
             rename_sheet_view(&mut names, op);
         }
-        if self.is_collaborative() && self.authority.supports_structure() {
+        if self.is_collaborative() {
             return;
         }
         for op in ops {
@@ -3268,17 +3214,8 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
     }
 }
 
-/// the collaboration document carries cells, not the rectangle a `t="array"`
-/// formula fills, so each projection re-adopts the anchors it still holds.
-impl Workbook {
-    /// Stable sessions project array formulas through their row and column identities.
-    fn retain_array_formulas(&self, projected: &mut WorkbookModel) {
-        if !self.authority.supports_structure() {
-            retain_array_formulas(&self.model, projected);
-        }
-    }
-}
-
+/// the standalone document carries cells, not the rectangle a `t="array"`
+/// formula fills, so its projection re-adopts the anchors the source holds.
 fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel) {
     for (index, sheet) in projected.sheets.iter_mut().enumerate() {
         let Some(source) = current.sheets.get(index) else {
@@ -3486,7 +3423,7 @@ impl Workbook {
         model: WorkbookModel,
         known: Option<WorkbookStructure>,
     ) -> Result<()> {
-        if self.is_collaborative() && self.authority.supports_structure() {
+        if self.is_collaborative() {
             let structure = match known {
                 Some(structure) => structure,
                 None => self.authority.structure().map_err(authority_error)?,

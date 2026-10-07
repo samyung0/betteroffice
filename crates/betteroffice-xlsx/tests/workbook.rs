@@ -3260,7 +3260,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
         .unwrap();
     assert!(matches!(
         workbook.apply_update_v1(&update, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
+        Err(Error::CollaborativeState(_))
     ));
     assert_unchanged(&workbook, &model, &state, &calculation);
 
@@ -3280,7 +3280,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
         .unwrap();
     assert!(matches!(
         workbook.apply_update_v1(&update, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
+        Err(Error::CollaborativeState(_))
     ));
     assert_unchanged(&workbook, &model, &state, &calculation);
 }
@@ -3333,7 +3333,7 @@ fn rejected_update_preserves_unrelated_valid_causal_backlog() {
         .unwrap();
     assert!(matches!(
         target.apply_update_v1(&invalid, CalculationOptions::default()),
-        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_))
+        Err(Error::CollaborativeState(_))
     ));
 
     assert!(
@@ -3652,7 +3652,7 @@ fn unresolved_invalid_updates_never_enter_live_yrs_state() {
     // It may remain pending, but must never mutate this session's live state.
     match target.apply_update_v1(&updates[0], CalculationOptions::default()) {
         Ok(result) => assert!(!result.applied),
-        Err(Error::CollaborativeStructureChanged | Error::CollaborativeState(_)) => {}
+        Err(Error::CollaborativeState(_)) => {}
         Err(error) => panic!("unexpected error: {error}"),
     }
     assert_eq!(target.encode_state_as_update_v1(), state);
