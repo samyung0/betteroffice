@@ -5,6 +5,8 @@
 
 mod common;
 mod docx;
+#[cfg(test)]
+mod effects_tests;
 pub mod env;
 mod error;
 pub mod js;

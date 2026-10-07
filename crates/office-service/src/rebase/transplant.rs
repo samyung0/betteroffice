@@ -967,3 +967,102 @@ fn land_later(
         ids: all_ids,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use yrs::types::Delta;
+    use yrs::types::text::YChange;
+    use yrs::{Any, Doc, Text, Transact};
+
+    fn run(initial: &[(&str, Option<Any>)], update: Vec<Delta<String>>, yjs: bool) -> String {
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("t");
+        let insert = |(chunk, value): &(&str, Option<Any>)| {
+            let attributes = value
+                .clone()
+                .map(|value| Box::new(HashMap::from([(Arc::<str>::from("f"), value)])));
+            Delta::Inserted(chunk.to_string(), attributes)
+        };
+        text.apply_delta(
+            &mut doc.transact_mut(),
+            initial.iter().map(insert).collect::<Vec<_>>(),
+        );
+        let mut txn = doc.transact_mut();
+        if yjs {
+            text.apply_delta_as_yjs(&mut txn, update);
+        } else {
+            text.apply_delta(&mut txn, update);
+        }
+        let runs: Vec<String> = text
+            .diff(&txn, YChange::identity)
+            .into_iter()
+            .map(|diff| {
+                let format = diff
+                    .attributes
+                    .and_then(|attributes| attributes.get("f").cloned())
+                    .map(|value| format!(" {value}"))
+                    .unwrap_or_default();
+                format!("{}{format}", diff.insert.to_string(&txn))
+            })
+            .collect();
+        runs.join(" | ")
+    }
+
+    /// Yjs 13.6.31 `applyDelta` results (`toDelta`) for text inserted where
+    /// formatted text was deleted: it takes no attribute. yrs's own cleanup
+    /// read the format items right of the gap into the insert position.
+    #[test]
+    fn a_delta_lands_as_in_yjs() {
+        type Case = (
+            Vec<(&'static str, Option<Any>)>,
+            Vec<Delta<String>>,
+            &'static str,
+        );
+        let cases: [Case; 3] = [
+            (
+                vec![("ab", Some(Any::from("x"))), ("cd", Some(Any::Bool(true)))],
+                vec![
+                    Delta::Retain(3, None),
+                    Delta::Deleted(1),
+                    Delta::Inserted("Q".into(), None),
+                ],
+                "ab x | c true | Q",
+            ),
+            (
+                vec![("ab", Some(Any::Bool(true))), ("cd", Some(Any::from("x")))],
+                vec![
+                    Delta::Deleted(2),
+                    Delta::Retain(1, None),
+                    Delta::Deleted(1),
+                    Delta::Inserted("Q".into(), None),
+                ],
+                "c x | Q",
+            ),
+            (
+                vec![
+                    ("ab", None),
+                    ("cd", Some(Any::from("x"))),
+                    ("ef", Some(Any::Bool(true))),
+                ],
+                vec![
+                    Delta::Retain(3, None),
+                    Delta::Deleted(2),
+                    Delta::Inserted("Q".into(), None),
+                ],
+                "ab | c x | Q | f true",
+            ),
+        ];
+        let mut differs = false;
+        for (initial, update, expected) in cases {
+            differs |= run(&initial, update.clone(), false) != expected;
+            assert_eq!(run(&initial, update, true), expected);
+        }
+        assert!(
+            differs,
+            "yrs's own apply_delta differs in one case at least"
+        );
+    }
+}
