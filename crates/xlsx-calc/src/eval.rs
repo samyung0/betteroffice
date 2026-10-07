@@ -33,6 +33,7 @@ thread_local! {
 pub(crate) struct EvaluationBudget {
     limit: u64,
     remaining: Cell<u64>,
+    refused: Cell<bool>,
 }
 
 impl EvaluationBudget {
@@ -40,6 +41,7 @@ impl EvaluationBudget {
         Self {
             limit,
             remaining: Cell::new(limit),
+            refused: Cell::new(false),
         }
     }
 
@@ -47,9 +49,15 @@ impl EvaluationBudget {
         self.limit - self.remaining.get()
     }
 
+    /// whether a visit was refused for want of budget.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.refused.get()
+    }
+
     fn consume(&self, count: u64) -> bool {
         let remaining = self.remaining.get();
         if count > remaining {
+            self.refused.set(true);
             return false;
         }
         self.remaining.set(remaining - count);

@@ -1886,3 +1886,52 @@ fn a_format_a_peer_added_resolves_in_any_delivery_order() {
     assert!(style(&c, "A3").is_some());
     assert_eq!(style(&c, "A3"), style(&c, "A1"));
 }
+
+/// A cycle read by more cells than the settle pass once took on: only the two
+/// cells on it are circular, its readers compute, and an edit the author
+/// recalculates from its cells agrees with a peer projecting the state whole.
+#[test]
+fn a_cycle_with_thousands_of_readers_computes_them_on_every_peer() {
+    let options = CalculationOptions::default();
+    let formula = |formula: String| Cell {
+        formula: Some(formula),
+        ..Cell::default()
+    };
+    let readers = 5_000;
+    let model = || {
+        let mut sheet = Sheet::new("S");
+        sheet.set_cell(at("A1"), formula("B1+1".into()));
+        sheet.set_cell(at("B1"), formula("A1+1".into()));
+        sheet.set_cell(
+            at("E1"),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        for row in 0..readers {
+            sheet.set_cell(
+                CellRef::new(row, 2),
+                formula(format!("$A$1+$E$1+{}", row + 1)),
+            );
+        }
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..WorkbookModel::default()
+        }
+    };
+    let c10 = |book: &Workbook| value_at(book, 0, "C10");
+    let mut author = Workbook::from_model_collaborative(model(), 41).unwrap();
+    let calculation = author.recalculate_all(options);
+    assert_eq!(calculation.cycle_cells.len(), 2);
+    assert_eq!(c10(&author), Some(CellValue::Number { value: 11.0 }));
+    author
+        .edit_cell(SheetId(0), at("E1"), "3", options)
+        .unwrap();
+    let mut peer = Workbook::from_model_collaborative(model(), 42).unwrap();
+    peer.apply_update_v1(&author.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(peer.last_calculation().cycle_cells.len(), 2);
+    assert_eq!(c10(&author), Some(CellValue::Number { value: 13.0 }));
+    assert_eq!(author.model(), peer.model());
+}

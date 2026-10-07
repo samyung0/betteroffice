@@ -186,10 +186,6 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
 /// workbook can loop here.
 const MAX_SPILL_ROUNDS: usize = 4;
 
-/// cells one deferred pass will try to settle. a larger apparent cycle keeps
-/// the range graph's answer rather than paying a quadratic scan for it.
-const MAX_DEFERRED_CYCLE_CELLS: usize = 4096;
-
 /// topologically order `recompute` and evaluate it, writing changed values into
 /// `wb`. cells caught in a cycle are settled and reported separately.
 fn run_recalc(
@@ -379,11 +375,12 @@ enum NodeValue {
 /// has no formula, it no longer parses, or an engine gap reached the result.
 /// the range graph makes every cell of a range a precedent, so a table whose
 /// column reads its own earlier rows through `INDEX(range, k)` looks circular
-/// even though no cell reads itself. settle what the reads really allow: a
-/// cell whose evaluation touches nothing still unsettled was never in a
-/// cycle. of what is left, the cells whose own reads lead back to them are
-/// circular and take the circular value; the cells that only read them then
-/// evaluate as any other, as Excel computes them. returns the circular cells.
+/// even though no cell reads itself. settle what the reads really allow: each
+/// cell is evaluated once to learn which unsettled cells it actually reads.
+/// the cells whose reads lead back to them are circular and take the circular
+/// value; the rest then evaluate in the order of their reads, as Excel computes
+/// them, so a cycle with any number of readers costs time linear in them.
+/// returns the circular cells.
 #[allow(clippy::too_many_arguments)]
 fn settle_deferred(
     wb: &mut Workbook,
@@ -396,31 +393,8 @@ fn settle_deferred(
     spilled: &mut Vec<(SheetId, CellRef)>,
     journal: &mut RecalcJournal,
 ) -> Vec<Key> {
-    if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
-        return cycle.to_vec();
-    }
     let mut unsettled: HashSet<Key> = cycle.iter().copied().collect();
-    settle_ready(
-        wb,
-        cycle,
-        &mut unsettled,
-        graph,
-        now_serial,
-        budget,
-        changed,
-        limited_cells,
-        None,
-        journal,
-    );
-    let left: Vec<Key> = cycle
-        .iter()
-        .copied()
-        .filter(|u| unsettled.contains(u))
-        .collect();
-    if left.is_empty() {
-        return left;
-    }
-    let reads: HashMap<Key, Vec<Key>> = left
+    let reads: HashMap<Key, Vec<Key>> = cycle
         .iter()
         .map(|u| {
             let log = ReadLog::new(wb, &unsettled);
@@ -428,8 +402,8 @@ fn settle_deferred(
             (*u, log.read.into_inner())
         })
         .collect();
-    let circular = cycle_members(&left, &reads);
-    for u in &left {
+    let circular = cycle_members(cycle, &reads);
+    for u in cycle {
         if circular.contains(u) {
             unsettled.remove(u);
             if write_if_changed(wb, *u, circular_value(wb, *u), journal) {
@@ -439,24 +413,75 @@ fn settle_deferred(
     }
     settle_ready(
         wb,
-        &left,
+        &read_order(cycle, &reads, &circular),
         &mut unsettled,
         graph,
         now_serial,
         budget,
         changed,
         limited_cells,
-        Some(spilled),
+        spilled,
         journal,
     );
-    left.into_iter()
+    cycle
+        .iter()
+        .copied()
         .filter(|u| circular.contains(u) || unsettled.contains(u))
         .collect()
 }
 
-/// evaluate, until none is left that can be, each of `nodes` whose reads
-/// touch nothing still unsettled. a spill rewrites a rectangle, so it waits
-/// for the ordered pass unless `spilled` takes the cells it moved.
+/// the cells of `cycle` that are not `circular`, each after the cells it read.
+fn read_order(cycle: &[Key], reads: &HashMap<Key, Vec<Key>>, circular: &HashSet<Key>) -> Vec<Key> {
+    let mut readers: HashMap<Key, Vec<Key>> = HashMap::new();
+    let mut waiting: HashMap<Key, usize> = HashMap::new();
+    for u in cycle.iter().filter(|u| !circular.contains(u)) {
+        let read = reads[u]
+            .iter()
+            .filter(|v| !circular.contains(*v) && *v != u)
+            .collect::<HashSet<_>>();
+        for v in &read {
+            readers.entry(**v).or_default().push(*u);
+        }
+        waiting.insert(*u, read.len());
+    }
+    let mut ready: Vec<Key> = cycle
+        .iter()
+        .copied()
+        .filter(|u| waiting.get(u) == Some(&0))
+        .collect();
+    let mut order = Vec::with_capacity(waiting.len());
+    let mut queue = VecDeque::new();
+    ready.sort();
+    queue.extend(ready);
+    while let Some(u) = queue.pop_front() {
+        order.push(u);
+        let mut ready = Vec::new();
+        for v in readers.get(&u).map(Vec::as_slice).unwrap_or_default() {
+            let count = waiting.get_mut(v).expect("reader is waiting");
+            *count -= 1;
+            if *count == 0 {
+                ready.push(*v);
+            }
+        }
+        ready.sort();
+        queue.extend(ready);
+    }
+    // whatever reads went round a cycle the first evaluations did not see
+    // still gets its passes, last.
+    let ordered = order.iter().copied().collect::<HashSet<_>>();
+    order.extend(
+        cycle
+            .iter()
+            .filter(|u| !circular.contains(*u) && !ordered.contains(*u)),
+    );
+    order
+}
+
+/// evaluate, pass after pass in `nodes`' order until none is left that can
+/// be, each node whose reads touch nothing still unsettled. in read order one
+/// pass settles them all. a pass that does not spends visits, so once the
+/// visit budget runs out the nodes left keep their cached values and are
+/// reported limited, as any recalc the budget stops.
 #[allow(clippy::too_many_arguments)]
 fn settle_ready(
     wb: &mut Workbook,
@@ -467,10 +492,18 @@ fn settle_ready(
     budget: &Rc<EvaluationBudget>,
     changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
-    mut spilled: Option<&mut Vec<(SheetId, CellRef)>>,
+    spilled: &mut Vec<(SheetId, CellRef)>,
     journal: &mut RecalcJournal,
 ) {
     for _ in 0..nodes.len() {
+        if budget.exhausted() {
+            for u in nodes {
+                if unsettled.remove(u) {
+                    limited_cells.push((u.0, cell_of(*u)));
+                }
+            }
+            return;
+        }
         let mut settled_any = false;
         for u in nodes {
             if !unsettled.contains(u) {
@@ -479,8 +512,7 @@ fn settle_ready(
             let log = ReadLog::new(wb, unsettled);
             let (value, limited) =
                 eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
-            let waits = !log.read.into_inner().is_empty();
-            if waits || (matches!(value, Some(NodeValue::Spill(_))) && spilled.is_none()) {
+            if !log.read.into_inner().is_empty() {
                 continue;
             }
             unsettled.remove(u);
@@ -495,10 +527,7 @@ fn settle_ready(
                     }
                 }
                 Some(NodeValue::Spill(spill)) => {
-                    let moved = write_spill(wb, *u, spill, changed, journal);
-                    if let Some(spilled) = spilled.as_deref_mut() {
-                        spilled.extend(moved);
-                    }
+                    spilled.extend(write_spill(wb, *u, spill, changed, journal));
                 }
                 None => {}
             }
@@ -1386,6 +1415,24 @@ mod tests {
         rebuild_and_recalc_all(&mut whole, None);
         assert_eq!(value(&wb, s, "D1"), num(16.0));
         assert_eq!(wb, whole);
+    }
+
+    /// a chain hanging off a cycle, each cell reading the one below it, settles
+    /// in one pass of its read order whatever its length.
+    #[test]
+    fn a_long_chain_reading_a_cycle_settles_in_read_order() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "B1+1");
+        put_formula(&mut wb, s, "B1", "A1+1");
+        let rows = 6_000;
+        for row in 1..rows {
+            put_formula(&mut wb, s, &format!("C{row}"), &format!("C{}+1", row + 1));
+        }
+        put_formula(&mut wb, s, &format!("C{rows}"), "$A$1+1");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+        assert!(r.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "C1"), num(f64::from(rows)));
     }
 
     /// an array formula caught in a cycle has no rectangle to settle into, so
