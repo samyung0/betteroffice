@@ -1851,3 +1851,38 @@ fn a_peer_undo_restoring_a_source_array_reaches_co_editors_whole() {
         Some(CellValue::Number { value: 10.0 })
     );
 }
+
+#[test]
+fn a_format_a_peer_added_resolves_in_any_delivery_order() {
+    let options = CalculationOptions::default();
+    let (mut a, mut b, mut c) = (peer(201), peer(202), peer(203));
+    let bold = |range: &str| Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1(range).unwrap(),
+        patch: StylePatch {
+            bold: Some(true),
+            ..StylePatch::default()
+        },
+    };
+    apply(&mut a, bold("A1:B2"));
+    relay(&a, &mut b);
+    // b reuses the bold format a added, so b's update names a format only
+    // a's update defines; c hears from b first.
+    apply(&mut b, bold("A3:B4"));
+    let from_b = b.encode_diff_v1(&a.encode_state_vector_v1()).unwrap();
+    c.apply_update_v1(&from_b, options).unwrap();
+    relay(&a, &mut c);
+    let mut fresh = peer(204);
+    fresh
+        .apply_update_v1(&b.encode_state_as_update_v1(), options)
+        .unwrap();
+    assert_eq!(c.model(), fresh.model());
+    assert_eq!(c.model(), b.model());
+    let style = |book: &Workbook, address: &str| {
+        book.model().sheets[0]
+            .cell(at(address))
+            .and_then(|cell| cell.style)
+    };
+    assert!(style(&c, "A3").is_some());
+    assert_eq!(style(&c, "A3"), style(&c, "A1"));
+}

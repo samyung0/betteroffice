@@ -397,7 +397,6 @@ pub(crate) struct StagedCells {
 struct TouchedCells {
     /// Cell identity keys written in each sheet's contents or formats.
     cells: BTreeMap<String, BTreeSet<String>>,
-    formats: bool,
     other: bool,
 }
 
@@ -410,7 +409,6 @@ impl TouchedCells {
             };
             let path = event.path();
             match (root, path.len()) {
-                (CELL_FORMATS, 0) => self.formats = true,
                 (SHEETS, 2) => {
                     let (yrs::types::PathSegment::Key(sheet), yrs::types::PathSegment::Key(map)) =
                         (&path[0], &path[1])

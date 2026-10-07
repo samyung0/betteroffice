@@ -1108,8 +1108,12 @@ pub(super) fn materialize<T: ReadTxn>(
                     .filter_map(|key| source_at(key).transpose())
                     .collect::<Result<HashSet<_>, String>>()
             };
-            let (content_overrides, format_overrides) =
-                (overridden(&contents)?, overridden(&formats)?);
+            let content_overrides = overridden(&contents)?;
+            let format_overrides = formats
+                .iter(txn)
+                .filter(|(_, value)| !names_unknown_format(value, &style_indices))
+                .filter_map(|(key, _)| source_at(key).transpose())
+                .collect::<Result<HashSet<_>, String>>()?;
             let formulas = &base_bindings(base)?[source_index];
             let mut source_styles = HashMap::new();
             for (at, cell) in base.sheets[source_index].iter_cells() {
@@ -1184,12 +1188,15 @@ pub(super) fn materialize<T: ReadTxn>(
             sheet.set_cell(at, cell);
         }
         for (cell_key, value) in formats.iter(txn) {
+            if names_unknown_format(&value, &style_indices) {
+                continue;
+            }
             let style = value
                 .cast::<String>()
                 .map_err(|_| "invalid cell style key")?;
             let style = match style.as_str() {
                 "" => None,
-                style => *style_indices.get(style).ok_or("unknown cell style")?,
+                style => style_indices[style],
             };
             let Some(at) = context.at(key, cell_key)? else {
                 continue;
@@ -1376,6 +1383,14 @@ pub(super) fn materialize<T: ReadTxn>(
     };
     Ok((model, structure))
 }
+/// Whether a cell format override names a format this replica has not
+/// received yet. A peer reusing a format another peer added writes only the
+/// override, so its update can arrive first; until the format does, the cell
+/// projects as if it had no override.
+fn names_unknown_format(value: &Out, style_indices: &BTreeMap<String, Option<u32>>) -> bool {
+    matches!(value, Out::Any(Any::String(key)) if !key.is_empty() && !style_indices.contains_key(key.as_ref()))
+}
+
 /// A live cell by sheet index, as [`materialize`] projects it.
 pub(super) type ProjectedCell = (SheetId, CellRef, Option<Cell>);
 
@@ -1418,6 +1433,7 @@ pub(super) fn project_cells<T: ReadTxn>(
                 .transpose()?;
             let format = formats
                 .get(txn, cell_key)
+                .filter(|value| !names_unknown_format(value, &style_indices))
                 .map(|value| {
                     value
                         .cast::<String>()
