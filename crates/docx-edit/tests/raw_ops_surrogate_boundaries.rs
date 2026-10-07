@@ -1,11 +1,13 @@
 //! Raw ops addressing a story that opens with an astral scalar must match the
-//! absolute-index path, which never rounds a position to a code-point boundary.
+//! absolute-index path, which never rounds a position to a code-point boundary:
+//! an op inside the pair splits it, and each half becomes U+FFFD, as in Yjs.
 
 use docx_edit::{EditCtx, EditingDoc, RawOp};
 use yrs::Any;
 use yrs::types::Attrs;
 
 const LAPTOP: &str = "\u{1F4BB}";
+const HALF: &str = "\u{FFFD}";
 
 fn story(text: &str) -> (EditingDoc, EditCtx) {
     let doc = EditingDoc::new(7);
@@ -41,7 +43,7 @@ fn a_second_insert_lands_ahead_of_the_first() {
     let (doc, ctx) = story(&format!("{LAPTOP}AB"));
     doc.apply_raw_ops("body", vec![insert(1, "Q"), insert(4, "R")], &ctx)
         .unwrap();
-    assert_eq!(text(&doc), format!("{LAPTOP}QARB"));
+    assert_eq!(text(&doc), format!("{HALF}Q{HALF}ARB"));
 }
 
 #[test]
@@ -60,7 +62,7 @@ fn an_insert_after_a_format_keeps_its_position() {
         &ctx,
     )
     .unwrap();
-    assert_eq!(text(&doc), format!("{LAPTOP}ARB"));
+    assert_eq!(text(&doc), format!("{HALF}{HALF}ARB"));
 }
 
 #[test]
@@ -68,7 +70,7 @@ fn an_insert_at_the_last_position_stays_in_the_paragraph() {
     let (doc, ctx) = story(&format!("{LAPTOP}AB"));
     doc.apply_raw_ops("body", vec![insert(1, "Q"), insert(5, "S")], &ctx)
         .unwrap();
-    assert_eq!(text(&doc), format!("{LAPTOP}QABS"));
+    assert_eq!(text(&doc), format!("{HALF}Q{HALF}ABS"));
 }
 
 #[test]

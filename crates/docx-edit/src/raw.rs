@@ -975,7 +975,12 @@ mod tests {
             ],
         );
         result.unwrap();
-        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "AB𝔘ZC");
+        // The format splits the pair, so each half becomes U+FFFD, as in Yjs;
+        // Z still lands after both units.
+        assert_eq!(
+            doc.paragraphs("body").unwrap()[0].text,
+            "AB\u{FFFD}\u{FFFD}ZC"
+        );
     }
 
     #[test]
@@ -1010,15 +1015,17 @@ mod tests {
             vec![
                 RawOp::Delete { index: 1, len: 1 },
                 RawOp::Insert {
-                    index: 4,
+                    index: 5,
                     text: "X".into(),
                     attrs: Attrs::new(),
                 },
             ],
         );
-        assert_eq!(result, Err(OpError::OutOfBounds { index: 4, len: 3 }));
-        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "AB");
-        assert_eq!(doc.story_len("body").unwrap(), 3);
+        // Deleting half the pair leaves U+FFFD for the other half, as in Yjs:
+        // one unit shorter, so the end before the delete is now out of bounds.
+        assert_eq!(result, Err(OpError::OutOfBounds { index: 5, len: 4 }));
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "A\u{FFFD}B");
+        assert_eq!(doc.story_len("body").unwrap(), 4);
     }
 
     #[test]
