@@ -16,9 +16,11 @@ use crate::error::Result;
 use crate::types::{Checkpoint, NetEffect};
 use crate::xlsx::{self, EffectsReader};
 
-/// Estimated heap a replica holds per byte of its unzipped package
-/// (`XLSX_HEAP_PER_UNZIPPED_BYTE`, measured as WASM linear memory).
-pub const HEAP_PER_UNZIPPED_BYTE: u64 = 16;
+/// Estimated memory a replica holds per byte of its unzipped package. The TS
+/// measured 16 as WASM linear memory (`XLSX_HEAP_PER_UNZIPPED_BYTE`); a
+/// native replica keeps about 21.6 (8.1 MiB gradebook, process working set
+/// after the miss, Windows; API.md "XLSX replicas").
+pub const HEAP_PER_UNZIPPED_BYTE: u64 = 22;
 /// How long a replica must have gone unused before a new one may push it out.
 pub const REPLICA_IDLE: Duration = Duration::from_secs(120);
 
@@ -266,5 +268,172 @@ impl XlsxReplicas {
             Some(effects) => Ok(effects),
             None => xlsx::XlsxSession::open(base, Some(checkpoint.state))?.effects(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::{Env, with_env};
+    use crate::types::Format;
+
+    const SAMPLE: &[u8] = include_bytes!("../../../apps/demo/public/sample.xlsx");
+    const SHOWCASE: &[u8] = include_bytes!("../../../apps/demo/public/showcase.xlsx");
+
+    struct Source {
+        base: &'static [u8],
+        sha: String,
+        state: Vec<u8>,
+    }
+
+    impl Source {
+        fn new(base: &'static [u8]) -> Self {
+            Self {
+                base,
+                sha: crate::common::sha256_hex(base),
+                state: crate::seed(Format::Xlsx, base).expect("seeds"),
+            }
+        }
+
+        fn checkpoint(&self) -> Checkpoint<'_> {
+            self.checkpoint_with(&self.state)
+        }
+
+        fn checkpoint_with<'a>(&'a self, state: &'a [u8]) -> Checkpoint<'a> {
+            Checkpoint {
+                format: Format::Xlsx,
+                schema_version: 1,
+                base_sha256: &self.sha,
+                state,
+            }
+        }
+
+        fn bytes(&self) -> u64 {
+            crate::common::unzipped_bytes(self.base).expect("a package") * HEAP_PER_UNZIPPED_BYTE
+        }
+    }
+
+    /// `performance.now()` at `ms` for one call.
+    fn at<T>(ms: f64, call: impl FnOnce() -> T) -> T {
+        let env = Env {
+            perf_ms: Some(ms),
+            ..Env::default()
+        };
+        with_env(env, call)
+    }
+
+    fn effects(replicas: &XlsxReplicas, source: &Source, room: &str, ms: f64) {
+        at(ms, || {
+            replicas.pending_effects(source.base, source.checkpoint(), room)
+        })
+        .expect("effects");
+    }
+
+    #[test]
+    fn a_replica_serves_its_room_until_it_does_not_fit() {
+        let sample = Source::new(SAMPLE);
+        let replicas = XlsxReplicas::new(1 << 30);
+        effects(&replicas, &sample, "a", 0.0);
+        effects(&replicas, &sample, "a", 1.0);
+        let stats = replicas.stats();
+        assert_eq!((stats.hits, stats.misses, stats.replicas), (1, 1, 1));
+        assert_eq!(stats.replica_bytes, sample.bytes());
+        // Another base for the room replaces its replica.
+        let showcase = Source::new(SHOWCASE);
+        effects(&replicas, &showcase, "a", 2.0);
+        assert_eq!(replicas.stats().replica_bytes, showcase.bytes());
+        // A replica larger than the budget is not kept.
+        replicas.configure(sample.bytes() - 1);
+        assert_eq!(replicas.stats().replicas, 0);
+        effects(&replicas, &sample, "a", 3.0);
+        assert_eq!(replicas.stats().replicas, 0);
+    }
+
+    #[test]
+    fn a_new_replica_waits_for_the_least_recently_used_to_go_idle() {
+        let sample = Source::new(SAMPLE);
+        let replicas = XlsxReplicas::new(sample.bytes());
+        effects(&replicas, &sample, "a", 0.0);
+        // "a" was used within REPLICA_IDLE: "b" reads without keeping a replica.
+        effects(&replicas, &sample, "b", 60_000.0);
+        let stats = replicas.stats();
+        assert_eq!((stats.misses, stats.evictions, stats.replicas), (2, 0, 1));
+        effects(&replicas, &sample, "a", 61_000.0);
+        assert_eq!(replicas.stats().hits, 1);
+        // Idle long enough, "a" makes room for "b".
+        effects(&replicas, &sample, "b", 61_000.0 + 120_000.0);
+        effects(&replicas, &sample, "b", 182_000.0);
+        let stats = replicas.stats();
+        assert_eq!((stats.evictions, stats.replicas, stats.hits), (1, 1, 2));
+    }
+
+    #[test]
+    fn a_room_dropped_or_a_budget_cut_during_a_call_loses_its_replica() {
+        let sample = Source::new(SAMPLE);
+        let replicas = XlsxReplicas::new(1 << 30);
+        for change in [
+            (|replicas: &XlsxReplicas| replicas.drop_room("a")) as fn(&XlsxReplicas),
+            |replicas| replicas.configure(0),
+        ] {
+            replicas.configure(1 << 30);
+            let Lease::Opening(checkout) = replicas.lease("a", sample.base, &sample.sha) else {
+                panic!("a new replica opens");
+            };
+            change(&replicas);
+            checkout.restore(EffectsReader::open(sample.base).expect("opens"));
+            assert_eq!(replicas.stats().replicas, 0);
+        }
+    }
+
+    #[test]
+    fn a_replica_in_use_leaves_other_calls_a_reader_of_their_own() {
+        let sample = Source::new(SAMPLE);
+        let replicas = XlsxReplicas::new(1 << 30);
+        effects(&replicas, &sample, "a", 0.0);
+        let Lease::Hit(checkout, reader) = replicas.lease("a", sample.base, &sample.sha) else {
+            panic!("the replica is held");
+        };
+        // Another thread's call for the room meanwhile: a transient reader.
+        std::thread::scope(|scope| {
+            scope.spawn(|| effects(&replicas, &sample, "a", 1.0));
+        });
+        assert_eq!(replicas.stats().misses, 2);
+        checkout.restore(*reader);
+        effects(&replicas, &sample, "a", 2.0);
+        let stats = replicas.stats();
+        assert_eq!((stats.hits, stats.replicas), (2, 1));
+    }
+
+    #[test]
+    fn a_call_that_fails_or_panics_on_its_replica_drops_it() {
+        let sample = Source::new(SAMPLE);
+        let replicas = XlsxReplicas::new(1 << 30);
+        effects(&replicas, &sample, "a", 0.0);
+        // A state the reader does not adopt fails in the fresh session; the
+        // replica served the call and stays (office-checkpoint.ts too).
+        let broken = [0_u8, 1, 2, 3];
+        let read = at(1.0, || {
+            replicas.pending_effects(sample.base, sample.checkpoint_with(&broken), "a")
+        });
+        assert!(read.is_err());
+        assert_eq!(replicas.stats().replicas, 1);
+        // A read that errs or panics returns no reader: the replica goes.
+        let Lease::Hit(checkout, _reader) = replicas.lease("a", sample.base, &sample.sha) else {
+            panic!("the replica is held");
+        };
+        drop(checkout);
+        assert_eq!(replicas.stats().replicas, 0);
+        effects(&replicas, &sample, "a", 2.0);
+        let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Lease::Hit(_checkout, _reader) = replicas.lease("a", sample.base, &sample.sha)
+            else {
+                panic!("the replica is held");
+            };
+            panic!("the engine panics");
+        }));
+        assert!(held.is_err());
+        assert_eq!(replicas.stats().replicas, 0);
+        effects(&replicas, &sample, "a", 3.0);
+        assert_eq!(replicas.stats().replicas, 1);
     }
 }
