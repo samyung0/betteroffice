@@ -168,6 +168,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extras = Value::Object(extras).to_string();
     drop(layout);
     out.insert("memLayout".into(), mark());
+    // The lowered body the render cache keeps beside the measured arena.
+    let env: docx_edit::bridge::RenderEnv =
+        serde_json::from_value(wire["request"]["renderEnv"].clone())?;
+    let misses = engine.stats().lower_cache_misses;
+    let live = LIVE.load(Ordering::Relaxed);
+    let lowered = engine.with_lowered_story("body", &env, <[_]>::to_vec)?;
+    let lowered_bytes = LIVE.load(Ordering::Relaxed) - live;
+    drop(lowered);
+    PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    if engine.stats().lower_cache_misses == misses {
+        out.insert("loweredBodyMB".into(), json!(mb(lowered_bytes)));
+    }
     let started = Instant::now();
     let first = engine.build_display_list_frame(&extras, 0)?;
     out.insert("firstFrameMs".into(), json!(started.elapsed().as_millis()));
