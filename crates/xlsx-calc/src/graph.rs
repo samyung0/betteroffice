@@ -49,8 +49,8 @@ pub struct DepGraph {
     tables: HashMap<String, Table>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
     deps: HashMap<NodeKey, NodeEntry>,
-    /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
-    by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
+    /// reverse edges: which nodes read a cell, without scanning the sheet.
+    readers: Readers,
     /// formula cells that must re-evaluate every recalc regardless of edits.
     volatile: HashSet<NodeKey>,
     /// array anchors whose result fills more than their own cell: a formula
@@ -67,6 +67,138 @@ pub struct DepGraph {
 struct NodeEntry {
     ast: Arc<Expr>,
     edges: Vec<(SheetId, CellRange)>,
+}
+
+/// side of the square blocks reads are filed under.
+const BLOCK: u32 = 64;
+/// blocks a read may be filed under before it goes by column instead.
+const MAX_BLOCKS: u32 = 64;
+/// columns a taller read may be filed under before it is scanned.
+const MAX_COLUMNS: u32 = 64;
+
+type Read = (CellRange, NodeKey);
+
+/// reverse edges: each read range, filed so a lookup visits the reads near a
+/// cell rather than every read of the sheet. small ranges go under the blocks
+/// they touch, tall narrow ones (whole columns) under their columns, and the
+/// few wide and tall ones in a list scanned on every lookup.
+#[derive(Default)]
+struct Readers {
+    blocks: HashMap<(SheetId, u32, u32), Vec<Read>>,
+    columns: HashMap<(SheetId, u32), Vec<Read>>,
+    wide: HashMap<SheetId, Vec<Read>>,
+}
+
+enum Filing {
+    Blocks(std::ops::RangeInclusive<u32>, std::ops::RangeInclusive<u32>),
+    Columns(std::ops::RangeInclusive<u32>),
+    Wide,
+}
+
+fn filing(range: CellRange) -> Filing {
+    let rows = range.start.row / BLOCK..=range.end.row / BLOCK;
+    let cols = range.start.col / BLOCK..=range.end.col / BLOCK;
+    let blocks =
+        u64::from(rows.end() - rows.start() + 1) * u64::from(cols.end() - cols.start() + 1);
+    if blocks <= u64::from(MAX_BLOCKS) {
+        Filing::Blocks(rows, cols)
+    } else if range.end.col - range.start.col < MAX_COLUMNS {
+        Filing::Columns(range.start.col..=range.end.col)
+    } else {
+        Filing::Wide
+    }
+}
+
+impl Readers {
+    fn insert(&mut self, sheet: SheetId, range: CellRange, node: NodeKey) {
+        match filing(range) {
+            Filing::Blocks(rows, cols) => {
+                for row in rows {
+                    for col in cols.clone() {
+                        self.blocks
+                            .entry((sheet, row, col))
+                            .or_default()
+                            .push((range, node));
+                    }
+                }
+            }
+            Filing::Columns(cols) => {
+                for col in cols {
+                    self.columns
+                        .entry((sheet, col))
+                        .or_default()
+                        .push((range, node));
+                }
+            }
+            Filing::Wide => self.wide.entry(sheet).or_default().push((range, node)),
+        }
+    }
+
+    fn remove(&mut self, sheet: SheetId, range: CellRange, node: NodeKey) {
+        let forget = |list: Option<&mut Vec<Read>>| {
+            if let Some(list) = list {
+                list.retain(|read| *read != (range, node));
+            }
+        };
+        match filing(range) {
+            Filing::Blocks(rows, cols) => {
+                for row in rows {
+                    for col in cols.clone() {
+                        forget(self.blocks.get_mut(&(sheet, row, col)));
+                    }
+                }
+            }
+            Filing::Columns(cols) => {
+                for col in cols {
+                    forget(self.columns.get_mut(&(sheet, col)));
+                }
+            }
+            Filing::Wide => forget(self.wide.get_mut(&sheet)),
+        }
+    }
+
+    /// reads on `sheet` sharing a cell with `area`; a read filed under several
+    /// blocks or columns the area spans comes back once for each.
+    fn overlapping(&self, sheet: SheetId, area: CellRange) -> impl Iterator<Item = &Read> + '_ {
+        let blocks = match filing(area) {
+            Filing::Blocks(rows, cols) => rows
+                .flat_map(move |row| cols.clone().map(move |col| (sheet, row, col)))
+                .collect::<Vec<_>>(),
+            // an area this large only comes from a spill; scan every block.
+            _ => self
+                .blocks
+                .keys()
+                .filter(|(block_sheet, ..)| *block_sheet == sheet)
+                .copied()
+                .collect(),
+        };
+        let columns = (area.start.col..=area.end.col)
+            .filter(move |col| self.columns.contains_key(&(sheet, *col)));
+        blocks
+            .into_iter()
+            .filter_map(|block| self.blocks.get(&block))
+            .chain(columns.filter_map(move |col| self.columns.get(&(sheet, col))))
+            .chain(self.wide.get(&sheet))
+            .flatten()
+            .filter(move |(range, _)| range.overlaps(&area))
+    }
+
+    #[cfg(test)]
+    fn filed(&self, sheet: SheetId) -> usize {
+        let count = |reads: &Vec<Read>| reads.len();
+        self.blocks
+            .iter()
+            .filter(|((block_sheet, ..), _)| *block_sheet == sheet)
+            .map(|(_, reads)| count(reads))
+            .chain(
+                self.columns
+                    .iter()
+                    .filter(|((column_sheet, _), _)| *column_sheet == sheet)
+                    .map(|(_, reads)| count(reads)),
+            )
+            .chain(self.wide.get(&sheet).map(count))
+            .sum()
+    }
 }
 
 impl DepGraph {
@@ -97,7 +229,7 @@ impl DepGraph {
             defined_name_indices,
             tables,
             deps: HashMap::new(),
-            by_sheet: HashMap::new(),
+            readers: Readers::default(),
             volatile: HashSet::new(),
             spills: HashMap::new(),
             spills_by_sheet: HashMap::new(),
@@ -170,15 +302,13 @@ impl DepGraph {
         *self = Self::build(wb);
     }
 
-    /// every stored edge as `(range's sheet, range, dependent cell)`.
-    pub(crate) fn edges(
-        &self,
-    ) -> impl Iterator<Item = (SheetId, CellRange, SheetId, CellRef)> + '_ {
-        self.by_sheet.iter().flat_map(|(&sheet, edges)| {
-            edges
-                .iter()
-                .map(move |(range, node)| (sheet, *range, node.sheet, node.cell()))
-        })
+    /// the ranges a formula node reads, sheets resolved; empty for a cell that
+    /// is not one.
+    pub(crate) fn precedents(&self, sheet: SheetId, cell: CellRef) -> &[(SheetId, CellRange)] {
+        self.deps
+            .get(&NodeKey::new(sheet, cell))
+            .map(|node| node.edges.as_slice())
+            .unwrap_or_default()
     }
 
     /// formula cells that directly read `cell` on `sheet`; may contain
@@ -190,15 +320,14 @@ impl DepGraph {
     ) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
         let target = CellRef::new(cell.row, cell.col);
         let anchor = NodeKey::new(sheet, cell);
-        let spill = self.spills.get(&anchor).copied();
-        self.by_sheet
-            .get(&sheet)
-            .into_iter()
-            .flatten()
-            .filter(move |(range, node)| {
-                range.contains(target)
-                    || (*node != anchor && spill.is_some_and(|spill| range.overlaps(&spill)))
-            })
+        let reach = self
+            .spills
+            .get(&anchor)
+            .copied()
+            .unwrap_or(CellRange::new(target, target));
+        self.readers
+            .overlapping(sheet, reach)
+            .filter(move |(range, node)| range.contains(target) || *node != anchor)
             .map(|(_, node)| (node.sheet, node.cell()))
     }
 
@@ -237,7 +366,7 @@ impl DepGraph {
         };
         let edges = self.resolve_edges(key, &expr);
         for (sid, range) in &edges {
-            self.by_sheet.entry(*sid).or_default().push((*range, key));
+            self.readers.insert(*sid, *range, key);
         }
         if self.is_volatile(key.sheet, &expr) {
             self.volatile.insert(key);
@@ -248,10 +377,8 @@ impl DepGraph {
     /// drop a node's edges from every index it appears in.
     fn uninstall(&mut self, key: NodeKey) {
         if let Some(entry) = self.deps.remove(&key) {
-            for (sid, _) in &entry.edges {
-                if let Some(list) = self.by_sheet.get_mut(sid) {
-                    list.retain(|(_, node)| *node != key);
-                }
+            for (sid, range) in &entry.edges {
+                self.readers.remove(*sid, *range, key);
             }
         }
         self.volatile.remove(&key);
@@ -607,7 +734,8 @@ mod tests {
         }
         assert!(deps_a1(&graph, "Data", "W1", &wb).is_empty());
         assert!(deps_a1(&graph, "Sheet1", "S1", &wb).is_empty());
-        assert_eq!(graph.by_sheet[&SheetId(1)].len(), 1);
+        // filed once per column of $S:$V, not once per row
+        assert_eq!(graph.readers.filed(SheetId(1)), 4);
         assert_eq!(wb.sheets[1].iter_cells().count(), 0);
     }
 

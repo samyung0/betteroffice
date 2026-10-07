@@ -295,34 +295,34 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
     let mut indegree: HashMap<Key, usize> = recompute.iter().map(|k| (*k, 0)).collect();
     let mut seen: HashSet<(Key, Key)> = HashSet::new();
 
-    for (es, range, vs, vc) in graph.edges() {
-        let v = key(vs, vc);
-        if !recompute.contains(&v) {
-            continue;
-        }
-        let Some(rows) = points.get(&es) else {
-            continue;
-        };
-        for (&row, cols) in rows.range(range.start.row..=range.end.row) {
-            for &col in cols {
-                if col < range.start.col || col > range.end.col {
+    // each recomputed node waits for the recomputed cells, and spill anchors,
+    // its own reads cover: the work follows the recompute set, not the graph.
+    for &v in recompute {
+        for &(es, range) in graph.precedents(v.0, cell_of(v)) {
+            let Some(rows) = points.get(&es) else {
+                continue;
+            };
+            for (&row, cols) in rows.range(range.start.row..=range.end.row) {
+                for &col in cols {
+                    if col < range.start.col || col > range.end.col {
+                        continue;
+                    }
+                    let u = (es, row, col);
+                    if seen.insert((u, v)) {
+                        adj.entry(u).or_default().push(v);
+                        *indegree.get_mut(&v).unwrap() += 1;
+                    }
+                }
+            }
+            for (sheet, anchor) in graph.spill_sources(es, range) {
+                let u = key(sheet, anchor);
+                if u == v || !recompute.contains(&u) {
                     continue;
                 }
-                let u = (es, row, col);
                 if seen.insert((u, v)) {
                     adj.entry(u).or_default().push(v);
                     *indegree.get_mut(&v).unwrap() += 1;
                 }
-            }
-        }
-        for (sheet, anchor) in graph.spill_sources(es, range) {
-            let u = key(sheet, anchor);
-            if u == v || !recompute.contains(&u) {
-                continue;
-            }
-            if seen.insert((u, v)) {
-                adj.entry(u).or_default().push(v);
-                *indegree.get_mut(&v).unwrap() += 1;
             }
         }
     }
