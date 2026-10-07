@@ -8,6 +8,7 @@ use crate::{BranchID, ClientID, ReadTxn, ID};
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
@@ -226,6 +227,53 @@ impl StickyIndex {
         } else {
             None
         }
+    }
+
+    /// [StickyIndex::get_offset] of every index in `indexes`, walking each
+    /// collection they point into once instead of walking left from every
+    /// index: resolving all of a long text's anchors stays linear.
+    pub fn get_offsets<T: ReadTxn>(txn: &T, indexes: &[StickyIndex]) -> Vec<Option<Offset>> {
+        let store = txn.store();
+        let encoding = store.offset_kind;
+        let mut item_starts: HashMap<BranchPtr, HashMap<ID, u32>> = HashMap::new();
+        indexes
+            .iter()
+            .map(|sticky| {
+                let IndexScope::Relative(right_id) = &sticky.scope else {
+                    return sticky.get_offset(txn);
+                };
+                if store.blocks.get_clock(&right_id.client) <= right_id.clock {
+                    return None;
+                }
+                let right = store.follow_redone(right_id)?;
+                let branch = *right.ptr.parent.as_branch()?;
+                let mut index = 0;
+                if !branch.item.is_some_and(|item| item.is_deleted()) {
+                    index = if right.is_deleted() || !right.is_countable() {
+                        0
+                    } else if sticky.assoc == Assoc::After {
+                        right.start
+                    } else {
+                        right.start + 1
+                    };
+                    let starts = item_starts.entry(branch).or_insert_with(|| {
+                        let mut starts = HashMap::new();
+                        let mut at = 0;
+                        let mut next = branch.start;
+                        while let Some(item) = next.as_deref() {
+                            starts.insert(*item.id(), at);
+                            if !item.is_deleted() && item.is_countable() {
+                                at += item.content_len(encoding);
+                            }
+                            next = item.right;
+                        }
+                        starts
+                    });
+                    index += starts.get(right.ptr.id()).copied().unwrap_or(0);
+                }
+                Some(Offset::new(branch, index, sticky.assoc))
+            })
+            .collect()
     }
 
     pub fn at<T: ReadTxn>(
@@ -667,6 +715,44 @@ mod test {
     }
 
     #[test]
+    fn get_offsets_resolve_like_get_offset() {
+        let doc = Doc::with_client_id(1);
+        let txt = doc.get_or_insert_text("test");
+        let other = doc.get_or_insert_text("other");
+        let mut txn = doc.transact_mut();
+        for (step, word) in ["alpha ", "beta ", "gamma ", "delta ", "eps "]
+            .iter()
+            .enumerate()
+        {
+            let at = (step as u32 * 3) % (txt.len(&txn) + 1);
+            txt.insert(&mut txn, at, word);
+        }
+        other.insert(&mut txn, 0, "xy");
+        let mut indexes = Vec::new();
+        for i in 0..=txt.len(&txn) {
+            for assoc in [Assoc::After, Assoc::Before] {
+                indexes.extend(txt.sticky_index(&mut txn, i, assoc));
+            }
+        }
+        indexes.extend(other.sticky_index(&mut txn, 1, Assoc::After));
+        txt.remove_range(&mut txn, 4, 6);
+        txt.insert(&mut txn, 2, "ZZ");
+        let single: Vec<_> = indexes
+            .iter()
+            .map(|sticky| {
+                sticky
+                    .get_offset(&txn)
+                    .map(|offset| (offset.index, offset.assoc))
+            })
+            .collect();
+        let batch: Vec<_> = StickyIndex::get_offsets(&txn, &indexes)
+            .into_iter()
+            .map(|offset| offset.map(|offset| (offset.index, offset.assoc)))
+            .collect();
+        assert_eq!(batch, single);
+    }
+
+    #[test]
     fn sticky_index_inside_a_redone_item_keeps_its_offset() {
         let doc = Doc::with_client_id(1);
         let txt = doc.get_or_insert_text("test");
@@ -674,7 +760,9 @@ mod test {
         let mut undo = crate::UndoManager::new();
         undo.expand_scope(&doc, &txt);
         txt.insert(&mut doc.transact_mut(), 2, "yy");
-        let end = txt.sticky_index(&mut doc.transact_mut(), 4, Assoc::Before).unwrap();
+        let end = txt
+            .sticky_index(&mut doc.transact_mut(), 4, Assoc::Before)
+            .unwrap();
         undo.undo_blocking();
         undo.redo_blocking();
         assert_eq!(crate::GetString::get_string(&txt, &doc.transact()), "abyy");
