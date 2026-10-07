@@ -178,12 +178,14 @@ pub fn yrs_doc_to_layout_blocks(
     }
 
     let txn = doc.yrs_doc().transact();
+    let comments = resolve_comment_intervals(&txn, env)?;
     let mut active_stories = BTreeSet::new();
     let mut list_state = ListState::default();
     lower_story(
         &txn,
         story_id,
         env,
+        &comments,
         0,
         &mut active_stories,
         &mut list_state,
@@ -198,10 +200,12 @@ struct CellEdges {
     after: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_story<T: ReadTxn>(
     txn: &T,
     story_id: &str,
     env: &RenderEnv,
+    comment_index: &CommentIndex,
     pm_base: u64,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
@@ -213,7 +217,11 @@ fn lower_story<T: ReadTxn>(
 
     let result = (|| {
         let story = story_ref(txn, story_id)?;
-        let comments = resolve_comment_intervals(txn, story_id, env)?;
+        let comments = match comment_index.get(story_id) {
+            Some(Ok(intervals)) => intervals.as_slice(),
+            Some(Err(reason)) => return Err(EditError::InvalidComment((*reason).into()).into()),
+            None => &[],
+        };
         let bookmarks = std::cell::OnceCell::<Vec<u32>>::new();
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();
@@ -245,7 +253,7 @@ fn lower_story<T: ReadTxn>(
                         text,
                         story_index,
                         attributes,
-                        &comments,
+                        comments,
                         env,
                         paragraph_pm_units,
                     );
@@ -299,19 +307,18 @@ fn lower_story<T: ReadTxn>(
                         }
                     }
                     slot.close(&mut blocks, content || reference);
+                    let values = pilcrow_values(&pilcrow, txn);
                     let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
-                        &pilcrow,
+                        &values,
                         attributes,
-                        txn,
                         story_id,
                         env,
                         paragraph_pm_start,
                         paragraph_pm_units,
                         list_state,
                     );
-                    let values = pilcrow_values(&pilcrow, txn);
                     suppress_cell_edge_spacing(
                         &mut paragraph_blocks,
                         &values,
@@ -321,7 +328,7 @@ fn lower_story<T: ReadTxn>(
                         },
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
-                    if !shared_map_string(&pilcrow, txn, "paraId")
+                    if !value_string(values.get("paraId"))
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
@@ -367,6 +374,7 @@ fn lower_story<T: ReadTxn>(
                         story_index,
                         pm_cursor,
                         env,
+                        comment_index,
                         active_stories,
                         list_state,
                     )?;
@@ -490,6 +498,7 @@ fn lower_story<T: ReadTxn>(
                         txn,
                         &child_story,
                         env,
+                        comment_index,
                         pm_cursor + 1,
                         active_stories,
                         list_state,
@@ -990,6 +999,7 @@ fn lower_table<T: ReadTxn>(
     story_index: u32,
     pm_start: u64,
     env: &RenderEnv,
+    comment_index: &CommentIndex,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
 ) -> Result<(TableBlock, u64), BridgeError> {
@@ -1096,6 +1106,7 @@ fn lower_table<T: ReadTxn>(
                 txn,
                 &cell_story,
                 env,
+                comment_index,
                 cell_pm_start + 1,
                 active_stories,
                 list_state,
@@ -2090,21 +2101,20 @@ struct DrawingMarker {
     anchored: bool,
 }
 
-/// Resolves every comment anchored in `story_id` to sorted, story-global
-/// UTF-16 intervals with the numeric ids the layout contract carries. Anchors
-/// in other stories are skipped and an empty range contributes nothing; an
-/// anchor that no longer resolves is an error, because the run cuts derived
-/// from these intervals would silently misplace the comment.
+/// Each story's comment intervals in story order, or why an anchor of that
+/// story no longer resolves (an error only when that story is lowered, because
+/// the run cuts derived from its intervals would misplace the comment). Every
+/// anchor of the document resolves in one walk per story.
+type CommentIndex = std::collections::HashMap<String, Result<Vec<CommentInterval>, &'static str>>;
+
 fn resolve_comment_intervals<T: ReadTxn>(
     txn: &T,
-    story_id: &str,
     env: &RenderEnv,
-) -> Result<Vec<CommentInterval>, BridgeError> {
+) -> Result<CommentIndex, BridgeError> {
     let comments = txn
         .get_map(COMMENTS)
         .expect("comments root is declared by EditingDoc::new");
-    // Every anchor resolves in one walk of the story, not one walk each.
-    let mut ids = Vec::new();
+    let mut owners = Vec::new();
     let mut edges = Vec::new();
     for (comment_id, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
@@ -2115,39 +2125,40 @@ fn resolve_comment_intervals<T: ReadTxn>(
         };
         for encoded in anchors.iter() {
             let anchor = decode_anchor(encoded)?;
-            if anchor.story != story_id {
-                continue;
-            }
-            ids.push(numeric_id(comment_id, env));
+            owners.push((anchor.story, numeric_id(comment_id, env)));
             edges.push(anchor.start);
             edges.push(anchor.end);
         }
     }
     let offsets = yrs::StickyIndex::get_offsets(txn, &edges);
-    let mut intervals = Vec::new();
-    for (id, [start, end]) in ids.into_iter().zip(offsets.as_chunks::<2>().0) {
-        let start = start
-            .as_ref()
-            .ok_or_else(|| EditError::InvalidComment("start anchor no longer resolves".into()))?;
-        let end = end
-            .as_ref()
-            .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
-        if start.index < end.index {
-            intervals.push(CommentInterval {
-                start: start.index,
-                end: end.index,
-                id,
-            });
+    let mut index = CommentIndex::new();
+    for ((story, id), [start, end]) in owners.into_iter().zip(offsets.as_chunks::<2>().0) {
+        let entry = index.entry(story).or_insert_with(|| Ok(Vec::new()));
+        let Ok(intervals) = entry else {
+            continue;
+        };
+        match (start, end) {
+            (None, _) => *entry = Err("start anchor no longer resolves"),
+            (_, None) => *entry = Err("end anchor no longer resolves"),
+            (Some(start), Some(end)) if start.index < end.index => {
+                intervals.push(CommentInterval {
+                    start: start.index,
+                    end: end.index,
+                    id,
+                });
+            }
+            _ => {}
         }
     }
-
-    intervals.sort_by(|a, b| {
-        a.start
-            .cmp(&b.start)
-            .then(a.end.cmp(&b.end))
-            .then(a.id.total_cmp(&b.id))
-    });
-    Ok(intervals)
+    for intervals in index.values_mut().filter_map(|entry| entry.as_mut().ok()) {
+        intervals.sort_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then(a.end.cmp(&b.end))
+                .then(a.id.total_cmp(&b.id))
+        });
+    }
+    Ok(index)
 }
 
 /// Splits one formatted text chunk into runs. Cuts land at every comment
@@ -2223,12 +2234,11 @@ fn push_text_chunks(
 /// out ahead of it and leave it whole; in-flow ones break it into the text
 /// segments around them, each carrying the same pilcrow properties.
 #[allow(clippy::too_many_arguments)]
-fn flush_paragraph_parts<T: ReadTxn>(
+fn flush_paragraph_parts(
     mut raw_runs: Vec<RawRun>,
     mut drawings: Vec<DrawingMarker>,
-    pilcrow: &MapRef,
+    values: &BTreeMap<String, Any>,
     pilcrow_attributes: Option<&Attrs>,
-    txn: &T,
     story_id: &str,
     env: &RenderEnv,
     paragraph_pm_start: u64,
@@ -2252,9 +2262,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
     if drawings.is_empty() {
         let paragraph = flush_paragraph(
             raw_runs,
-            pilcrow,
+            values,
             pilcrow_attributes,
-            txn,
             story_id,
             env,
             paragraph_pm_start,
@@ -2264,8 +2273,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
             && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
-                shared_any(pilcrow, txn, "defaultTextFormatting")
-                    .as_ref()
+                values
+                    .get("defaultTextFormatting")
                     .and_then(any_map)
                     .and_then(|defaults| map_bool(defaults, "hidden"))
             }) == Some(true)
@@ -2287,9 +2296,8 @@ fn flush_paragraph_parts<T: ReadTxn>(
         let mut continuation = ListState::default();
         let mut paragraph = flush_paragraph(
             runs,
-            pilcrow,
+            values,
             pilcrow_attributes,
-            txn,
             story_id,
             env,
             paragraph_pm_start + u64::from(start),
@@ -2378,25 +2386,23 @@ fn flush_paragraph_parts<T: ReadTxn>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flush_paragraph<T: ReadTxn>(
+fn flush_paragraph(
     mut raw_runs: Vec<RawRun>,
-    pilcrow: &MapRef,
+    values: &BTreeMap<String, Any>,
     pilcrow_attributes: Option<&Attrs>,
-    txn: &T,
     story_id: &str,
     env: &RenderEnv,
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
 ) -> ParagraphBlock {
-    let values = pilcrow_values(pilcrow, txn);
     let para_id = value_string(values.get("paraId")).unwrap_or_default();
     let generated_prefix = format!("{story_id}:p");
     let para_id_is_generated = para_id
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
-    let style_id = paragraph_style_id(&values);
-    let defaults = paragraph_run_defaults(&values);
+    let style_id = paragraph_style_id(values);
+    let defaults = paragraph_run_defaults(values);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
@@ -2408,7 +2414,7 @@ fn flush_paragraph<T: ReadTxn>(
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
-    let mut attrs = lower_paragraph_attrs(&values, pilcrow_attributes, env, list_state);
+    let mut attrs = lower_paragraph_attrs(values, pilcrow_attributes, env, list_state);
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();
