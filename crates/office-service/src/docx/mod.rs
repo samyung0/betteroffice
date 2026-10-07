@@ -27,7 +27,7 @@ use crate::types::{
 };
 
 pub(crate) use comments::comment_ooxml_ids;
-pub(crate) use item::clear_unit_breaks;
+use item::UnitBreaks;
 use project::{Hooks, SaveContext, project_document};
 
 pub(crate) struct DocxSession {
@@ -255,9 +255,10 @@ impl DocxSession {
                 embeds: Some(Vec::new()),
                 ..Hooks::default()
             };
+            let breaks = UnitBreaks;
             let mut context = SaveContext::new(self.engine.doc(), &base, hooks)?;
             let document = project_document(&mut context, &base);
-            clear_unit_breaks();
+            drop(breaks);
             let document = document?;
             let hooks = context.into_hooks();
             let mut embeds = HashMap::new();
@@ -282,6 +283,11 @@ impl DocxSession {
         if let Some(reached) = reach::reach(self.engine.doc(), &self.base_document())? {
             return Ok(reached);
         }
+        self.projected_reach()
+    }
+
+    /// The stories and embed content the full save projection reaches.
+    fn projected_reach(&mut self) -> Result<reach::Reached> {
         let projected = self.project()?;
         Ok(reach::Reached {
             stories: projected.stories.clone(),
@@ -291,8 +297,12 @@ impl DocxSession {
     }
 
     pub fn entries(&mut self) -> Result<Vec<Item>> {
+        let reached = self.reached()?;
+        self.entries_of(reached)
+    }
+
+    fn entries_of(&self, mut reached: reach::Reached) -> Result<Vec<Item>> {
         let media = media_data_urls(&self.base_document());
-        let mut reached = self.reached()?;
         let doc = self.engine.doc();
         let mut entries = Vec::new();
         for story in &reached.stories {
@@ -608,9 +618,10 @@ impl DocxSession {
             paragraphs: Some(Vec::new()),
             ..Hooks::default()
         };
+        let breaks = UnitBreaks;
         let mut context = SaveContext::new(self.engine.doc(), &base, hooks)?;
         let projected = project_document(&mut context, &base);
-        clear_unit_breaks();
+        drop(breaks);
         projected?;
         let mut paragraphs = HashMap::new();
         for (story, _, paragraph, id) in context.into_hooks().paragraphs.unwrap_or_default() {

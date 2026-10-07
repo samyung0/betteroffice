@@ -15,7 +15,8 @@ use crate::jsv::{Obj, V, text};
 use crate::obj;
 
 use super::item::{
-    content_control_value, is, is_kind, ordinary_content_for_item, restore_projected_field_results,
+    UnitBreaks, content_control_value, is, is_kind, ordinary_content_for_item,
+    restore_projected_field_results,
 };
 use super::paragraph::{items_with_markers, page_break_paragraph, split_slot_bookmarks};
 use super::project::{Hooks, SaveContext, push_text};
@@ -35,6 +36,7 @@ pub(super) struct Reached {
 /// projection carries the base block at the same block index, which only the
 /// projection knows.
 pub(super) fn reach(doc: &EditingDoc, base: &V) -> Result<Option<Reached>> {
+    let _breaks = UnitBreaks;
     let mut walk = Walk {
         doc,
         base,
@@ -237,5 +239,162 @@ impl<'a> Walk<'a> {
             .as_mut()
             .expect("made above")
             .story_to_blocks(story)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use docx_edit::{EditCtx, Position};
+    use yrs::Any;
+
+    use super::super::DocxSession;
+    use super::*;
+    use crate::session::Item;
+    use crate::types::Format;
+
+    const STORIES: &[u8] = include_bytes!("../../tests/fixtures/stories.docx");
+    const FIXTURES: [(&str, &[u8]); 5] = [
+        ("stories", STORIES),
+        (
+            "wordprocessingml-comprehensive",
+            include_bytes!("../../../../poc/fixtures/wordprocessingml-comprehensive.docx"),
+        ),
+        (
+            "feature-rich",
+            include_bytes!("../../../../poc/fixtures/feature-rich.docx"),
+        ),
+        (
+            "opaque-objects",
+            include_bytes!("../../../../poc/fixtures/opaque-objects.docx"),
+        ),
+        (
+            "footnote-anchor",
+            include_bytes!("../../../docx-edit/tests/fixtures/footnote-anchor.docx"),
+        ),
+    ];
+
+    fn open(base: &[u8]) -> DocxSession {
+        let state = crate::seed(Format::Docx, base).expect("seeds");
+        DocxSession::open(base, Some(&state)).expect("opens")
+    }
+
+    fn baseline(entries: Vec<Item>) -> String {
+        let entries: Vec<_> = entries.into_iter().map(Item::baseline).collect();
+        serde_json::to_string(&entries).expect("serializes")
+    }
+
+    /// The walk reaches the stories the projection reaches, in its order,
+    /// and gives the entries the projection's embeds give.
+    fn assert_walk_matches(name: &str, session: &mut DocxSession) -> Reached {
+        let walked = reach(session.engine.doc(), &session.base_document())
+            .expect("walks")
+            .expect("no opaque block");
+        let projected = session.projected_reach().expect("projects");
+        assert_eq!(walked.stories, projected.stories, "{name}");
+        let reached = Reached {
+            stories: walked.stories.clone(),
+            segments: walked.segments.clone(),
+            embeds: walked.embeds.clone(),
+        };
+        let fast = session.entries_of(walked).expect("entries");
+        let full = session.entries_of(projected).expect("entries");
+        assert_eq!(baseline(fast), baseline(full), "{name}");
+        reached
+    }
+
+    /// The body offset of the first embed of `kind`.
+    fn embed_at(session: &DocxSession, kind: &str) -> u32 {
+        let mut offset = 0;
+        for segment in read::story_segments(session.engine.doc(), "body").expect("reads") {
+            if is_kind(&segment, "text") {
+                offset += text::len(&segment.get("text").to_js_string()) as u32;
+                continue;
+            }
+            if segment.get("embedKind").as_str().as_deref() == Some(kind) {
+                return offset;
+            }
+            offset += 1;
+        }
+        panic!("no {kind} embed");
+    }
+
+    fn set_value(session: &DocxSession, kind: &str, value: &str) {
+        let at = Position::new("body", embed_at(session, kind));
+        session
+            .engine
+            .doc()
+            .set_embed_attrs(
+                &EditCtx::local(String::new(), String::new()),
+                at,
+                vec![("value".to_owned(), Any::from_json(value).expect("json"))],
+            )
+            .expect("sets the value");
+    }
+
+    #[test]
+    fn the_walk_reaches_what_the_projection_reaches() {
+        for (name, base) in FIXTURES {
+            let mut session = open(base);
+            let reached = assert_walk_matches(name, &mut session);
+            if name == "stories" {
+                // Header, footer and note stories, both table cells and the
+                // nested table's cell, and each block control's story.
+                let kinds: Vec<&str> = reached
+                    .stories
+                    .iter()
+                    .map(|story| story.split(':').next().unwrap_or_default())
+                    .collect();
+                for kind in ["body", "hf", "fn"] {
+                    assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
+                }
+                assert!(reached.stories.len() >= 9, "{:?}", reached.stories);
+            }
+        }
+    }
+
+    /// A block control's authored value replaces its story, which the
+    /// projection then no longer reaches; a value of another kind leaves it.
+    #[test]
+    fn block_control_values_replace_their_story() {
+        let mut session = open(STORIES);
+        let before = assert_walk_matches("stories", &mut session).stories.len();
+        set_value(
+            &session,
+            "blockSdt",
+            r#"{"kind":"date","date":"2026-05-06"}"#,
+        );
+        session.projected = None;
+        let reached = assert_walk_matches("stories with a date", &mut session);
+        assert_eq!(reached.stories.len(), before - 1);
+        let entries = session.entries().expect("entries");
+        // The control's language (`w:lid` ja-JP) is not in the embed's
+        // payload, so the projection formats in English, as yrsToDocument.ts.
+        assert!(entries.iter().any(|entry| entry.value == "6 May 2026\n"));
+    }
+
+    #[test]
+    fn an_opaque_block_control_falls_back_to_the_projection() {
+        let session = open(STORIES);
+        let base = session.base_document();
+        let mut walk = Walk {
+            doc: session.engine.doc(),
+            base: &base,
+            all: HashMap::new(),
+            seen: HashSet::new(),
+            reached: Reached {
+                stories: Vec::new(),
+                segments: HashMap::new(),
+                embeds: HashMap::new(),
+            },
+            context: None,
+        };
+        let opaque = obj! {
+            "kind": "embed",
+            "embedKind": "opaque",
+            "payload": obj! { "blob": obj! { "type": "blockSdt" } },
+            "attributes": obj! {},
+        };
+        let walked = walk.embed("body", 0.0, &opaque, &mut Paragraph::default());
+        assert!(!walked.expect("reads"));
     }
 }

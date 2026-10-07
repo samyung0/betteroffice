@@ -1062,9 +1062,14 @@ pub(crate) fn is_unit_break(entry: &V) -> bool {
         .is_some_and(|entry| UNIT_BREAKS.with(|breaks| breaks.borrow().contains_key(&entry.id())))
 }
 
-/// Forgets the unit breaks of a finished projection.
-pub(crate) fn clear_unit_breaks() {
-    UNIT_BREAKS.with(|breaks| breaks.borrow_mut().clear());
+/// Forgets the unit breaks of a projection when dropped, also when the
+/// projection fails or panics: the engine thread outlives many calls.
+pub(crate) struct UnitBreaks;
+
+impl Drop for UnitBreaks {
+    fn drop(&mut self) {
+        UNIT_BREAKS.with(|breaks| breaks.borrow_mut().clear());
+    }
 }
 
 pub(crate) fn raw_content_for_item(item: &V) -> Result<Option<V>> {
