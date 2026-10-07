@@ -2,7 +2,7 @@
 //! could have changed, in dependency order, and report what moved.
 
 use std::borrow::Cow;
-use std::cell::Cell as Flag;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
@@ -233,6 +233,7 @@ fn run_recalc(
             &budget,
             &mut changed,
             &mut limited_cells,
+            &mut spilled,
             journal,
         );
         for u in &circular {
@@ -380,7 +381,9 @@ enum NodeValue {
 /// column reads its own earlier rows through `INDEX(range, k)` looks circular
 /// even though no cell reads itself. settle what the reads really allow: a
 /// cell whose evaluation touches nothing still unsettled was never in a
-/// cycle. what is left over is.
+/// cycle. of what is left, the cells whose own reads lead back to them are
+/// circular and take the circular value; the cells that only read them then
+/// evaluate as any other, as Excel computes them. returns the circular cells.
 #[allow(clippy::too_many_arguments)]
 fn settle_deferred(
     wb: &mut Workbook,
@@ -390,27 +393,94 @@ fn settle_deferred(
     budget: &Rc<EvaluationBudget>,
     changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
+    spilled: &mut Vec<(SheetId, CellRef)>,
     journal: &mut RecalcJournal,
 ) -> Vec<Key> {
     if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
         return cycle.to_vec();
     }
     let mut unsettled: HashSet<Key> = cycle.iter().copied().collect();
-    for _ in 0..cycle.len() {
+    settle_ready(
+        wb,
+        cycle,
+        &mut unsettled,
+        graph,
+        now_serial,
+        budget,
+        changed,
+        limited_cells,
+        None,
+        journal,
+    );
+    let left: Vec<Key> = cycle
+        .iter()
+        .copied()
+        .filter(|u| unsettled.contains(u))
+        .collect();
+    if left.is_empty() {
+        return left;
+    }
+    let reads: HashMap<Key, Vec<Key>> = left
+        .iter()
+        .map(|u| {
+            let log = ReadLog::new(wb, &unsettled);
+            eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
+            (*u, log.read.into_inner())
+        })
+        .collect();
+    let circular = cycle_members(&left, &reads);
+    for u in &left {
+        if circular.contains(u) {
+            unsettled.remove(u);
+            if write_if_changed(wb, *u, circular_value(wb, *u), journal) {
+                changed.push((u.0, cell_of(*u)));
+            }
+        }
+    }
+    settle_ready(
+        wb,
+        &left,
+        &mut unsettled,
+        graph,
+        now_serial,
+        budget,
+        changed,
+        limited_cells,
+        Some(spilled),
+        journal,
+    );
+    left.into_iter()
+        .filter(|u| circular.contains(u) || unsettled.contains(u))
+        .collect()
+}
+
+/// evaluate, until none is left that can be, each of `nodes` whose reads
+/// touch nothing still unsettled. a spill rewrites a rectangle, so it waits
+/// for the ordered pass unless `spilled` takes the cells it moved.
+#[allow(clippy::too_many_arguments)]
+fn settle_ready(
+    wb: &mut Workbook,
+    nodes: &[Key],
+    unsettled: &mut HashSet<Key>,
+    graph: &DepGraph,
+    now_serial: Option<f64>,
+    budget: &Rc<EvaluationBudget>,
+    changed: &mut Vec<(SheetId, CellRef)>,
+    limited_cells: &mut Vec<(SheetId, CellRef)>,
+    mut spilled: Option<&mut Vec<(SheetId, CellRef)>>,
+    journal: &mut RecalcJournal,
+) {
+    for _ in 0..nodes.len() {
         let mut settled_any = false;
-        for u in cycle {
+        for u in nodes {
             if !unsettled.contains(u) {
                 continue;
             }
-            let log = ReadLog {
-                inner: wb,
-                watch: &unsettled,
-                touched: Flag::new(false),
-            };
+            let log = ReadLog::new(wb, unsettled);
             let (value, limited) =
                 eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
-            // a spill rewrites a rectangle, which the ordered pass owns
-            if log.touched.get() || matches!(value, Some(NodeValue::Spill(_))) {
+            let waits = !log.read.into_inner().is_empty();
+            if waits || (matches!(value, Some(NodeValue::Spill(_))) && spilled.is_none()) {
                 continue;
             }
             unsettled.remove(u);
@@ -418,35 +488,103 @@ fn settle_deferred(
             if limited {
                 limited_cells.push((u.0, cell_of(*u)));
             }
-            if let Some(NodeValue::Scalar(value)) = value
-                && write_if_changed(wb, *u, value, journal)
-            {
-                changed.push((u.0, cell_of(*u)));
+            match value {
+                Some(NodeValue::Scalar(value)) => {
+                    if write_if_changed(wb, *u, value, journal) {
+                        changed.push((u.0, cell_of(*u)));
+                    }
+                }
+                Some(NodeValue::Spill(spill)) => {
+                    let moved = write_spill(wb, *u, spill, changed, journal);
+                    if let Some(spilled) = spilled.as_deref_mut() {
+                        spilled.extend(moved);
+                    }
+                }
+                None => {}
             }
         }
         if !settled_any {
             break;
         }
     }
-    cycle
-        .iter()
-        .copied()
-        .filter(|u| unsettled.contains(u))
-        .collect()
 }
 
-/// a provider that notes whether a formula read any of the cells still
-/// waiting to settle, without recording the rest.
+/// the nodes on a cycle of `reads`, a cell reading itself included.
+fn cycle_members(nodes: &[Key], reads: &HashMap<Key, Vec<Key>>) -> HashSet<Key> {
+    let successors = |u: &Key| reads.get(u).map(Vec::as_slice).unwrap_or_default();
+    // kosaraju: finish order along the reads, then components on their reverse.
+    let mut visited = HashSet::new();
+    let mut finished = Vec::with_capacity(nodes.len());
+    for &start in nodes {
+        if !visited.insert(start) {
+            continue;
+        }
+        let mut stack = vec![(start, 0)];
+        while let Some(&(u, next)) = stack.last() {
+            match successors(&u).get(next) {
+                Some(&v) => {
+                    stack.last_mut().expect("non-empty").1 += 1;
+                    if visited.insert(v) {
+                        stack.push((v, 0));
+                    }
+                }
+                None => {
+                    finished.push(u);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    let mut readers: HashMap<Key, Vec<Key>> = HashMap::new();
+    for (&u, read) in reads {
+        for &v in read {
+            readers.entry(v).or_default().push(u);
+        }
+    }
+    let mut assigned = HashSet::new();
+    let mut members = HashSet::new();
+    for &root in finished.iter().rev() {
+        if !assigned.insert(root) {
+            continue;
+        }
+        let mut component = vec![root];
+        let mut stack = vec![root];
+        while let Some(u) = stack.pop() {
+            for &v in readers.get(&u).map(Vec::as_slice).unwrap_or_default() {
+                if assigned.insert(v) {
+                    component.push(v);
+                    stack.push(v);
+                }
+            }
+        }
+        if component.len() > 1 || successors(&root).contains(&root) {
+            members.extend(component);
+        }
+    }
+    members
+}
+
+/// a provider that records which of the cells still waiting to settle a
+/// formula read, without recording the rest.
 struct ReadLog<'a> {
     inner: &'a Workbook,
     watch: &'a HashSet<Key>,
-    touched: Flag<bool>,
+    read: RefCell<Vec<Key>>,
 }
 
-impl ReadLog<'_> {
+impl<'a> ReadLog<'a> {
+    fn new(inner: &'a Workbook, watch: &'a HashSet<Key>) -> Self {
+        Self {
+            inner,
+            watch,
+            read: RefCell::new(Vec::new()),
+        }
+    }
+
     fn note(&self, sheet: SheetId, at: CellRef) {
-        if self.watch.contains(&key(sheet, at)) {
-            self.touched.set(true);
+        let read = key(sheet, at);
+        if self.watch.contains(&read) {
+            self.read.borrow_mut().push(read);
         }
     }
 }
@@ -1216,6 +1354,38 @@ mod tests {
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(r.cycle_cells, vec![(s, a1("A1"))]);
         assert_eq!(value(&wb, s, "A1"), num(0.0));
+    }
+
+    /// only the cells on a cycle are circular; a cell that reads one, directly
+    /// or through a spill, evaluates as Excel does, and an edit recalculated
+    /// from its cells agrees with a whole recalculation.
+    #[test]
+    fn dependents_of_a_cycle_evaluate_normally() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "B1+1");
+        put_formula(&mut wb, s, "B1", "A1+1");
+        put_num(&mut wb, s, "E1", 1.0);
+        put_formula(&mut wb, s, "C1", "A1+E1+5");
+        put_formula(&mut wb, s, "D1", "C1*2");
+        put_formula(&mut wb, s, "F1", "A1:B1+1");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("F1"), xlsx_model::CellRange::parse_a1("F1:G1").unwrap());
+        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+        assert_eq!(value(&wb, s, "A1"), num(0.0));
+        assert_eq!(value(&wb, s, "C1"), num(6.0));
+        assert_eq!(value(&wb, s, "D1"), num(12.0));
+        assert_eq!(value(&wb, s, "F1"), num(1.0));
+        assert_eq!(value(&wb, s, "G1"), num(1.0));
+
+        put_num(&mut wb, s, "E1", 3.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("E1"))], None);
+        assert!(r.cycle_cells.is_empty());
+        let mut whole = wb.clone();
+        rebuild_and_recalc_all(&mut whole, None);
+        assert_eq!(value(&wb, s, "D1"), num(16.0));
+        assert_eq!(wb, whole);
     }
 
     /// an array formula caught in a cycle has no rectangle to settle into, so
