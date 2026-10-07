@@ -824,6 +824,13 @@ pub struct GlyphRunPrimitive {
     pub emphasis_mark: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_effect: Option<String>,
+    /// Joined from the one-cluster runs an authoritatively measured line
+    /// paints: each glyph cluster at byte offset `cluster` was a run of its
+    /// own covering its text's UTF-16 length of the document, with logical
+    /// orders counting up from this run's. The accessibility mirror splits
+    /// such a run back into one element per cluster.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cluster_runs: bool,
     #[serde(flatten)]
     pub attrs: DocAttrs,
 }
@@ -5212,6 +5219,8 @@ fn build_display_list_selected(
         }
         let note_areas = emit_note_regions(page, &ctx);
         let (content_bounds, column_bounds) = page_content_geometry(page);
+        // Retained for the session: drop the growth slack.
+        prims.shrink_to_fit();
 
         pages.push(DisplayPage {
             page_index: page_index as u64,
@@ -5868,6 +5877,7 @@ fn emit_line(
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
 ) -> Option<LinePaintMetrics> {
+    let line_from = prims.len();
     let segments = resolve_line_segments(&block.runs, line);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
@@ -6472,6 +6482,9 @@ fn emit_line(
     }
 
     let (trailing_tabs, trailing_breaks) = stamp_copy_separators(prims, &segments, &text_prims);
+    if authoritative_active && joins_cluster_glyph_runs() {
+        join_cluster_glyph_runs(prims, line_from);
+    }
 
     // A line with no positioned text still needs a doc position for hit
     // testing. A blank row from a line break carries the break's own inline
@@ -6517,6 +6530,250 @@ fn emit_line(
         end_x: pen_x,
         baseline,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Off only in tests that compare against the one-run-per-cluster list.
+    static JOIN_CLUSTER_GLYPH_RUNS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn joins_cluster_glyph_runs() -> bool {
+    JOIN_CLUSTER_GLYPH_RUNS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn joins_cluster_glyph_runs() -> bool {
+    true
+}
+
+/// Joins the one-cluster glyph runs an authoritatively measured line emits
+/// into one run per stretch the next cluster merely continues. Every glyph
+/// keeps its own position and paint order, so the page paints the same; the
+/// list just stops carrying a full primitive per character.
+fn join_cluster_glyph_runs(prims: &mut Vec<Primitive>, from: usize) {
+    let tail = prims.split_off(from);
+    // Logical order of the last cluster joined into the run at the end.
+    let mut joined_order = None;
+    for primitive in tail {
+        let Primitive::GlyphRun(next) = primitive else {
+            joined_order = None;
+            prims.push(primitive);
+            continue;
+        };
+        let piece = one_cluster_piece(&next);
+        if piece
+            && prims.len() > from
+            && let Some(Primitive::GlyphRun(run)) = prims.last_mut()
+            && joined_order.is_some_and(|order| glyph_run_continues(run, &next, order))
+        {
+            let offset = u32::try_from(run.text.len()).unwrap_or(u32::MAX);
+            run.cluster_runs = true;
+            run.text.push_str(&next.text);
+            run.glyphs.extend(next.glyphs.into_iter().map(|mut glyph| {
+                glyph.cluster += offset;
+                glyph
+            }));
+            run.attrs.doc_end = next.attrs.doc_end;
+            run.attrs.tabs_after = next.attrs.tabs_after;
+            run.attrs.breaks_after = next.attrs.breaks_after;
+            joined_order = next.attrs.logical_order;
+            continue;
+        }
+        joined_order = next.attrs.logical_order.filter(|_| piece);
+        prims.push(Primitive::GlyphRun(next));
+    }
+}
+
+/// A run of one glyph cluster at its text's start, covering exactly its
+/// text's UTF-16 length of the document: what a joined run can split back into.
+fn one_cluster_piece(run: &GlyphRunPrimitive) -> bool {
+    let utf16_len = run.text.encode_utf16().count() as i64;
+    !run.glyphs.is_empty()
+        && run.glyphs.iter().all(|glyph| glyph.cluster == 0)
+        && run
+            .attrs
+            .doc_start
+            .zip(run.attrs.doc_end)
+            .is_some_and(|(start, end)| end - start == utf16_len)
+}
+
+/// Whether `next` continues `run` left to right: the same paint and document
+/// attributes, with its document range and logical order following on from
+/// `run`'s last cluster (`run_order`), and no copy separator between them.
+fn glyph_run_continues(run: &GlyphRunPrimitive, next: &GlyphRunPrimitive, run_order: u64) -> bool {
+    let GlyphRunPrimitive {
+        font_id,
+        size,
+        color,
+        text: _,
+        glyphs: _,
+        paint_clip,
+        word_spacing,
+        rtl,
+        opacity,
+        rotation_deg,
+        horizontal_scale,
+        all_caps,
+        small_caps,
+        hidden,
+        text_shadow,
+        text_outline,
+        emphasis_mark,
+        text_effect,
+        cluster_runs,
+        attrs,
+    } = next;
+    let DocAttrs {
+        doc_start,
+        doc_end,
+        block_id,
+        block_key,
+        fragment_doc_start,
+        fragment_doc_end,
+        para_id,
+        from_line,
+        to_line,
+        line_index,
+        cell,
+        comment_ids,
+        field,
+        note_ref,
+        revision,
+        list_marker,
+        list_marker_revision,
+        structural_revision,
+        href,
+        tooltip,
+        link_title,
+        link_target,
+        link_history,
+        link_doc_location,
+        sdt,
+        sdt_path,
+        inline_sdt_widget,
+        chart,
+        logical_order,
+        bidi_level,
+        lang,
+        decorative,
+        aria_label,
+        aria_description,
+        hidden_object,
+        group_id,
+        comment,
+        clip_group,
+        leader_glyphs,
+        tabs_before,
+        breaks_before,
+        tabs_after: _,
+        breaks_after: _,
+        highlight_slice,
+        style,
+        primitive_opacity,
+        image_flip_h,
+        image_flip_v,
+        image_shape_type,
+        content_frame,
+        effects,
+        border,
+        fill_paint,
+        stroke_paint,
+        effect_extent,
+        drawing_scene,
+        text_body_properties,
+        fallback_font,
+        modern_effects,
+        table,
+        inline_shape_atom,
+    } = attrs;
+    let previous = &run.attrs;
+    !cluster_runs
+        && run.paint_clip.is_none()
+        && paint_clip.is_none()
+        && run.rtl.is_none()
+        && rtl.is_none()
+        && bidi_level.is_some_and(|level| level % 2 == 0)
+        && previous.doc_end.is_some()
+        && previous.doc_end == *doc_start
+        && doc_end.is_some()
+        && *logical_order == run_order.checked_add(1)
+        && previous.tabs_after.is_none()
+        && previous.breaks_after.is_none()
+        && tabs_before.is_none()
+        && breaks_before.is_none()
+        && previous.inline_sdt_widget.is_none()
+        && inline_sdt_widget.is_none()
+        && previous.note_ref.is_none()
+        && note_ref.is_none()
+        && previous.leader_glyphs.is_none()
+        && leader_glyphs.is_none()
+        && run.font_id == *font_id
+        && run.size == *size
+        && run.color == *color
+        && run.word_spacing == *word_spacing
+        && run.opacity == *opacity
+        && run.rotation_deg == *rotation_deg
+        && run.horizontal_scale == *horizontal_scale
+        && run.all_caps == *all_caps
+        && run.small_caps == *small_caps
+        && run.hidden == *hidden
+        && run.text_shadow == *text_shadow
+        && run.text_outline == *text_outline
+        && run.emphasis_mark == *emphasis_mark
+        && run.text_effect == *text_effect
+        && previous.block_id == *block_id
+        && previous.block_key == *block_key
+        && previous.fragment_doc_start == *fragment_doc_start
+        && previous.fragment_doc_end == *fragment_doc_end
+        && previous.para_id == *para_id
+        && previous.from_line == *from_line
+        && previous.to_line == *to_line
+        && previous.line_index == *line_index
+        && previous.cell == *cell
+        && previous.comment_ids == *comment_ids
+        && previous.field == *field
+        && previous.revision == *revision
+        && previous.list_marker == *list_marker
+        && previous.list_marker_revision == *list_marker_revision
+        && previous.structural_revision == *structural_revision
+        && previous.href == *href
+        && previous.tooltip == *tooltip
+        && previous.link_title == *link_title
+        && previous.link_target == *link_target
+        && previous.link_history == *link_history
+        && previous.link_doc_location == *link_doc_location
+        && previous.sdt == *sdt
+        && previous.sdt_path == *sdt_path
+        && previous.chart == *chart
+        && previous.bidi_level == *bidi_level
+        && previous.lang == *lang
+        && previous.decorative == *decorative
+        && previous.aria_label == *aria_label
+        && previous.aria_description == *aria_description
+        && previous.hidden_object == *hidden_object
+        && previous.group_id == *group_id
+        && previous.comment == *comment
+        && previous.clip_group == *clip_group
+        && previous.highlight_slice == *highlight_slice
+        && previous.style == *style
+        && previous.primitive_opacity == *primitive_opacity
+        && previous.image_flip_h == *image_flip_h
+        && previous.image_flip_v == *image_flip_v
+        && previous.image_shape_type == *image_shape_type
+        && previous.content_frame == *content_frame
+        && previous.effects == *effects
+        && previous.border == *border
+        && previous.fill_paint == *fill_paint
+        && previous.stroke_paint == *stroke_paint
+        && previous.effect_extent == *effect_extent
+        && previous.drawing_scene == *drawing_scene
+        && previous.text_body_properties == *text_body_properties
+        && previous.fallback_font == *fallback_font
+        && previous.modern_effects == *modern_effects
+        && previous.table == *table
+        && previous.inline_shape_atom == *inline_shape_atom
 }
 
 /// Stamps `tabs_before`, `breaks_before`, `tabs_after` and `breaks_after`
@@ -7313,6 +7570,7 @@ fn try_emit_glyph_runs(
             text_outline: fmt.text_outline == Some(true),
             emphasis_mark: fmt.emphasis_mark.clone(),
             text_effect: fmt.text_effect.clone(),
+            cluster_runs: false,
             attrs: sub_attrs,
         }));
     }
@@ -10499,6 +10757,313 @@ mod tests {
         let chains: HashMap<String, Vec<u32>> =
             serde_json::from_value(value["fontChains"].clone()).unwrap();
         assert_eq!(chains["calibri|0|0"], vec![1]);
+    }
+
+    /// The accessibility mirror's inverse of the join: one run per cluster.
+    fn split_cluster_runs(list: &DisplayList) -> DisplayList {
+        let mut list = list.clone();
+        for page in &mut list.pages {
+            page.primitives = std::mem::take(&mut page.primitives)
+                .into_iter()
+                .flat_map(|primitive| {
+                    let Primitive::GlyphRun(run) = primitive else {
+                        return vec![primitive];
+                    };
+                    if !run.cluster_runs {
+                        return vec![Primitive::GlyphRun(run)];
+                    }
+                    let mut starts: Vec<u32> =
+                        run.glyphs.iter().map(|glyph| glyph.cluster).collect();
+                    starts.dedup();
+                    let order = run.attrs.logical_order.unwrap();
+                    let mut doc = run.attrs.doc_start.unwrap();
+                    (0..starts.len())
+                        .map(|k| {
+                            let start = starts[k] as usize;
+                            let end = starts
+                                .get(k + 1)
+                                .map_or(run.text.len(), |end| *end as usize);
+                            let mut piece = run.clone();
+                            piece.cluster_runs = false;
+                            piece.text = run.text[start..end].to_owned();
+                            piece.glyphs = run
+                                .glyphs
+                                .iter()
+                                .filter(|glyph| glyph.cluster == starts[k])
+                                .map(|glyph| PlacedGlyph {
+                                    cluster: 0,
+                                    ..glyph.clone()
+                                })
+                                .collect();
+                            piece.attrs.doc_start = Some(doc);
+                            doc += piece.text.encode_utf16().count() as i64;
+                            piece.attrs.doc_end = Some(doc);
+                            piece.attrs.logical_order = Some(order + k as u64);
+                            if k > 0 {
+                                piece.attrs.tabs_before = None;
+                                piece.attrs.breaks_before = None;
+                            }
+                            if k + 1 < starts.len() {
+                                piece.attrs.tabs_after = None;
+                                piece.attrs.breaks_after = None;
+                            }
+                            Primitive::GlyphRun(piece)
+                        })
+                        .collect()
+                })
+                .collect();
+        }
+        list
+    }
+
+    /// Joining a line's one-cluster glyph runs changes neither paint nor
+    /// interaction: the same glyphs land in the same order at the same
+    /// positions, and caret, hit, range and vertical-move queries answer alike.
+    #[test]
+    fn joined_cluster_glyph_runs_paint_and_hit_like_the_cluster_runs() {
+        use crate::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        const NOTO_SC: &[u8] =
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansSC-Regular.otf");
+        crate::clear_measure_fonts();
+        let latin = crate::register_measure_font(LIBERATION).unwrap();
+        let cjk = crate::register_measure_font(NOTO_SC).unwrap();
+        let chains = serde_json::json!({ "liberation sans|0|0": [latin, cjk] });
+        let lorem = "The committee reviews every application against the published \
+                     criteria before the spring deadline. Late submissions wait. ";
+        let plain = serde_json::json!({});
+        let paragraphs = [
+            ("justify", vec![(lorem.repeat(3), plain.clone())]),
+            (
+                "left",
+                vec![
+                    ("Plain words then ".to_owned(), plain.clone()),
+                    (
+                        "underlined words".to_owned(),
+                        serde_json::json!({ "underline": { "style": "single" } }),
+                    ),
+                    (" and a".to_owned(), plain.clone()),
+                    ("\t".to_owned(), plain.clone()),
+                    (
+                        "commented tail".to_owned(),
+                        serde_json::json!({ "commentIds": [7.0] }),
+                    ),
+                    (" ends here.".to_owned(), plain.clone()),
+                ],
+            ),
+            (
+                "left",
+                vec![(
+                    "交換學生計畫每年春季開放申請 exchange plan 2026 申請人須提交學習計畫與預算表。"
+                        .to_owned(),
+                    serde_json::json!({ "language": { "eastAsia": "zh-TW" } }),
+                )],
+            ),
+            (
+                "justify",
+                vec![(
+                    format!("{lorem}Hebrew שלום עולם mixed in, then 合作大學提供宿舍 {lorem}"),
+                    plain.clone(),
+                )],
+            ),
+        ];
+        let mut pm = 0_usize;
+        let mut blocks = Vec::new();
+        for (index, (alignment, runs)) in paragraphs.iter().enumerate() {
+            let start = pm;
+            let mut cursor = start + 1;
+            let runs: Vec<Value> = runs
+                .iter()
+                .map(|(text, formatting)| {
+                    let len = text.encode_utf16().count();
+                    let mut run = if text == "\t" {
+                        serde_json::json!({ "kind": "tab" })
+                    } else {
+                        serde_json::json!({ "kind": "text", "text": text })
+                    };
+                    let fields = run.as_object_mut().unwrap();
+                    fields.extend(formatting.as_object().unwrap().clone());
+                    fields.insert("fontFamily".into(), "Liberation Sans".into());
+                    fields.insert("fontSize".into(), 11.0.into());
+                    fields.insert("pmStart".into(), cursor.into());
+                    fields.insert("pmEnd".into(), (cursor + len).into());
+                    cursor += len;
+                    run
+                })
+                .collect();
+            pm = cursor + 1;
+            blocks.push(
+                serde_json::from_value::<crate::types::LayoutBlock>(serde_json::json!({
+                    "kind": "paragraph",
+                    "id": format!("p{index}"),
+                    "runs": runs,
+                    "attrs": {
+                        "alignment": alignment,
+                        "defaultFontFamily": "Liberation Sans",
+                        "defaultFontSize": 11.0
+                    },
+                    "pmStart": start,
+                    "pmEnd": pm
+                }))
+                .unwrap(),
+            );
+        }
+        let config = crate::measure_blocks::MeasurementConfig {
+            font_chains: serde_json::from_value(chains.clone()).unwrap(),
+            defaults: serde_json::json!({ "fontSize": 11.0, "fontFamily": "Liberation Sans" }),
+            compat: Value::Null,
+            authoritative_shaping: true,
+        };
+        let extents = crate::measure_blocks::measure_blocks(&mut blocks, 400.0, &config).unwrap();
+        let mut input = crate::types::Input {
+            measured: blocks
+                .into_iter()
+                .zip(extents)
+                .map(|(block, measure)| crate::types::MeasuredBlock { block, measure })
+                .collect(),
+            options: serde_json::from_value(serde_json::json!({
+                "pageSize": { "w": 500.0, "h": 300.0 },
+                "margins": { "top": 50.0, "right": 50.0, "bottom": 50.0, "left": 50.0 }
+            }))
+            .unwrap(),
+        };
+        let layout = crate::compute_layout_input(&mut input).unwrap();
+        let extras = serde_json::json!({ "fontChains": chains }).to_string();
+        let joined =
+            crate::build_display_list_value_from_resident(&input, &layout, &extras).unwrap();
+        JOIN_CLUSTER_GLYPH_RUNS.with(|join| join.set(false));
+        let clusters = crate::build_display_list_value_from_resident(&input, &layout, &extras);
+        JOIN_CLUSTER_GLYPH_RUNS.with(|join| join.set(true));
+        let clusters = clusters.unwrap();
+        crate::clear_measure_fonts();
+
+        let glyph_runs = |list: &DisplayList| {
+            list.pages
+                .iter()
+                .flat_map(|page| &page.primitives)
+                .filter(|primitive| matches!(primitive, Primitive::GlyphRun(_)))
+                .count()
+        };
+        assert!(layout.pages.len() > 1);
+        assert!(
+            glyph_runs(&clusters) > 8 * glyph_runs(&joined),
+            "{} cluster runs became {}",
+            glyph_runs(&clusters),
+            glyph_runs(&joined)
+        );
+        let paint = |list: &DisplayList| -> Vec<Vec<String>> {
+            list.pages
+                .iter()
+                .map(|page| {
+                    let mut out = Vec::new();
+                    for primitive in &page.primitives {
+                        match primitive {
+                            Primitive::GlyphRun(run) => {
+                                out.extend(run.glyphs.iter().map(|glyph| {
+                                    format!(
+                                        "{} {} {} {} {} {}",
+                                        run.font_id,
+                                        run.size,
+                                        run.color,
+                                        glyph.id,
+                                        glyph.x,
+                                        glyph.y
+                                    )
+                                }))
+                            }
+                            other => out.push(serde_json::to_string(other).unwrap()),
+                        }
+                    }
+                    out
+                })
+                .collect()
+        };
+        assert_eq!(paint(&joined), paint(&clusters));
+        assert_eq!(split_cluster_runs(&joined), clusters);
+        // Glyph x and advance round to 3 decimals each, so a cluster's right
+        // edge and the next one's left edge may differ by one rounding unit;
+        // a joined run's caret can take the other edge. Geometry compares
+        // within 0.002 px.
+        let near = |left: f64, right: f64| (left - right).abs() < 2e-3;
+        let end = i64::try_from(pm).unwrap();
+        for position in 0..=end {
+            match (
+                caret_rect(&joined, position),
+                caret_rect(&clusters, position),
+            ) {
+                (Some(left), Some(right)) => assert!(
+                    left.page_index == right.page_index
+                        && near(left.x, right.x)
+                        && near(left.y, right.y)
+                        && near(left.height, right.height),
+                    "caret at {position}: {left:?} vs {right:?}"
+                ),
+                (left, right) => assert_eq!(left, right, "caret at {position}"),
+            }
+            for direction in [VerticalDirection::Up, VerticalDirection::Down] {
+                match (
+                    vertical_move(&joined, position, direction, None),
+                    vertical_move(&clusters, position, direction, None),
+                ) {
+                    (Some(left), Some(right)) => assert!(
+                        left.position == right.position && near(left.goal_x, right.goal_x),
+                        "vertical move from {position}: {left:?} vs {right:?}"
+                    ),
+                    (left, right) => assert_eq!(left, right, "vertical move from {position}"),
+                }
+            }
+            for to in [position + 1, position + 17, end] {
+                let (left, right) = (
+                    range_rects(&joined, position, to),
+                    range_rects(&clusters, position, to),
+                );
+                assert_eq!(left.len(), right.len(), "range {position}..{to}");
+                for (left, right) in left.iter().zip(&right) {
+                    assert!(
+                        left.page_index == right.page_index
+                            && near(left.x, right.x)
+                            && near(left.y, right.y)
+                            && near(left.width, right.width)
+                            && near(left.height, right.height),
+                        "range {position}..{to}: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+        for page in 0..layout.pages.len() {
+            for y in (0..300).step_by(4) {
+                for x in (0..500).step_by(3) {
+                    let (x, y) = (f64::from(x), f64::from(y));
+                    let (left, right) = (
+                        hit_test(&joined, page, x, y),
+                        hit_test(&clusters, page, x, y),
+                    );
+                    // A click on a cluster's midpoint is a tie between its two
+                    // edges, which the rounding unit above may break either way.
+                    let tie = || {
+                        let (Some(left), Some(right)) = (left, right) else {
+                            return false;
+                        };
+                        clusters.pages[page].primitives.iter().any(|primitive| {
+                            let Primitive::GlyphRun(run) = primitive else {
+                                return false;
+                            };
+                            run.attrs.doc_start == Some(left.min(right))
+                                && run.attrs.doc_end == Some(left.max(right))
+                                && run
+                                    .glyphs
+                                    .iter()
+                                    .any(|glyph| near(x, glyph.x + glyph.advance / 2.0))
+                        })
+                    };
+                    assert!(
+                        left == right || tie(),
+                        "hit at page {page} ({x}, {y}): {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -123,3 +123,54 @@ describe('buildMirrorPage text runs', () => {
     expect(kept.hasAttribute('aria-hidden')).toBe(false);
   });
 });
+
+describe('buildMirrorPage joined glyph runs', () => {
+  // one glyph run per cluster, as an authoritatively measured line paints them
+  const clusters = ['A', 'b', '交', '😀', '.'];
+  const glyphRun = (text: string, docStart: number, order: number, x: number, extra = {}) => ({
+    kind: 'glyphRun',
+    fontId: 0,
+    size: 14.667,
+    color: '#000000',
+    text,
+    glyphs: [{ id: 7 + order, x, y: 100, cluster: 0, advance: 9 }],
+    docStart,
+    docEnd: docStart + text.length,
+    blockKey: 'body:p2',
+    lineIndex: 0,
+    logicalOrder: order,
+    bidiLevel: 0,
+    fallbackFont: '400 14.667px Calibri, sans-serif',
+    ...extra,
+  });
+  const pieces = clusters.map((text, index) =>
+    glyphRun(
+      text,
+      10 + clusters.slice(0, index).join('').length,
+      40 + index,
+      50 + index * 9,
+      index === 0 ? { tabsBefore: 1 } : index === clusters.length - 1 ? { breaksAfter: 1 } : {}
+    )
+  );
+  const bytes = (text: string) => new TextEncoder().encode(text).length;
+  const joined = {
+    ...glyphRun(clusters.join(''), 10, 40, 50, { tabsBefore: 1, breaksAfter: 1 }),
+    glyphs: clusters.map((_, index) => ({
+      id: 47 + index,
+      x: 50 + index * 9,
+      y: 100,
+      cluster: bytes(clusters.slice(0, index).join('')),
+      advance: 9,
+    })),
+    clusterRuns: true,
+  };
+  const page = (primitives: unknown[]) =>
+    ({ pageIndex: 0, width: 500, height: 500, primitives }) as unknown as DisplayPage;
+
+  test('mirror one element per cluster, as the runs they were joined from', () => {
+    expect(buildMirrorPage(page([joined])).outerHTML).toBe(
+      buildMirrorPage(page(pieces)).outerHTML
+    );
+    expect(buildMirrorPage(page([joined])).querySelectorAll('.layout-run-text')).toHaveLength(5);
+  });
+});
