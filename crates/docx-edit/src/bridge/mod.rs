@@ -2703,11 +2703,12 @@ fn flush_paragraph_parts(
             LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
         )
     });
-    // A part is numbered by the blocks between it and the first part, so a
-    // copy writes a newline for each break between two parts.
-    let mut first_part = None;
-    let mut emit = |runs, start: u32, width: u32, blocks_before: usize| {
-        let part = blocks_before - *first_part.get_or_insert(blocks_before);
+    // Two consecutive parts' numbers differ by the page and column breaks
+    // between them, at least one: the newlines a copy writes there.
+    let mut last_part = None;
+    let mut emit = |runs, start: u32, width: u32, breaks: usize| {
+        let part = last_part.map_or(0, |last: usize| last + breaks.max(1));
+        last_part = Some(part);
         let mut continuation = ListState::default();
         let mut paragraph = flush_paragraph(
             runs,
@@ -2746,12 +2747,8 @@ fn flush_paragraph_parts(
     };
     let mut segment_start = 0_u32;
     let mut ends_in_break = false;
-    let count = drawings.len();
-    for (blocks_before, drawing) in drawings.into_iter().enumerate() {
-        ends_in_break = matches!(
-            drawing.block,
-            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
-        );
+    let mut breaks = 0_usize;
+    for drawing in drawings {
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
         let remaining = raw_runs.split_off(split_at);
         let mut segment = std::mem::replace(&mut raw_runs, remaining);
@@ -2764,9 +2761,15 @@ fn flush_paragraph_parts(
                 segment,
                 segment_start,
                 drawing.pm_offset - segment_start,
-                blocks_before,
+                breaks,
             ));
+            breaks = 0;
         }
+        ends_in_break = matches!(
+            drawing.block,
+            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
+        );
+        breaks += usize::from(ends_in_break);
         blocks.push(drawing.block);
         segment_start = drawing.pm_offset + 1;
     }
@@ -2780,7 +2783,7 @@ fn flush_paragraph_parts(
             raw_runs,
             segment_start,
             paragraph_pm_units - segment_start,
-            count,
+            breaks,
         ));
     }
     // The paragraph mark, and after a break its space-after, belong to the

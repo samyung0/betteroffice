@@ -426,6 +426,8 @@ describe('text layer over a laid-out document', () => {
 
   const pb = '<w:r><w:br w:type="page"/></w:r>';
   const cb = '<w:r><w:br w:type="column"/></w:r>';
+  // An inline text box: a block between two parts of its paragraph that is no break.
+  const shape = `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
   // A page or column break inside a paragraph copies as a soft line break does, in both modes.
   test.each([
     ['a page break', `${t('Aa')}${pb}${t('Bb')}`, 'Aa\nBb'],
@@ -435,6 +437,8 @@ describe('text layer over a laid-out document', () => {
     ['two soft breaks', `${t('Aa')}${br}${br}${t('Bb')}`, 'Aa\n\nBb'],
     ['a soft then a page break', `${t('Aa')}${br}${pb}${t('Bb')}`, 'Aa\n\nBb'],
     ['a page then a soft break', `${t('Aa')}${pb}${br}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a shape then a page break', `${t('Aa')}${shape}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a page break then a shape', `${t('Aa')}${pb}${shape}${t('Bb')}`, 'Aa\nBb'],
     ['a break opening the paragraph', `${pb}${t('Bb')}`, 'Bb'],
     ['a break ending the paragraph', `${t('Aa')}${pb}`, 'Aa'],
     ['only a break', pb, ''],
@@ -447,6 +451,12 @@ describe('text layer over a laid-out document', () => {
     },
     30_000
   );
+
+  // Edit mode writes nothing for them; view mode paints them on a line of their own.
+  test('copies one newline in view mode for shapes between two parts of a paragraph', async () => {
+    const body = p(t('Lead')) + p(`${t('Aa')}${shape}${shape}${t('Bb')}`) + p(t('Cc'));
+    expect(await copied(body)).toBe('Lead\nAa\nBb\nCc');
+  }, 30_000);
 
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');

@@ -227,9 +227,9 @@ function selectedText(run: HTMLElement, range: Range | null): string {
 }
 
 /**
- * Newlines between two blocks: one between paragraphs, and one for each break
- * between two parts of a paragraph a page or column break splits, whose ids
- * (`id#n`) count the blocks before them.
+ * Newlines between two blocks: one between paragraphs, and between two parts
+ * of one paragraph (`id#n`) the step in `n`, which the bridge sets to the page
+ * and column breaks between them, at least one.
  */
 function paragraphBreaks(previous: string | null, next: string | null): number {
   const part = (id: string | null): [string | null, number] => {
