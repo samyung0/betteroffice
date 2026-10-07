@@ -972,7 +972,7 @@ impl Workbook {
             || cells.iter().any(|(sheet, ..)| {
                 self.model
                     .sheet(*sheet)
-                    .is_some_and(|sheet| sheet.array_formulas().next().is_some())
+                    .is_none_or(|sheet| sheet.array_formulas().next().is_some())
             })
         {
             return None;
@@ -984,7 +984,7 @@ impl Workbook {
         }
         let mut prior = Vec::with_capacity(cells.len());
         for (sheet, at, cell) in cells {
-            let target = self.model.sheet_mut(sheet)?;
+            let target = self.model.sheet_mut(sheet).expect("sheet checked above");
             prior.push((sheet, at, target.cell(at).cloned()));
             target.set_cell(at, cell.unwrap_or_default());
         }
