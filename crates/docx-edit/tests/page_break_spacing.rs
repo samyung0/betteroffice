@@ -58,21 +58,21 @@ fn render(bytes: &[u8]) -> Value {
     .unwrap()
 }
 
-/// `y` of the fragment whose text is `TARGET`, and its page number.
+/// `y` of the fragment whose paragraph's text is `TARGET`, and its page number.
 fn target(output: &Value) -> (u64, f64) {
+    let text_of = |block_id: &Value| -> String {
+        output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|measured| measured["block"]["id"] == *block_id)
+            .and_then(|measured| measured["block"]["runs"].as_array())
+            .map(|runs| runs.iter().filter_map(|run| run["text"].as_str()).collect())
+            .unwrap_or_default()
+    };
     for page in output["layout"]["pages"].as_array().unwrap() {
         for fragment in page["fragments"].as_array().unwrap() {
-            let text: String = fragment["resolvedLines"]
-                .as_array()
-                .map(|lines| {
-                    lines
-                        .iter()
-                        .flat_map(|line| line["segments"].as_array().cloned().unwrap_or_default())
-                        .filter_map(|segment| segment["text"].as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if text == "TARGET" {
+            if text_of(&fragment["blockId"]) == "TARGET" {
                 return (
                     page["number"].as_u64().unwrap(),
                     fragment["y"].as_f64().unwrap(),

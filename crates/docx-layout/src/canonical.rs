@@ -7,7 +7,7 @@ use serde_json::Value;
 const GOLDEN_FACTOR: f64 = 1000.0; // 10 ** 3
 
 /// Keys excluded from the canonical form (derived-redundant data).
-const OMITTED_KEYS: [&str; 2] = ["resolvedLines", "checkpoints"];
+const OMITTED_KEYS: [&str; 1] = ["checkpoints"];
 
 /// ECMAScript `Math.round`: nearest integral value, ties toward +Infinity.
 /// (`f64::round` ties away from zero — wrong for negative halves.) The
