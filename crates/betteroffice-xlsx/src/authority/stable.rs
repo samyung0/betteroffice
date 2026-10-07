@@ -2124,7 +2124,14 @@ pub(super) fn pending_effects(
 
         let mut formatted = BTreeMap::new();
         let mut source_keys = HashMap::new();
+        let catalog = map(&txn, CELL_FORMATS)?;
         for (cell_key, value) in nested_map(&sheet, &txn, STYLES)?.iter(&txn) {
+            // A format that has not arrived yet changes nothing the cell shows.
+            if matches!(&value, Out::Any(Any::String(format))
+                if !format.is_empty() && !catalog.contains_key(&txn, format))
+            {
+                continue;
+            }
             let Some(at) = context.at(key, cell_key)? else {
                 continue;
             };

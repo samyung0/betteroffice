@@ -1935,3 +1935,47 @@ fn a_cycle_with_thousands_of_readers_computes_them_on_every_peer() {
     assert_eq!(c10(&author), Some(CellValue::Number { value: 13.0 }));
     assert_eq!(author.model(), peer.model());
 }
+
+/// Until the format a peer's override names arrives, the cell shows its own
+/// style, so the pending effects report no formatting there; once it arrives
+/// they do.
+#[test]
+fn a_format_not_yet_received_is_no_formatting_effect() {
+    let options = CalculationOptions::default();
+    let (mut a, mut b, mut c) = (peer(301), peer(302), peer(303));
+    let bold = Op::PatchRangeStyle {
+        sheet: SheetId(0),
+        range: CellRange::parse_a1("A1").unwrap(),
+        patch: StylePatch {
+            bold: Some(true),
+            ..StylePatch::default()
+        },
+    };
+    apply(&mut a, bold);
+    relay(&a, &mut b);
+    apply(
+        &mut b,
+        Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A2").unwrap(),
+            patch: StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    );
+    let from_b = b.encode_diff_v1(&a.encode_state_vector_v1()).unwrap();
+    c.apply_update_v1(&from_b, options).unwrap();
+    let formatting = |book: &Workbook| {
+        serde_json::from_str::<Vec<serde_json::Value>>(&book.pending_effects_json().unwrap())
+            .unwrap()
+            .into_iter()
+            .filter_map(|effect| effect["label"].as_str().map(str::to_owned))
+            .filter(|label| label.ends_with("formatting"))
+            .collect::<Vec<_>>()
+    };
+    assert!(formatting(&c).is_empty());
+    relay(&a, &mut c);
+    assert_eq!(formatting(&c), formatting(&b));
+    assert!(!formatting(&c).is_empty());
+}
