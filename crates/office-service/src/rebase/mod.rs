@@ -15,7 +15,7 @@ use crate::common::{CHECKPOINT_MISMATCH, sha256_hex};
 use crate::env;
 use crate::error::{Error, Result};
 use crate::jsv::{V, stringify};
-use crate::session::compare_baselines;
+use crate::session::{compare_baselines, unshifted_effects};
 use crate::types::{Checkpoint, EffectKind, Format, NetEffect, Rebased};
 use crate::xlsx;
 use transplant::{DOCX_LINEAGE, PPTX_LINEAGE, open, ordered_keys, root_map, transplant as land};
@@ -90,18 +90,23 @@ pub(crate) fn rebase(
         base_sha256: &exported_sha256,
         state,
     };
-    let effects = compare_baselines(
-        &crate::baseline_unguarded(exported, exported_checkpoint(&seed))?,
-        &crate::baseline_unguarded(exported, exported_checkpoint(&state))?,
+    let (from, to) = (
+        crate::baseline_unguarded(exported, exported_checkpoint(&seed))?,
+        crate::baseline_unguarded(exported, exported_checkpoint(&state))?,
     );
     let saved = compare_baselines(
         &crate::baseline_unguarded(base, captured)?,
         &crate::baseline_unguarded(base, latest)?,
     );
-    if change(format, &saved) != change(format, &effects) {
+    // The check compares every effect, moves included; the effects returned,
+    // as save effects, leave out entries an edit only shifted (Epo, 2026-10-07).
+    if change(format, &saved) != change(format, &compare_baselines(&from, &to)) {
         return Err(fail("the rebased state does not carry the saved edits"));
     }
-    Ok(Rebased { state, effects })
+    Ok(Rebased {
+        state,
+        effects: unshifted_effects(&from, &to),
+    })
 }
 
 /// What a list of effects changes, as the rebase compares it: DOCX
