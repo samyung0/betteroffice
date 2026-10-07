@@ -1279,7 +1279,7 @@ type ChildGroups = Vec<(f64, Vec<V>)>;
 
 /// Moves each field's projected children back into its result
 /// (`restoreProjectedFieldResults`).
-fn restore_projected_field_results(items: Vec<V>) -> Result<Vec<V>> {
+pub(crate) fn restore_projected_field_results(items: Vec<V>) -> Result<Vec<V>> {
     let mut owners: Vec<V> = Vec::new();
     let mut owner_at: HashMap<usize, V> = HashMap::new();
     let mut run = 0_usize;

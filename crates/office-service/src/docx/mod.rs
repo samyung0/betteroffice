@@ -7,6 +7,7 @@ mod format;
 mod item;
 mod paragraph;
 mod project;
+mod reach;
 pub(crate) mod read;
 mod sdt;
 mod styles;
@@ -275,20 +276,37 @@ impl DocxSession {
         Ok(self.projected.as_ref().expect("projected above"))
     }
 
+    /// The stories `entries` and `editable` read: walked from the session,
+    /// or from the projection when a story holds an opaque block.
+    fn reached(&mut self) -> Result<reach::Reached> {
+        if let Some(reached) = reach::reach(self.engine.doc(), &self.base_document())? {
+            return Ok(reached);
+        }
+        let projected = self.project()?;
+        Ok(reach::Reached {
+            stories: projected.stories.clone(),
+            segments: HashMap::new(),
+            embeds: projected.embeds.clone(),
+        })
+    }
+
     pub fn entries(&mut self) -> Result<Vec<Item>> {
         let media = media_data_urls(&self.base_document());
-        self.project()?;
-        let projected = self.projected.as_ref().expect("projected above");
+        let mut reached = self.reached()?;
         let doc = self.engine.doc();
         let mut entries = Vec::new();
-        for story in &projected.stories {
+        for story in &reached.stories {
             let objects = read::story_object_ids(doc, story)?;
             let mut object_index = 0;
             let mut paragraph_index = 0;
             let mut paragraph_text = String::new();
             let mut formats: Vec<V> = Vec::new();
             let mut offset = 0.0;
-            for segment in read::story_segments(doc, story)? {
+            let segments = match reached.segments.remove(story) {
+                Some(segments) => segments,
+                None => read::story_segments(doc, story)?,
+            };
+            for segment in segments {
                 let attributes = segment.get("attributes");
                 if item::is_kind(&segment, "text") {
                     let source = segment.get("text").to_js_string();
@@ -376,7 +394,7 @@ impl DocxSession {
                     } else {
                         let id = format!("{story}:object:{stable_id}");
                         let readable =
-                            authored_text(&projected.embeds.get(&at).cloned().unwrap_or_default());
+                            authored_text(&reached.embeds.get(&at).cloned().unwrap_or_default());
                         let textual = embed_kind != "table"
                             && (!readable.is_empty()
                                 || ["sdt", "blockSdt", "field", "math", "shape"]
@@ -430,6 +448,11 @@ impl DocxSession {
     fn paragraphs(&self, story: &str) -> Result<Vec<Paragraph>> {
         let segments = read::story_segments(self.engine.doc(), story)
             .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
+        Ok(Self::paragraphs_of(segments))
+    }
+
+    /// A story's paragraphs (`docxParagraphs`) from its segments.
+    fn paragraphs_of(segments: Vec<V>) -> Vec<Paragraph> {
         let mut paragraphs = Vec::new();
         let (mut start, mut cursor) = (0, 0);
         let mut paragraph_text = String::new();
@@ -467,7 +490,7 @@ impl DocxSession {
             }
             cursor += 1;
         }
-        Ok(paragraphs)
+        paragraphs
     }
 
     fn paragraph(&self, id: &str) -> Result<(String, Paragraph)> {
@@ -496,10 +519,14 @@ impl DocxSession {
     }
 
     pub fn editable(&mut self) -> Result<Vec<Entry>> {
-        let stories = self.project()?.stories.clone();
+        let mut reached = self.reached()?;
         let mut entries = Vec::new();
-        for story in stories {
-            for (index, paragraph) in self.paragraphs(&story)?.into_iter().enumerate() {
+        for story in reached.stories {
+            let paragraphs = match reached.segments.remove(&story) {
+                Some(segments) => Self::paragraphs_of(segments),
+                None => self.paragraphs(&story)?,
+            };
+            for (index, paragraph) in paragraphs.into_iter().enumerate() {
                 if paragraph.plain {
                     entries.push(Entry {
                         id: format!("{story}:paragraph:{}", paragraph.para_id),

@@ -1477,7 +1477,7 @@ fn finite_or_one(value: &V) -> usize {
     }
 }
 
-fn push_text(items: &mut Vec<V>, source: &str, attributes: &V) {
+pub(super) fn push_text(items: &mut Vec<V>, source: &str, attributes: &V) {
     let mut cursor = String::new();
     for ch in source.chars() {
         if ch == '\t' {

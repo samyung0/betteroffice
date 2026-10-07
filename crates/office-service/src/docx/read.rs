@@ -1,6 +1,8 @@
 //! The session reads the TS made through the docx-edit WASM facade, as the
 //! same JSON values (`crates/docx-edit/src/wasm.rs` builds them).
 
+use std::collections::HashMap;
+
 use docx_edit::{EditingDoc, SegmentContent};
 use serde_json::{Value, json};
 use yrs::types::text::YChange;
@@ -26,7 +28,18 @@ pub(crate) fn story_ids(doc: &EditingDoc) -> Vec<String> {
 
 /// `session.storySegments(story)`.
 pub(crate) fn story_segments(doc: &EditingDoc, story: &str) -> Result<Vec<V>> {
-    let segments = doc.story_segments(story).map_err(Error::engine)?;
+    segment_values(doc.story_segments(story).map_err(Error::engine)?)
+}
+
+/// `story_segments` of every story by id, reading the bookmarks once.
+pub(crate) fn all_story_segments(doc: &EditingDoc) -> Result<HashMap<String, Vec<V>>> {
+    doc.all_story_segments()
+        .into_iter()
+        .map(|(story, segments)| Ok((story, segment_values(segments)?)))
+        .collect()
+}
+
+fn segment_values(segments: Vec<docx_edit::StorySegment>) -> Result<Vec<V>> {
     segments
         .into_iter()
         .map(|segment| {

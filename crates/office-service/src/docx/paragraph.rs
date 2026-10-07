@@ -859,15 +859,9 @@ fn paragraph_attrs(properties: &V) -> V {
     V::Obj(attrs)
 }
 
-pub(crate) fn paragraph_from_story(
-    para_id: &str,
-    properties: &V,
-    items: Vec<V>,
-    comment_boundaries: &[V],
-    base_paragraph: Option<&V>,
-    seeded: &mut dyn FnMut(&V) -> Result<V>,
-) -> Result<V> {
-    let attrs = paragraph_attrs(properties);
+/// A paragraph's items with its bookmark and field-boundary markers
+/// placed among them, as its content is built from.
+pub(crate) fn items_with_markers(properties: &V, items: Vec<V>) -> Vec<V> {
     // The engine lists markers in their order at each point.
     let mut markers = Vec::new();
     for raw in properties.get("bookmarks").items() {
@@ -895,7 +889,19 @@ pub(crate) fn paragraph_from_story(
             });
         }
     }
-    let mut content = build_paragraph_content(insert_bookmark_items(items.clone(), markers))?;
+    insert_bookmark_items(items, markers)
+}
+
+pub(crate) fn paragraph_from_story(
+    para_id: &str,
+    properties: &V,
+    items: Vec<V>,
+    comment_boundaries: &[V],
+    base_paragraph: Option<&V>,
+    seeded: &mut dyn FnMut(&V) -> Result<V>,
+) -> Result<V> {
+    let attrs = paragraph_attrs(properties);
+    let mut content = build_paragraph_content(items_with_markers(properties, items.clone()))?;
     content = restore_original_runs(
         content,
         &items,
