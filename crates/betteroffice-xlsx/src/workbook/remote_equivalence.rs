@@ -395,3 +395,285 @@ fn local_edits_keep_spilled_values_as_a_whole_recalculation_does() {
         assert_eq!(value("D4"), Some(number(71.0)));
     }
 }
+
+/// Column A holds values only and every formula reads column A or a name over
+/// it, so no edit makes a cycle; with `spill`, a third sheet holds a source
+/// array over `Data!A1:A3` with its cached results, as a saved file does.
+fn cycle_free_base(spill: bool) -> WorkbookModel {
+    let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
+    let mut data = Sheet::new("Data");
+    for row in 0..6 {
+        data.set_cell(CellRef::new(row, 0), cell(number(f64::from(row + 1)), None));
+        data.set_cell(
+            CellRef::new(row, 1),
+            cell(CellValue::Empty, Some(&format!("A{}*2", row + 1))),
+        );
+    }
+    data.set_cell(at("C1"), cell(CellValue::Empty, Some("SUM(A1:A6)")));
+    data.set_cell(at("D1"), cell(CellValue::Empty, Some("SUM(Range)+NOW()*0")));
+    let mut summary = Sheet::new("Summary");
+    summary.set_cell(at("A1"), cell(number(3.0), None));
+    summary.set_cell(at("B1"), cell(CellValue::Empty, Some("Data!A2+A1")));
+    summary.set_cell(at("C1"), cell(CellValue::Empty, Some("SUM(Data!A1:A4)")));
+    let mut arrays = Sheet::new("Arrays");
+    if spill {
+        arrays.set_cell(at("A1"), cell(number(10.0), Some("Data!A1:A3*10")));
+        arrays.set_cell(at("A2"), cell(number(20.0), None));
+        arrays.set_cell(at("A3"), cell(number(30.0), None));
+        arrays.set_array_formula(at("A1"), CellRange::parse_a1("A1:A3").unwrap());
+    }
+    arrays.set_cell(at("C1"), cell(CellValue::Empty, Some("SUM(Data!A1:A6)")));
+    WorkbookModel {
+        sheets: vec![data, summary, arrays],
+        defined_names: vec![xlsx_model::DefinedName {
+            name: "Range".into(),
+            formula: "Data!$A$1:$A$6".into(),
+            local_sheet: None,
+            hidden: false,
+        }],
+        ..WorkbookModel::default()
+    }
+}
+
+const VALUES: [&str; 7] = ["", "5", "-2", "text", "TRUE", "17", "0.5"];
+const READS_OF_A: [&str; 8] = [
+    "=A1+1",
+    "=SUM(A1:A6)",
+    "=Data!A3*3",
+    "=SUM(Range)",
+    "=IF(A4>2,A5,A6)",
+    "=COUNT(Data!A1:A6)",
+    "=A2&\"x\"",
+    "=SUMPRODUCT(A1:A3,A4:A6)",
+];
+
+/// A local step that cannot make a cycle; `history` adds Undo and Redo.
+fn cycle_free_step(book: &mut Workbook, rng: &mut Rng, history: bool) {
+    let options = CalculationOptions {
+        now_serial: Some(45_000.25),
+    };
+    let row = rng.below(7) as u32;
+    let kind = rng.below(if history { 24 } else { 20 });
+    let sheet = SheetId(rng.below(3) as u32);
+    let _ = match kind {
+        // values into column A, the array's anchor and cells under it included
+        0..=8 | 19 => book.edit_cell(
+            sheet,
+            CellRef::new(row.min(5), 0),
+            rng.pick(&VALUES),
+            options,
+        ),
+        9..=15 if sheet.0 < 2 => book.edit_cell(
+            sheet,
+            CellRef::new(row, 1 + rng.below(4) as u32),
+            rng.pick(&READS_OF_A),
+            options,
+        ),
+        9..=15 => book.edit_cell(
+            sheet,
+            CellRef::new(row, 1 + rng.below(4) as u32),
+            rng.pick(&VALUES),
+            options,
+        ),
+        16 => book.edit_cells(
+            sheet,
+            &[
+                CellInput {
+                    cell: CellRef::new(row, 0),
+                    input: (*rng.pick(&VALUES)).to_owned(),
+                },
+                CellInput {
+                    cell: CellRef::new(row + 1, 0),
+                    input: (*rng.pick(&VALUES)).to_owned(),
+                },
+            ],
+            options,
+        ),
+        17 => book.apply_ops(
+            vec![Op::PatchRangeStyle {
+                sheet,
+                range: CellRange::new(CellRef::new(row, 0), CellRef::new(row + 1, 1)),
+                patch: xlsx_ops::StylePatch {
+                    bold: Some(rng.below(2) == 0),
+                    ..xlsx_ops::StylePatch::default()
+                },
+            }],
+            options,
+        ),
+        18 => book.apply_ops(
+            vec![Op::InsertRows {
+                sheet,
+                at: row,
+                count: 1,
+            }],
+            options,
+        ),
+        20..=22 => book.undo(options),
+        _ => book.redo(options),
+    };
+}
+
+type Sink = (UpdateSubscription, Arc<Mutex<Vec<UpdateEvent>>>);
+
+/// Queues each peer's local updates for every other peer.
+fn forward(sinks: &[Sink], inbox: &mut [Vec<(usize, Vec<u8>)>]) {
+    for (from, (_, sink)) in sinks.iter().enumerate() {
+        for update in local_events(sink) {
+            for (to, queue) in inbox.iter_mut().enumerate() {
+                if to != from {
+                    queue.push((from, update.clone()));
+                }
+            }
+        }
+    }
+}
+
+fn local_events(sink: &Arc<Mutex<Vec<UpdateEvent>>>) -> Vec<Vec<u8>> {
+    drain(sink)
+        .into_iter()
+        .filter(|event| matches!(event.origin, UpdateOrigin::Local))
+        .map(|event| event.update)
+        .collect()
+}
+
+/// Three peers edit concurrently and hear each other in any order a room can
+/// deliver. Peer 1 takes remote cell edits incrementally and its twin takes
+/// every one whole; they must agree after every step, and at the end every
+/// peer must equal a replica that projects the final state whole. Two seeds
+/// in three add a source array, and one of those shuffles delivery through
+/// the pending queue; the rest deliver each sender in order without arrays,
+/// the shape the shortcut is for, and must take it at least four times as
+/// often as the whole path.
+#[test]
+fn concurrent_cycle_free_peers_take_the_shortcut_and_converge() {
+    let options = CalculationOptions {
+        now_serial: Some(45_000.25),
+    };
+    let fresh = |client_id, spill| {
+        let mut book =
+            Workbook::from_model_collaborative(cycle_free_base(spill), client_id).unwrap();
+        book.recalculate_all(options);
+        book.mark_exact();
+        book
+    };
+    let (mut incremental, mut whole_path) = (0, 0);
+    for seed in 1..=9_u64 {
+        let in_order = seed % 3 != 2;
+        let spill = seed % 3 != 0;
+        let counted = !spill;
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+        let mut peers = vec![fresh(8000, spill), fresh(8001, spill), fresh(8002, spill)];
+        let mut twin = fresh(8001, spill);
+        twin.whole_local_commits = true;
+        let sinks = peers.iter().map(observe).collect::<Vec<_>>();
+        let (_t, twin_sink) = observe(&twin);
+        let mut inbox: Vec<Vec<(usize, Vec<u8>)>> = vec![Vec::new(); 3];
+        let mut deliver = |peers: &mut [Workbook],
+                           twin: &mut Workbook,
+                           to: usize,
+                           update: &[u8],
+                           context: &str| {
+            let before = peers[to].model.clone();
+            let result = if to == 1 {
+                let result = match peers[1].apply_cell_update(update, options) {
+                    Some(result) => {
+                        incremental += usize::from(counted);
+                        Ok(result)
+                    }
+                    None => {
+                        whole_path += usize::from(counted);
+                        peers[1].apply_update_v1(update, options)
+                    }
+                };
+                twin.exact_epoch = None;
+                let expected = twin.apply_update_v1(update, options);
+                assert_eq!(
+                    format!("{result:?}"),
+                    format!("{expected:?}"),
+                    "{context}: result"
+                );
+                assert_twins(&peers[1], twin, context);
+                result
+            } else {
+                peers[to].apply_update_v1(update, options)
+            };
+            assert_eq!(
+                result
+                    .unwrap_or_else(|error| panic!("{context}: {error:?}"))
+                    .changed,
+                changed_cells_between(&before, &peers[to].model),
+                "{context}: changed"
+            );
+        };
+        for step in 0..300 {
+            let context = format!("seed {seed} step {step}");
+            if rng.below(3) == 0 {
+                let who = rng.below(3) as usize;
+                if who == 1 {
+                    let mut copy = Rng(rng.next());
+                    let mut same = Rng(copy.0);
+                    cycle_free_step(&mut peers[1], &mut copy, false);
+                    cycle_free_step(&mut twin, &mut same, false);
+                    assert_twins(&peers[1], &twin, &context);
+                    let sent = drain(&sinks[1].1);
+                    assert_eq!(sent, drain(&twin_sink), "{context}: local update");
+                    sinks[1].1.lock().unwrap().extend(sent);
+                } else {
+                    cycle_free_step(&mut peers[who], &mut rng, true);
+                }
+            } else {
+                let to = rng.below(3) as usize;
+                if !inbox[to].is_empty() {
+                    let mut index = rng.below(inbox[to].len() as u64) as usize;
+                    if in_order {
+                        let from = inbox[to][index].0;
+                        index = inbox[to]
+                            .iter()
+                            .position(|(sender, _)| *sender == from)
+                            .unwrap();
+                    }
+                    let (_, update) = inbox[to].remove(index);
+                    deliver(&mut peers, &mut twin, to, &update, &context);
+                }
+            }
+            drain(&twin_sink);
+            forward(&sinks, &mut inbox);
+        }
+        loop {
+            forward(&sinks, &mut inbox);
+            if inbox.iter().all(Vec::is_empty) {
+                break;
+            }
+            for (to, queue) in inbox.iter_mut().enumerate() {
+                for (_, update) in std::mem::take(queue) {
+                    deliver(
+                        &mut peers,
+                        &mut twin,
+                        to,
+                        &update,
+                        &format!("seed {seed} drain"),
+                    );
+                }
+            }
+            drain(&twin_sink);
+        }
+        let state = peers[0].encode_state_as_update_v1();
+        let mut oracle = fresh(8999, spill);
+        oracle.apply_update_v1(&state, options).unwrap();
+        for (index, peer) in peers.iter().enumerate() {
+            assert_eq!(
+                peer.encode_state_vector_v1(),
+                oracle.encode_state_vector_v1(),
+                "seed {seed}: peer {index} state"
+            );
+            assert_eq!(
+                peer.model, oracle.model,
+                "seed {seed}: peer {index} converged"
+            );
+        }
+    }
+    assert!(
+        incremental >= 4 * whole_path,
+        "incremental {incremental}, whole {whole_path}"
+    );
+}
