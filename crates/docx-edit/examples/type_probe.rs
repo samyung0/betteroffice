@@ -207,12 +207,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Page-windowed residency (PLAN-DEEP 2.3): primitives only on the eleven
+    // pages around the middle of the document, every page's geometry kept.
+    let middle = list.pages.len() / 2;
+    let window = middle.saturating_sub(5)..(middle + 6).min(list.pages.len());
+    let live = LIVE.load(Ordering::Relaxed);
+    let windowed: Vec<_> = list
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            if window.contains(&index) {
+                return page.clone();
+            }
+            let mut summary = page.clone();
+            summary.primitives = Vec::new();
+            summary.note_areas = Vec::new();
+            summary.header = None;
+            summary.footer = None;
+            summary
+        })
+        .collect();
+    let windowed_bytes = LIVE.load(Ordering::Relaxed) - live;
+    drop(windowed);
     drop(list);
     PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
     out.insert(
         "displayList".into(),
         json!({"mb": mb(list_bytes), "primitives": primitives, "glyphs": glyphs,
-            "primitiveBytes": std::mem::size_of::<docx_layout::display_list::Primitive>()}),
+            "primitiveBytes": std::mem::size_of::<docx_layout::display_list::Primitive>(),
+            "elevenPageWindowMB": mb(windowed_bytes)}),
     );
 
     let paragraphs: Vec<_> = engine
