@@ -1190,8 +1190,11 @@ impl WorkbookAuthority {
         hydrate_local_doc(&staged_doc, &self.encode_state_as_update_v1())
             .map_err(AuthorityError::InvalidState)?;
         let state_vector = staged_doc.transact().state_vector();
-        let touched = stable::apply_cells(&staged_doc, &self.base, ops, origin)
-            .map_err(AuthorityError::InvalidState)?;
+        let Some(touched) = stable::apply_cells(&staged_doc, &self.base, ops, origin)
+            .map_err(AuthorityError::InvalidState)?
+        else {
+            return Ok(None);
+        };
         let txn = staged_doc.transact();
         let (styles, cells) = stable::project_cells(&txn, &self.base, &touched)
             .map_err(AuthorityError::InvalidState)?;

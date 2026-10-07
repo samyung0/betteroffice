@@ -2755,8 +2755,8 @@ impl Workbook {
 
     /// A user's batch of `SetCell`s staged without projecting the workbook,
     /// when the cells it projects leave the model the whole projection would:
-    /// no edited cell under a spill, whose anchor that commit recalculates, no
-    /// keys the projection alone finds.
+    /// no edit on a sheet with array formulas, whose rectangles that commit
+    /// lays out, no keys the projection alone finds.
     fn stage_local_cells(&self, ops: &[Op]) -> Result<Option<StagedCells>> {
         #[cfg(test)]
         if self.whole_local_commits {
@@ -2765,7 +2765,10 @@ impl Workbook {
         if !self.is_collaborative()
             || !self.canonical_overrides
             || ops.iter().any(|op| match op {
-                Op::SetCell { sheet, at, .. } => in_array(&self.model, *sheet, *at),
+                Op::SetCell { sheet, .. } => self
+                    .model
+                    .sheet(*sheet)
+                    .is_none_or(|sheet| sheet.array_formulas().next().is_some()),
                 _ => false,
             })
         {
@@ -3293,13 +3296,6 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
             sheet.set_array_formula(at, range);
         }
     }
-}
-
-/// Whether `at` anchors or lies under an array formula's rectangle.
-fn in_array(model: &WorkbookModel, sheet: SheetId, at: CellRef) -> bool {
-    model
-        .sheet(sheet)
-        .is_some_and(|sheet| sheet.array_formulas().any(|(_, range)| range.contains(at)))
 }
 
 /// Carries spills over a fresh projection of a cell-edit batch, as

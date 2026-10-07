@@ -1758,13 +1758,15 @@ pub(super) fn apply(
 /// [`apply`] for a batch of `SetCell`s that projects only their targets
 /// instead of the workbook. Each op reads its target as `apply` does, so the
 /// writes, and the update, are the same. Returns the written cell keys per
-/// sheet key.
+/// sheet key, or `None`, with nothing written, for a batch writing to a sheet
+/// whose source holds array formulas: their rectangles, which only the whole
+/// projection lays out, decide what such a cell shows.
 pub(super) fn apply_cells(
     doc: &Doc,
     base: &WorkbookBase,
     ops: &[Op],
     origin: SyncOrigin,
-) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+) -> Result<Option<BTreeMap<String, BTreeSet<String>>>, String> {
     let mut touched = BTreeMap::<String, BTreeSet<String>>::new();
     let (context, styles, mut current) = {
         let txn = doc.transact();
@@ -1774,6 +1776,12 @@ pub(super) fn apply_cells(
                 return Err("not a cell batch".into());
             };
             let key = context.sheet(*sheet)?;
+            if base_sheet_index(key)
+                .and_then(|index| base.sheets.get(index))
+                .is_some_and(|sheet| sheet.array_formulas().next().is_some())
+            {
+                return Ok(None);
+            }
             touched
                 .entry(key.to_owned())
                 .or_default()
@@ -1814,7 +1822,7 @@ pub(super) fn apply_cells(
         )?;
         *slot = (written != Cell::default()).then_some(written);
     }
-    Ok(touched)
+    Ok(Some(touched))
 }
 
 /// Sheet containers are durable identities. Adding a sheet records its order entry
