@@ -21,6 +21,11 @@ betteroffice-xlsx.workspace = true
 # `tiff` matches the docx edit and parse wasm builds, which transcode TIFF media for display.
 docx-edit = { workspace = true, features = ["tiff"] }
 docx-parse.workspace = true
+# Month names of DOCX date content controls in the control's language, as the
+# TS engine gets them from `Intl.DateTimeFormat` (Epo, 2026-10-07).
+icu_calendar = "2.3"
+icu_datetime = "2.3"
+icu_locale_core = "2"
 indexmap = "2"
 ooxml-opc.workspace = true
 pptx-edit.workspace = true
