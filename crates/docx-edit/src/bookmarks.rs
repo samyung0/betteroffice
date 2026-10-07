@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use yrs::{
-    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, Transact,
-    TransactionMut,
+    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, StickyIndex, TextRef,
+    Transact, TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -155,37 +155,27 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
 }
 
 pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> {
-    let Some(root) = txn.get_map(ROOT) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    for (_, value) in root.iter(txn) {
-        let Out::YMap(entry) = value else {
-            continue;
-        };
-        let (Some(Out::Any(data)), Some(Out::Any(Any::Array(anchors)))) =
-            (entry.get(txn, "data"), entry.get(txn, "anchors"))
-        else {
-            continue;
-        };
-        for encoded in anchors.iter() {
-            if let Ok(anchor) = decode_anchor(encoded)
-                && anchor.story == story_id
-                && let Some(at) = anchor.start.get_offset(txn)
-            {
-                result.push((at.index, data.clone()));
-            }
-        }
-    }
-    ordered(result)
+    positions_by_story_where(txn, |story| story == story_id)
+        .remove(story_id)
+        .unwrap_or_default()
 }
 
 /// `positions` of every story, reading the anchors once.
 pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u32, Any)>> {
+    positions_by_story_where(txn, |_| true)
+}
+
+/// Markers of the stories `wanted` picks, every anchor resolved in one walk
+/// of its story rather than one walk per anchor.
+fn positions_by_story_where<T: ReadTxn>(
+    txn: &T,
+    wanted: impl Fn(&str) -> bool,
+) -> HashMap<String, Vec<(u32, Any)>> {
     let Some(root) = txn.get_map(ROOT) else {
         return HashMap::new();
     };
-    let mut stories: HashMap<String, Vec<(u32, Any)>> = HashMap::new();
+    let mut found: Vec<(String, Any)> = Vec::new();
+    let mut starts: Vec<StickyIndex> = Vec::new();
     for (_, value) in root.iter(txn) {
         let Out::YMap(entry) = value else {
             continue;
@@ -197,13 +187,20 @@ pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u3
         };
         for encoded in anchors.iter() {
             if let Ok(anchor) = decode_anchor(encoded)
-                && let Some(at) = anchor.start.get_offset(txn)
+                && wanted(&anchor.story)
             {
-                stories
-                    .entry(anchor.story)
-                    .or_default()
-                    .push((at.index, data.clone()));
+                found.push((anchor.story, data.clone()));
+                starts.push(anchor.start);
             }
+        }
+    }
+    let mut stories: HashMap<String, Vec<(u32, Any)>> = HashMap::new();
+    for ((story, data), at) in found
+        .into_iter()
+        .zip(StickyIndex::get_offsets(txn, &starts))
+    {
+        if let Some(at) = at {
+            stories.entry(story).or_default().push((at.index, data));
         }
     }
     stories

@@ -2103,8 +2103,9 @@ fn resolve_comment_intervals<T: ReadTxn>(
     let comments = txn
         .get_map(COMMENTS)
         .expect("comments root is declared by EditingDoc::new");
-    let mut intervals = Vec::new();
-
+    // Every anchor resolves in one walk of the story, not one walk each.
+    let mut ids = Vec::new();
+    let mut edges = Vec::new();
     for (comment_id, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
             continue;
@@ -2117,20 +2118,26 @@ fn resolve_comment_intervals<T: ReadTxn>(
             if anchor.story != story_id {
                 continue;
             }
-            let start = anchor.start.get_offset(txn).ok_or_else(|| {
-                EditError::InvalidComment("start anchor no longer resolves".into())
-            })?;
-            let end = anchor
-                .end
-                .get_offset(txn)
-                .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
-            if start.index < end.index {
-                intervals.push(CommentInterval {
-                    start: start.index,
-                    end: end.index,
-                    id: numeric_id(comment_id, env),
-                });
-            }
+            ids.push(numeric_id(comment_id, env));
+            edges.push(anchor.start);
+            edges.push(anchor.end);
+        }
+    }
+    let offsets = yrs::StickyIndex::get_offsets(txn, &edges);
+    let mut intervals = Vec::new();
+    for (id, [start, end]) in ids.into_iter().zip(offsets.as_chunks::<2>().0) {
+        let start = start
+            .as_ref()
+            .ok_or_else(|| EditError::InvalidComment("start anchor no longer resolves".into()))?;
+        let end = end
+            .as_ref()
+            .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
+        if start.index < end.index {
+            intervals.push(CommentInterval {
+                start: start.index,
+                end: end.index,
+                id,
+            });
         }
     }
 
