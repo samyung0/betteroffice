@@ -477,11 +477,13 @@ fn read_order(cycle: &[Key], reads: &HashMap<Key, Vec<Key>>, circular: &HashSet<
     order
 }
 
-/// evaluate, pass after pass in `nodes`' order until none is left that can
-/// be, each node whose reads touch nothing still unsettled. in read order one
-/// pass settles them all. a pass that does not spends visits, so once the
-/// visit budget runs out the nodes left keep their cached values and are
-/// reported limited, as any recalc the budget stops.
+/// settle `nodes` in their order: a node whose evaluation read no cell still
+/// unsettled settles; one that did waits for exactly the cells it read and is
+/// evaluated again once they have all settled. reads that change with the
+/// values only add waits, so the work is linear in the reads made, and every
+/// evaluation is charged to the visit budget. what waits on itself through
+/// changed reads stays unsettled; once the budget runs out the nodes left keep
+/// their cached values and are reported limited, as any recalc it stops.
 #[allow(clippy::too_many_arguments)]
 fn settle_ready(
     wb: &mut Workbook,
@@ -495,45 +497,55 @@ fn settle_ready(
     spilled: &mut Vec<(SheetId, CellRef)>,
     journal: &mut RecalcJournal,
 ) {
-    for _ in 0..nodes.len() {
+    let mut queue: VecDeque<Key> = nodes.iter().copied().collect();
+    let mut waiting: HashMap<Key, usize> = HashMap::new();
+    let mut waiters: HashMap<Key, Vec<Key>> = HashMap::new();
+    while let Some(u) = queue.pop_front() {
+        if !unsettled.contains(&u) || waiting.contains_key(&u) {
+            continue;
+        }
         if budget.exhausted() {
-            for u in nodes {
-                if unsettled.remove(u) {
-                    limited_cells.push((u.0, cell_of(*u)));
+            break;
+        }
+        let log = ReadLog::new(wb, unsettled);
+        let (value, limited) = eval_node_with(&log, wb, u, now_serial, Rc::clone(budget), graph);
+        let read = log.read.into_inner().into_iter().collect::<HashSet<_>>();
+        if !read.is_empty() {
+            for v in &read {
+                waiters.entry(*v).or_default().push(u);
+            }
+            waiting.insert(u, read.len());
+            continue;
+        }
+        unsettled.remove(&u);
+        if limited {
+            limited_cells.push((u.0, cell_of(u)));
+        }
+        match value {
+            Some(NodeValue::Scalar(value)) => {
+                if write_if_changed(wb, u, value, journal) {
+                    changed.push((u.0, cell_of(u)));
                 }
             }
-            return;
+            Some(NodeValue::Spill(spill)) => {
+                spilled.extend(write_spill(wb, u, spill, changed, journal));
+            }
+            None => {}
         }
-        let mut settled_any = false;
+        for w in waiters.remove(&u).unwrap_or_default() {
+            let count = waiting.get_mut(&w).expect("a waiter is waiting");
+            *count -= 1;
+            if *count == 0 {
+                waiting.remove(&w);
+                queue.push_back(w);
+            }
+        }
+    }
+    if budget.exhausted() {
         for u in nodes {
-            if !unsettled.contains(u) {
-                continue;
-            }
-            let log = ReadLog::new(wb, unsettled);
-            let (value, limited) =
-                eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
-            if !log.read.into_inner().is_empty() {
-                continue;
-            }
-            unsettled.remove(u);
-            settled_any = true;
-            if limited {
+            if unsettled.remove(u) {
                 limited_cells.push((u.0, cell_of(*u)));
             }
-            match value {
-                Some(NodeValue::Scalar(value)) => {
-                    if write_if_changed(wb, *u, value, journal) {
-                        changed.push((u.0, cell_of(*u)));
-                    }
-                }
-                Some(NodeValue::Spill(spill)) => {
-                    spilled.extend(write_spill(wb, *u, spill, changed, journal));
-                }
-                None => {}
-            }
-        }
-        if !settled_any {
-            break;
         }
     }
 }
@@ -681,6 +693,11 @@ fn eval_node_with(
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
+    // the evaluation itself is a visit, so no formula, however it reads,
+    // escapes the budget.
+    if !budget.consume(1) {
+        return (None, true);
+    }
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
@@ -1433,6 +1450,50 @@ mod tests {
         assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
         assert!(r.limited_cells.is_empty());
         assert_eq!(value(&wb, s, "C1"), num(f64::from(rows)));
+    }
+
+    /// cells whose reads change once a cell below a cycle settles (each
+    /// reads only D1 at first, then the next cell) still settle in a few
+    /// evaluations each, whether their reads are metered or not.
+    #[test]
+    fn reads_that_change_while_settling_cost_linear_work() {
+        let rows: u32 = 6_000;
+        for anchored in [false, true] {
+            let (mut wb, s) = one_sheet();
+            let read = |at: &str| {
+                if anchored {
+                    format!("ANCHORARRAY({at})")
+                } else {
+                    at.to_owned()
+                }
+            };
+            put_formula(&mut wb, s, "A1", "B1+1");
+            put_formula(&mut wb, s, "B1", "A1+1");
+            put_formula(&mut wb, s, "D1", "A1+1");
+            for row in 1..rows {
+                put_formula(
+                    &mut wb,
+                    s,
+                    &format!("E{row}"),
+                    &format!(
+                        "IF({}=1,{}+1,0)",
+                        read("$D$1"),
+                        read(&format!("E{}", row + 1))
+                    ),
+                );
+            }
+            put_formula(
+                &mut wb,
+                s,
+                &format!("E{rows}"),
+                &format!("IF({}=1,7,0)", read("$D$1")),
+            );
+            let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+            assert!(r.limited_cells.is_empty());
+            assert_eq!(value(&wb, s, "E1"), num(f64::from(7 + rows - 1)));
+            assert!(r.visits < 20 * u64::from(rows), "{} visits", r.visits);
+        }
     }
 
     /// an array formula caught in a cycle has no rectangle to settle into, so

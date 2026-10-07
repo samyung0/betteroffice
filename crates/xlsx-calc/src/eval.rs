@@ -54,7 +54,7 @@ impl EvaluationBudget {
         self.refused.get()
     }
 
-    fn consume(&self, count: u64) -> bool {
+    pub(crate) fn consume(&self, count: u64) -> bool {
         let remaining = self.remaining.get();
         if count > remaining {
             self.refused.set(true);
