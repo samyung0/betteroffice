@@ -45,9 +45,54 @@ impl XlsxSession {
         self.workbook.encode_state_as_update_v1()
     }
 
-    /// `checkpointProjectionJson` (`full`) or `checkpointCellsJson`.
+    /// `checkpointProjectionJson` (`full`) or `checkpointCellsJson` without
+    /// the sheets' cells, which [`Self::each_cell`] reads one at a time: the
+    /// whole projection as one value peaked at 2 GiB for an 8 MiB workbook.
     fn projection(&self, full: bool) -> Result<J> {
         J::parse(&projection_json(&self.workbook, full)?).map_err(Error::Engine)
+    }
+
+    /// Sheet `index`'s projected cells in order.
+    fn each_cell(
+        &self,
+        index: usize,
+        full: bool,
+        mut visit: impl FnMut(J) -> Result<()>,
+    ) -> Result<()> {
+        let model = self.workbook.model();
+        let sheet = &model.sheets[index];
+        let ids = self
+            .workbook
+            .cell_identities(
+                sheet
+                    .iter_cells()
+                    .map(|(at, _)| (SheetId(index as u32), at)),
+            )
+            .map_err(Error::engine)?;
+        for ((at, cell), id) in sheet.iter_cells().zip(&ids) {
+            let json = serde_json::to_string(&ProjectedCell {
+                id,
+                address: at.to_a1(),
+                value: &cell.value,
+                formula: &cell.formula,
+                format: full.then(|| model.styles.cell_format(cell.style)),
+            })
+            .map_err(Error::engine)?;
+            visit(J::parse(&json).map_err(Error::Engine)?)?;
+        }
+        Ok(())
+    }
+
+    /// The projected cell at `address` on sheet `index`.
+    fn cell_at(&self, index: usize, address: &str) -> Result<Option<J>> {
+        let mut found = None;
+        self.each_cell(index, false, |cell| {
+            if found.is_none() && cell.get("address").and_then(J::as_str) == Some(address) {
+                found = Some(cell);
+            }
+            Ok(())
+        })?;
+        Ok(found)
     }
 
     pub fn entries(&self) -> Result<Vec<Item>> {
@@ -112,7 +157,8 @@ impl XlsxSession {
                     asset: Some(asset),
                 });
             }
-            for cell in array(sheet.get("cells")) {
+            self.each_cell(index, true, |cell| {
+                let cell = &cell;
                 let cell_id = text(cell.get("id"));
                 let address = text(cell.get("address"));
                 let value = match cell.get("formula") {
@@ -140,7 +186,8 @@ impl XlsxSession {
                     cell.get("format").unwrap_or(&J::Null),
                     "",
                 ));
-            }
+                Ok(())
+            })?;
         }
         for item in array(projection.get("definedNames")) {
             let name = text(item.get("name"));
@@ -156,19 +203,20 @@ impl XlsxSession {
     }
 
     pub fn editable(&self) -> Result<Vec<Entry>> {
-        let cells = self.projection(false)?;
+        let sheets = self.projection(false)?;
         let mut entries = Vec::new();
-        for sheet in array(cells.get("sheets")) {
+        for (index, sheet) in array(sheets.get("sheets")).iter().enumerate() {
             let (sheet_id, name) = (text(sheet.get("id")), text(sheet.get("name")));
-            for cell in array(sheet.get("cells")) {
+            self.each_cell(index, false, |cell| {
                 let address = text(cell.get("address"));
                 entries.push(Entry {
                     id: text(cell.get("id")),
                     label: format!("{name}!{address}"),
-                    value: cell_value(cell),
+                    value: cell_value(&cell),
                     position: format!("{sheet_id}:{address}"),
                 });
-            }
+                Ok(())
+            })?;
         }
         Ok(entries)
     }
@@ -197,7 +245,7 @@ impl XlsxSession {
                 .map(|cell| cell.input)
                 .map_err(Error::engine)
         };
-        let before = cell_at(found, &address).cloned();
+        let before = self.cell_at(index, &address)?;
         let input = read_input(&self.workbook)?;
         if *expected_value != input
             && *expected_value != before.as_ref().map(cell_value).unwrap_or_default()
@@ -227,10 +275,9 @@ impl XlsxSession {
         let cell = match before {
             Some(cell) => cell,
             None => {
-                let cells = self.projection(false)?;
-                let (_, sheet) = find_sheet(&cells, &sheet_id)?;
-                cell_at(sheet, &address)
-                    .cloned()
+                let sheets = self.projection(false)?;
+                let (index, _) = find_sheet(&sheets, &sheet_id)?;
+                self.cell_at(index, &address)?
                     .ok_or_else(|| Error::engine("edited cell is missing from the projection"))?
             }
         };
@@ -417,12 +464,6 @@ fn find_sheet<'a>(cells: &'a J, sheet: &str) -> Result<(usize, &'a J)> {
         .ok_or_else(|| Error::edit(EditCode::UnavailableTarget, "unknown sheet"))
 }
 
-fn cell_at<'a>(sheet: &'a J, address: &str) -> Option<&'a J> {
-    array(sheet.get("cells"))
-        .iter()
-        .find(|cell| cell.get("address").and_then(J::as_str) == Some(address))
-}
-
 /// `String.prototype.trim`: White_Space and the byte order mark.
 fn js_trim(text: &str) -> &str {
     text.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
@@ -533,7 +574,6 @@ struct Projection<'a> {
 struct ProjectedSheet<'a> {
     id: &'a str,
     name: &'a str,
-    cells: ProjectedCells<'a>,
     #[serde(flatten)]
     layout: Option<ProjectedLayout<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -559,55 +599,21 @@ struct ProjectedLayout<'a> {
     charts: &'a Vec<betteroffice_xlsx::SheetChart>,
 }
 
-struct ProjectedCells<'a> {
-    sheet: &'a betteroffice_xlsx::Sheet,
-    ids: &'a [String],
-    styles: Option<&'a betteroffice_xlsx::Stylesheet>,
-}
-
-impl Serialize for ProjectedCells<'_> {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct ProjectedCell<'a, F> {
-            id: &'a str,
-            address: String,
-            value: &'a betteroffice_xlsx::CellValue,
-            formula: &'a Option<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            format: Option<F>,
-        }
-        serializer.collect_seq(
-            self.sheet
-                .iter_cells()
-                .zip(self.ids)
-                .map(|((at, cell), id)| ProjectedCell {
-                    id,
-                    address: at.to_a1(),
-                    value: &cell.value,
-                    formula: &cell.formula,
-                    format: self.styles.map(|styles| styles.cell_format(cell.style)),
-                }),
-        )
-    }
+#[derive(Serialize)]
+struct ProjectedCell<'a, F> {
+    id: &'a str,
+    address: String,
+    value: &'a betteroffice_xlsx::CellValue,
+    formula: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<F>,
 }
 
 fn projection_json(workbook: &Workbook, full: bool) -> Result<String> {
     let sheet_ids = workbook.sheet_info().map_err(Error::engine)?.sheet_ids;
     let model = workbook.model();
-    let identities = workbook
-        .cell_identities(model.sheets.iter().enumerate().flat_map(|(index, sheet)| {
-            sheet
-                .iter_cells()
-                .map(move |(at, _)| (SheetId(index as u32), at))
-        }))
-        .map_err(Error::engine)?;
-    let mut offset = 0;
     let mut sheets = Vec::with_capacity(model.sheets.len());
     for (index, sheet) in model.sheets.iter().enumerate() {
-        let count = sheet.iter_cells().count();
         let images = if full {
             let images = workbook
                 .embedded_images(SheetId(index as u32))
@@ -629,11 +635,6 @@ fn projection_json(workbook: &Workbook, full: bool) -> Result<String> {
         sheets.push(ProjectedSheet {
             id: &sheet_ids[index],
             name: &sheet.name,
-            cells: ProjectedCells {
-                sheet,
-                ids: &identities[offset..offset + count],
-                styles: full.then_some(&model.styles),
-            },
             layout: full.then_some(ProjectedLayout {
                 freeze_pane: &sheet.freeze_pane,
                 hyperlinks: &sheet.hyperlinks,
@@ -644,7 +645,6 @@ fn projection_json(workbook: &Workbook, full: bool) -> Result<String> {
             }),
             images,
         });
-        offset += count;
     }
     serde_json::to_string(&Projection {
         sheets,
