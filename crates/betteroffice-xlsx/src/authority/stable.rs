@@ -1847,6 +1847,13 @@ pub(super) fn immutable_sheet_insertions(doc: &Doc) -> Result<yrs::IdSet, String
     Ok(immutable)
 }
 
+/// Undo tracks each sheet record's own map, not the `SHEETS` root, which
+/// would also track the records themselves and the fields of a sheet added
+/// in the update, and so change what Undo of an added sheet takes back. The
+/// UndoManager reads these nested branches on every tracked transaction, so
+/// a sheet record is never deleted (removing a sheet removes only its order
+/// entry): a deleted and collected record would leave the scope pointing into
+/// freed memory.
 pub(super) fn undo_scopes(doc: &Doc, undo: &mut UndoManager<()>) -> Result<(), String> {
     let order = doc.get_or_insert_array(SHEET_ORDER);
     let names = doc.get_or_insert_map(DEFINED_NAMES);
