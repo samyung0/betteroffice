@@ -14,9 +14,15 @@ export class PptxViewDocument {
 export class PptxViewRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    fontBytes(font_id: number): Uint8Array;
     hitTestJson(x: number, y: number): string;
     layoutSlideJson(document: PptxViewDocument, slide_index: number): string;
     constructor();
+    /**
+     * Registers the deck's embedded faces, as
+     * `[{"family", "bold", "italic", "fontId"}]`.
+     */
+    registerEmbeddedFontsJson(document: PptxViewDocument): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
 }
 
@@ -30,9 +36,11 @@ export interface InitOutput {
     readonly pptxviewdocument_open: (a: number, b: number) => [number, number, number];
     readonly pptxviewdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxviewdocument_version: () => [number, number];
+    readonly pptxviewrenderer_fontBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxviewrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxviewrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxviewrenderer_new: () => number;
+    readonly pptxviewrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxviewrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

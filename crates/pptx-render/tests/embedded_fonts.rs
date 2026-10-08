@@ -100,14 +100,8 @@ fn lato_ttf() -> Vec<u8> {
 
 #[test]
 fn the_presentation_lists_each_embedded_face_with_its_part() {
-    let deck = deck(
-        &[
-            ("regular", "Lato-regular.fntdata", LATO),
-            ("bold", "Lato-bold.fntdata", LATO_BOLD),
-        ],
-        false,
-    );
-    let session = DeckSession::open(&deck, 8_021).unwrap();
+    let deck = include_bytes!("fixtures/embedded-lato.pptx");
+    let session = DeckSession::open(deck, 8_021).unwrap();
     assert_eq!(
         session.package().presentation.embedded_fonts,
         [

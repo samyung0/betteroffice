@@ -1,4 +1,5 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
+export { installEmbeddedFonts, removeFontFaces } from './render/fonts';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export {
   analyzeOpenPresentation,

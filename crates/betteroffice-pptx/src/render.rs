@@ -23,7 +23,8 @@ pub(crate) struct RenderCaches {
 impl Presentation {
     /// Rasterizes one slide to deterministic PNG bytes. Media resolves from the
     /// package, so nothing needs registering beyond the fonts
-    /// [`Presentation::register_font`] took; a picture the backend cannot draw
+    /// [`Presentation::register_font`] took (the deck's embedded faces register
+    /// at open); a picture the backend cannot draw
     /// is skipped and counted rather than failing the render. Glyph outlines and
     /// decoded images are cached on the deck.
     pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {

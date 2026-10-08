@@ -14,6 +14,7 @@ import {
 const root = resolve(import.meta.dir, '../../../..');
 const fixture = resolve(root, 'apps/demo/public/betteroffice-demo.pptx');
 const font = resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf');
+const embeddedLato = resolve(root, 'crates/pptx-render/tests/fixtures/embedded-lato.pptx');
 const editorWasm = resolve(import.meta.dir, 'generated/pptx_wasm_bg.wasm');
 const viewerWasm = resolve(import.meta.dir, 'generated/viewer/pptx_view_wasm_bg.wasm');
 
@@ -52,5 +53,45 @@ describe('PPTX viewer wasm', () => {
     expect(analysis.widthEmu).toBeGreaterThan(0);
     expect(analysis.heightEmu).toBeGreaterThan(0);
     expect(analysis.textCharacterCount).toBeGreaterThan(0);
+  });
+
+  test('lays out in the embedded faces of the deck and hands them to the page', async () => {
+    const [deck, fontBytes, plain] = await Promise.all([
+      readFile(embeddedLato),
+      readFile(font),
+      readFile(fixture),
+    ]);
+    const fonts = [{ family: 'Arial', bytes: new Uint8Array(fontBytes) }];
+    const viewer = openViewerPresentation(new Uint8Array(deck), { fonts });
+    const editor = openEditorPresentation(new Uint8Array(deck), { clientId: 812, fonts });
+    const other = openViewerPresentation(new Uint8Array(plain), { fonts });
+    try {
+      for (const handle of [viewer, editor]) {
+        const faces = handle.embeddedFonts();
+        expect(faces.map(({ family, bold, italic }) => ({ family, bold, italic }))).toEqual([
+          { family: 'Lato', bold: false, italic: false },
+          { family: 'Lato', bold: true, italic: false },
+        ]);
+        // Decoded from MicroType Express to a TrueType sfnt the page can load.
+        for (const face of faces) expect([...face.bytes.subarray(0, 4)]).toEqual([0, 1, 0, 0]);
+      }
+      const frame = viewer.layoutSlide(0);
+      expect(frame).toEqual(editor.layoutSlide(0));
+      const box = frame.primitives.find(
+        (primitive) => primitive.kind === 'textBox' && primitive.objectId === 4
+      );
+      if (box?.kind !== 'textBox') throw new Error('shape 4 has no text box');
+      expect(box.lines.map((line) => line.runs.map((run) => run.text).join(''))).toEqual([
+        'Embedded as text ',
+        'it wraps later',
+        'Second line',
+      ]);
+      expect(box.lines[0].runs[0].fontFamily).toBe('Lato');
+      expect(other.embeddedFonts()).toEqual([]);
+    } finally {
+      viewer.dispose();
+      editor.dispose();
+      other.dispose();
+    }
   });
 });

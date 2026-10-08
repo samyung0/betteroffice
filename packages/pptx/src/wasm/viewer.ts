@@ -15,6 +15,9 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface PresentationViewerHandle {
   snapshot(): DeckSnapshot;
   registerFont(face: PptxFontFace): number;
+  /** The deck's embedded faces, for the page to paint with; decoded by this
+   *  call or the first layout, which then measures with them. */
+  embeddedFonts(): PptxFontFace[];
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
@@ -60,6 +63,15 @@ export function openPresentation(
   if (!initialized) throw new Error('pptx viewer wasm is not initialized; call initWasm() first');
   const document = call(() => PptxViewDocument.open(bytes));
   const renderer = createRenderer(document, options.fonts ?? []);
+  // The deck's own faces, decoded on first use so a host that only reads the
+  // snapshot never pays for them.
+  let embeddedFaces: EmbeddedFace[] | undefined;
+  const withEmbeddedFonts = (): PptxViewRenderer => {
+    embeddedFaces ??= parseJson<EmbeddedFace[]>(() =>
+      renderer.registerEmbeddedFontsJson(document)
+    );
+    return renderer;
+  };
   let disposed = false;
 
   const read = <T,>(operation: () => T): T => {
@@ -70,8 +82,18 @@ export function openPresentation(
   return {
     snapshot: () => parseJson(() => read(() => document.snapshotJson())),
     registerFont: (face) => read(() => registerFont(renderer, face)),
+    embeddedFonts: () =>
+      read(() => {
+        withEmbeddedFonts();
+        return (embeddedFaces ?? []).map(({ family, bold, italic, fontId }) => ({
+          family,
+          bold,
+          italic,
+          bytes: renderer.fontBytes(fontId),
+        }));
+      }),
     layoutSlide: (slideIndex) =>
-      parseJson(() => read(() => renderer.layoutSlideJson(document, slideIndex))),
+      parseJson(() => read(() => withEmbeddedFonts().layoutSlideJson(document, slideIndex))),
     hitTest: (x, y) => parseJson(() => read(() => renderer.hitTestJson(x, y))),
     mediaBytes: (partPath) => read(() => document.mediaBytes(partPath)),
     dispose(): void {
@@ -140,6 +162,14 @@ function countShapeTextCharacters(shape: DeckSnapshot['slides'][number]['shapes'
   }
   for (const child of shape.children) count += countShapeTextCharacters(child);
   return count;
+}
+
+/** A face of the deck's `p:embeddedFontLst`, as the renderer registered it. */
+interface EmbeddedFace {
+  family: string;
+  bold: boolean;
+  italic: boolean;
+  fontId: number;
 }
 
 function createRenderer(

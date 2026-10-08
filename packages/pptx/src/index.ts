@@ -1,5 +1,6 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { presentationImageBlob } from './render/image';
+export { installEmbeddedFonts, removeFontFaces } from './render/fonts';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';

@@ -234,6 +234,11 @@ impl SlideRenderer {
         &self.fonts
     }
 
+    /// The bytes of the registered face `font_id`.
+    pub fn font_bytes(&self, font_id: u32) -> Option<&[u8]> {
+        self.fonts.font_bytes(FontId::from_u32(font_id)).ok()
+    }
+
     /// First registered face for placeholder labels.
     pub fn fallback_font(&self) -> Option<FontId> {
         self.fallback.as_ref().map(|face| face.id)
