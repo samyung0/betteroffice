@@ -503,7 +503,10 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
                 &[StoryRange::new(story, *from, *to)],
                 "Ada",
                 DATE,
-                Any::from("a comment"),
+                Any::from_json(
+                    r#"[{"type":"paragraph","content":[{"type":"run","content":[{"type":"text","text":"a comment"}]}]}]"#,
+                )
+                .unwrap(),
             )
             .map(drop)
             .map_err(|error| error.to_string()),
@@ -833,6 +836,7 @@ fn first_difference(left: &str, right: &str) -> String {
 struct Stats {
     applied: usize,
     diverged: usize,
+    exported: usize,
     refused: usize,
     panicked: usize,
     room_seeded: usize,
@@ -1099,6 +1103,9 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         .iter()
         .map(|room| office_service::export(base, checkpoint(&sha, room), determinism))
         .collect();
+    if exports[0].is_ok() {
+        stats.exported += 1;
+    }
     match (&exports[0], &exports[1]) {
         (Ok(left), Ok(right)) => assert!(
             left == right || same_but_para_ids(left, right),
@@ -1202,6 +1209,7 @@ fn random_schedules_match_the_seeded_layout() {
                 totals.panicked += stats.panicked;
                 totals.copies += stats.copies;
                 totals.diverged += stats.diverged;
+                totals.exported += stats.exported;
                 schedules += 1;
             }
         }
@@ -1588,5 +1596,98 @@ fn duplicated_source_paragraph_ids_rename_alike() {
             Step::Sync(0, 1),
             Step::Sync(1, 0),
         ],
+    );
+}
+
+/// The publication rebase reads whole stories off its states: in the
+/// override layout it runs on materialized states (source plus room), and
+/// lands the same edits as today's.
+#[test]
+fn rebase_on_materialized_chunked_states_lands_as_today() {
+    let base = mixed();
+    let (_, start, mark) = para(&base, 1);
+    let (_, later, _) = para(&base, 3);
+    let captured_ops = [
+        insert("body", start + 2, "<cap>"),
+        Op::Split("body".into(), mark),
+        Op::Comment("body".into(), start, later),
+    ];
+    let latest_ops = [insert("body", later + 1, "<late>"), Op::Bold("body".into(), start, start + 4)];
+    let peers = [open_peer(&base, 701, false), open_peer(&base, 701, true)];
+    for op in &captured_ops {
+        for peer in &peers {
+            run(peer, op).unwrap();
+        }
+    }
+    // The rooms: today's whole state; the override layout's meta seed,
+    // copies and edits.
+    let room_of = |world: usize, peer: &Peer| -> Vec<u8> {
+        if world == 0 {
+            return peer.doc.encode_state_as_update_v1();
+        }
+        let meta = overlay::meta_seed(&overlay::fingerprint(&base));
+        let mut updates = vec![yrs::Update::decode_v1(&meta).unwrap()];
+        updates.extend(
+            peer.outbox
+                .borrow()
+                .iter()
+                .map(|message| yrs::Update::decode_v1(message).unwrap()),
+        );
+        yrs::updates::encoder::Encode::encode_v1(&yrs::Update::merge_updates(updates))
+    };
+    let captured: Vec<Vec<u8>> = peers.iter().enumerate().map(|(world, peer)| room_of(world, peer)).collect();
+    for op in &latest_ops {
+        for peer in &peers {
+            run(peer, op).unwrap();
+        }
+    }
+    let latest: Vec<Vec<u8>> = peers.iter().enumerate().map(|(world, peer)| room_of(world, peer)).collect();
+    let sha = office_service::sha256_hex(&base);
+    let determinism = Determinism {
+        seed: "0000000000000000000000000000000000000000000000000000000000000000",
+        now: "2026-10-08T00:00:00.000Z",
+    };
+    let exported = office_service::export(&base, checkpoint(&sha, &captured[0]), determinism).unwrap();
+    let export_sha = office_service::sha256_hex(&exported);
+    let rebased: Vec<_> = (0..2)
+        .map(|world| {
+            office_service::rebase(
+                &base,
+                checkpoint(&sha, &captured[world]),
+                checkpoint(&sha, &latest[world]),
+                &exported,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect();
+    let landed: Vec<_> = rebased
+        .iter()
+        .map(|result| {
+            result.as_ref().map(|rebased| {
+                office_service::export(&exported, checkpoint(&export_sha, &rebased.state), determinism)
+                    .unwrap()
+            })
+        })
+        .collect();
+    assert!(rebased[0].is_ok(), "today's rebase: {:?}", rebased[0].as_ref().err());
+    assert!(
+        landed[0] == landed[1],
+        "rebased exports differ: chunked {:?}",
+        rebased[1].as_ref().err()
+    );
+    let (today, chunked) = (rebased[0].as_ref().unwrap(), rebased[1].as_ref().unwrap());
+    assert_eq!(
+        format!("{:?}", today.effects),
+        format!("{:?}", chunked.effects).replace("", ""),
+        "rebase effects differ"
+    );
+    assert!(
+        overlay::is_chunked_state(&chunked.state),
+        "the rebased room is in the override layout"
+    );
+    eprintln!(
+        "rebased room: today {} B, override layout {} B",
+        today.state.len(),
+        chunked.state.len()
     );
 }

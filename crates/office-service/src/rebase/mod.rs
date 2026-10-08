@@ -60,7 +60,30 @@ pub(crate) fn rebase(
         let effects = xlsx::pending_effects(exported, checkpoint, None)?;
         return Ok(Rebased { state, effects });
     }
+    // Override layout (spike): the transplant reads whole stories, so it runs
+    // on materialized states and lands on the export's materialization; the
+    // room keeps the copies the landed edits name.
+    let chunked = format == Format::Docx && crate::docx::chunked_state(captured.state);
+    let materialized_captured;
+    let materialized_latest;
+    let (captured, latest) = if chunked {
+        materialized_captured = crate::docx::materialized(base, captured.state)?;
+        materialized_latest = crate::docx::materialized(base, latest.state)?;
+        (
+            Checkpoint {
+                state: &materialized_captured,
+                ..captured
+            },
+            Checkpoint {
+                state: &materialized_latest,
+                ..latest
+            },
+        )
+    } else {
+        (captured, latest)
+    };
     let seed = match format {
+        Format::Docx if chunked => crate::docx::materialized(exported, &[])?,
         Format::Docx => crate::docx::seed(exported)?,
         _ => crate::pptx::seed(exported)?,
     };
@@ -84,6 +107,14 @@ pub(crate) fn rebase(
     } else {
         assert_pptx_restorations(&seed, &state)?;
     }
+    let (seed, state) = if chunked {
+        (
+            crate::docx::seed_of_layout(exported, true),
+            crate::docx::shared_state(exported, &seed, &state)?,
+        )
+    } else {
+        (seed, state)
+    };
     let exported_checkpoint = |state| Checkpoint {
         format,
         schema_version: 1,

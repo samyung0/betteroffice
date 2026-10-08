@@ -90,8 +90,62 @@ pub(crate) fn chunked_layout() -> bool {
     std::env::var("OFFICE_DOCX_LAYOUT").is_ok_and(|layout| layout == "chunked")
 }
 
+/// The override layout's meta seed, or today's whole seed.
+pub(crate) fn seed_of_layout(base: &[u8], chunked: bool) -> Vec<u8> {
+    if chunked {
+        docx_edit::overlay::meta_seed(&docx_edit::overlay::fingerprint(base))
+    } else {
+        seed(base).unwrap_or_default()
+    }
+}
+
+/// A session's whole state in the override layout: every source block
+/// materialized, then `state` (the room's copies and edits).
+pub(crate) fn materialized(base: &[u8], state: &[u8]) -> Result<Vec<u8>> {
+    let engine = EngineSession::new(env::next_client());
+    let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
+    docx_edit::overlay::open_chunked(engine.doc(), envelope, &docx_edit::overlay::fingerprint(base))
+        .map_err(Error::Engine)?;
+    if !state.is_empty() {
+        engine
+            .doc()
+            .apply_shared_update(state)
+            .map_err(Error::engine)?;
+    }
+    Ok(engine.doc().encode_state_as_update_v1())
+}
+
+/// What a room in the override layout keeps of `full` (a materialized state
+/// over `base`'s materialization `materialized`): the meta seed, the edits,
+/// and the copies they name.
+pub(crate) fn shared_state(base: &[u8], materialized: &[u8], full: &[u8]) -> Result<Vec<u8>> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Transact};
+    let engine = EngineSession::new(env::next_client());
+    let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
+    docx_edit::overlay::open_chunked(engine.doc(), envelope, &docx_edit::overlay::fingerprint(base))
+        .map_err(Error::Engine)?;
+    let before = engine.doc().yrs_doc().transact().state_vector();
+    engine.doc().apply_update_v1(full).map_err(Error::engine)?;
+    let overlay = engine.doc().overlay().expect("opened in the override layout");
+    let txn = engine.doc().yrs_doc().transact();
+    // The edits, with only the deletions the materialization does not make.
+    let mut edits = yrs::Update::decode_v1(&txn.encode_state_as_update_v1(&before))
+        .map_err(Error::engine)?;
+    let own = yrs::Update::decode_v1(materialized).map_err(Error::engine)?;
+    edits.delete_set_mut().diff_with(own.delete_set());
+    let edits = yrs::updates::encoder::Encode::encode_v1(&edits);
+    let shared = overlay.augment(&txn, &edits).map_err(Error::Engine)?;
+    let meta = docx_edit::overlay::meta_seed(&docx_edit::overlay::fingerprint(base));
+    let merged = yrs::Update::merge_updates([
+        yrs::Update::decode_v1(&meta).map_err(Error::engine)?,
+        yrs::Update::decode_v1(&shared).map_err(Error::engine)?,
+    ]);
+    Ok(yrs::updates::encoder::Encode::encode_v1(&merged))
+}
+
 /// Whether `state` writes the override layout's meta root.
-fn chunked_state(state: &[u8]) -> bool {
+pub(crate) fn chunked_state(state: &[u8]) -> bool {
     use yrs::updates::decoder::Decode;
     let Ok(update) = yrs::Update::decode_v1(state) else {
         return false;
