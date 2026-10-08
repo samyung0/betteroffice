@@ -1393,6 +1393,82 @@ fn cell_scroll_bounds_reach_the_sheet_edge_and_agree_across_sheets() {
 }
 
 #[test]
+fn display_lists_on_the_memoized_geometry_match_a_fresh_workbook() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 900.0,
+        height: 600.0,
+    };
+    let options = CalculationOptions::default();
+    let steps: Vec<Box<dyn Fn(&mut Workbook)>> = vec![
+        // values and a new cell past the used range keep the memo.
+        Box::new(|wb| {
+            wb.edit_cell(SheetId(0), cell("A1"), "7", options).unwrap();
+        }),
+        Box::new(|wb| {
+            wb.edit_cell(SheetId(0), cell("K30"), "past the edge", options)
+                .unwrap();
+        }),
+        // a taller font, a row height and a row insert move the geometry.
+        Box::new(|wb| {
+            wb.apply_ops(
+                vec![Op::PatchRangeStyle {
+                    sheet: SheetId(0),
+                    range: CellRange::parse_a1("B3:C4").unwrap(),
+                    patch: StylePatch {
+                        font_size: Some(30.0),
+                        ..StylePatch::default()
+                    },
+                }],
+                options,
+            )
+            .unwrap();
+        }),
+        Box::new(|wb| {
+            wb.apply_ops(
+                vec![Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 1,
+                    height: Some(40.0),
+                }],
+                options,
+            )
+            .unwrap();
+        }),
+        Box::new(|wb| {
+            wb.apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                }],
+                options,
+            )
+            .unwrap();
+        }),
+        Box::new(|wb| {
+            wb.undo(options).unwrap();
+        }),
+    ];
+    for (index, step) in steps.iter().enumerate() {
+        step(&mut workbook);
+        let fresh = Workbook::from_model(workbook.model().clone()).unwrap();
+        assert_eq!(
+            workbook.display_list(&viewport).unwrap(),
+            fresh.display_list(&viewport).unwrap(),
+            "step {index}"
+        );
+        assert_eq!(
+            workbook.chart_at_point(&viewport, 300.0, 200.0).unwrap(),
+            fresh.chart_at_point(&viewport, 300.0, 200.0).unwrap(),
+            "step {index}"
+        );
+    }
+}
+
+#[test]
 fn combined_hyperlink_location_remaps_and_round_trips() {
     let mut source = Sheet::new("Source");
     source.hyperlinks.push(Hyperlink {
