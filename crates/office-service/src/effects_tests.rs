@@ -142,3 +142,72 @@ fn a_shape_brought_to_the_front_still_moves() {
             .all(|operation| *operation == Operation::Move)
     );
 }
+
+/// A deck's seed and the state after `edit`.
+fn deck_states(edit: impl FnOnce(&pptx_edit::DeckSession, &crate::js::J)) -> (Vec<u8>, Vec<u8>) {
+    let state = seed(Format::Pptx, DECK).expect("seeds");
+    let deck =
+        pptx_edit::DeckSession::open_from_update_with_source(&state, DECK, 7).expect("opens");
+    let snapshot = crate::pptx::deck_json(&deck).expect("snapshot");
+    edit(&deck, &snapshot);
+    (state, deck.encode_state_as_update_v1())
+}
+
+fn slide_ids(snapshot: &crate::js::J) -> Vec<String> {
+    snapshot
+        .get("slides")
+        .and_then(crate::js::J::as_arr)
+        .expect("slides")
+        .iter()
+        .map(|slide| {
+            slide
+                .get("id")
+                .and_then(crate::js::J::as_str)
+                .expect("id")
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Slides sit in the deck container (`deck:<n>`, Epo 2026-10-08): a slide
+/// inserted first shifts the others without moving them; a slide moved to
+/// the end still moves.
+#[test]
+fn slides_an_insert_shifts_do_not_move_a_reordered_slide_does() {
+    let ctx = pptx_edit::EditCtx::local("");
+    let sha = sha256_hex(DECK);
+    let (seeded, inserted) = deck_states(|deck, _| {
+        deck.insert_slide(&ctx, 0, None).expect("inserts");
+    });
+    let before = baseline(DECK, checkpoint(Format::Pptx, &sha, &seeded)).expect("baseline");
+    let after = checkpoint(Format::Pptx, &sha, &inserted);
+    let all = compare_baselines(&before, &baseline(DECK, after).expect("baseline"));
+    assert!(all.iter().any(|effect| effect.operation == Operation::Move));
+    let saved = save_effects(DECK, &before, after).expect("effects");
+    assert!(
+        saved
+            .iter()
+            .any(|effect| effect.operation == Operation::Add)
+    );
+    assert!(
+        saved
+            .iter()
+            .all(|effect| effect.operation != Operation::Move)
+    );
+
+    let mut first = String::new();
+    let (_, moved) = deck_states(|deck, snapshot| {
+        let slides = slide_ids(snapshot);
+        assert!(slides.len() >= 2, "a deck of two slides at least");
+        first = slides[0].clone();
+        deck.move_slide(&ctx, &first, slides.len() as u32 - 1)
+            .expect("moves");
+    });
+    let saved =
+        save_effects(DECK, &before, checkpoint(Format::Pptx, &sha, &moved)).expect("effects");
+    assert!(
+        saved
+            .iter()
+            .any(|effect| effect.operation == Operation::Move && effect.id == first)
+    );
+}

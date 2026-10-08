@@ -76,7 +76,7 @@ impl PptxSession {
                 &slide_id,
                 format!("Slide {}", slide_index + 1),
                 &J::Obj(identity),
-                slide_index.to_string(),
+                format!("deck:{slide_index}"),
             ));
             self.visit(
                 &mut entries,

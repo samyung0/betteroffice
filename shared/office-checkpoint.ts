@@ -551,7 +551,7 @@ function pptxEntries(doc: PptxDocument): Entry[] {
         slide.id,
         `Slide ${slideIndex + 1}`,
         { name: slide.name, layout: slide.layoutPartPath },
-        String(slideIndex)
+        `deck:${slideIndex}`
       )
     );
     const visit = (shapes: ShapeSnapshot[], parent: string): void =>
