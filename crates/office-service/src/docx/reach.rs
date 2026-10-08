@@ -367,9 +367,8 @@ mod tests {
         let reached = assert_walk_matches("stories with a date", &mut session);
         assert_eq!(reached.stories.len(), before - 1);
         let entries = session.entries().expect("entries");
-        // The control's language (`w:lid` ja-JP) is not in the embed's
-        // payload, so the projection formats in English, as yrsToDocument.ts.
-        assert!(entries.iter().any(|entry| entry.value == "6 May 2026\n"));
+        // The control's language (`w:lid` ja-JP) names the month.
+        assert!(entries.iter().any(|entry| entry.value == "6 5月 2026\n"));
     }
 
     #[test]

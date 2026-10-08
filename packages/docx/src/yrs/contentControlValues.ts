@@ -87,16 +87,11 @@ export function formatSdtDate(iso: string, pattern?: string, language?: string):
   const fmt = pattern && pattern.trim() ? pattern : 'M/d/yyyy';
   const pad = (n: number) => String(n).padStart(2, '0');
   const date = new Date(Date.UTC(y, m - 1, d));
-  const month = (width: 'long' | 'short'): string => {
-    try {
-      return new Intl.DateTimeFormat(language || 'en', {
-        month: width,
-        timeZone: 'UTC',
-      }).format(date);
-    } catch {
-      return new Intl.DateTimeFormat('en', { month: width, timeZone: 'UTC' }).format(date);
-    }
-  };
+  // English when the tag is missing, invalid or without locale data, where
+  // Intl would take the process's default locale (decided 2026-10-08).
+  const locale = language && hasLocaleData(language) ? language : 'en';
+  const month = (width: 'long' | 'short'): string =>
+    new Intl.DateTimeFormat(locale, { month: width, timeZone: 'UTC' }).format(date);
   // Single pass so an emitted month name (e.g. "March") isn't re-scanned by a
   // later, shorter token like `M` — which would corrupt it to "3arch".
   const tokens: Record<string, string> = {
@@ -110,6 +105,14 @@ export function formatSdtDate(iso: string, pattern?: string, language?: string):
     d: String(d),
   };
   return fmt.replace(/yyyy|yy|MMMM|MMM|MM|M|dd|d/g, (t) => tokens[t]);
+}
+
+function hasLocaleData(tag: string): boolean {
+  try {
+    return Intl.DateTimeFormat.supportedLocalesOf(tag).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function isValidIsoDate(year: number, month: number, day: number): boolean {
@@ -245,7 +248,9 @@ export function applyContentControlValue(
       const nextRaw = setAttr(raw, 'w:date', 'w:fullDate', fullDate);
       const pattern =
         props.dateState?.format ?? props.dateFormat ?? readAttr(raw, 'w:dateFormat', 'w:val');
-      const language = props.dateState?.language;
+      // The control's language: its parsed state, else `w:lid` in the raw
+      // properties the save projection carries (decided 2026-10-08).
+      const language = props.dateState?.language ?? readAttr(raw, 'w:lid', 'w:val');
       const display = formatSdtDate(iso, pattern, language);
       return {
         properties: {
