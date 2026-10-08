@@ -262,8 +262,9 @@ const BLOCKS = new Set(['table', 'blockSdt', ...FLOW_BREAKS]);
 
 /**
  * The current Yrs selection as plain text: paragraph ends, soft line breaks
- * and page or column breaks after text become newlines, and a field its shown
- * text. A selection holding anything
+ * and page or column breaks after text become newlines, as does an inline
+ * chart between text on its own line (none beside a break), and a field its
+ * shown text. A selection holding anything
  * else plain text cannot carry (a table, image, field, note reference, content
  * control, page break…) is not `plain`. Bookmarks are not in the text, so a
  * selection over one stays plain.
@@ -285,6 +286,8 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   let inUnmatchedField = false;
   // Whether text comes before this point in its paragraph.
   let textBefore = false;
+  // A selected chart after text owes the newline of its own line to the text after it.
+  let chartLine = false;
   for (const segment of segments) {
     if (offset >= end) break;
     const segmentStart = offset;
@@ -293,7 +296,10 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
     // A page or column break after text in its paragraph copies as a line
     // break; one opening the paragraph follows the previous mark's newline.
     const breakAfterText = textBefore && FLOW_BREAKS.has(embedKind);
-    textBefore = segment.kind !== 'pilcrow' && (textBefore || !BLOCKS.has(embedKind));
+    const chartAfterText = textBefore && embedKind === 'chart';
+    const lineContent = segment.kind !== 'pilcrow' && !BLOCKS.has(embedKind) && embedKind !== 'chart';
+    textBefore = segment.kind !== 'pilcrow' && (textBefore || lineContent);
+    if (segment.kind === 'pilcrow' || breakAfterText) chartLine = false;
     if (segment.kind === 'pilcrow') inUnmatchedField = false;
     if (segment.kind === 'embed' && segment.embedKind === 'field' && segment.payload.continuationId != null) {
       const until = fieldEnds.get(segment.payload.continuationId);
@@ -301,6 +307,11 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
       else fieldUntil = Math.max(fieldUntil, until);
     }
     if (offset <= start) continue;
+    if (chartAfterText) chartLine = true;
+    if (chartLine && lineContent) {
+      text += '\n';
+      chartLine = false;
+    }
     if (segment.kind === 'text') {
       const from = Math.max(start, segmentStart);
       text += segment.text.slice(from - segmentStart, Math.min(end, offset) - segmentStart);

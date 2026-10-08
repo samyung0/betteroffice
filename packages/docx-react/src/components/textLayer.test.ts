@@ -321,11 +321,18 @@ describe('text layer over a laid-out document', () => {
   const sdt = (content: string) =>
     `<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
 
+  // One bar chart, which an inline drawing (`chart`) shows on a line of its own.
+  const CHART =
+    '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>';
+  const chart =
+    '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:extent cx="914400" cy="457200"/><wp:docPr id="2" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart1"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+
   function docx(body: string, footnotes = ''): Uint8Array {
     const parts: Record<string, string> = {
-      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/></Types>`,
+      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>`,
       '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
-      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/></Relationships>`,
+      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdChart1" Type="${R}/chart" Target="charts/chart1.xml"/></Relationships>`,
+      'word/charts/chart1.xml': CHART,
       'word/styles.xml': `<w:styles ${W}><w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/></w:style></w:styles>`,
       'word/footnotes.xml': `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>${footnotes}</w:footnotes>`,
       'word/document.xml': `<w:document ${W}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`,
@@ -439,6 +446,11 @@ describe('text layer over a laid-out document', () => {
     ['a page then a soft break', `${t('Aa')}${pb}${br}${t('Bb')}`, 'Aa\n\nBb'],
     ['a shape then a page break', `${t('Aa')}${shape}${pb}${t('Bb')}`, 'Aa\nBb'],
     ['a page break then a shape', `${t('Aa')}${pb}${shape}${t('Bb')}`, 'Aa\nBb'],
+    ['an inline chart', `${t('Aa')}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['two inline charts', `${t('Aa')}${chart}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart then a page break', `${t('Aa')}${chart}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart opening the paragraph', `${chart}${t('Bb')}`, 'Bb'],
+    ['a chart ending the paragraph', `${t('Aa')}${chart}`, 'Aa'],
     ['a break opening the paragraph', `${pb}${t('Bb')}`, 'Bb'],
     ['a break ending the paragraph', `${t('Aa')}${pb}`, 'Aa'],
     ['only a break', pb, ''],
