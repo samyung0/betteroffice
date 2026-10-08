@@ -2569,14 +2569,8 @@ fn push_text_chunks(
 ) {
     let chunk_end = chunk_start + utf16_len(text);
     let mut cuts = BTreeSet::from([chunk_start, chunk_end]);
-    for interval in comments {
-        if interval.start > chunk_start && interval.start < chunk_end {
-            cuts.insert(interval.start);
-        }
-        if interval.end > chunk_start && interval.end < chunk_end {
-            cuts.insert(interval.end);
-        }
-    }
+    // Offsets between the halves of a surrogate pair, ascending.
+    let mut inside_pairs = Vec::new();
     let mut offset = chunk_start;
     for ch in text.chars() {
         let next = offset + ch.len_utf16() as u32;
@@ -2584,7 +2578,28 @@ fn push_text_chunks(
             cuts.insert(offset);
             cuts.insert(next);
         }
+        if next - offset == 2 {
+            inside_pairs.push(offset + 1);
+        }
         offset = next;
+    }
+    // A peer can anchor a comment edge inside a surrogate pair; the comment
+    // then covers the whole character rather than splitting it.
+    let widened = |interval: &CommentInterval| {
+        let inside = |at: u32| u32::from(inside_pairs.binary_search(&at).is_ok());
+        (
+            interval.start - inside(interval.start),
+            interval.end + inside(interval.end),
+        )
+    };
+    for interval in comments {
+        let (start, end) = widened(interval);
+        if start > chunk_start && start < chunk_end {
+            cuts.insert(start);
+        }
+        if end > chunk_start && end < chunk_end {
+            cuts.insert(end);
+        }
     }
 
     let cuts: Vec<u32> = cuts.into_iter().collect();
@@ -2603,7 +2618,10 @@ fn push_text_chunks(
         let mut formatting = lower_run_formatting(attributes, env);
         let mut comment_ids: Vec<f64> = comments
             .iter()
-            .filter(|interval| interval.start <= start && end <= interval.end)
+            .filter(|interval| {
+                let (from, to) = widened(interval);
+                from <= start && end <= to
+            })
             .map(|interval| interval.id)
             .collect();
         comment_ids.sort_by(f64::total_cmp);
@@ -4429,8 +4447,8 @@ fn utf16_slice(value: &str, start: u32, end: u32) -> String {
     if utf16_offset == end && byte_end.is_none() {
         byte_end = Some(value.len());
     }
-    let start = byte_start.expect("yrs/comment offsets never split a UTF-16 surrogate pair");
-    let end = byte_end.expect("yrs/comment offsets never split a UTF-16 surrogate pair");
+    let start = byte_start.expect("run cuts sit on code point boundaries");
+    let end = byte_end.expect("run cuts sit on code point boundaries");
     value[start..end].to_owned()
 }
 
@@ -4461,6 +4479,54 @@ mod tests {
 
     fn resolved_comment_stories() -> Vec<String> {
         RESOLVED_COMMENT_STORIES.with(|stories| stories.take())
+    }
+
+    /// A peer may anchor a comment edge between the halves of a surrogate
+    /// pair; lowering widens that edge to the whole character instead of
+    /// splitting it.
+    #[test]
+    fn a_comment_edge_inside_a_surrogate_pair_widens_to_the_character() {
+        let peer = EditingDoc::new(2);
+        // a b 😀 c d 😀 e f: each emoji spans two UTF-16 units (2-3, 6-7).
+        peer.create_story("body", "ab\u{1F600}cd\u{1F600}ef", "Normal", "left")
+            .unwrap();
+        peer.apply_raw_ops(
+            "body",
+            vec![RawOp::SetComment {
+                id: "4".into(),
+                ranges: vec![(3, 7)],
+                author: "Agent".into(),
+                date: "2026-10-08T00:00:00Z".into(),
+                body: Any::Null,
+            }],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
+        let doc = EditingDoc::new(9);
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let block = serde_json::to_value(&blocks[0]).unwrap();
+        let runs: Vec<(String, Value)> = block["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| {
+                (
+                    run["text"].as_str().unwrap().to_owned(),
+                    run["commentIds"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                ("ab".to_owned(), Value::Null),
+                ("\u{1F600}cd\u{1F600}".to_owned(), serde_json::json!([4.0])),
+                ("ef".to_owned(), Value::Null),
+            ]
+        );
     }
 
     /// A lowering resolves comment anchors once per story it visits:
