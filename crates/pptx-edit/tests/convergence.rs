@@ -533,3 +533,45 @@ fn manual_capture_groups_text_and_comment_edits_until_a_boundary() {
     assert_eq!(session.undo_capture_mode(), UndoCaptureMode::Auto);
     assert!(session.can_redo());
 }
+
+/// One peer deletes a slide while another moves it: the move re-inserts the
+/// slide's id into the merged order, but the delete removed its record.
+/// Readers skip the id, so the delete wins, both peers take each other's
+/// update and the stored merge reopens.
+#[test]
+fn a_slide_deleted_while_a_peer_moves_it_stays_deleted() {
+    let left = DeckSession::open(FIXTURE, 901).unwrap();
+    let right = DeckSession::open(FIXTURE, 902).unwrap();
+    let before = left.snapshot().unwrap();
+    let slide = before.slides[1].id.clone();
+    left.delete_slide(&EditCtx::local("a"), &slide).unwrap();
+    right.move_slide(&EditCtx::local("b"), &slide, 0).unwrap();
+
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left).unwrap();
+    right.apply_update_v1(&to_right).unwrap();
+    let merged = left.snapshot().unwrap();
+    assert_eq!(right.snapshot().unwrap(), merged);
+    let expected: Vec<&str> = before
+        .slides
+        .iter()
+        .map(|s| s.id.as_str())
+        .filter(|id| *id != slide)
+        .collect();
+    let ids: Vec<&str> = merged.slides.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, expected);
+    assert_eq!(right.slide_ids().unwrap(), expected);
+
+    let stored = yrs::merge_updates_v1([
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1(),
+    ])
+    .unwrap();
+    let reopened = DeckSession::open_from_update_with_source(&stored, FIXTURE, 903).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), merged);
+}

@@ -338,22 +338,16 @@ impl DeckSession {
     /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
     pub fn slide_ids(&self) -> EditResult<Vec<String>> {
         let txn = self.doc.transact();
-        let order = required_order(&txn)?;
         let slides = required_map(&txn, SLIDES)?;
-        let mut seen_slides = HashSet::new();
-        let mut ids = Vec::new();
-        for slide_id in string_array_ref(&order, &txn) {
-            if !seen_slides.insert(slide_id.clone()) {
-                continue;
-            }
+        let ids = live_slide_order(&txn)?;
+        for slide_id in &ids {
             if slides
-                .get(&txn, &slide_id)
+                .get(&txn, slide_id)
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .is_none()
             {
                 return Err(EditError::InvalidState(format!("missing slide {slide_id}")));
             }
-            ids.push(slide_id);
         }
         Ok(ids)
     }
@@ -1095,6 +1089,18 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
+/// Slide ids in deck order, first occurrence of each. An id whose slide
+/// record a concurrent delete removed is skipped, as `live_shape_order` skips
+/// removed shapes: the delete wins over a peer's move.
+pub(crate) fn live_slide_order<T: ReadTxn>(txn: &T) -> EditResult<Vec<String>> {
+    let slides = required_map(txn, SLIDES)?;
+    let mut seen = HashSet::new();
+    Ok(string_array_ref(&required_order(txn)?, txn)
+        .into_iter()
+        .filter(|id| slides.contains_key(txn, id) && seen.insert(id.clone()))
+        .collect())
+}
+
 pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditResult<Vec<String>> {
     let shapes = required_map(txn, SHAPES)?;
     let mut seen = HashSet::new();
@@ -1153,30 +1159,17 @@ pub(crate) fn slide_scope(
 ) -> EditResult<SlideScope> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
-    let mut position = 0usize;
-    let mut slide_id = None;
-    for id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(id.clone()) {
-            continue;
-        }
-        if position == slide_index {
-            slide_id = Some(id);
-            break;
-        }
-        position += 1;
-    }
-    let slide_id = slide_id.ok_or(EditError::OutOfBounds {
+    let order = live_slide_order(&txn)?;
+    let slide_id = order.get(slide_index).ok_or(EditError::OutOfBounds {
         index: slide_index.min(u32::MAX as usize) as u32,
-        length: seen_slides.len() as u32,
+        length: order.len() as u32,
     })?;
     Ok(SlideScope {
         index: slide_index,
-        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, slide_id)?,
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
     })
@@ -1185,16 +1178,11 @@ pub(crate) fn slide_scope(
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
     let mut slide_snapshots = Vec::new();
-    for slide_id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(slide_id.clone()) {
-            continue;
-        }
+    for slide_id in live_slide_order(&txn)? {
         slide_snapshots.push(snapshot_slide(
             &slides, &shapes, &stories, package, &txn, &slide_id,
         )?);
