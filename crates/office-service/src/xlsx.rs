@@ -106,7 +106,7 @@ impl XlsxSession {
                 &id,
                 format!("Sheet {name}"),
                 &name,
-                index.to_string(),
+                format!("workbook:{index}"),
             ));
             let mut layout = object.clone();
             for key in ["cells", "images", "id", "name"] {
@@ -674,5 +674,66 @@ mod tests {
             1_790_685_296_789.0
         );
         assert!(parse_iso_ms("2026-02-30T00:00:00.000Z").is_nan());
+    }
+
+    /// Sheets sit in the workbook container (`workbook:<n>`, as slides in
+    /// `deck`): a sheet inserted first shifts the others without moving
+    /// them; a sheet the order puts elsewhere still moves.
+    #[test]
+    fn sheets_an_insert_shifts_do_not_move_a_reordered_sheet_does() {
+        use yrs::types::ToJson;
+        use yrs::{Array, ReadTxn, Transact, Update, updates::decoder::Decode};
+
+        const SHOWCASE: &[u8] = include_bytes!("../../../apps/demo/public/showcase.xlsx");
+        let sha = sha256_hex(SHOWCASE);
+        let checkpoint = |state| Checkpoint {
+            format: Format::Xlsx,
+            schema_version: 1,
+            base_sha256: &sha,
+            state,
+        };
+        let seeded = crate::seed(Format::Xlsx, SHOWCASE).expect("seeds");
+        let mut session = XlsxSession::open(SHOWCASE, Some(&seeded)).expect("opens");
+        session
+            .workbook
+            .apply_ops(
+                vec![betteroffice_xlsx::Op::AddSheet {
+                    index: 0,
+                    name: "First".into(),
+                }],
+                now_options(),
+            )
+            .expect("adds a sheet");
+        let inserted = session.state();
+        let before = crate::baseline(SHOWCASE, checkpoint(&seeded)).expect("baseline");
+        let after = crate::baseline(SHOWCASE, checkpoint(&inserted)).expect("baseline");
+        let moves = |effects: &[NetEffect]| {
+            effects
+                .iter()
+                .filter(|effect| effect.operation == crate::types::Operation::Move)
+                .count()
+        };
+        assert!(moves(&crate::compare_baselines(&before, &after)) > 0);
+        let saved = crate::unshifted_effects(&before, &after);
+        assert_eq!(moves(&saved), 0);
+        assert!(saved.iter().any(|effect| effect.label == "Sheet First"));
+
+        // The last sheet moved first in the order.
+        let doc = yrs::Doc::new();
+        let mut txn = doc.transact_mut();
+        txn.apply_update(Update::decode_v1(&seeded).expect("decodes"))
+            .expect("applies");
+        let order = txn.get_array("xlsx:sheet-order").expect("a sheet order");
+        let last = order.len(&txn) - 1;
+        assert!(last >= 1, "two sheets at least");
+        let moved = order.get(&txn, last).expect("the last sheet").to_json(&txn);
+        order.remove(&mut txn, last);
+        order.insert(&mut txn, 0, moved);
+        drop(txn);
+        let reordered = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let after = crate::baseline(SHOWCASE, checkpoint(&reordered)).expect("baseline");
+        assert!(moves(&crate::unshifted_effects(&before, &after)) > 0);
     }
 }

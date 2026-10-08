@@ -454,7 +454,7 @@ function xlsxEntries(doc: XlsxDocument): Entry[] {
       kind: "text",
       label: `Sheet ${name}`,
       value: name,
-      position: String(index),
+      position: `workbook:${index}`,
     });
     entries.push(visual(`${id}:layout`, `${name} layout`, layout));
     if (Array.isArray(layout.hyperlinks))
