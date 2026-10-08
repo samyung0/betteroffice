@@ -607,6 +607,11 @@ export class EditSession {
      */
     reject_change(target_json: string): string;
     /**
+     * [`EditingDoc::rename_duplicate_para_ids`], for a client that loaded a
+     * stored state: returns how many paragraph ids it renamed.
+     */
+    rename_duplicate_para_ids(): number;
+    /**
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
      * the deletion and the insertion share one revision id. Receipt:
@@ -1165,6 +1170,7 @@ export interface InitOutput {
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_rename_duplicate_para_ids: (a: number) => number;
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];

@@ -3802,6 +3802,12 @@ impl EditSession {
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
+    /// [`EditingDoc::rename_duplicate_para_ids`], for a client that loaded a
+    /// stored state: returns how many paragraph ids it renamed.
+    pub fn rename_duplicate_para_ids(&self) -> usize {
+        self.engine.doc().rename_duplicate_para_ids().len()
+    }
+
     /// [`EditingDoc::paragraph_unit_text`].
     pub fn paragraph_unit_text(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         self.engine

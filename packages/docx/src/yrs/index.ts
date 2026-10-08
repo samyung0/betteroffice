@@ -1118,6 +1118,8 @@ export interface YrsSession extends CollaborationReplica {
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
   /** A paragraph's units as text, so string offsets are Loc offsets: a break as a newline, another embed as U+FFFC. */
   paragraphUnitText(story: string, paraId: string): string;
+  /** Renames paragraph ids concurrent splits duplicated in a loaded state, as `applyUpdate` does; returns how many. */
+  renameDuplicateParaIds(): number;
 
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
@@ -2123,6 +2125,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
     paragraphUnitText: (story, paraId) => session.paragraph_unit_text(story, paraId),
+    renameDuplicateParaIds: () => {
+      markDirty('all');
+      return mutate(() => session.rename_duplicate_para_ids());
+    },
 
     destroy: () => {
       if (destroyed) return;
