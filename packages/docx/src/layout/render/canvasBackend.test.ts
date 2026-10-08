@@ -438,7 +438,34 @@ describe('Canvas text-run slot clipping', () => {
   });
 });
 
-describe('Canvas glyph-run fallback', () => {
+describe('Canvas glyph-run clusters', () => {
+  // The Rust join equivalence test models this transform; joined runs never
+  // carry a scale, since it would scale the shaped pen positions again.
+  it('scales a run about its leftmost glyph', async () => {
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'abc',
+      horizontalScale: 150,
+      glyphs: [
+        { id: 1, x: 100, y: 20, cluster: 0, advance: 12 },
+        { id: 2, x: 112, y: 20, cluster: 1, advance: 12 },
+        { id: 3, x: 124, y: 20, cluster: 2, advance: 12 },
+      ],
+    };
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = {
+      get: () => ({ path: glyphPath, upem: 2048 }),
+    } as unknown as GlyphCache;
+    const { ctx, paints } = recordingContext(new Map());
+
+    await drawPrimitive(ctx, run, { glyphCache });
+
+    expect(paints.map((paint) => paint.left)).toEqual([100, 118, 136]);
+  });
+
   it('paints a joined run cluster by cluster at the shaped glyph x', async () => {
     // 'W' then 'e' + U+0301 in one two-glyph cluster at UTF-8 byte 1
     const run: GlyphRunPrimitive = {
