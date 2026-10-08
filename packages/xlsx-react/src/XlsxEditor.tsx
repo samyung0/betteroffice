@@ -603,8 +603,10 @@ function XlsxEditorContent({
   const frameRequestRef = useRef({ inFlight: false, again: false });
   // the next frame opens the active sheet at its saved scroll.
   const initialScrollRef = useRef(false);
-  // the last change posted: a painted frame older than it may be stale.
+  // the last change posted, and the requests posted when a peer's change
+  // last arrived: a frame older than either may be stale.
   const lastMutationRef = useRef(0);
+  const remoteSeenRef = useRef(0);
   const revealSeqRef = useRef(0);
 
   // the last frame the worker drew, and what it says about the workbook.
@@ -705,10 +707,11 @@ function XlsxEditorContent({
         }
       : null;
 
-  // the editable text of a cell, when the frame on screen is current: no
-  // change is in flight and it draws this sheet.
+  // the editable text of a cell, when the frame on screen is current: it was
+  // built after every change posted and every peer's change seen, on this sheet.
   const knownInput = (row: number, col: number): string | undefined => {
-    if (!shownHere || inFlight > 0) return undefined;
+    if (!shownHere || shownHere.seq < Math.max(lastMutationRef.current, remoteSeenRef.current))
+      return undefined;
     const cell = shownHere.cells[`${row}:${col}`];
     if (cell) return cell.input;
     const focus = shownHere.view.selection?.focus;
@@ -983,6 +986,7 @@ function XlsxEditorContent({
           if (disposed || origin !== 'remote') return;
           // a peer's change: the next frame shows it (and drops a draft
           // whose sheet it removed).
+          remoteSeenRef.current = opened.posted;
           setStaleFor({});
           setError(null);
           requestFrame();
