@@ -1,9 +1,14 @@
 export type CollaborationUpdateOrigin = 'local' | 'remote';
 
+/**
+ * A workbook replica the provider syncs. A replica in a worker answers with
+ * promises; its requests run in the order they are made.
+ */
 export interface CollaborationReplica {
   readonly clientId: number;
-  encodeStateVector(): Uint8Array;
-  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  encodeStateVector(): Uint8Array | Promise<Uint8Array>;
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array | Promise<Uint8Array>;
+  /** May return a promise that rejects when the update is refused. */
   applyUpdate(update: Uint8Array): unknown;
   onUpdate(
     listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void

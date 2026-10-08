@@ -86,7 +86,7 @@ describe('workbook worker', () => {
 
     const updates = record(seeded);
     peer.editCell(0, 1, 2, 'second');
-    const result = await seeded.applyUpdate(peerUpdates.at(-1)!);
+    const result = await seeded.applyUpdate(peerUpdates[peerUpdates.length - 1]);
     expect(result.applied).toBe(true);
     expect(updates.map(([origin]) => origin)).toEqual(['remote']);
     expect((await seeded.cell(0, 1, 2)).input).toBe('second');
@@ -121,7 +121,7 @@ describe('workbook worker', () => {
     expect((await proxy.sheetInfo()).activeSheet).toBe(1);
 
     peer.applyOps([{ type: 'removeSheet', index: 1 }]);
-    await proxy.applyUpdate(peerUpdates.at(-1)!);
+    await proxy.applyUpdate(peerUpdates[peerUpdates.length - 1]);
     const refused = (promise: Promise<unknown>) => promise.then(() => null, (error) => error);
     expect(await refused(proxy.onSheet(second, 'editCell', 1, 0, 0, 'lost sheet'))).toBeInstanceOf(
       SheetGoneError

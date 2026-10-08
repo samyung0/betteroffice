@@ -263,6 +263,52 @@ describe('CollaborationProvider sync', () => {
     expect(provider.synced).toBe(true);
   });
 
+  it('syncs a replica that answers with promises, as one in a worker does', async () => {
+    const replica = new FakeReplica();
+    replica.stateVector = Uint8Array.of(1, 2);
+    replica.stateUpdate = Uint8Array.of(5, 6);
+    const answers = {
+      encodeStateVector: () => Promise.resolve(replica.stateVector),
+      encodeStateAsUpdate: (vector?: Uint8Array) =>
+        Promise.resolve(FakeReplica.prototype.encodeStateAsUpdate.call(replica, vector)),
+      applyUpdate: (update: Uint8Array) =>
+        update[0] === 0xee
+          ? Promise.reject(new Error('refused'))
+          : Promise.resolve(replica.applyUpdate(update)),
+    };
+    const worker: CollaborationReplica = {
+      clientId: replica.clientId,
+      onUpdate: (listener) => replica.onUpdate(listener),
+      ...answers,
+    };
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(worker, transport);
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+    // the handshake waits for the worker's state vector.
+    expect(transport.sent).toEqual([]);
+    await Promise.resolve();
+    expect([...transport.sent[0]]).toEqual([0, 0, 2, 1, 2]);
+    expect(messageTypes(transport.sent)).toEqual(['sync-step-1', 'query-awareness', 'awareness']);
+
+    transport.sent = [];
+    transport.emit({ type: 'message', data: encodeSyncStep1(Uint8Array.of(9, 10)) });
+    await Promise.resolve();
+    expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 1, 2, 5, 6]]);
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    expect(provider.synced).toBe(true);
+    await Promise.resolve();
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+
+    // a refusal the worker sends back later fails the connection then.
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(0xee)) });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(errors.map((error) => error.code)).toEqual(['replica']);
+    expect(provider.status).not.toBe('connected');
+  });
+
   it('strips native document fingerprints before calling the strict XLSX replica', () => {
     const { replica, transport } = open();
     transport.emit({

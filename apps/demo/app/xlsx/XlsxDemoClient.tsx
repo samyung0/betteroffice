@@ -7,14 +7,16 @@ import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
 import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
-import type { CollaborationUserOptions } from "@betteroffice/xlsx/collaboration";
+import type {
+  CollaborationReplica,
+  CollaborationUserOptions,
+} from "@betteroffice/xlsx/collaboration";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
   COLLAB_RELAY_ORIGIN,
   useCollabRoom,
   useDemoRoom,
-  type CollaborationReplica,
   type CollaborationTransport,
 } from "../collab";
 import { cn } from "../../lib/cn";
@@ -131,13 +133,13 @@ export function XlsxDemoClient() {
     setReady(true);
   }, []);
 
-  const proposeTotals = useCallback(() => {
+  const proposeTotals = useCallback(async () => {
     const api = apiRef.current;
     if (!api) return;
-    const edits = buildTotalsEdits(api.handle);
+    const edits = await buildTotalsEdits(api.handle);
     if (edits.length === 0) return;
     try {
-      api.handle.propose("demo-agent", "totals and source updates", edits);
+      await api.handle.propose("demo-agent", "totals and source updates", edits);
       api.refreshProposals();
     } catch {
       // proposals not in this wasm build — nothing staged.

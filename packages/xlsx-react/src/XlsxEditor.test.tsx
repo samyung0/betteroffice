@@ -9,12 +9,21 @@
  */
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+  spyOn,
+} from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
-import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
+import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
 
@@ -30,7 +39,12 @@ const LINK_TARGET = 'https://example.com/report';
 const LINK_CELL: CellAddr = { row: 5, col: 4 };
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, configure, fireEvent, render, waitFor } = await import(
+  '@testing-library/react'
+);
+// the workbook opens in its own worker: Bun starts it and its WASM per editor.
+configure({ asyncUtilTimeout: 10_000 });
+setDefaultTimeout(30_000);
 
 function stubContext(): CanvasRenderingContext2D {
   const noop = () => {};
@@ -136,20 +150,34 @@ async function withTallFontColumn(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 }
 
-// engine geometry calls and paints from here on.
-function countEngine(handle: WorkbookHandle) {
+// cell positions the editor asks the worker for, and frames, from here on.
+function countEngine(proxy: WorkbookProxy) {
   const counts = { positions: 0, paints: 0 };
-  const cellPosition = handle.cellPosition.bind(handle);
-  const displayList = handle.displayList.bind(handle);
-  handle.cellPosition = (sheet, row, col) => {
-    counts.positions += 1;
-    return cellPosition(sheet, row, col);
-  };
-  handle.displayList = (viewport) => {
+  const onSheet = proxy.onSheet;
+  const frame = proxy.frame;
+  proxy.onSheet = ((sheetId, method, ...args) => {
+    if (method === 'cellPosition') counts.positions += 1;
+    return onSheet(sheetId, method, ...args);
+  }) as WorkbookProxy['onSheet'];
+  proxy.frame = (view) => {
     counts.paints += 1;
-    return displayList(viewport);
+    return frame(view);
   };
   return counts;
+}
+
+// the workbook of the editor mounted last.
+let currentWorkbook: WorkbookProxy | null = null;
+
+// every request posted so far answered and the frames it asked for painted:
+// a round trip to the worker, the commits it triggers, again until quiet.
+function idleWith(proxy: () => WorkbookProxy | null | undefined) {
+  return act(async () => {
+    for (let round = 0; round < 4; round += 1) {
+      await proxy()?.historyState();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  });
 }
 
 interface Fixture {
@@ -220,6 +248,7 @@ afterAll(async () => {
 afterEach(() => {
   cleanup();
   opened = [];
+  currentWorkbook = null;
 });
 
 function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: number } {
@@ -233,20 +262,30 @@ async function mountEditor(
   onSave?: (bytes: Uint8Array) => void,
   onChange?: () => void
 ) {
-  const ready: { handle: WorkbookHandle | null; api?: XlsxEditorApi } = { handle: null };
+  const ready: { handle: WorkbookProxy | null; api?: XlsxEditorApi; painted: number } = {
+    handle: null,
+    painted: 0,
+  };
+  const onFirstPaint = () => {
+    ready.painted += 1;
+  };
   const view = render(
     <XlsxEditor
       file={fixture.bytes.slice()}
       onChange={onChange}
       onSave={onSave}
+      onFirstPaint={onFirstPaint}
       onReady={(api) => {
         ready.handle = api.handle;
         ready.api = api;
+        currentWorkbook = api.handle;
       }}
     />
   );
   const nameBox = () => view.getByTestId('xlsx-name-box') as HTMLInputElement;
-  await waitFor(() => expect(nameBox().value).toBe('A1'));
+  await waitFor(() => expect(ready.painted).toBe(1));
+  const idle = () => idleWith(() => ready.handle);
+  await idle();
   const surface = view.getByTestId('xlsx-scroll');
   const editor = () => view.queryByTestId('xlsx-cell-editor') as HTMLInputElement | null;
   const press = (addr: CellAddr) => {
@@ -258,9 +297,23 @@ async function mountEditor(
     surface,
     nameBox,
     editor,
+    idle,
     workbook: () => ready.handle!,
-    flush: () => act(() => ready.api!.flush()),
-    run: (command: XlsxCommand) => act(async () => ready.api!.run(command)),
+    /** A cell's editable text on sheet 0, once every change posted landed. */
+    input: async (row: number, col: number) => {
+      await idle();
+      return (await ready.handle!.cell(0, row, col)).input;
+    },
+    flush: async () => {
+      await act(async () => {
+        await ready.api!.flush();
+      });
+      await idle();
+    },
+    run: async (command: XlsxCommand) => {
+      await act(async () => ready.api!.run(command));
+      await idle();
+    },
     shown: () => ready.api!.visibleViewport()!,
     typeFormula: (value: string) =>
       fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value } }),
@@ -271,18 +324,24 @@ async function mountEditor(
             file={next.bytes.slice()}
             onChange={onChange}
             onSave={onSave}
+            onFirstPaint={onFirstPaint}
             onReady={(api) => {
               ready.handle = api.handle;
               ready.api = api;
+              currentWorkbook = api.handle;
             }}
           />
         );
       }),
-    click: press,
-    doubleClick: (addr: CellAddr) => {
+    click: async (addr: CellAddr) => {
+      press(addr);
+      await idle();
+    },
+    doubleClick: async (addr: CellAddr) => {
       press(addr);
       press(addr);
       fireEvent.doubleClick(surface, pointAt(fixture, addr));
+      await idle();
     },
     pressInEditor: (addr: CellAddr) => fireEvent.mouseDown(editor()!, pointAt(fixture, addr)),
     doubleClickInEditor: (addr: CellAddr) => {
@@ -345,26 +404,26 @@ describe('XlsxEditor grid pointer handling', () => {
       changes += 1;
     });
 
-    view.click({ row: 2, col: 0 });
+    await view.click({ row: 2, col: 0 });
     expect(changes).toBe(0);
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Edited item');
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     expect(changes).toBe(1);
   });
 
   it('flushes open cell and formula drafts before a host checkpoint without blur', async () => {
     const view = await mountEditor();
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Unblurred cell');
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Line item 1');
-    view.flush();
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Unblurred cell');
+    expect((await view.input(2, 0))).toBe('Line item 1');
+    await view.flush();
+    expect((await view.input(2, 0))).toBe('Unblurred cell');
     view.typeFormula('Unblurred formula');
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Unblurred cell');
-    view.flush();
-    const reopened = openWorkbook(view.workbook().save());
+    expect((await view.input(2, 0))).toBe('Unblurred cell');
+    await view.flush();
+    const reopened = openWorkbook(await view.workbook().save());
     try {
       expect(reopened.cell(0, 2, 0).input).toBe('Unblurred formula');
     } finally {
@@ -375,67 +434,67 @@ describe('XlsxEditor grid pointer handling', () => {
   it('commits the open editor and moves the selection when another cell is clicked', async () => {
     const view = await mountEditor();
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     expect(view.editor()?.value).toBe('Line item 1');
 
     view.type('Edited item');
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
 
     expect(view.editor()).toBeNull();
     expect(view.nameBox().value).toBe('B4');
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Edited item');
+    expect((await view.input(2, 0))).toBe('Edited item');
   });
 
   it('commits and reopens on the target when another cell is double-clicked', async () => {
     const view = await mountEditor();
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Edited item');
-    view.doubleClick({ row: 3, col: 1 });
+    await view.doubleClick({ row: 3, col: 1 });
 
     expect(view.editor()?.value).toBe('200');
     expect(view.nameBox().value).toBe('B4');
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Edited item');
+    expect((await view.input(2, 0))).toBe('Edited item');
   });
 
   it('leaves a formula cell unchanged when the pointer moves on', async () => {
     const view = await mountEditor();
 
-    view.doubleClick({ row: 2, col: 3 });
+    await view.doubleClick({ row: 2, col: 3 });
     expect(view.editor()?.value).toBe('=B3+C3');
 
-    view.click({ row: 6, col: 0 });
+    await view.click({ row: 6, col: 0 });
 
     expect(view.editor()).toBeNull();
     expect(view.nameBox().value).toBe('A7');
-    expect(view.workbook().cell(0, 2, 3).input).toBe('=B3+C3');
+    expect((await view.input(2, 3))).toBe('=B3+C3');
 
-    view.doubleClick({ row: 3, col: 3 });
+    await view.doubleClick({ row: 3, col: 3 });
     expect(view.editor()?.value).toBe('=B4+C4');
 
-    view.doubleClick({ row: 7, col: 0 });
+    await view.doubleClick({ row: 7, col: 0 });
 
     expect(view.editor()?.value).toBe('Line item 6');
     expect(view.nameBox().value).toBe('A8');
-    expect(view.workbook().cell(0, 3, 3).input).toBe('=B4+C4');
+    expect((await view.input(3, 3))).toBe('=B4+C4');
   });
 
   it('keeps a press inside the open editor from committing or moving on', async () => {
     const view = await mountEditor();
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Edited item');
     view.pressInEditor({ row: 6, col: 0 });
 
     expect(view.editor()?.value).toBe('Edited item');
     expect(view.nameBox().value).toBe('A3');
-    expect(view.workbook().cell(0, 2, 0).input).toBe('Line item 1');
+    expect((await view.input(2, 0))).toBe('Line item 1');
   });
 
   it('keeps a double-click inside the open editor from reopening it', async () => {
     const view = await mountEditor();
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Edited item');
     view.doubleClickInEditor({ row: 2, col: 0 });
 
@@ -445,15 +504,15 @@ describe('XlsxEditor grid pointer handling', () => {
   it('dismisses the editor without following a hyperlink in the clicked cell', async () => {
     const view = await mountEditor(linked);
 
-    view.doubleClick({ row: 2, col: 0 });
+    await view.doubleClick({ row: 2, col: 0 });
     view.type('Edited item');
-    view.click(LINK_CELL);
+    await view.click(LINK_CELL);
 
     expect(view.editor()).toBeNull();
     expect(view.nameBox().value).toBe('E6');
     expect(opened).toEqual([]);
 
-    view.click(LINK_CELL);
+    await view.click(LINK_CELL);
 
     expect(opened).toEqual([LINK_TARGET]);
   });
@@ -462,16 +521,26 @@ describe('XlsxEditor grid pointer handling', () => {
 describe('XlsxEditor keyboard', () => {
   // dozens of keys, each with a full paint: generous for a loaded runner.
   const MANY_KEYS_MS = 30_000;
-  const press = (target: Element, key: string, init: KeyboardEventInit = {}) =>
-    act(async () => {
+  // each key, then the worker's answers to what it asked for.
+  const press = async (target: Element, key: string, init: KeyboardEventInit = {}) => {
+    await act(async () => {
       fireEvent.keyDown(target, { key, ...init });
     });
-  const scrollTo = (view: Awaited<ReturnType<typeof mountEditor>>, left: number, top: number) =>
-    act(async () => {
+    await idleWith(() => currentWorkbook);
+  };
+  const scrollTo = async (
+    view: Awaited<ReturnType<typeof mountEditor>>,
+    left: number,
+    top: number
+  ) => {
+    await act(async () => {
       view.surface.scrollLeft = left;
       view.surface.scrollTop = top;
       fireEvent.scroll(view.surface);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     });
+    await view.idle();
+  };
   const cellAt = (a1: string) => {
     const [, letters, digits] = /^([A-Z]+)(\d+)$/.exec(a1)!;
     const col = [...letters].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1;
@@ -491,7 +560,7 @@ describe('XlsxEditor keyboard', () => {
 
   it('scrolls a cell the arrow keys reach into view and types into it', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowRight');
     for (let step = 0; step < 30; step += 1) await press(view.surface, 'ArrowDown');
     expect(view.nameBox().value).toBe('Q34');
@@ -509,14 +578,14 @@ describe('XlsxEditor keyboard', () => {
     expect(document.activeElement).toBe(input);
 
     await press(input!, 'Enter');
-    expect(view.workbook().cell(0, 33, 16).input).toBe('7');
+    expect((await view.input(33, 16))).toBe('7');
     expect(view.nameBox().value).toBe('Q35');
   }, MANY_KEYS_MS);
 
   it('keeps a revealed cell clear of the frozen panes', async () => {
     const view = await mountEditor(wideFrozen);
     const pane = cellRect(wideFrozen.grid, 2, 2)!;
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     for (let step = 0; step < 15; step += 1) await press(view.surface, 'ArrowRight');
     for (let step = 0; step < 30; step += 1) await press(view.surface, 'ArrowDown');
     await press(view.surface, '7');
@@ -536,7 +605,7 @@ describe('XlsxEditor keyboard', () => {
 
   it('brings a cell scrolled out of view back when typing into it', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await scrollTo(view, 1500, 600);
 
     await press(view.surface, '7');
@@ -546,12 +615,12 @@ describe('XlsxEditor keyboard', () => {
     expect(box.left).toBeCloseTo(0, 1);
     expect(box.top).toBeCloseTo(0, 1);
     await press(view.editor()!, 'Enter');
-    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    expect((await view.input(3, 1))).toBe('7');
   });
 
   it('leaves the scroll alone for a move that stays on screen', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, 'ArrowRight');
     await press(view.surface, 'ArrowDown');
     expect(view.nameBox().value).toBe('C5');
@@ -561,7 +630,7 @@ describe('XlsxEditor keyboard', () => {
 
   it('keeps the view on select all, as the menu does', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, 'a', { ctrlKey: true });
     expect(view.selectionBox()).not.toBeNull();
     expect(view.surface.scrollLeft).toBe(0);
@@ -570,7 +639,7 @@ describe('XlsxEditor keyboard', () => {
 
   it('keeps typing into an open edit whose cell scrolled away, and scrolls back', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     const input = view.editor()!;
     await scrollTo(view, 1500, 600);
@@ -588,12 +657,12 @@ describe('XlsxEditor keyboard', () => {
     expect(box.left).toBeCloseTo(0, 1);
     expect(box.top).toBeCloseTo(0, 1);
     await press(input, 'Enter');
-    expect(view.workbook().cell(0, 3, 1).input).toBe('75');
+    expect((await view.input(3, 1))).toBe('75');
   });
 
   it('keeps an IME composition in the edit while its cell scrolls back', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, 'F2');
     const input = view.editor()!;
     await scrollTo(view, 1500, 600);
@@ -606,12 +675,12 @@ describe('XlsxEditor keyboard', () => {
     fireEvent.change(input, { target: { value: '日本' } });
     fireEvent.compositionEnd(input, { data: '日本' });
     await press(input, 'Enter');
-    expect(view.workbook().cell(0, 3, 1).input).toBe('日本');
+    expect((await view.input(3, 1))).toBe('日本');
   });
 
   it('types into a cell the frozen panes leave no room to show', async () => {
     const view = await mountEditor(paneFilled);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, 'End', { ctrlKey: true });
     const { row, col } = cellAt(view.nameBox().value);
     expect(row).toBeGreaterThan(40);
@@ -622,12 +691,12 @@ describe('XlsxEditor keyboard', () => {
     await press(input, '8');
     fireEvent.change(input, { target: { value: '78' } });
     await press(input, 'Enter');
-    expect(view.workbook().cell(0, row, col).input).toBe('78');
+    expect((await view.input(row, col))).toBe('78');
   });
 
   it('leaves a scrolled-away edit where it is for keys that type nothing', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     await scrollTo(view, 1500, 600);
     const input = view.editor()!;
@@ -638,48 +707,46 @@ describe('XlsxEditor keyboard', () => {
     expect(document.activeElement).toBe(input);
   });
 
-  it('paints once for an Enter that commits and scrolls', async () => {
+  it('draws an Enter that commits and scrolls in at most two frames, the last one live', async () => {
     const view = await mountEditor(wide);
     // the last row the window shows whole: Enter moves below the edge.
     const offsets = wide.grid.rowOffsets;
     const last = offsets.filter((bottom) => bottom <= VIEWPORT.height).length - 2;
-    view.click({ row: last, col: 1 });
+    await view.click({ row: last, col: 1 });
     await press(view.surface, '7');
-    const handle = view.workbook();
-    const displayList = handle.displayList.bind(handle);
-    let paints = 0;
-    handle.displayList = (viewport) => {
-      paints += 1;
-      return displayList(viewport);
-    };
+    const counts = countEngine(view.workbook());
     await press(view.editor()!, 'Enter');
     // what the browser does next: the scroll event, then a frame.
     await act(async () => {
       fireEvent.scroll(view.surface);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     });
+    await view.idle();
     expect(view.surface.scrollTop).toBeGreaterThan(0);
-    expect(view.workbook().cell(0, last, 1).input).toBe('7');
-    expect(paints).toBe(1);
+    expect(await view.input(last, 1)).toBe('7');
+    // the commit's frame, then the scrolled window's.
+    expect(counts.paints).toBeLessThanOrEqual(2);
+    expect(view.shown().y).toBe(view.surface.scrollTop);
+    expect(view.selectionBox()).not.toBeNull();
   });
 
   it('judges a key against the live view, not a frame its scroll has not repainted', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     // scrolled, and the key lands before the scroll's frame is painted.
     await act(async () => {
       view.surface.scrollLeft = 1500;
     });
     await press(view.surface, 'ArrowRight');
     expect(view.nameBox().value).toBe('C4');
-    expect(view.surface.scrollLeft).toBe(Math.floor(view.workbook().cellPosition(0, 3, 2).x));
+    expect(view.surface.scrollLeft).toBe(Math.floor((await view.workbook().cellPosition(0, 3, 2)).x));
   });
 
   it('brings a partly hidden edit fully into view when typing into it', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
-    const start = view.workbook().cellPosition(0, 3, 1).x;
+    const start = (await view.workbook().cellPosition(0, 3, 1)).x;
     await scrollTo(view, Math.ceil(start) + 10, 0);
     expect(view.editor()!.style.opacity).toBe('');
     await press(view.editor()!, '5');
@@ -688,7 +755,7 @@ describe('XlsxEditor keyboard', () => {
 
   it('shows a cell wider than the view as it is, typing or moving down', async () => {
     const view = await mountEditor(wideColumn);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     const input = view.editor()!;
     // inside the wide cell, to the right of its start.
@@ -704,18 +771,19 @@ describe('XlsxEditor keyboard', () => {
     for (let step = 0; step < 3; step += 1) await press(view.surface, 'ArrowDown');
     expect(view.nameBox().value).toBe('B7');
     expect(view.surface.scrollLeft).toBe(left);
-    expect(counts).toEqual({ positions: 0, paints: 0 });
+    // no position asked of the worker: the frame on screen answered.
+    expect(counts.positions).toBe(0);
   });
 
   it('judges the cell an Enter lands on against the row its commit grew', async () => {
     const view = await mountEditor(tallFont);
     // Enter lands on the last row the window shows whole.
     const target = tallFont.grid.rowOffsets.filter((bottom) => bottom <= VIEWPORT.height).length - 2;
-    view.click({ row: target - 1, col: 5 });
+    await view.click({ row: target - 1, col: 5 });
     await press(view.surface, '7');
     await press(view.editor()!, 'Enter');
-    expect(view.workbook().cell(0, target - 1, 5).input).toBe('7');
-    const cell = view.workbook().cellPosition(0, target, 5);
+    expect((await view.input(target - 1, 5))).toBe('7');
+    const cell = await view.workbook().cellPosition(0, target, 5);
     expect(cell.y + cell.height).toBeLessThanOrEqual(view.surface.scrollTop + VIEWPORT.height);
     expect(view.surface.scrollTop).toBeGreaterThan(0);
   });
@@ -723,7 +791,7 @@ describe('XlsxEditor keyboard', () => {
   it('asks the engine nothing for the first cell under frozen panes at scroll 0', async () => {
     const view = await mountEditor(wideFrozen);
     const counts = countEngine(view.workbook());
-    view.click({ row: 2, col: 2 });
+    await view.click({ row: 2, col: 2 });
     await press(view.surface, '7');
     const input = view.editor()!;
     for (const key of ['a', 'b', 'c']) {
@@ -736,13 +804,13 @@ describe('XlsxEditor keyboard', () => {
 
   it('commits an edit a press on nothing focusable ends, and gives the grid the keys', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     await act(async () => {
       fireEvent.blur(view.editor()!, { relatedTarget: null });
     });
     expect(view.editor()).toBeNull();
-    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    expect((await view.input(3, 1))).toBe('7');
     // the grid takes the keys once focus has settled, a frame later.
     await act(async () => {
       await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -753,9 +821,9 @@ describe('XlsxEditor keyboard', () => {
 
   it('keeps a formula-bar draft across a window or tab switch, commits it on a blur', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     const formula = view.formulaInput();
-    const before = view.workbook().cell(0, 3, 1).input;
+    const before = (await view.input(3, 1));
     act(() => formula.focus());
     view.typeFormula('42');
     const away = spyOn(document, 'hasFocus').mockReturnValue(false);
@@ -766,20 +834,20 @@ describe('XlsxEditor keyboard', () => {
     } finally {
       away.mockRestore();
     }
-    expect(view.workbook().cell(0, 3, 1).input).toBe(before);
+    expect((await view.input(3, 1))).toBe(before);
     expect(formula.value).toBe('42');
     await act(async () => {
       fireEvent.blur(formula);
     });
-    expect(view.workbook().cell(0, 3, 1).input).toBe('42');
+    expect((await view.input(3, 1))).toBe('42');
   });
 
   it('keeps the edit open across a window or tab switch', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     const input = view.editor()!;
-    const before = view.workbook().cell(0, 3, 1).input;
+    const before = (await view.input(3, 1));
     const away = spyOn(document, 'hasFocus').mockReturnValue(false);
     try {
       await act(async () => {
@@ -789,11 +857,11 @@ describe('XlsxEditor keyboard', () => {
       away.mockRestore();
     }
     expect(view.editor() === input).toBe(true);
-    expect(view.workbook().cell(0, 3, 1).input).toBe(before);
+    expect((await view.input(3, 1))).toBe(before);
     // back: the next key types into the edit.
     fireEvent.change(input, { target: { value: '78' } });
     await press(input, 'Enter');
-    expect(view.workbook().cell(0, 3, 1).input).toBe('78');
+    expect((await view.input(3, 1))).toBe('78');
   });
 
   it('gives the grid the keys after a sheet tab is clicked', async () => {
@@ -839,12 +907,12 @@ describe('XlsxEditor keyboard', () => {
     expect(box.right).toBeLessThanOrEqual(VIEWPORT.width);
     expect(box.bottom).toBeLessThanOrEqual(VIEWPORT.height);
     await press(view.editor()!, 'Enter');
-    expect(view.workbook().cell(0, 23, 11).input).toBe('7');
+    expect((await view.input(23, 11))).toBe('7');
   }, MANY_KEYS_MS);
 
   it('leaves the formula bar focused when an edit it committed scrolls back', async () => {
     const view = await mountEditor(wide);
-    view.click({ row: 3, col: 1 });
+    await view.click({ row: 3, col: 1 });
     await press(view.surface, '7');
     const input = view.editor()!;
     await scrollTo(view, 1500, 600);
@@ -852,7 +920,7 @@ describe('XlsxEditor keyboard', () => {
     const formula = view.formulaInput();
     act(() => formula.focus());
     expect(view.editor()).toBeNull();
-    expect(view.workbook().cell(0, 3, 1).input).toBe('7');
+    expect((await view.input(3, 1))).toBe('7');
     await scrollTo(view, 0, 0);
     expect(document.activeElement).toBe(formula);
     expect(input.isConnected).toBe(false);
@@ -923,14 +991,14 @@ describe('XlsxEditor chart objects', () => {
     const [chart] = charted.charts;
     const view = await mountEditor(charted);
 
-    view.doubleClick({ row: 1, col: 1 });
+    await view.doubleClick({ row: 1, col: 1 });
     view.type('Edited item');
     fireEvent.mouseDown(view.surface, chartCenter(chart));
 
     const outline = await waitFor(() => view.outline()!);
     expect(outline.getAttribute('data-chart-id')).toBe(chart.id);
     expect(view.editor()).toBeNull();
-    expect(view.workbook().cell(0, 1, 1).input).toBe('Edited item');
+    expect((await view.input(1, 1))).toBe('Edited item');
     fireEvent.mouseUp(window, chartCenter(chart));
   });
 
@@ -945,13 +1013,15 @@ describe('XlsxEditor chart objects', () => {
     }
     const view = await mountEditor(charted);
 
-    view.doubleClick({ row: 1, col: 1 });
+    await view.doubleClick({ row: 1, col: 1 });
     view.type('Edited item');
 
     await act(async () => {
       view.surface.scrollTop = SCROLLED_BY;
       fireEvent.scroll(view.surface);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
     });
+    await view.idle();
     // the input stays mounted, out of sight, while its cell is away; the press
     // commits it without a blur.
     expect(view.editor()?.style.opacity).toBe('0');
@@ -960,14 +1030,14 @@ describe('XlsxEditor chart objects', () => {
     await waitFor(() => view.outline()!);
     fireEvent.mouseUp(window, chartCenter(target));
 
-    expect(view.workbook().cell(0, 1, 1).input).toBe('Edited item');
+    expect((await view.input(1, 1))).toBe('Edited item');
   });
 
   it('leaves a press inside the open editor to the editor, not a chart behind it', async () => {
     const [chart] = charted.charts;
     const view = await mountEditor(charted);
 
-    view.doubleClick({ row: 1, col: 1 });
+    await view.doubleClick({ row: 1, col: 1 });
     view.type('Edited item');
     // the press lands on the input, at coordinates the chart also covers: the
     // editor is a dom overlay, so without its guard the hit test would reach
@@ -1046,7 +1116,7 @@ describe('XlsxEditor chart objects', () => {
 
     expect(view.error()).toBeNull();
     expect(view.canUndo()).toBe(false);
-    const still = (view.workbook().displayList({ x: 0, y: 0, ...VIEWPORT }).charts ?? []).find(
+    const still = ((await view.workbook().displayList({ x: 0, y: 0, ...VIEWPORT })).charts ?? []).find(
       (candidate) => candidate.id === chart.id
     );
     expect(Math.round(still!.rect.x)).toBe(chartRounded(chart).x);
@@ -1082,6 +1152,7 @@ describe('XlsxEditor chart objects', () => {
     await act(async () => {
       fireEvent.keyDown(view.surface, { key: 's', ctrlKey: true });
     });
+    await view.idle();
 
     expect(view.canUndo()).toBe(true);
     expect(saved).toHaveLength(1);
@@ -1283,7 +1354,7 @@ describe('XlsxEditor with a peer', () => {
   for (const source of ['cell', 'formula bar'] as const)
     it(`drops a half-typed ${source} edit whose sheet the peer removes, and takes no more keys`, async () => {
       const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3101 });
-      let mine: WorkbookHandle | undefined;
+      let mine: WorkbookProxy | undefined;
       const view = render(
         <XlsxEditor
           file={plain.bytes.slice()}
@@ -1296,16 +1367,19 @@ describe('XlsxEditor with a peer', () => {
       try {
         await waitFor(() => expect(mine).toBeDefined());
         const editor = mine!;
+        const idle = () => idleWith(() => editor);
         editor.onUpdate((update, origin) => {
           if (origin === 'local') peer.applyUpdate(update);
         });
         // the peer's edits reach the editor as a room would deliver them.
-        const fromPeer = (change: () => void) =>
-          act(async () => {
-            const before = editor.encodeStateVector();
+        const fromPeer = async (change: () => void) => {
+          await act(async () => {
+            const before = await editor.encodeStateVector();
             change();
-            editor.applyUpdate(peer.encodeStateAsUpdate(before));
+            await editor.applyUpdate(peer.encodeStateAsUpdate(before));
           });
+          await idle();
+        };
         await fromPeer(() => {
           peer.applyOps([{ type: 'addSheet', index: 3, name: 'Added' }]);
         });
@@ -1314,6 +1388,7 @@ describe('XlsxEditor with a peer', () => {
         await act(async () => {
           fireEvent.click(added);
         });
+        await idle();
         const surface = view.getByTestId('xlsx-scroll');
         const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
         if (source === 'cell') {
@@ -1342,10 +1417,12 @@ describe('XlsxEditor with a peer', () => {
         await act(async () => {
           for (const key of ['x', 'Enter']) fireEvent.keyDown(document.activeElement!, { key });
         });
+        await idle();
         expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(true);
-        for (const handle of [editor, peer])
-          for (let sheet = 0; sheet < handle.sheetInfo().sheetNames.length; sheet += 1)
-            expect(handle.cell(sheet, 0, 0).input).not.toBe('draft');
+        for (let sheet = 0; sheet < (await editor.sheetInfo()).sheetNames.length; sheet += 1)
+          expect((await editor.cell(sheet, 0, 0)).input).not.toBe('draft');
+        for (let sheet = 0; sheet < peer.sheetInfo().sheetNames.length; sheet += 1)
+          expect(peer.cell(sheet, 0, 0).input).not.toBe('draft');
         // one click on the grid gives it the keys again.
         fireEvent.mouseDown(surface, pointAt(plain, { row: 1, col: 1 }));
         fireEvent.mouseUp(surface, pointAt(plain, { row: 1, col: 1 }));
@@ -1358,9 +1435,7 @@ describe('XlsxEditor with a peer', () => {
         peer.dispose();
       }
     });
-});
 
-describe('XlsxEditor with a peer, before a render', () => {
   it('commits a draft to its own sheet when a peer inserts one before it', async () => {
     const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3201 });
     let api: XlsxEditorApi | undefined;
@@ -1376,6 +1451,7 @@ describe('XlsxEditor with a peer, before a render', () => {
     try {
       await waitFor(() => expect(api).toBeDefined());
       const editor = api!.handle;
+      await idleWith(() => editor);
       editor.onUpdate((update, origin) => {
         if (origin === 'local') peer.applyUpdate(update);
       });
@@ -1384,28 +1460,95 @@ describe('XlsxEditor with a peer, before a render', () => {
       await act(async () => {
         fireEvent.click(summary);
       });
+      await idleWith(() => editor);
       await act(async () => {
         fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'd' });
       });
       const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
       fireEvent.change(input, { target: { value: 'draft' } });
 
-      // the peer's new first sheet arrives, and a host flush runs before
-      // React renders the shifted indexes.
-      act(() => {
-        const before = editor.encodeStateVector();
-        peer.applyOps([{ type: 'addSheet', index: 0, name: 'First' }]);
-        editor.applyUpdate(peer.encodeStateAsUpdate(before));
-        api!.flush();
+      // the peer's new first sheet reaches the worker, and a host flush
+      // follows before any frame shows the shifted indexes.
+      const before = await editor.encodeStateVector();
+      peer.applyOps([{ type: 'addSheet', index: 0, name: 'First' }]);
+      await act(async () => {
+        void editor.applyUpdate(peer.encodeStateAsUpdate(before));
+        await api!.flush();
       });
-      const names = editor.sheetInfo().sheetNames;
-      const landed = names.filter((_, sheet) => editor.cell(sheet, 0, 0).input === 'draft');
+      const names = (await editor.sheetInfo()).sheetNames;
+      const landed = [];
+      for (const [sheet, name] of names.entries())
+        if ((await editor.cell(sheet, 0, 0)).input === 'draft') landed.push(name);
       expect(landed).toEqual(['Summary']);
     } finally {
       cleanup();
       peer.dispose();
     }
   });
+
+  it('keeps every key typed while a peer pastes a large range, the edit on its cell', async () => {
+    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3301 });
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        collaboration={{ clientId: 3302 }}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    try {
+      await waitFor(() => expect(api).toBeDefined());
+      const editor = api!.handle;
+      const idle = () => idleWith(() => editor);
+      await idle();
+      // the peer pastes 4,000 cells, several times, as the user types.
+      const pastes: Uint8Array[] = [];
+      peer.onUpdate((update) => pastes.push(update));
+      for (let paste = 0; paste < 3; paste += 1) {
+        const edits = [];
+        for (let row = 20; row < 420; row += 1)
+          for (let col = 0; col < 10; col += 1)
+            edits.push({ row, col, input: String(paste * 1000 + row + col) });
+        peer.editCells(0, edits);
+      }
+      const surface = view.getByTestId('xlsx-scroll');
+      const target = { row: 3, col: 1 };
+      fireEvent.mouseDown(surface, pointAt(plain, target));
+      fireEvent.mouseUp(surface, pointAt(plain, target));
+      await idle();
+      const typed: string[] = [];
+      for (let entry = 0; entry < 3; entry += 1) {
+        // each paste reaches the editor between two keys of an entry.
+        void editor.applyUpdate(pastes[entry]);
+        const text = `typed ${entry}`;
+        await act(async () => {
+          fireEvent.keyDown(surface, { key: text[0] });
+        });
+        const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+        for (let length = 2; length <= text.length; length += 1) {
+          fireEvent.change(input, { target: { value: text.slice(0, length) } });
+          // the open edit stays on its cell while the peer's frames land.
+          expect(input.isConnected).toBe(true);
+          expect(document.activeElement === input).toBe(true);
+        }
+        expect(input.value).toBe(text);
+        await act(async () => {
+          fireEvent.keyDown(input, { key: 'Enter' });
+        });
+        typed.push(text);
+      }
+      await idle();
+      for (const [entry, text] of typed.entries())
+        expect((await editor.cell(0, target.row + entry, target.col)).input).toBe(text);
+      expect((await editor.cell(0, 419, 9)).input).toBe(String(2000 + 419 + 9));
+      expect(view.getByTestId('xlsx-name-box')).toHaveProperty('value', 'B7');
+    } finally {
+      cleanup();
+      peer.dispose();
+    }
+  }, 30_000);
 });
 
 describe('XlsxEditor host integration', () => {
@@ -1438,13 +1581,16 @@ describe('XlsxEditor host integration', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
     const surface = view.getByTestId('xlsx-scroll');
     const target = { row: 2, col: 0 };
-    const before = api!.handle.cell(0, target.row, target.col).input;
+    const before = (await api!.handle.cell(0, target.row, target.col)).input;
 
     fireEvent.doubleClick(surface, pointAt(plain, target));
     fireEvent.keyDown(surface, { key: 'x' });
     fireEvent.keyDown(surface, { key: 'Delete' });
+    await idle();
 
     // The toolbar and formula bar stay, disabled, so the grid keeps its place;
     // the zoom box and its list button stay usable, as zoom edits nothing.
@@ -1460,11 +1606,11 @@ describe('XlsxEditor host integration', () => {
     const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
     expect([formula.disabled, formula.readOnly]).toEqual([false, true]);
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
-    expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+    expect((await api!.handle.cell(0, target.row, target.col)).input).toBe(before);
     expect(changes).toBe(0);
 
     await act(async () => {
-      expect(api!.selectCells(0, selectionAt({ row: 3, col: 1 }))).toBe(true);
+      expect(await api!.selectCells(0, selectionAt({ row: 3, col: 1 }))).toBe(true);
     });
     await waitFor(() => {
       const selected = view.getByRole('gridcell', { selected: true });
@@ -1474,7 +1620,7 @@ describe('XlsxEditor host integration', () => {
     await waitFor(() =>
       expect(view.queryAllByRole('gridcell', { selected: true })).toHaveLength(0)
     );
-    expect(api!.selectCells(99, selectionAt({ row: 0, col: 0 }))).toBe(false);
+    expect(await api!.selectCells(99, selectionAt({ row: 0, col: 0 }))).toBe(false);
   });
 
   it('notifies on applied edits and saves through the host API', async () => {
@@ -1490,25 +1636,29 @@ describe('XlsxEditor host integration', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
     const surface = view.getByTestId('xlsx-scroll');
     const target = { row: 2, col: 0 };
 
     await act(async () => {
-      expect(api!.selectCells(0, selectionAt(target))).toBe(true);
+      expect(await api!.selectCells(0, selectionAt(target))).toBe(true);
     });
+    await idle();
     fireEvent.doubleClick(surface, pointAt(plain, target));
     const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
     fireEvent.change(editor, { target: { value: 'Host edit' } });
     fireEvent.keyDown(editor, { key: 'Enter' });
+    await idle();
     expect(changes).toBe(1);
 
     await act(async () => {
-      api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      await api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
       api!.clearSelection();
     });
     let saved!: Uint8Array;
     await act(async () => {
-      saved = api!.save();
+      saved = await api!.save();
     });
     expect(changes).toBe(1);
 
@@ -1539,17 +1689,21 @@ describe('XlsxEditor host integration', () => {
       };
       const view = render(<XlsxEditor file={file} onReady={onReady} />);
       await waitFor(() => expect(api).toBeDefined());
+      const idle = () => idleWith(() => api?.handle);
+      await idle();
       const target = { row: 2, col: 0 };
-      const before = api!.handle.cell(0, target.row, target.col).input;
+      const before = (await api!.handle.cell(0, target.row, target.col)).input;
       await act(async () => {
-        api!.selectCells(0, selectionAt(target));
+        await api!.selectCells(0, selectionAt(target));
       });
+      await idle();
 
       fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
       view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
       await act(async () => resolveClipboard('late paste'));
+      await idle();
 
-      expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+      expect((await api!.handle.cell(0, target.row, target.col)).input).toBe(before);
     } finally {
       if (originalClipboard) {
         Object.defineProperty(navigator, 'clipboard', originalClipboard);
@@ -1568,62 +1722,73 @@ describe('XlsxEditor proposal review', () => {
     );
     await waitFor(() => expect(api).toBeDefined());
     const workbook = api!.handle;
-    const before = workbook.cell(0, 6, 4).input;
-    const stage = async (input: string) => {
+    const idle = () => idleWith(() => workbook);
+    await idle();
+    const input = async () => (await workbook.cell(0, 6, 4)).input;
+    const before = await input();
+    const stage = async (value: string) => {
       await act(async () => {
-        workbook.propose('Audit agent', 'Review this change', [
-          { sheet: 0, row: 6, col: 4, input },
+        await workbook.propose('Audit agent', 'Review this change', [
+          { sheet: 0, row: 6, col: 4, input: value },
         ]);
         api!.refreshProposals();
       });
+      await idle();
     };
 
     await stage('12');
-    expect(workbook.cell(0, 6, 4).input).toBe(before);
+    expect(await input()).toBe(before);
     fireEvent.click(view.getByTestId('xlsx-proposals-button'));
     expect(view.getByTestId('xlsx-proposal').textContent).toContain('Audit agent');
     fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
-    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('12'));
-    expect(workbook.listProposals()).toHaveLength(0);
+    await idle();
+    expect(await input()).toBe('12');
+    expect(await workbook.listProposals()).toHaveLength(0);
     fireEvent.click(view.getByTestId('xlsx-undo'));
-    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe(before));
+    await idle();
+    expect(await input()).toBe(before);
 
     await stage('24');
     fireEvent.click(view.getByTestId('xlsx-proposal-reject'));
-    await waitFor(() => expect(workbook.listProposals()).toHaveLength(0));
-    expect(workbook.cell(0, 6, 4).input).toBe(before);
+    await idle();
+    expect(await workbook.listProposals()).toHaveLength(0);
+    expect(await input()).toBe(before);
 
     await stage('42');
     await act(async () => {
-      workbook.editCell(0, 6, 4, '99');
+      await workbook.editCell(0, 6, 4, '99');
       api!.refreshProposals();
     });
+    await idle();
     fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
     await waitFor(() =>
       expect(view.getByTestId('xlsx-proposal-stale').textContent).toContain('E7')
     );
-    expect(workbook.cell(0, 6, 4).input).toBe('99');
+    expect(await input()).toBe('99');
     fireEvent.click(view.getByTestId('xlsx-proposal-force'));
-    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('42'));
-    expect(workbook.listProposals()).toHaveLength(0);
+    await idle();
+    expect(await input()).toBe('42');
+    expect(await workbook.listProposals()).toHaveLength(0);
 
     await act(async () => {
-      workbook.editCell(0, 1, 6, '10');
+      await workbook.editCell(0, 1, 6, '10');
     });
     await stage('=G2*2');
     expect(view.getByTestId('xlsx-proposal-cell-new').textContent).toBe('20');
     await act(async () => {
-      workbook.editCell(0, 1, 6, '99');
+      await workbook.editCell(0, 1, 6, '99');
       api!.refreshProposals();
     });
+    await idle();
     fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
     await waitFor(() =>
       expect(view.getByTestId('xlsx-proposal-cell-new').textContent).toBe('198')
     );
-    expect(workbook.cell(0, 6, 4).input).toBe('42');
+    expect(await input()).toBe('42');
     fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
-    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('=G2*2'));
-    expect(workbook.listProposals()).toHaveLength(0);
+    await idle();
+    expect(await input()).toBe('=G2*2');
+    expect(await workbook.listProposals()).toHaveLength(0);
   });
 });
 
@@ -1643,8 +1808,10 @@ describe('XlsxEditor pending host edits', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
     const surface = view.getByTestId('xlsx-scroll');
-    const chart = api!.handle.displayList({ x: 0, y: 0, ...VIEWPORT }).charts![0];
+    const chart = (await api!.handle.displayList({ x: 0, y: 0, ...VIEWPORT })).charts![0];
     fireEvent.mouseDown(surface, chartCenter(chart));
     fireEvent.mouseUp(window, chartCenter(chart));
     await act(async () => {
@@ -1654,17 +1821,17 @@ describe('XlsxEditor pending host edits', () => {
       Math.round(parseFloat(view.getByTestId('xlsx-chart-selection').style.left))
     ).toBe(Math.round(chart.rect.x + 1));
     await act(async () => {
-      expect(api!.selectCells(1, selectionAt({ row: 0, col: 0 }))).toBe(true);
+      expect(await api!.selectCells(1, selectionAt({ row: 0, col: 0 }))).toBe(true);
     });
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 350));
     });
     await act(async () => {
-      api!.selectCells(0, selectionAt({ row: 0, col: 0 }));
+      await api!.selectCells(0, selectionAt({ row: 0, col: 0 }));
     });
-    const after = api!.handle
-      .displayList({ x: 0, y: 0, ...VIEWPORT })
-      .charts!.find((c) => c.id === chart.id)!;
+    const after = (await api!.handle.displayList({ x: 0, y: 0, ...VIEWPORT })).charts!.find(
+      (c) => c.id === chart.id
+    )!;
     expect(after.rect.x).toBe(chart.rect.x + 1);
   });
 
@@ -1679,17 +1846,20 @@ describe('XlsxEditor pending host edits', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
     const target = { row: 2, col: 0 };
     await act(async () => {
-      api!.selectCells(0, selectionAt(target));
+      await api!.selectCells(0, selectionAt(target));
     });
+    await idle();
     fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
     const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
     fireEvent.change(editor, { target: { value: 'Draft that must survive' } });
     await act(async () => {
-      api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      await api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
     });
-    expect(api!.handle.cell(0, target.row, target.col).input).toBe(
+    expect((await api!.handle.cell(0, target.row, target.col)).input).toBe(
       'Draft that must survive'
     );
   });
@@ -1710,10 +1880,13 @@ describe('XlsxEditor pending host edits', () => {
           />
         );
         await waitFor(() => expect(api).toBeDefined());
+        const idle = () => idleWith(() => api?.handle);
+        await idle();
         const target = { row: 2, col: 0 };
         await act(async () => {
-          api!.selectCells(0, selectionAt(target));
+          await api!.selectCells(0, selectionAt(target));
         });
+        await idle();
         if (source === 'cell') {
           fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
         }
@@ -1721,15 +1894,16 @@ describe('XlsxEditor pending host edits', () => {
           source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input'
         );
         fireEvent.change(input, { target: { value: 'Saved draft' } });
-        expect(api!.selectCells(-1, selectionAt(target))).toBe(false);
-        expect(api!.handle.cell(0, target.row, target.col).input).toBe('Line item 1');
+        expect(await api!.selectCells(-1, selectionAt(target))).toBe(false);
+        expect((await api!.handle.cell(0, target.row, target.col)).input).toBe('Line item 1');
         let saved: Uint8Array | undefined;
         await act(async () => {
-          if (action === 'save') saved = api!.save();
+          if (action === 'save') saved = await api!.save();
           else if (action === 'clear') api!.clearSelection();
-          else api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+          else await api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
         });
-        expect(api!.handle.cell(0, target.row, target.col).input).toBe('Saved draft');
+        await idle();
+        expect((await api!.handle.cell(0, target.row, target.col)).input).toBe('Saved draft');
         expect(changes).toBe(1);
         if (saved) {
           const reopened = openWorkbook(saved);
@@ -1753,21 +1927,25 @@ describe('XlsxEditor pending host edits', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
     const target = { row: 2, col: 0 };
     await act(async () => {
-      api!.selectCells(0, selectionAt(target));
+      await api!.selectCells(0, selectionAt(target));
     });
+    await idle();
     fireEvent.change(view.getByTestId('xlsx-formula-input'), {
       target: { value: 'First draft' },
     });
     await act(async () => {
-      api!.save();
+      await api!.save();
     });
+    await idle();
     fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
-    const editor = view.getByTestId('xlsx-cell-editor');
+    const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
     fireEvent.change(editor, { target: { value: 'Second draft' } });
     fireEvent.blur(editor);
-    expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
+    expect((await api!.handle.cell(0, target.row, target.col)).input).toBe('Second draft');
   });
 });
 
@@ -1789,105 +1967,118 @@ describe('XlsxEditor menu commands', () => {
       />
     );
     await waitFor(() => expect(api).toBeDefined());
-    const select = (anchor: CellAddr, focus: CellAddr = anchor) =>
-      act(async () => {
-        api!.selectCells(api!.handle.sheetInfo().activeSheet, { anchor, focus });
+    const idle = () => idleWith(() => api?.handle);
+    await idle();
+    const select = async (anchor: CellAddr, focus: CellAddr = anchor) => {
+      await act(async () => {
+        await api!.selectCells((await api!.handle.sheetInfo()).activeSheet, { anchor, focus });
       });
-    const run = (command: XlsxCommand) =>
-      act(async () => {
+      await idle();
+    };
+    const run = async (command: XlsxCommand) => {
+      await act(async () => {
         api!.run(command);
       });
+      await idle();
+    };
     const column = (col: number, rows = 8) =>
-      Array.from({ length: rows }, (_, row) => api!.handle.cell(0, row, col).input);
+      Promise.all(
+        Array.from({ length: rows }, async (_, row) => (await api!.handle.cell(0, row, col)).input)
+      );
     const row = (at: number, cols = 4) =>
-      Array.from({ length: cols }, (_, col) => api!.handle.cell(0, at, col).input);
+      Promise.all(
+        Array.from({ length: cols }, async (_, col) => (await api!.handle.cell(0, at, col)).input)
+      );
     // Types into the toolbar's zoom box and presses Enter.
-    const typeZoom = (value: string) =>
-      act(async () => {
+    const typeZoom = async (value: string) => {
+      await act(async () => {
         const box = view.getByTestId('xlsx-zoom');
         fireEvent.focus(box);
         fireEvent.input(box, { target: { value } });
         fireEvent.keyDown(box, { key: 'Enter' });
       });
+      await idle();
+    };
     return { api: () => api!, state: () => state!, select, run, column, row, typeZoom, view };
   }
 
   it('inserts as many rows as are selected above the selection, as one undo step', async () => {
     const view = await mountCommands();
-    const before = view.column(0);
+    const before = await view.column(0);
     await view.select({ row: 2, col: 0 }, { row: 3, col: 1 });
     await view.run('insertRowAbove');
-    expect(view.column(0, 10)).toEqual([...before.slice(0, 2), '', '', ...before.slice(2)]);
+    expect(await view.column(0, 10)).toEqual([...before.slice(0, 2), '', '', ...before.slice(2)]);
     await view.run('undo');
-    expect(view.column(0)).toEqual(before);
+    expect(await view.column(0)).toEqual(before);
   });
 
   it('inserts rows below the selection', async () => {
     const view = await mountCommands();
-    const before = view.column(0);
+    const before = await view.column(0);
     await view.select({ row: 2, col: 0 });
     await view.run('insertRowBelow');
-    expect(view.column(0, 9)).toEqual([...before.slice(0, 3), '', ...before.slice(3)]);
+    expect(await view.column(0, 9)).toEqual([...before.slice(0, 3), '', ...before.slice(3)]);
   });
 
   it('inserts columns left and right of the selection', async () => {
     const view = await mountCommands();
-    const header = view.row(1);
+    const header = await view.row(1);
     await view.select({ row: 1, col: 1 });
     await view.run('insertColumnLeft');
-    expect(view.row(1, 5)).toEqual([header[0], '', ...header.slice(1)]);
+    expect(await view.row(1, 5)).toEqual([header[0], '', ...header.slice(1)]);
     await view.select({ row: 1, col: 2 });
     await view.run('insertColumnRight');
-    expect(view.row(1, 6)).toEqual([header[0], '', header[1], '', ...header.slice(2)]);
+    expect(await view.row(1, 6)).toEqual([header[0], '', header[1], '', ...header.slice(2)]);
   });
 
   it('deletes the selected rows and columns', async () => {
     const view = await mountCommands();
-    const before = view.column(0);
+    const before = await view.column(0);
     await view.select({ row: 2, col: 0 }, { row: 3, col: 0 });
     await view.run('deleteRows');
-    expect(view.column(0, 4)).toEqual([...before.slice(0, 2), ...before.slice(4, 6)]);
-    const header = view.row(1);
+    expect(await view.column(0, 4)).toEqual([...before.slice(0, 2), ...before.slice(4, 6)]);
+    const header = await view.row(1);
     await view.select({ row: 1, col: 1 });
     await view.run('deleteColumns');
-    expect(view.row(1, 3)).toEqual([header[0], ...header.slice(2)]);
+    expect(await view.row(1, 3)).toEqual([header[0], ...header.slice(2)]);
   });
 
   it('deletes the values of the selected cells', async () => {
     const view = await mountCommands();
     await view.select({ row: 2, col: 0 }, { row: 2, col: 2 });
     await view.run('deleteValues');
-    expect(view.row(2, 3)).toEqual(['', '', '']);
-    expect(view.row(3, 1)).toEqual(['Line item 2']);
+    expect(await view.row(2, 3)).toEqual(['', '', '']);
+    expect(await view.row(3, 1)).toEqual(['Line item 2']);
   });
 
   it('freezes rows and columns, by count or up to the selection, independently', async () => {
     const view = await mountCommands();
-    const frozen = () => {
-      const info = view.api().handle.sheetInfo();
+    const frozen = async () => {
+      const info = await view.api().handle.sheetInfo();
       return [info.frozenRows, info.frozenCols];
     };
     await view.select({ row: 3, col: 2 });
     await view.run('freezeRows:1');
-    expect(frozen()).toEqual([1, 0]);
+    expect(await frozen()).toEqual([1, 0]);
     await view.run('freezeColumns:current');
-    expect(frozen()).toEqual([1, 3]);
+    expect(await frozen()).toEqual([1, 3]);
     await view.run('freezeRows:current');
-    expect(frozen()).toEqual([4, 3]);
+    expect(await frozen()).toEqual([4, 3]);
     expect([view.state().frozenRows, view.state().frozenColumns]).toEqual([4, 3]);
     await view.run('freezeRows:0');
     await view.run('freezeColumns:2');
-    expect(frozen()).toEqual([0, 2]);
+    expect(await frozen()).toEqual([0, 2]);
     await view.run('freezeColumns:0');
-    expect(frozen()).toEqual([0, 0]);
+    expect(await frozen()).toEqual([0, 0]);
   });
 
   it('adds a sheet after the active one and opens it', async () => {
     const view = await mountCommands();
     await view.run('insertSheet');
-    const info = view.api().handle.sheetInfo();
+    const info = await view.api().handle.sheetInfo();
     expect(info.sheetNames).toEqual(['Budget', 'Sheet4', 'Summary', 'Styled']);
     expect(info.activeSheet).toBe(1);
+    expect(view.view.getAllByRole('tab')[1].getAttribute('aria-selected')).toBe('true');
   });
 
   it('clears every style and the number format of the selection', async () => {
@@ -1896,14 +2087,14 @@ describe('XlsxEditor menu commands', () => {
     await view.run('bold');
     await view.run('numberFormat:percent');
     await view.run('align:center');
-    let formatting = view.api().handle.selectionFormatting(0, 'B3:C4');
+    let formatting = await view.api().handle.selectionFormatting(0, 'B3:C4');
     expect([formatting.bold, formatting.numberFormat, formatting.horizontalAlignment]).toEqual([
       true,
       'percent',
       'center',
     ]);
     await view.run('clearFormatting');
-    formatting = view.api().handle.selectionFormatting(0, 'B3:C4');
+    formatting = await view.api().handle.selectionFormatting(0, 'B3:C4');
     expect(formatting.bold).toBe(false);
     expect(formatting.numberFormat).toBe('automatic');
     expect(formatting.horizontalAlignment).not.toBe('center');
@@ -1950,10 +2141,12 @@ describe('XlsxEditor menu commands', () => {
     await view.select({ row: 2, col: 1 }, { row: 3, col: 2 });
     expect(view.state().canMerge).toBe(true);
     await view.run('merge:all');
-    expect(view.api().handle.mergedRanges(0, 'B3:C4')).toHaveLength(1);
+    expect(await view.api().handle.mergedRanges(0, 'B3:C4')).toHaveLength(1);
     expect(view.state().canUnmerge).toBe(true);
+    await view.run('merge:unmerge');
+    expect(await view.api().handle.mergedRanges(0, 'B3:C4')).toHaveLength(0);
     await view.run('wrap:wrap');
-    expect(view.api().handle.selectionFormatting(0, 'B3').textWrapping).toBe('wrap');
+    expect((await view.api().handle.selectionFormatting(0, 'B3')).textWrapping).toBe('wrap');
     await view.run('zoom:150');
     expect(view.state().zoom).toBe(1.5);
   });
