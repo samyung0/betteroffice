@@ -42,6 +42,8 @@ import type {
   DrawCmd,
   Direction,
   EditResult,
+  MergedRange,
+  Proposal,
   Selection,
   SelectionLimits,
   SheetInfo,
@@ -193,7 +195,12 @@ interface OptimisticEdit {
   text: string;
 }
 
+// stable stand-ins while no frame describes the selection: derived values
+// feed memos and host callbacks, so a fresh one per render would loop.
 const NO_HISTORY = { canUndo: false, canRedo: false };
+const NO_FORMATTING: SelectionFormatting = {};
+const NO_MERGES: MergedRange[] = [];
+const NO_PROPOSALS: Proposal[] = [];
 const NUMBER_INPUT = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?%?$/i;
 
 // the in-cell editor while its cell is scrolled away: in the window (so typing
@@ -689,11 +696,11 @@ function XlsxEditorContent({
   const activeSheetId = sheetInfo?.sheetIds[activeSheet] ?? '';
   // the frame on screen draws the sheet the user is on.
   const shownHere = shown && shown.sheetInfo.activeSheet === activeSheet ? shown : null;
-  const selectionFormatting: SelectionFormatting = shownHere?.formatting ?? {};
+  const selectionFormatting = shownHere?.formatting ?? NO_FORMATTING;
   const historyState = shown?.history ?? NO_HISTORY;
-  const mergedRanges = shownHere?.selectionMerged ?? [];
-  const visibleMergedRanges = shownHere?.visibleMerged ?? [];
-  const proposals = shown?.proposals ?? [];
+  const mergedRanges = shownHere?.selectionMerged ?? NO_MERGES;
+  const visibleMergedRanges = shownHere?.visibleMerged ?? NO_MERGES;
+  const proposals = shown?.proposals ?? NO_PROPOSALS;
   // overlays follow the frame on screen, so they stay on its pixels.
   const paintedZoom = file && shown ? shown.view.zoom : zoom;
   pendingDraftRef.current = editing
