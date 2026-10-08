@@ -2,13 +2,8 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use serde::Serialize;
-use yrs::{Map, TextRef, Transact};
 
-use crate::deck::{
-    live_shape_order, map_string_array, required_map, required_order, shape_ref, slide_ref,
-    slide_shape_order, string_array_ref,
-};
-use crate::{DeckSession, EditError, EditResult, STORIES, story::snapshot_story};
+use crate::{DeckSession, EditResult, ShapeSnapshot};
 
 /// Story-local UTF-16 offsets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -134,30 +129,17 @@ impl DeckSession {
             return Ok(Vec::new());
         }
         let needle = Needle::new(query, case_sensitive);
-        let txn = self.doc.transact();
-        let stories = required_map(&txn, STORIES)?;
-        let mut seen_slides = HashSet::new();
+        let deck = self.snapshot()?;
         let mut matches = Vec::new();
-        for (slide_index, slide_id) in string_array_ref(&required_order(&txn)?, &txn)
-            .into_iter()
-            .filter(|id| seen_slides.insert(id.clone()))
-            .enumerate()
-        {
-            let slide = slide_ref(&txn, &slide_id)?;
-            let mut shapes = live_shape_order(&slide_shape_order(&slide, &txn)?, &txn)?;
-            shapes.reverse();
+        for (slide_index, slide) in deck.slides.iter().enumerate() {
+            let mut shapes: Vec<&ShapeSnapshot> = slide.shapes.iter().rev().collect();
             let mut seen_shapes = HashSet::new();
-            while let Some(shape_id) = shapes.pop() {
-                if !seen_shapes.insert(shape_id.clone()) {
+            while let Some(shape) = shapes.pop() {
+                if !seen_shapes.insert(shape.id.as_str()) {
                     continue;
                 }
-                let shape = shape_ref(&txn, &shape_id)?;
-                for story_id in map_string_array(&shape, &txn, "textStories")? {
-                    let story = stories
-                        .get(&txn, &story_id)
-                        .and_then(|value| value.cast::<TextRef>().ok())
-                        .ok_or_else(|| EditError::StoryNotFound(story_id.clone()))?;
-                    let text = snapshot_story(&story, &txn, &story_id)?.plain_text();
+                for story in &shape.text_stories {
+                    let text = story.plain_text();
                     let mut byte_offset = 0;
                     let mut position = 0;
                     for (from, to) in needle.find_all(&text) {
@@ -166,9 +148,9 @@ impl DeckSession {
                         let end = position + found.encode_utf16().count() as u32;
                         matches.push(TextSearchMatch {
                             slide_index,
-                            slide_id: slide_id.clone(),
-                            shape_id: shape_id.clone(),
-                            story_id: story_id.clone(),
+                            slide_id: slide.id.clone(),
+                            shape_id: shape.id.clone(),
+                            story_id: story.id.clone(),
                             start: position,
                             end,
                             text: found.to_owned(),
@@ -180,11 +162,7 @@ impl DeckSession {
                         position = end;
                     }
                 }
-                shapes.extend(
-                    map_string_array(&shape, &txn, "children")?
-                        .into_iter()
-                        .rev(),
-                );
+                shapes.extend(shape.children.iter().rev());
             }
         }
         Ok(matches)

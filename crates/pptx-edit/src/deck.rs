@@ -18,25 +18,26 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
+use crate::overlay::{BaseIndex, Entry, Reader, SCHEMA_OVERRIDES, ShapeRec, SlideRec, StoryRec};
 use crate::save::slide_layout;
 use crate::story::{
     baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story,
     validate_text_style,
 };
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, PendingMedia, PictureDraft,
-    PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideScope, SlideSnapshot,
+    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, Layout, META, PendingMedia,
+    PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideScope, SlideSnapshot, StorySnapshot,
     TransformReceipt,
 };
 
-/// The only deck schema this engine reads. Parsed package data (layouts,
-/// masters, themes, relationships, media) is never stored in the document; it is
-/// derived from the fingerprinted source package.
+/// The seeded deck schema. Parsed package data (layouts, masters, themes,
+/// relationships, media) is never stored in the document; it is derived from
+/// the fingerprinted source package. Schema 6 is the override layout.
 const SCHEMA_VERSION: f64 = 5.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
-const MAX_SHAPE_DEPTH: usize = 128;
+pub(crate) const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
 const MAX_ADJUSTMENTS: usize = 32;
 const MAX_ADJUSTMENT_INDEX: usize = 32;
@@ -203,6 +204,87 @@ fn seed_shape(
     Ok(shape_id)
 }
 
+/// The keys `seed_shape` writes for one shape, without its stories or
+/// children: what copying a source shape into the override layout writes.
+pub(crate) fn write_shape_record(
+    shapes: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    shape_id: &str,
+    shape: &ShapeNode,
+    story_ids: &[String],
+    child_ids: &[String],
+) -> EditResult<()> {
+    let shape_map = shapes.insert(txn, shape_id, MapPrelim::default());
+    let base = shape_base(shape);
+    shape_map.insert(txn, "id", shape_id);
+    shape_map.insert(txn, "sourceId", base.id as f64);
+    shape_map.insert(txn, "name", base.name.as_str());
+    shape_map.insert(txn, "x", base.transform.x as f64);
+    shape_map.insert(txn, "y", base.transform.y as f64);
+    shape_map.insert(txn, "width", base.transform.width as f64);
+    shape_map.insert(txn, "height", base.transform.height as f64);
+    shape_map.insert(txn, "rotationDeg", base.transform.rotation_deg);
+    shape_map.insert(txn, "flipH", base.transform.flip_h);
+    shape_map.insert(txn, "flipV", base.transform.flip_v);
+    if base.hidden {
+        shape_map.insert(txn, "hidden", true);
+    }
+    insert_json(
+        &shape_map,
+        txn,
+        "placeholderJson",
+        base.placeholder.as_ref(),
+    )?;
+    match shape {
+        ShapeNode::Shape(shape) => {
+            shape_map.insert(txn, "kind", "shape");
+            shape_map.insert(txn, "geometry", shape.geometry.as_str());
+            if !shape.has_preset_geometry {
+                shape_map.insert(txn, "hasPresetGeometry", false);
+            }
+            let mut adjust_values = preset_geometry_default_adjustments(&shape.geometry)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            adjust_values.extend(shape.adjust_values.clone());
+            insert_json(&shape_map, txn, "adjustValuesJson", Some(&adjust_values))?;
+            insert_json(&shape_map, txn, "fillJson", shape.fill.as_ref())?;
+            insert_json(&shape_map, txn, "outlineJson", shape.outline.as_ref())?;
+        }
+        ShapeNode::Picture(picture) => {
+            shape_map.insert(txn, "kind", "picture");
+            shape_map.insert(txn, "geometry", "rect");
+            insert_json(&shape_map, txn, "fillJson", picture.fill.as_ref())?;
+            insert_json(&shape_map, txn, "outlineJson", picture.outline.as_ref())?;
+            if !picture.effects.is_empty() {
+                insert_json(&shape_map, txn, "blipEffectsJson", Some(&picture.effects))?;
+            }
+            if let Some(media) = &picture.media_part_path {
+                shape_map.insert(txn, "mediaPartPath", media.as_str());
+            }
+        }
+        ShapeNode::GraphicFrame(frame) => {
+            shape_map.insert(txn, "kind", "graphicFrame");
+            shape_map.insert(txn, "geometry", "rect");
+            insert_json(&shape_map, txn, "graphicJson", Some(&frame.data))?;
+        }
+        ShapeNode::Group(_) => {
+            shape_map.insert(txn, "kind", "group");
+            shape_map.insert(txn, "geometry", "group");
+        }
+    }
+    shape_map.insert(txn, "textStories", string_array(story_ids));
+    shape_map.insert(txn, "children", string_array(child_ids));
+    Ok(())
+}
+
+/// The slide and file text body a seeded story was read from.
+pub(crate) fn source_story_body<'a>(
+    package: &'a PptxPackage,
+    story_id: &str,
+) -> Option<(&'a Slide, &'a TextBody)> {
+    source_story(package, story_id).map(|(slide, _, body)| (slide, body))
+}
+
 /// The file text body a seeded story was read from: a shape's body or a table
 /// cell's. Stories of shapes added in the session have none.
 pub(crate) fn source_text_body<'a>(
@@ -332,35 +414,125 @@ fn insert_json<T: serde::Serialize>(
 
 impl DeckSession {
     pub fn snapshot(&self) -> EditResult<DeckSnapshot> {
-        snapshot_doc(&self.doc, &self.package)
+        snapshot_doc(&self.doc, &self.package, self.base_index())
     }
 
     /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
     pub fn slide_ids(&self) -> EditResult<Vec<String>> {
         let txn = self.doc.transact();
-        let order = required_order(&txn)?;
-        let slides = required_map(&txn, SLIDES)?;
-        let mut seen_slides = HashSet::new();
-        let mut ids = Vec::new();
-        for slide_id in string_array_ref(&order, &txn) {
-            if !seen_slides.insert(slide_id.clone()) {
-                continue;
-            }
-            if slides
-                .get(&txn, &slide_id)
-                .and_then(|value| value.cast::<MapRef>().ok())
-                .is_none()
-            {
-                return Err(EditError::InvalidState(format!("missing slide {slide_id}")));
-            }
-            ids.push(slide_id);
+        let reader = Reader::new(&txn, self.base_index())?;
+        let ids = reader.order()?;
+        if let Some(missing) = ids.iter().find(|id| reader.slide(id).is_none()) {
+            return Err(EditError::InvalidState(format!("missing slide {missing}")));
         }
         Ok(ids)
     }
 
     /// Snapshot one slide without materializing the rest of the deck.
     pub fn slide_scope(&self, slide_index: usize) -> EditResult<SlideScope> {
-        slide_scope(&self.doc, &self.package, slide_index)
+        slide_scope(&self.doc, &self.package, self.base_index(), slide_index)
+    }
+
+    /// A slide still in the deck: in the override layout a source slide
+    /// keeps its record after its delete, so the order decides.
+    pub(crate) fn require_slide(&self, slide_id: &str) -> EditResult<()> {
+        let txn = self.doc.transact();
+        let reader = Reader::new(&txn, self.base_index())?;
+        let live = reader.slide(slide_id).is_some()
+            && (self.base_index().is_none() || reader.order()?.iter().any(|id| id == slide_id));
+        if live {
+            Ok(())
+        } else {
+            Err(EditError::SlideNotFound(slide_id.to_owned()))
+        }
+    }
+
+    /// A shape the slide lists; copies it for an edit of its own record.
+    fn edit_shape(&self, slide_id: &str, shape_id: &str) -> EditResult<()> {
+        self.require_slide(slide_id)?;
+        {
+            let txn = self.doc.transact();
+            let reader = Reader::new(&txn, self.base_index())?;
+            let slide = reader
+                .slide(slide_id)
+                .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+            if !reader
+                .slide_shape_ids(&slide)?
+                .iter()
+                .any(|id| id == shape_id)
+            {
+                return Err(EditError::ShapeNotFound(shape_id.to_owned()));
+            }
+        }
+        self.copy(Entry::Shape(shape_id))
+    }
+
+    /// The live shape ids `slide_id` lists, as the projection reads them.
+    fn live_slide_shapes(&self, slide_id: &str) -> EditResult<Vec<String>> {
+        let txn = self.doc.transact();
+        let reader = Reader::new(&txn, self.base_index())?;
+        let slide = reader
+            .slide(slide_id)
+            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        reader.slide_shape_ids(&slide)
+    }
+
+    /// Copies every source shape and story under (and including) `shape_id`,
+    /// so a delete removes the same records the seeded layout's would: a
+    /// peer's concurrent copy of one of them is the same items, deleted too.
+    fn copy_subtree(&self, shape_id: &str) -> EditResult<()> {
+        if self.base_index().is_none() {
+            return Ok(());
+        }
+        let mut pending = vec![shape_id.to_owned()];
+        let mut seen = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) || seen.len() > 100_000 {
+                continue;
+            }
+            let (stories, children) = {
+                let txn = self.doc.transact();
+                let reader = Reader::new(&txn, self.base_index())?;
+                match reader.shape(&id) {
+                    Some(shape) => reader.shape_lists(&shape)?,
+                    None => continue,
+                }
+            };
+            self.copy(Entry::Shape(&id))?;
+            for story in &stories {
+                self.copy(Entry::Story(story))?;
+            }
+            pending.extend(children);
+        }
+        Ok(())
+    }
+
+    /// The shape and story ids under `root_shape_ids` that the document holds.
+    fn held_entries(&self, root_shape_ids: &[String]) -> EditResult<(Vec<String>, Vec<String>)> {
+        let txn = self.doc.transact();
+        let reader = Reader::new(&txn, self.base_index())?;
+        let (mut shapes, mut stories) = (Vec::new(), Vec::new());
+        let mut pending: Vec<String> = root_shape_ids.to_vec();
+        let mut seen = HashSet::new();
+        while let Some(shape_id) = pending.pop() {
+            if !seen.insert(shape_id.clone()) || seen.len() > 100_000 {
+                continue;
+            }
+            let Some(shape) = reader.shape(&shape_id) else {
+                continue;
+            };
+            let (story_ids, child_ids) = reader.shape_lists(&shape)?;
+            for story_id in story_ids {
+                if matches!(reader.story(&story_id), Some(StoryRec::Live(_))) {
+                    stories.push(story_id);
+                }
+            }
+            pending.extend(child_ids);
+            if matches!(shape, ShapeRec::Live(_)) {
+                shapes.push(shape_id);
+            }
+        }
+        Ok((shapes, stories))
     }
 
     pub fn insert_slide(
@@ -381,6 +553,7 @@ impl DeckSession {
             )));
         }
         let slide_id = self.next_id("slide");
+        self.copy(Entry::Order)?;
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
         let length = order.len(&txn);
@@ -405,6 +578,8 @@ impl DeckSession {
 
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
         crate::model::validate_xml_text(text)?;
+        self.require_slide(slide_id)?;
+        self.copy(Entry::Slide(slide_id))?;
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
@@ -415,15 +590,35 @@ impl DeckSession {
     }
 
     pub fn delete_slide(&self, context: &EditCtx, slide_id: &str) -> EditResult<SlideReceipt> {
+        self.require_slide(slide_id)?;
+        let shape_ids = self.live_slide_shapes(slide_id)?;
+        for shape_id in &shape_ids {
+            self.copy_subtree(shape_id)?;
+        }
+        let (held_shapes, held_stories) = self.held_entries(&shape_ids)?;
+        self.copy(Entry::Order)?;
+        // A source slide is copied so its delete removes a record, which a
+        // peer's concurrent move cannot bring back.
+        self.copy(Entry::Slide(slide_id))?;
+        if self
+            .base_index()
+            .is_some_and(|index| index.comments.iter().any(|c| c.slide_id == slide_id))
+        {
+            self.copy(Entry::Comments)?;
+        }
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
         let index = array_index(&order, &txn, slide_id)
             .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
         let slides = required_map(&txn, SLIDES)?;
-        let slide = slide_ref(&txn, slide_id)?;
-        let shape_order = slide_shape_order(&slide, &txn)?;
-        let shape_ids = live_shape_order(&shape_order, &txn)?;
-        remove_shape_entries(&mut txn, &shape_ids)?;
+        let stories = required_map(&txn, STORIES)?;
+        let shapes = required_map(&txn, SHAPES)?;
+        for story_id in held_stories {
+            stories.remove(&mut txn, &story_id);
+        }
+        for shape_id in held_shapes {
+            shapes.remove(&mut txn, &shape_id);
+        }
         let comments = required_map(&txn, crate::COMMENTS)?;
         let comment_ids: Vec<String> = comments
             .iter(&txn)
@@ -451,6 +646,7 @@ impl DeckSession {
         slide_id: &str,
         to_index: u32,
     ) -> EditResult<SlideReceipt> {
+        self.copy(Entry::Order)?;
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
         let length = order.len(&txn);
@@ -486,6 +682,8 @@ impl DeckSession {
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
+        self.require_slide(slide_id)?;
+        self.copy(Entry::Slide(slide_id))?;
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
@@ -560,6 +758,8 @@ impl DeckSession {
             .into_iter()
             .collect::<BTreeMap<_, _>>();
         let shape_id = self.next_id("shape");
+        self.require_slide(slide_id)?;
+        self.copy(Entry::Slide(slide_id))?;
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
@@ -634,6 +834,8 @@ impl DeckSession {
             )));
         }
         let shape_id = self.next_id("shape");
+        self.require_slide(slide_id)?;
+        self.copy(Entry::Slide(slide_id))?;
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
@@ -680,8 +882,8 @@ impl DeckSession {
         color: Option<&str>,
     ) -> EditResult<ShapeFillReceipt> {
         let fill = shape_fill(color)?;
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let before = optional_json::<ShapeFill, _>(&shape, &txn, "fillJson")?
@@ -711,8 +913,8 @@ impl DeckSession {
                 "stroke width {width}pt is outside the safe range"
             )));
         }
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let existing = optional_json::<ShapeOutline, _>(&shape, &txn, "outlineJson")?;
@@ -752,8 +954,8 @@ impl DeckSession {
         adjustments: &BTreeMap<String, f64>,
     ) -> EditResult<ShapeAdjustReceipt> {
         validate_adjustments(adjustments)?;
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let geometry = required_string(&shape, &txn, "geometry")?;
@@ -792,15 +994,32 @@ impl DeckSession {
         slide_id: &str,
         shape_id: &str,
     ) -> EditResult<ShapeReceipt> {
+        self.require_slide(slide_id)?;
+        let ids = self.live_slide_shapes(slide_id)?;
+        if !ids.iter().any(|id| id == shape_id) {
+            return Err(EditError::ShapeNotFound(shape_id.to_owned()));
+        }
+        // Source shapes are copied so their removal deletes records, which
+        // a peer's concurrent reorder cannot bring back.
+        self.copy_subtree(shape_id)?;
+        let held = self.held_entries(&[shape_id.to_owned()])?;
+        self.copy(Entry::Slide(slide_id))?;
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
-        let ids = live_shape_order(&order, &txn)?;
         let index =
             ids.iter()
                 .position(|id| id == shape_id)
                 .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))? as u32;
-        remove_shape_entries(&mut txn, &[shape_id.to_owned()])?;
+        let (held_shapes, held_stories) = held;
+        let stories = required_map(&txn, STORIES)?;
+        let shapes = required_map(&txn, SHAPES)?;
+        for story_id in held_stories {
+            stories.remove(&mut txn, &story_id);
+        }
+        for held_shape in held_shapes {
+            shapes.remove(&mut txn, &held_shape);
+        }
         for (index, id) in string_array_ref(&order, &txn).iter().enumerate().rev() {
             if id == shape_id {
                 order.remove(&mut txn, index as u32);
@@ -823,8 +1042,8 @@ impl DeckSession {
     ) -> EditResult<TransformReceipt> {
         validate_coordinate(x)?;
         validate_coordinate(y)?;
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         let before = shape_rect(&shape, &txn)?;
         shape.insert(&mut txn, "x", x as f64);
@@ -888,10 +1107,12 @@ impl DeckSession {
         shape_id: &str,
         to_index: impl FnOnce(u32, u32) -> u32,
     ) -> EditResult<ShapeZOrderReceipt> {
+        self.require_slide(slide_id)?;
+        let ids = self.live_slide_shapes(slide_id)?;
+        self.copy(Entry::Slide(slide_id))?;
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
-        let ids = live_shape_order(&order, &txn)?;
         let length = ids.len() as u32;
         let from_index =
             ids.iter()
@@ -936,8 +1157,8 @@ impl DeckSession {
             ..ShapeRect::default()
         };
         validate_rect(rect)?;
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         let before = shape_rect(&shape, &txn)?;
         shape.insert(&mut txn, "width", width as f64);
@@ -962,8 +1183,8 @@ impl DeckSession {
         rect: ShapeRect,
     ) -> EditResult<TransformReceipt> {
         validate_rect(rect)?;
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         let before = shape_rect(&shape, &txn)?;
         shape.insert(&mut txn, "x", rect.x as f64);
@@ -990,8 +1211,8 @@ impl DeckSession {
         if let Some(anchor) = anchor {
             validate_text_anchor(anchor)?;
         }
+        self.edit_shape(slide_id, shape_id)?;
         let mut txn = self.transact_for(context);
-        require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
         if required_string(&shape, &txn, "kind")? != "shape"
             || map_string_array(&shape, &txn, "textStories")?.is_empty()
@@ -1024,8 +1245,9 @@ fn validate_text_anchor(anchor: &str) -> EditResult<()> {
     }
 }
 
-/// Schema and fingerprint checks that need no package.
-pub(crate) fn validate_meta(doc: &Doc) -> EditResult<()> {
+/// Schema and fingerprint checks that need no package; the layout the
+/// schema names.
+pub(crate) fn validate_meta(doc: &Doc) -> EditResult<Layout> {
     let txn = doc.transact();
     if let Some((root, _)) = txn
         .root_refs()
@@ -1036,22 +1258,36 @@ pub(crate) fn validate_meta(doc: &Doc) -> EditResult<()> {
         )));
     }
     let meta = required_map(&txn, META)?;
-    if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported deck schema version".to_owned(),
-        ));
-    }
+    let layout = match map_number(&meta, &txn, "schemaVersion") {
+        Some(version) if version == SCHEMA_VERSION => Layout::Seeded,
+        Some(version) if version == SCHEMA_OVERRIDES => Layout::Overrides,
+        _ => {
+            return Err(EditError::InvalidState(
+                "unsupported deck schema version".to_owned(),
+            ));
+        }
+    };
     if map_string(&meta, &txn, "fingerprint").is_none() {
         return Err(EditError::InvalidState("missing fingerprint".to_owned()));
     }
-    Ok(())
+    Ok(layout)
 }
 
 /// Validates the doc against the package derived from its source and returns
-/// the snapshot it computed internally.
-pub(crate) fn validated_snapshot(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
-    validate_meta(doc)?;
-    let snapshot = snapshot_doc(doc, package)?;
+/// the snapshot it computed internally. `index` is the source deck by entry in
+/// the override layout.
+pub(crate) fn validated_snapshot(
+    doc: &Doc,
+    package: &PptxPackage,
+    index: Option<&BaseIndex>,
+) -> EditResult<DeckSnapshot> {
+    let layout = validate_meta(doc)?;
+    if (layout == Layout::Overrides) != index.is_some() {
+        return Err(EditError::InvalidState(
+            "the deck layout does not match the session".to_owned(),
+        ));
+    }
+    let snapshot = snapshot_doc(doc, package, index)?;
     if snapshot.width_emu <= 0 || snapshot.height_emu <= 0 {
         return Err(EditError::InvalidState(
             "slide dimensions must be positive".to_owned(),
@@ -1104,107 +1340,143 @@ pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditRes
         .collect())
 }
 
-fn snapshot_slide<T: ReadTxn>(
-    slides: &MapRef,
-    shapes: &MapRef,
-    stories: &MapRef,
+/// One slide as the deck reads: its record from the document when copied or
+/// made there, else from the source, and each shape and story the same way.
+pub(crate) fn project_slide<T: ReadTxn>(
+    reader: &Reader<'_, T>,
     package: &PptxPackage,
-    txn: &T,
     slide_id: &str,
 ) -> EditResult<SlideSnapshot> {
-    let slide = slides
-        .get(txn, slide_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
+    let slide = reader
+        .slide(slide_id)
         .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
-    let source_part_path = map_string(&slide, txn, "sourcePartPath");
-    let layout_part_path = map_string(&slide, txn, "layoutPartPath");
+    let (source_part_path, layout_part_path, name, notes) = match &slide {
+        SlideRec::Base(base) => (
+            base.snapshot.source_part_path.clone(),
+            base.snapshot.layout_part_path.clone(),
+            base.snapshot.name.clone(),
+            base.snapshot.notes.clone(),
+        ),
+        SlideRec::Live(map) => (
+            map_string(map, reader.txn, "sourcePartPath"),
+            map_string(map, reader.txn, "layoutPartPath"),
+            map_string(map, reader.txn, "name"),
+            slide_notes(map, reader.txn, package),
+        ),
+    };
     let theme = pptx_parse::slide_theme(
         package,
         source_part_path.as_deref(),
         layout_part_path.as_deref(),
     );
-    let shape_order = slide_shape_order(&slide, txn)?;
-    let mut shape_snapshots = Vec::new();
-    for shape_id in live_shape_order(&shape_order, txn)? {
-        shape_snapshots.push(snapshot_shape(
-            shapes,
-            stories,
-            txn,
+    let mut shapes = Vec::new();
+    for shape_id in reader.slide_shape_ids(&slide)? {
+        shapes.push(project_shape(
+            reader,
             &shape_id,
             &mut HashSet::new(),
             Some(&theme),
         )?);
     }
-    let notes = slide_notes(&slide, txn, package);
     Ok(SlideSnapshot {
         id: slide_id.to_owned(),
         source_part_path,
         layout_part_path,
-        name: map_string(&slide, txn, "name"),
+        name,
         notes,
-        shapes: shape_snapshots,
+        shapes,
     })
+}
+
+pub(crate) fn project_story<T: ReadTxn>(
+    reader: &Reader<'_, T>,
+    story_id: &str,
+) -> EditResult<StorySnapshot> {
+    match reader.story(story_id) {
+        Some(StoryRec::Live(story)) => snapshot_story(&story, reader.txn, story_id),
+        Some(StoryRec::Base(base)) => Ok(base.snapshot.clone()),
+        None => Err(EditError::InvalidState(format!("missing story {story_id}"))),
+    }
+}
+
+pub(crate) fn project_shape<T: ReadTxn>(
+    reader: &Reader<'_, T>,
+    shape_id: &str,
+    visiting: &mut HashSet<String>,
+    theme: Option<&Theme>,
+) -> EditResult<ShapeSnapshot> {
+    if visiting.len() >= MAX_SHAPE_DEPTH {
+        return Err(EditError::InvalidState(format!(
+            "shape nesting exceeds {MAX_SHAPE_DEPTH} levels"
+        )));
+    }
+    if !visiting.insert(shape_id.to_owned()) {
+        return Err(EditError::InvalidState(format!(
+            "shape cycle at {shape_id}"
+        )));
+    }
+    let shape = reader
+        .shape(shape_id)
+        .ok_or_else(|| EditError::InvalidState(format!("missing shape {shape_id}")))?;
+    let (story_ids, child_ids) = reader.shape_lists(&shape)?;
+    let mut text_stories = Vec::with_capacity(story_ids.len());
+    for story_id in story_ids {
+        text_stories.push(project_story(reader, &story_id)?);
+    }
+    let mut children = Vec::with_capacity(child_ids.len());
+    for child_id in child_ids {
+        children.push(project_shape(reader, &child_id, visiting, theme)?);
+    }
+    visiting.remove(shape_id);
+    let mut snapshot = match &shape {
+        ShapeRec::Base(base) => base.snapshot.clone(),
+        ShapeRec::Live(map) => shape_fields(map, reader.txn, shape_id, theme)?,
+    };
+    snapshot.text_stories = text_stories;
+    snapshot.children = children;
+    Ok(snapshot)
 }
 
 pub(crate) fn slide_scope(
     doc: &Doc,
     package: &PptxPackage,
+    index: Option<&BaseIndex>,
     slide_index: usize,
 ) -> EditResult<SlideScope> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
-    let slides = required_map(&txn, SLIDES)?;
-    let shapes = required_map(&txn, SHAPES)?;
-    let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
-    let mut position = 0usize;
-    let mut slide_id = None;
-    for id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(id.clone()) {
-            continue;
-        }
-        if position == slide_index {
-            slide_id = Some(id);
-            break;
-        }
-        position += 1;
-    }
-    let slide_id = slide_id.ok_or(EditError::OutOfBounds {
+    let reader = Reader::new(&txn, index)?;
+    let order = reader.order()?;
+    let slide_id = order.get(slide_index).ok_or(EditError::OutOfBounds {
         index: slide_index.min(u32::MAX as usize) as u32,
-        length: seen_slides.len() as u32,
+        length: order.len() as u32,
     })?;
     Ok(SlideScope {
         index: slide_index,
-        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        slide: project_slide(&reader, package, slide_id)?,
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
     })
 }
 
-pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+pub(crate) fn snapshot_doc(
+    doc: &Doc,
+    package: &PptxPackage,
+    index: Option<&BaseIndex>,
+) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
-    let order = required_order(&txn)?;
-    let slides = required_map(&txn, SLIDES)?;
-    let shapes = required_map(&txn, SHAPES)?;
-    let stories = required_map(&txn, STORIES)?;
-    let mut seen_slides = HashSet::new();
-    let mut slide_snapshots = Vec::new();
-    for slide_id in string_array_ref(&order, &txn) {
-        if !seen_slides.insert(slide_id.clone()) {
-            continue;
-        }
-        slide_snapshots.push(snapshot_slide(
-            &slides, &shapes, &stories, package, &txn, &slide_id,
-        )?);
+    let reader = Reader::new(&txn, index)?;
+    let mut slides = Vec::new();
+    for slide_id in reader.order()? {
+        slides.push(project_slide(&reader, package, &slide_id)?);
     }
     Ok(DeckSnapshot {
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
-        slides: slide_snapshots,
+        slides,
         comment_flavor: snapshot_flavor(&txn)?,
-        comments: snapshot_comments(&txn)?,
+        comments: snapshot_comments(&reader)?,
     })
 }
 
@@ -1221,6 +1493,7 @@ pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPac
         .unwrap_or_default()
 }
 
+/// A seeded-layout shape read straight from the document (proposal previews).
 pub(crate) fn snapshot_shape<T: ReadTxn>(
     shapes: &MapRef,
     stories: &MapRef,
@@ -1258,8 +1531,21 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         )?);
     }
     visiting.remove(shape_id);
-    let fill: Option<ShapeFill> = optional_json(&shape, txn, "fillJson")?;
-    let outline: Option<ShapeOutline> = optional_json(&shape, txn, "outlineJson")?;
+    let mut snapshot = shape_fields(&shape, txn, shape_id, theme)?;
+    snapshot.text_stories = text_snapshots;
+    snapshot.children = children;
+    Ok(snapshot)
+}
+
+/// A shape record's own fields, without its stories and children.
+fn shape_fields<T: ReadTxn>(
+    shape: &MapRef,
+    txn: &T,
+    shape_id: &str,
+    theme: Option<&Theme>,
+) -> EditResult<ShapeSnapshot> {
+    let fill: Option<ShapeFill> = optional_json(shape, txn, "fillJson")?;
+    let outline: Option<ShapeOutline> = optional_json(shape, txn, "outlineJson")?;
     let resolved_fill_color = fill
         .as_ref()
         .filter(|fill| fill.fill_type != "none")
@@ -1269,28 +1555,28 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
-        source_id: required_u32(&shape, txn, "sourceId")?,
-        kind: parse_shape_kind(&required_string(&shape, txn, "kind")?)?,
-        name: required_string(&shape, txn, "name")?,
-        x: required_i64(&shape, txn, "x")?,
-        y: required_i64(&shape, txn, "y")?,
-        width: required_i64(&shape, txn, "width")?,
-        height: required_i64(&shape, txn, "height")?,
-        rotation_deg: map_number(&shape, txn, "rotationDeg").unwrap_or_default(),
-        flip_h: map_bool(&shape, txn, "flipH").unwrap_or_default(),
-        flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
-        hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
-        geometry: required_string(&shape, txn, "geometry")?,
-        adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
-        placeholder: optional_json(&shape, txn, "placeholderJson")?,
+        source_id: required_u32(shape, txn, "sourceId")?,
+        kind: parse_shape_kind(&required_string(shape, txn, "kind")?)?,
+        name: required_string(shape, txn, "name")?,
+        x: required_i64(shape, txn, "x")?,
+        y: required_i64(shape, txn, "y")?,
+        width: required_i64(shape, txn, "width")?,
+        height: required_i64(shape, txn, "height")?,
+        rotation_deg: map_number(shape, txn, "rotationDeg").unwrap_or_default(),
+        flip_h: map_bool(shape, txn, "flipH").unwrap_or_default(),
+        flip_v: map_bool(shape, txn, "flipV").unwrap_or_default(),
+        hidden: map_bool(shape, txn, "hidden").unwrap_or_default(),
+        geometry: required_string(shape, txn, "geometry")?,
+        adjust_values: optional_json(shape, txn, "adjustValuesJson")?.unwrap_or_default(),
+        placeholder: optional_json(shape, txn, "placeholderJson")?,
         fill,
         resolved_fill_color,
         outline,
         resolved_outline_color,
-        media_part_path: map_string(&shape, txn, "mediaPartPath"),
+        media_part_path: map_string(shape, txn, "mediaPartPath"),
         pending_media: match (
-            pending_media_bytes(&shape, txn),
-            map_string(&shape, txn, "pendingMediaContentType"),
+            pending_media_bytes(shape, txn),
+            map_string(shape, txn, "pendingMediaContentType"),
         ) {
             (Some(bytes), Some(content_type)) => Some(PendingMedia {
                 content_type,
@@ -1298,8 +1584,8 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
             }),
             _ => None,
         },
-        blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
-        text_anchor: match map_string(&shape, txn, TEXT_ANCHOR) {
+        blip_effects: optional_json(shape, txn, "blipEffectsJson")?.unwrap_or_default(),
+        text_anchor: match map_string(shape, txn, TEXT_ANCHOR) {
             Some(anchor) => {
                 validate_text_anchor(&anchor)
                     .map_err(|error| EditError::InvalidState(error.to_string()))?;
@@ -1307,9 +1593,9 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
             }
             None => None,
         },
-        graphic: optional_json(&shape, txn, "graphicJson")?,
-        text_stories: text_snapshots,
-        children,
+        graphic: optional_json(shape, txn, "graphicJson")?,
+        text_stories: Vec::new(),
+        children: Vec::new(),
     })
 }
 
@@ -1562,79 +1848,6 @@ pub(crate) fn slide_shape_order<T: ReadTxn>(slide: &MapRef, txn: &T) -> EditResu
         .ok_or_else(|| EditError::InvalidState("slide has no shape order".to_owned()))
 }
 
-fn require_shape_membership<T: ReadTxn>(txn: &T, slide_id: &str, shape_id: &str) -> EditResult<()> {
-    let slide = slide_ref(txn, slide_id)?;
-    let order = slide_shape_order(&slide, txn)?;
-    if array_index(&order, txn, shape_id).is_some() {
-        Ok(())
-    } else {
-        Err(EditError::ShapeNotFound(shape_id.to_owned()))
-    }
-}
-
-fn remove_shape_entries(txn: &mut TransactionMut<'_>, root_shape_ids: &[String]) -> EditResult<()> {
-    let shapes = required_map(txn, SHAPES)?;
-    let stories = required_map(txn, STORIES)?;
-    let mut entries = ShapeEntries::default();
-    for shape_id in root_shape_ids {
-        collect_shape_entries(&shapes, txn, shape_id, &mut HashSet::new(), &mut entries)?;
-    }
-    for story_id in entries.story_ids {
-        stories.remove(txn, &story_id);
-    }
-    for shape_id in entries.shape_ids {
-        shapes.remove(txn, &shape_id);
-    }
-    Ok(())
-}
-
-#[derive(Default)]
-struct ShapeEntries {
-    shape_ids: Vec<String>,
-    seen_shape_ids: HashSet<String>,
-    story_ids: Vec<String>,
-    seen_story_ids: HashSet<String>,
-}
-
-fn collect_shape_entries<T: ReadTxn>(
-    shapes: &MapRef,
-    txn: &T,
-    shape_id: &str,
-    visiting: &mut HashSet<String>,
-    entries: &mut ShapeEntries,
-) -> EditResult<()> {
-    if visiting.len() >= MAX_SHAPE_DEPTH {
-        return Err(EditError::InvalidState(format!(
-            "shape nesting exceeds {MAX_SHAPE_DEPTH} levels"
-        )));
-    }
-    if !visiting.insert(shape_id.to_owned()) {
-        return Err(EditError::InvalidState(format!(
-            "shape cycle at {shape_id}"
-        )));
-    }
-    if entries.seen_shape_ids.contains(shape_id) {
-        visiting.remove(shape_id);
-        return Ok(());
-    }
-    let shape = shapes
-        .get(txn, shape_id)
-        .and_then(|value| value.cast::<MapRef>().ok())
-        .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
-    for story_id in map_string_array(&shape, txn, "textStories")? {
-        if entries.seen_story_ids.insert(story_id.clone()) {
-            entries.story_ids.push(story_id);
-        }
-    }
-    for child_id in map_string_array(&shape, txn, "children")? {
-        collect_shape_entries(shapes, txn, &child_id, visiting, entries)?;
-    }
-    visiting.remove(shape_id);
-    entries.seen_shape_ids.insert(shape_id.to_owned());
-    entries.shape_ids.push(shape_id.to_owned());
-    Ok(())
-}
-
 fn array_index<T: ReadTxn>(array: &ArrayRef, txn: &T, value: &str) -> Option<u32> {
     array
         .iter(txn)
@@ -1860,10 +2073,10 @@ mod tests {
         {
             let mut txn = session.doc.transact_mut();
             let meta = required_map(&txn, META).unwrap();
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION + 1.0);
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_OVERRIDES + 1.0);
         }
         assert!(matches!(
-            validated_snapshot(&session.doc, session.package()),
+            validated_snapshot(&session.doc, session.package(), None),
             Err(EditError::InvalidState(message))
                 if message == "unsupported deck schema version"
         ));
@@ -1975,7 +2188,7 @@ mod tests {
             let package = pptx_parse::parse_pptx(bytes).unwrap();
             let doc = crate::doc_with_client_id(crate::BOOTSTRAP_CLIENT_ID);
             seed_doc(&doc, &package, "").unwrap();
-            let seeded = snapshot_doc(&doc, &package).unwrap();
+            let seeded = snapshot_doc(&doc, &package, None).unwrap();
             let direct = baseline_snapshot(&package).unwrap();
             assert_eq!(seeded, direct, "baseline snapshot differs for file {index}");
         }

@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use pptx_parse::PptxPackage;
 use sha2::{Digest, Sha256};
@@ -17,6 +17,7 @@ use yrs::{
 mod comments;
 mod deck;
 mod model;
+mod overlay;
 mod proposal_diff;
 mod proposals;
 mod save;
@@ -26,6 +27,7 @@ mod undo;
 
 pub use deck::baseline_snapshot;
 pub use model::*;
+pub use overlay::Layout;
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
@@ -76,6 +78,9 @@ pub struct DeckSession {
     client_id: u64,
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
+    layout: Layout,
+    /// The source deck by entry; built on first use in the override layout.
+    base: Arc<OnceLock<overlay::BaseIndex>>,
     undo: RefCell<DeckUndoManager>,
     proposals: RefCell<proposals::ProposalStore>,
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
@@ -98,9 +103,15 @@ fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
 
 impl DeckSession {
     pub fn open(bytes: &[u8], client_id: u64) -> EditResult<Self> {
+        Self::open_with_layout(bytes, client_id, Layout::Seeded)
+    }
+
+    /// Opens a new session from the file, seeding the document in `layout`.
+    pub fn open_with_layout(bytes: &[u8], client_id: u64, layout: Layout) -> EditResult<Self> {
         let package =
             pptx_parse::parse_pptx(bytes).map_err(|error| EditError::Parse(error.to_string()))?;
-        Self::from_package_with_source(package, bytes, client_id)
+        let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Self::from_package_with_fingerprint(package, fingerprint, client_id, layout)
     }
 
     /// Opens an edit session from an already parsed package. The fingerprint
@@ -111,7 +122,7 @@ impl DeckSession {
         let bytes = pptx_parse::write_pptx(&package)
             .map_err(|error| EditError::Parse(error.to_string()))?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+        Self::from_package_with_fingerprint(package, fingerprint, client_id, Layout::Seeded)
     }
 
     /// Opens an edit session from a parsed package, fingerprinting the file
@@ -122,23 +133,37 @@ impl DeckSession {
         client_id: u64,
     ) -> EditResult<Self> {
         let fingerprint = format!("{:x}", Sha256::digest(source));
-        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+        Self::from_package_with_fingerprint(package, fingerprint, client_id, Layout::Seeded)
     }
 
     fn from_package_with_fingerprint(
         package: PptxPackage,
         fingerprint: String,
         client_id: u64,
+        layout: Layout,
     ) -> EditResult<Self> {
-        validate_client_id(client_id)?;
+        validate_client_id(client_id, layout)?;
         let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
-        deck::seed_doc(&bootstrap, &package, &fingerprint)?;
+        match layout {
+            Layout::Seeded => deck::seed_doc(&bootstrap, &package, &fingerprint)?,
+            Layout::Overrides => {
+                overlay::seed_meta(
+                    &mut bootstrap.transact_mut_with("pptx:bootstrap"),
+                    &package,
+                    &fingerprint,
+                );
+            }
+        }
         let baseline = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, &baseline)?;
-        deck::validated_snapshot(&doc, &package)?;
+        let base = Arc::new(OnceLock::new());
+        if layout == Layout::Overrides {
+            let _ = base.set(overlay::BaseIndex::new(&package, &fingerprint)?);
+        }
+        deck::validated_snapshot(&doc, &package, base.get())?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
         let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
@@ -146,6 +171,8 @@ impl DeckSession {
             client_id,
             id_counter: AtomicU64::new(0),
             package: Arc::new(package),
+            layout,
+            base,
             undo: RefCell::new(undo),
             proposals: Default::default(),
             epoch,
@@ -162,10 +189,10 @@ impl DeckSession {
         source: &[u8],
         client_id: u64,
     ) -> EditResult<Self> {
-        validate_client_id(client_id)?;
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
-        deck::validate_meta(&doc)?;
+        let layout = deck::validate_meta(&doc)?;
+        validate_client_id(client_id, layout)?;
         let recorded = deck::fingerprint_from_doc(&doc)?;
         let actual = format!("{:x}", Sha256::digest(source));
         if recorded != actual {
@@ -175,7 +202,11 @@ impl DeckSession {
         }
         let package =
             pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
-        deck::validated_snapshot(&doc, &package)?;
+        let base = Arc::new(OnceLock::new());
+        if layout == Layout::Overrides {
+            let _ = base.set(overlay::BaseIndex::new(&package, &recorded)?);
+        }
+        deck::validated_snapshot(&doc, &package, base.get())?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
         let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
@@ -183,6 +214,8 @@ impl DeckSession {
             client_id,
             id_counter: AtomicU64::new(0),
             package: Arc::new(package),
+            layout,
+            base,
             undo: RefCell::new(undo),
             proposals: Default::default(),
             epoch,
@@ -197,6 +230,44 @@ impl DeckSession {
 
     pub fn package(&self) -> &PptxPackage {
         &self.package
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// The source deck by entry in the override layout; `None` when seeded.
+    pub(crate) fn base_index(&self) -> Option<&overlay::BaseIndex> {
+        self.base.get()
+    }
+
+    /// Copies a source entry into the document before its first edit, as
+    /// its own writer (no-op when seeded, for entries made in the session,
+    /// and for entries already copied by anyone).
+    pub(crate) fn copy(&self, entry: overlay::Entry<'_>) -> EditResult<()> {
+        let Some(index) = self.base_index() else {
+            return Ok(());
+        };
+        let Some(writer) = index.entry_writer(entry) else {
+            return Ok(());
+        };
+        if self
+            .doc
+            .transact()
+            .state_vector()
+            .get(&ClientID::new(writer))
+            > 0
+        {
+            return Ok(());
+        }
+        if let Some(update) = overlay::copy_update(&self.package, index, entry)? {
+            let update = decode_update_v1(&update).map_err(EditError::InvalidUpdate)?;
+            self.doc
+                .transact_mut_with(overlay::COPY_ORIGIN)
+                .apply_update(update)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        }
+        Ok(())
     }
 
     pub fn yrs_doc(&self) -> &Doc {
@@ -250,7 +321,7 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        let snapshot = deck::validated_snapshot(&staged, &self.package)?;
+        let snapshot = deck::validated_snapshot(&staged, &self.package, self.base_index())?;
         deck::validate_remote_meta(&self.doc, &staged)?;
 
         let diff = staged
@@ -339,11 +410,20 @@ impl DeckSession {
 pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
+    // Prototype only: the lockstep property test runs without garbage
+    // collection, which has a use-after-free under concurrent deletes
+    // (override-seeds REPORT, reproduced on capy-ci 21e57bee).
+    options.skip_gc = std::env::var_os("PPTX_EDIT_SKIP_GC").is_some();
     Doc::with_options(options)
 }
 
-fn validate_client_id(client_id: u64) -> EditResult<()> {
-    if client_id == 0 || client_id > MAX_SAFE_CLIENT_ID {
+fn validate_client_id(client_id: u64, layout: Layout) -> EditResult<()> {
+    let limit = match layout {
+        Layout::Seeded => MAX_SAFE_CLIENT_ID,
+        // Copies of source entries are written above every session.
+        Layout::Overrides => overlay::RESERVED_CLIENTS - 1,
+    };
+    if client_id == 0 || client_id > limit {
         return Err(EditError::InvalidClientId(client_id));
     }
     Ok(())

@@ -294,6 +294,8 @@ impl DeckSession {
             client_id: self.client_id,
             id_counter: self.id_counter.load(Ordering::Relaxed).into(),
             package: self.package.clone(),
+            layout: self.layout,
+            base: self.base.clone(),
             undo: std::cell::RefCell::new(undo),
             proposals: Default::default(),
             epoch,
@@ -303,7 +305,8 @@ impl DeckSession {
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        let snapshot = crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        let snapshot =
+            crate::deck::validated_snapshot(&preview.doc, &self.package, self.base_index())?;
         Ok((preview, snapshot))
     }
 }

@@ -6,11 +6,12 @@ use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
+    Any, Assoc, Doc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
     TextPrelim, TextRef, Transact, TransactionMut,
 };
 
 use crate::model::{source_paragraph_index, validate_xml_text};
+use crate::overlay::{Entry, Reader, StoryRec};
 use crate::{
     Bullet, BulletFont, CaretAnchor, DeckSession, EditError, EditResult, KIND, LineSpacing,
     PARA_ID, PILCROW_KIND, PROPERTIES_FROM, ParagraphSnapshot, ParagraphSpacing, STORIES,
@@ -292,12 +293,61 @@ fn append_pilcrow(
 impl DeckSession {
     pub fn story(&self, story_id: &str) -> EditResult<StorySnapshot> {
         let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
-        snapshot_story(&story, &txn, story_id)
+        let reader = Reader::new(&txn, self.base_index())?;
+        if reader.story(story_id).is_none() {
+            return Err(EditError::StoryNotFound(story_id.to_owned()));
+        }
+        crate::deck::project_story(&reader, story_id)
+    }
+
+    /// Copies a source story into the document before its first edit; a
+    /// story whose shape left the deck is gone.
+    pub(crate) fn copy_story(&self, story_id: &str) -> EditResult<()> {
+        let Some(index) = self.base_index() else {
+            return Ok(());
+        };
+        let Some(base) = index.stories.get(story_id) else {
+            return Ok(());
+        };
+        {
+            let txn = self.doc.transact();
+            let reader = Reader::new(&txn, Some(index))?;
+            if reader.copied(base.writer) {
+                return Ok(());
+            }
+            if !reader.base_shape_live(&base.shape_id)? {
+                return Err(EditError::StoryNotFound(story_id.to_owned()));
+            }
+        }
+        self.copy(Entry::Story(story_id))
+    }
+
+    /// The story a caret anchors in, with the document it lives in: the
+    /// session's once the story is there, else a scratch copy holding only
+    /// it. Copies are deterministic, so an anchor taken in the scratch copy
+    /// names the items every peer's copy of the story will have.
+    fn anchor_story(&self, story_id: &str) -> EditResult<Option<Doc>> {
+        let Some(index) = self.base_index() else {
+            return Ok(None);
+        };
+        let txn = self.doc.transact();
+        let reader = Reader::new(&txn, Some(index))?;
+        if !matches!(reader.story(story_id), Some(StoryRec::Base(_))) {
+            return Ok(None);
+        }
+        let scratch = crate::doc_with_client_id(crate::MAX_SAFE_CLIENT_ID);
+        if let Some(update) =
+            crate::overlay::copy_update(&self.package, index, Entry::Story(story_id))?
+        {
+            crate::hydrate_doc(&scratch, &update)?;
+        }
+        Ok(Some(scratch))
     }
 
     pub fn anchor_caret(&self, story_id: &str, index: u32) -> EditResult<CaretAnchor> {
-        let txn = self.doc.transact();
+        let scratch = self.anchor_story(story_id)?;
+        let doc = scratch.as_ref().unwrap_or(&self.doc);
+        let txn = doc.transact();
         let story = story_ref(&txn, story_id)?;
         let length = final_pilcrow_index(&story, &txn)?;
         if index > length {
@@ -317,7 +367,9 @@ impl DeckSession {
     }
 
     pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
-        let txn = self.doc.transact();
+        let scratch = self.anchor_story(&anchor.story_id).ok()?;
+        let doc = scratch.as_ref().unwrap_or(&self.doc);
+        let txn = doc.transact();
         let story = story_ref(&txn, &anchor.story_id).ok()?;
         let offset = anchor.position.get_offset(&txn)?;
         let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
@@ -338,6 +390,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
         validate_text_style(style)?;
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -366,6 +419,7 @@ impl DeckSession {
         start: u32,
         end: u32,
     ) -> EditResult<TextReceipt> {
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_range(&story, &txn, start, end)?;
@@ -397,6 +451,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
         validate_text_style(style)?;
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -443,6 +498,7 @@ impl DeckSession {
             patch.baseline_pct,
         )?;
         validate_run_extras(patch.strike.as_deref(), patch.highlight.as_deref())?;
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -474,6 +530,7 @@ impl DeckSession {
         alignment: Option<&str>,
     ) -> EditResult<TextReceipt> {
         validate_alignment(alignment)?;
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -522,6 +579,7 @@ impl DeckSession {
                 .collect::<EditResult<_>>()?,
             None => RUN_ATTRIBUTES.to_vec(),
         };
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -568,6 +626,7 @@ impl DeckSession {
             validate_list_levels(levels)?;
         }
         let source = crate::deck::source_text_body(&self.package, story_id);
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -696,6 +755,7 @@ impl DeckSession {
             validate_list_levels(levels)?;
         }
         let source = crate::deck::source_text_body(&self.package, story_id);
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -751,6 +811,7 @@ impl DeckSession {
         {
             validate_spacing(value)?;
         }
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
@@ -782,6 +843,7 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -808,6 +870,7 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
+        self.copy_story(story_id)?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;

@@ -96,7 +96,8 @@ impl DeckSession {
                     new_text,
                 });
             }
-            (changes, snapshot_flavor(&txn)?, snapshot_comments(&txn)?)
+            let reader = crate::overlay::Reader::new(&txn, preview.base_index())?;
+            (changes, snapshot_flavor(&txn)?, snapshot_comments(&reader)?)
         };
         proposal.changes = changes;
         let mut scope = preview.slide_scope(slide_index)?;
@@ -154,6 +155,8 @@ impl DeckSession {
             client_id: self.client_id,
             id_counter: self.id_counter.load(Ordering::Relaxed).into(),
             package: self.package.clone(),
+            layout: self.layout,
+            base: self.base.clone(),
             undo: std::cell::RefCell::new(undo),
             proposals: Default::default(),
             epoch,
@@ -163,7 +166,7 @@ impl DeckSession {
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        crate::deck::validated_snapshot(&preview.doc, &self.package, self.base_index())?;
         Ok(preview)
     }
 

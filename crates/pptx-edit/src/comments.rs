@@ -3,9 +3,9 @@ use sha2::{Digest, Sha256};
 use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
 
 use crate::deck::{map_bool, map_number, map_string, required_map};
+use crate::overlay::{Entry, Reader};
 use crate::{
     COMMENTS, CommentReceipt, CommentSnapshot, DeckSession, EditCtx, EditError, EditResult, META,
-    SLIDES,
 };
 
 pub(crate) fn seeded_comment_id(index: usize, source_id: &str) -> String {
@@ -68,9 +68,32 @@ pub(crate) fn seed_comments(
     Ok(())
 }
 
-pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSnapshot>> {
+/// The comments of slides still in the deck: the source's until a comment
+/// edit copies them (every comment edit copies them first), then the map's.
+pub(crate) fn snapshot_comments<T: ReadTxn>(
+    reader: &Reader<'_, T>,
+) -> EditResult<Vec<CommentSnapshot>> {
+    let txn = reader.txn;
     let comments = required_map(txn, COMMENTS)?;
-    let slides = required_map(txn, SLIDES)?;
+    let live: Option<std::collections::HashSet<String>> = match reader.index {
+        Some(_) => Some(reader.order()?.into_iter().collect()),
+        None => None,
+    };
+    let slide_live = |slide_id: &str| match &live {
+        Some(live) => live.contains(slide_id),
+        None => reader.slides.contains_key(txn, slide_id),
+    };
+    if let Some(index) = reader.index
+        && !index.comments.is_empty()
+        && !reader.copied(index.comments_writer)
+    {
+        return Ok(index
+            .comments
+            .iter()
+            .filter(|comment| slide_live(&comment.slide_id))
+            .cloned()
+            .collect());
+    }
     let mut output = Vec::new();
     for (id, value) in comments.iter(txn) {
         let Ok(entry) = value.cast::<MapRef>() else {
@@ -79,7 +102,7 @@ pub(crate) fn snapshot_comments<T: ReadTxn>(txn: &T) -> EditResult<Vec<CommentSn
             )));
         };
         let slide_id = map_string(&entry, txn, "slideId").unwrap_or_default();
-        if !slides.contains_key(txn, &slide_id) {
+        if !slide_live(&slide_id) {
             continue;
         }
         output.push(CommentSnapshot {
@@ -250,10 +273,11 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("comment text is empty".into()));
         }
+        self.require_slide(slide_id)?;
+        self.copy(Entry::Comments)?;
         self.automatic_undo_barrier();
         let comment_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
-        crate::deck::slide_ref(&txn, slide_id)?;
         let comments = required_map(&txn, COMMENTS)?;
         let entry = comments.insert(&mut txn, comment_id.as_str(), MapPrelim::default());
         entry.insert(&mut txn, "id", comment_id.as_str());
@@ -288,6 +312,7 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("reply text is empty".into()));
         }
+        self.copy(Entry::Comments)?;
         self.automatic_undo_barrier();
         let reply_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
@@ -334,6 +359,7 @@ impl DeckSession {
                 "coordinates exceed safe integer range".into(),
             ));
         }
+        self.copy(Entry::Comments)?;
         {
             let txn = self.doc.transact();
             let comments = required_map(&txn, COMMENTS)?;
@@ -368,6 +394,7 @@ impl DeckSession {
         comment_id: &str,
         resolved: bool,
     ) -> EditResult<CommentReceipt> {
+        self.copy(Entry::Comments)?;
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         require_modern(&txn)?;
@@ -391,6 +418,7 @@ impl DeckSession {
         context: &EditCtx,
         comment_id: &str,
     ) -> EditResult<CommentReceipt> {
+        self.copy(Entry::Comments)?;
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let comments = required_map(&txn, COMMENTS)?;
@@ -425,6 +453,7 @@ impl DeckSession {
         context: &EditCtx,
         flavor: CommentFlavor,
     ) -> EditResult<CommentFlavor> {
+        self.copy(Entry::Comments)?;
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let comments = required_map(&txn, COMMENTS)?;
@@ -441,7 +470,8 @@ impl DeckSession {
     }
 
     pub fn comments(&self) -> EditResult<Vec<CommentSnapshot>> {
-        snapshot_comments(&self.doc.transact())
+        let txn = self.doc.transact();
+        snapshot_comments(&Reader::new(&txn, self.base_index())?)
     }
 
     pub fn comment_flavor(&self) -> EditResult<CommentFlavor> {
