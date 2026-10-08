@@ -65,7 +65,12 @@ struct World {
     peers: Vec<Peer>,
     /// Every message sent, with its author.
     log: Vec<(usize, Vec<u8>)>,
+    /// Whether a message came from applying a peer's update (a forwarded
+    /// cleanup, a rename or a field re-read) rather than from an op.
+    system: Vec<bool>,
     seen: Vec<BTreeSet<usize>>,
+    /// Cleanup messages a peer sent while applying another cleanup message.
+    echoes: usize,
 }
 
 fn open_peer(base: &[u8], client: u64, chunked: bool) -> Peer {
@@ -78,8 +83,11 @@ fn open_peer(base: &[u8], client: u64, chunked: bool) -> Peer {
     }
     let outbox = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&outbox);
+    // D3: replicas send their formatting cleanup unless the mode is `on`.
     let subscription = doc
-        .observe_shared_updates(true, move |update| sink.borrow_mut().push(update))
+        .observe_shared_updates(cleanup_mode() != CleanupMode::On, move |update| {
+            sink.borrow_mut().push(update)
+        })
         .unwrap();
     let undo = UndoSession::new();
     undo.track(&doc);
@@ -99,16 +107,27 @@ impl World {
                 .map(|peer| open_peer(base, 701 + peer as u64, chunked))
                 .collect(),
             log: Vec::new(),
+            system: Vec::new(),
             seen: vec![BTreeSet::new(); peers],
+            echoes: 0,
         }
     }
 
     fn drain(&mut self, peer: usize) {
+        self.drain_as(peer, false);
+    }
+
+    /// Logs what `peer` sent; returns how many of them were cleanups.
+    fn drain_as(&mut self, peer: usize, system: bool) -> usize {
         let sent: Vec<_> = self.peers[peer].outbox.borrow_mut().drain(..).collect();
+        let mut cleanups = 0;
         for message in sent {
+            cleanups += usize::from(system && blockless(&message));
             self.seen[peer].insert(self.log.len());
             self.log.push((peer, message));
+            self.system.push(system);
         }
+        cleanups
     }
 
     /// Delivers to `to` every message `from` has that `to` lacks.
@@ -124,7 +143,10 @@ impl World {
                 .doc
                 .apply_peer_update_v1(&message)
                 .map_err(|error| error.to_string())?;
-            self.drain(to);
+            let cleanups = self.drain_as(to, true);
+            if self.system[index] && blockless(&message) {
+                self.echoes += cleanups;
+            }
         }
         Ok(())
     }
@@ -208,6 +230,7 @@ enum Op {
     /// A paragraph by story and index (its id differs by layout once renamed).
     Merge(String, usize, bool),
     Bold(String, u32, u32),
+    Italic(String, u32, u32),
     Align(String, usize),
     List(String, usize),
     Paste(String, u32, u32, Vec<String>),
@@ -465,6 +488,10 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
             .map_err(|error| error.to_string())),
         Op::Bold(story, from, to) => doc
             .toggle_format(&ctx(), StoryRange::new(story, *from, *to), SimpleFormat::Bold)
+            .map(drop)
+            .map_err(|error| error.to_string()),
+        Op::Italic(story, from, to) => doc
+            .toggle_format(&ctx(), StoryRange::new(story, *from, *to), SimpleFormat::Italic)
             .map(drop)
             .map_err(|error| error.to_string()),
         Op::Align(story, index) => para_at(story, *index).and_then(|para| doc
@@ -1875,4 +1902,728 @@ fn rebase_on_materialized_chunked_states_lands_as_today() {
         today.state.len(),
         chunked.state.len()
     );
+}
+
+// D3 (spike measurement): yrs's formatting cleanup `on` (every replica and
+// the room clean for themselves, as production does today), `off` (nobody
+// cleans) or `sent` (each replica sends the deletions its cleanup made; the
+// room does not clean). `CHUNKED_CLEANUP_MODE`; `off` also needs
+// `DOCX_EDIT_FORMAT_CLEANUP=0` for the sessions. Results go to `D3_OUT` as
+// JSON lines; run the `d3_` tests with `--ignored --test-threads=1`.
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CleanupMode {
+    On,
+    Off,
+    Sent,
+}
+
+fn cleanup_mode() -> CleanupMode {
+    let mode = match std::env::var("CHUNKED_CLEANUP_MODE").as_deref() {
+        Ok("on") => CleanupMode::On,
+        Ok("off") => CleanupMode::Off,
+        _ => CleanupMode::Sent,
+    };
+    let sessions_clean = !std::env::var("DOCX_EDIT_FORMAT_CLEANUP").is_ok_and(|value| value == "0");
+    if std::env::var("CHUNKED_CLEANUP_MODE").is_ok() {
+        assert_eq!(
+            mode == CleanupMode::Off,
+            !sessions_clean,
+            "CHUNKED_CLEANUP_MODE=off goes with DOCX_EDIT_FORMAT_CLEANUP=0"
+        );
+    }
+    mode
+}
+
+/// An update without structs: a deletion only.
+fn blockless(update: &[u8]) -> bool {
+    yrs::Update::decode_v1(update).is_ok_and(|update| update.blocks().next().is_none())
+}
+
+struct Counting;
+static LIVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        LIVE.fetch_add(layout.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        LIVE.fetch_sub(layout.size() as isize, std::sync::atomic::Ordering::Relaxed);
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        LIVE.fetch_add(
+            new_size as isize - layout.size() as isize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The server's room: a yrs document applying every logged message in its
+/// own transaction, cleaning only in the `on` mode.
+struct RoomTrack {
+    doc: yrs::Doc,
+    applied: usize,
+    regular_us: Vec<f64>,
+    cleanup_us: Vec<f64>,
+    saves: Vec<usize>,
+    vector: yrs::StateVector,
+}
+
+impl RoomTrack {
+    fn new(seed: &[u8], clean: bool) -> Self {
+        let mut options = yrs::Options::with_client_id(yrs::ClientID::new(9));
+        options.offset_kind = yrs::OffsetKind::Utf16;
+        options.cleanup_formatting = clean;
+        let doc = yrs::Doc::with_options(options);
+        doc.transact_mut()
+            .apply_update(yrs::Update::decode_v1(seed).unwrap())
+            .unwrap();
+        let vector = doc.transact().state_vector();
+        Self {
+            doc,
+            applied: 0,
+            regular_us: Vec::new(),
+            cleanup_us: Vec::new(),
+            saves: Vec::new(),
+            vector,
+        }
+    }
+
+    fn catch_up(&mut self, world: &World) {
+        while self.applied < world.log.len() {
+            let message = &world.log[self.applied].1;
+            let cleanup = world.system[self.applied] && blockless(message);
+            let started = std::time::Instant::now();
+            self.doc
+                .transact_mut()
+                .apply_update(yrs::Update::decode_v1(message).unwrap())
+                .unwrap();
+            let micros = started.elapsed().as_secs_f64() * 1e6;
+            if cleanup {
+                self.cleanup_us.push(micros);
+            } else {
+                self.regular_us.push(micros);
+            }
+            self.applied += 1;
+        }
+    }
+
+    /// The change a save stores: the room's diff against the last save.
+    fn save(&mut self) {
+        let txn = self.doc.transact();
+        self.saves
+            .push(txn.encode_state_as_update_v1(&self.vector).len());
+        self.vector = txn.state_vector();
+    }
+
+    fn state(&self) -> Vec<u8> {
+        self.doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default())
+    }
+}
+
+/// Live format items over every story, and how many of them change nothing:
+/// a value the attribute already has, or one overridden before any content.
+fn format_items(doc: &yrs::Doc) -> (usize, usize) {
+    use yrs::block::ItemContent;
+    use yrs::types::Attrs;
+    let txn = doc.transact();
+    let Some(stories) = txn.get_map("stories") else {
+        return (0, 0);
+    };
+    let (mut live, mut redundant) = (0, 0);
+    for (_, story) in yrs::Map::iter(&stories, &txn) {
+        let yrs::Out::YText(story) = story else {
+            continue;
+        };
+        let mut current: Attrs = Attrs::new();
+        let mut since_content: HashMap<std::sync::Arc<str>, usize> = HashMap::new();
+        let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&story).start();
+        while let Some(at) = item {
+            item = at.right();
+            if at.is_deleted() {
+                continue;
+            }
+            match at.content() {
+                ItemContent::Format(key, value) => {
+                    live += 1;
+                    let now = current.get(key).cloned().unwrap_or(Any::Null);
+                    if now == **value || since_content.contains_key(key) {
+                        // A no-op, or the earlier marker for the key is
+                        // overridden before any content.
+                        redundant += 1;
+                    }
+                    *since_content.entry(key.clone()).or_default() += 1;
+                    if **value == Any::Null {
+                        current.remove(key);
+                    } else {
+                        current.insert(key.clone(), (**value).clone());
+                    }
+                }
+                _ => since_content.clear(),
+            }
+        }
+    }
+    (live, redundant)
+}
+
+/// `word/document.xml`: its size, its runs, and adjacent text runs with the
+/// same properties (a split a clean document would not have).
+fn xml_runs(docx: &[u8]) -> (usize, usize, usize) {
+    let parts = ooxml_opc::unzip_parts(docx).unwrap();
+    let xml = parts
+        .iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let (mut runs, mut mergeable) = (0, 0);
+    let mut previous: Option<(usize, String, bool)> = None;
+    let mut at = 0;
+    while let Some(offset) = xml[at..].find("<w:r") {
+        let start = at + offset;
+        let next = xml.as_bytes().get(start + 4).copied();
+        if !matches!(next, Some(b'>') | Some(b' ')) {
+            at = start + 4;
+            continue;
+        }
+        let Some(length) = xml[start..].find("</w:r>") else {
+            break;
+        };
+        let end = start + length + 6;
+        let body = &xml[start..end];
+        let properties = body
+            .find("<w:rPr>")
+            .and_then(|open| {
+                body[open..]
+                    .find("</w:rPr>")
+                    .map(|close| body[open..open + close].to_owned())
+            })
+            .unwrap_or_default();
+        let others = [
+            "<w:drawing",
+            "<w:fldChar",
+            "<w:instrText",
+            "<w:br",
+            "<w:tab",
+            "<w:sym",
+            "<w:footnoteReference",
+            "<w:endnoteReference",
+            "<w:commentReference",
+            "<w:object",
+            "<w:pict",
+        ];
+        let text_only = body.contains("<w:t") && others.iter().all(|tag| !body.contains(tag));
+        if let Some((previous_end, previous_properties, previous_text)) = &previous
+            && *previous_end == start
+            && *previous_properties == properties
+            && *previous_text
+            && text_only
+        {
+            mergeable += 1;
+        }
+        runs += 1;
+        previous = Some((end, properties, text_only));
+        at = end;
+    }
+    (xml.len(), runs, mergeable)
+}
+
+fn median_of(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values[values.len() / 2]
+}
+
+/// Everything D3 compares, for a world and its room after a full sync.
+fn d3_metrics(base: &[u8], world: &World, room: &RoomTrack) -> serde_json::Value {
+    let state = room.state();
+    let sha = office_service::sha256_hex(base);
+    let determinism = Determinism {
+        seed: "0000000000000000000000000000000000000000000000000000000000000000",
+        now: "2026-10-08T00:00:00.000Z",
+    };
+    let heap = {
+        let before = LIVE.load(std::sync::atomic::Ordering::Relaxed);
+        let doc = yrs::Doc::new();
+        doc.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&state).unwrap())
+            .unwrap();
+        let heap = LIVE.load(std::sync::atomic::Ordering::Relaxed) - before;
+        drop(doc);
+        heap
+    };
+    let export = office_service::export(base, checkpoint(&sha, &state), determinism)
+        .map_err(|error| error.to_string());
+    let (xml_bytes, runs, mergeable) = export.as_ref().map_or((0, 0, 0), |bytes| xml_runs(bytes));
+    let baseline = office_service::baseline(base, checkpoint(&sha, &state))
+        .map(|entries| {
+            (
+                entries.len(),
+                office_service::sha256_hex(
+                    renamed_ids_hidden(&object_ids_hidden(&format!("{entries:?}"))).as_bytes(),
+                ),
+            )
+        })
+        .unwrap_or((0, String::new()));
+    let room_view = {
+        let doc = EditingDoc::new(990);
+        doc.load_state_v1(&state).unwrap();
+        let text = renamed_ids_hidden(&dump(&doc));
+        if let Ok(path) = std::env::var("D3_DUMP") {
+            std::fs::write(format!("{path}.{}.txt", mode_name(cleanup_mode())), &text).unwrap();
+        }
+        office_service::sha256_hex(text.as_bytes())
+    };
+    let dumps: Vec<String> = world.peers.iter().map(|peer| dump(&peer.doc)).collect();
+    let diverged = dumps.iter().filter(|other| **other != dumps[0]).count();
+    let (room_live, room_redundant) = format_items(&room.doc);
+    let (peer_live, peer_redundant) = format_items(world.peers[0].doc.yrs_doc());
+    let cleanups: Vec<&Vec<u8>> = world
+        .log
+        .iter()
+        .zip(&world.system)
+        .filter(|((_, message), system)| **system && blockless(message))
+        .map(|((_, message), _)| message)
+        .collect();
+    let distinct: BTreeSet<String> = cleanups
+        .iter()
+        .map(|message| {
+            format!(
+                "{:?}",
+                yrs::Update::decode_v1(message).unwrap().delete_set()
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "roomBytes": state.len(),
+        "roomHeap": heap,
+        "saves": room.saves,
+        "storedTotal": room.saves.iter().sum::<usize>(),
+        "storedLast": room.saves.last().copied().unwrap_or(0),
+        "roomFormatLive": room_live,
+        "roomFormatRedundant": room_redundant,
+        "peerFormatLive": peer_live,
+        "peerFormatRedundant": peer_redundant,
+        "exportBytes": export.as_ref().map_or(0, Vec::len),
+        "exportError": export.as_ref().err(),
+        "documentXmlBytes": xml_bytes,
+        "runs": runs,
+        "mergeableRuns": mergeable,
+        "baselineEntries": baseline.0,
+        "baselineHash": baseline.1,
+        "roomViewHash": room_view,
+        "peersDiverged": diverged,
+        "messages": world.log.len(),
+        "cleanupMessages": cleanups.len(),
+        "cleanupBytes": cleanups.iter().map(|message| message.len()).sum::<usize>(),
+        "distinctCleanups": distinct.len(),
+        "echoes": world.echoes,
+        "roomRegularApplyUsMedian": median_of(room.regular_us.clone()),
+        "roomCleanupApplyUsMedian": median_of(room.cleanup_us.clone()),
+        "roomCleanupApplyUsTotal": room.cleanup_us.iter().sum::<f64>(),
+        "roomRegularApplyUsTotal": room.regular_us.iter().sum::<f64>(),
+    })
+}
+
+fn d3_write(line: serde_json::Value) {
+    use std::io::Write;
+    let path = std::env::var("D3_OUT").expect("D3_OUT names the output file");
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(out, "{line}").unwrap();
+}
+
+fn mode_name(mode: CleanupMode) -> &'static str {
+    match mode {
+        CleanupMode::On => "on",
+        CleanupMode::Off => "off",
+        CleanupMode::Sent => "sent",
+    }
+}
+
+fn seed_state_of(base: &[u8]) -> Vec<u8> {
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, base).unwrap();
+    doc.encode_state_as_update_v1()
+}
+
+/// The lockstep's random schedule in today's layout only, with the room
+/// saved at every round's end.
+fn d3_schedule(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops: usize) {
+    let mode = cleanup_mode();
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut world = World::new(base, peers, false);
+    let mut room = RoomTrack::new(&seed_state_of(base), mode == CleanupMode::On);
+    let focus = layout(&world.peers[0].doc, "body")
+        .1
+        .get(1)
+        .map(|paragraph| paragraph.0.clone());
+    let mut applied = 0;
+    let trace = std::env::var("CHUNKED_TRACE").ok() == Some(seed.to_string());
+    for round in 0..rounds {
+        for step in 0..ops {
+            for peer in 0..peers {
+                let marker = format!("<{peer}.{round}.{step}>");
+                let focused = (round == 0 && step == 0)
+                    .then_some(focus.as_deref())
+                    .flatten();
+                let op = choose(&mut rng, &world.peers[peer].doc, focused, marker);
+                let outcome = attempt(&world.peers[peer], &op);
+                if trace {
+                    eprintln!("r{round} s{step} p{peer} {op:?} -> {outcome:?}");
+                }
+                applied += usize::from(outcome.is_ok());
+                world.drain(peer);
+            }
+        }
+        let pairs: Vec<(usize, usize)> = (0..peers * 2)
+            .map(|_| (rng.below(peers), rng.below(peers)))
+            .filter(|(from, to)| from != to)
+            .collect();
+        for (from, to) in pairs {
+            world.sync(from, to).unwrap();
+            if trace {
+                eprintln!("r{round} sync {from}->{to}");
+            }
+        }
+        room.catch_up(&world);
+        room.save();
+    }
+    world.sync_all();
+    room.catch_up(&world);
+    room.save();
+    let mut line = d3_metrics(base, &world, &room);
+    let object = line.as_object_mut().unwrap();
+    object.insert("kind".into(), "schedule".into());
+    object.insert("fixture".into(), name.into());
+    object.insert("seed".into(), seed.into());
+    object.insert("peers".into(), peers.into());
+    object.insert("mode".into(), mode_name(mode).into());
+    object.insert("applied".into(), applied.into());
+    d3_write(line);
+}
+
+#[test]
+#[ignore = "D3 measurement: CHUNKED_CLEANUP_MODE, D3_OUT"]
+fn d3_random_schedules() {
+    let seeds: u64 = std::env::var("CHUNKED_SEEDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(6);
+    let only: Option<u64> = std::env::var("CHUNKED_SEED")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let fixture = std::env::var("CHUNKED_FIXTURE").ok();
+    for (name, base) in fixtures() {
+        if fixture.as_ref().is_some_and(|only| *only != name) {
+            continue;
+        }
+        for seed in 0..seeds {
+            for peers in [2, 3] {
+                let seed = seed * 31 + peers as u64;
+                if only.is_some_and(|only| only != seed) {
+                    continue;
+                }
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    d3_schedule(&name, &base, seed, peers, 4, 3)
+                }));
+                if let Err(panic) = outcome {
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+                        .unwrap_or_default();
+                    d3_write(serde_json::json!({
+                        "kind": "schedule", "fixture": name, "seed": seed, "peers": peers,
+                        "mode": mode_name(cleanup_mode()), "panicked": message,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// The paragraph `index` of `peer`'s body: its first unit and its mark.
+fn d3_para(peer: &Peer, index: usize) -> (u32, u32) {
+    let (_, paragraphs) = layout(&peer.doc, "body");
+    let (_, start, mark) = paragraphs[index.min(paragraphs.len() - 1)].clone();
+    (start, mark)
+}
+
+fn d3_op(world: &mut World, peer: usize, op: Op) {
+    let _ = attempt(&world.peers[peer], &op);
+    world.drain(peer);
+}
+
+/// The bold-then-italic span of a round: the last 20 units of a paragraph
+/// and the first 10 of the next.
+fn d3_span(peer: &Peer, paragraph: usize) -> (u32, u32) {
+    let (start, mark) = d3_para(peer, paragraph);
+    let (_, next_mark) = d3_para(peer, paragraph + 1);
+    (
+        mark.saturating_sub(20).max(start),
+        (mark + 10).min(next_mark),
+    )
+}
+
+/// Three peers typing, formatting, pasting and undoing on a long file, with
+/// one select-all delete and its Undo; the room saved every round.
+fn d3_session(name: &str, base: &[u8], rounds: usize) {
+    let mode = cleanup_mode();
+    let mut world = World::new(base, 3, false);
+    let mut room = RoomTrack::new(&seed_state_of(base), mode == CleanupMode::On);
+    let mut timeline = Vec::new();
+    for round in 0..rounds {
+        let paragraph = 4 + 3 * round;
+        // Peer 0 types a word at the end of a paragraph, key by key.
+        for character in format!(" word{round}").chars() {
+            let (_, mark) = d3_para(&world.peers[0], paragraph);
+            d3_op(
+                &mut world,
+                0,
+                Op::Insert("body".into(), mark, character.to_string()),
+            );
+        }
+        // Peer 1 bolds across the paragraph's end, then italicizes inside.
+        let (from, to) = d3_span(&world.peers[1], paragraph);
+        d3_op(&mut world, 1, Op::Bold("body".into(), from, to));
+        d3_op(
+            &mut world,
+            1,
+            Op::Italic("body".into(), from + 5, to.saturating_sub(5).max(from + 6)),
+        );
+        // Peer 2 pastes three lines over a few characters further down.
+        let (start, mark) = d3_para(&world.peers[2], paragraph + 10);
+        d3_op(
+            &mut world,
+            2,
+            Op::Paste(
+                "body".into(),
+                start,
+                (start + 5).min(mark),
+                vec![
+                    format!("pasted {round} a"),
+                    format!("pasted {round} b"),
+                    format!("pasted {round} c"),
+                ],
+            ),
+        );
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            world.sync(from, to).unwrap();
+        }
+        // Peer 0 undoes three keys; peer 1 takes the bold off again.
+        for _ in 0..3 {
+            d3_op(&mut world, 0, Op::Undo);
+        }
+        let (from, to) = d3_span(&world.peers[1], paragraph);
+        d3_op(&mut world, 1, Op::Bold("body".into(), from, to));
+        if round == rounds / 2 && !std::env::var("D3_SELECT_ALL").is_ok_and(|value| value == "0") {
+            // Peer 2 selects all and deletes while peer 0 types; then Undo.
+            d3_op(&mut world, 2, Op::SelectAll("body".into()));
+            let (_, mark) = d3_para(&world.peers[0], paragraph + 2);
+            d3_op(
+                &mut world,
+                0,
+                Op::Insert("body".into(), mark, "late".into()),
+            );
+            for (from, to) in [(2, 0), (0, 2), (2, 1), (0, 1)] {
+                world.sync(from, to).unwrap();
+            }
+            d3_op(&mut world, 2, Op::Undo);
+        }
+        for (from, to) in [(0, 1), (1, 0), (2, 0), (0, 2), (1, 2)] {
+            world.sync(from, to).unwrap();
+        }
+        room.catch_up(&world);
+        room.save();
+        let (live, redundant) = format_items(&room.doc);
+        timeline.push(serde_json::json!([live, redundant]));
+    }
+    world.sync_all();
+    room.catch_up(&world);
+    room.save();
+    let mut line = d3_metrics(base, &world, &room);
+    let object = line.as_object_mut().unwrap();
+    object.insert(
+        "kind".into(),
+        if std::env::var("D3_SELECT_ALL").is_ok_and(|value| value == "0") {
+            "session-without-select-all"
+        } else {
+            "session"
+        }
+        .into(),
+    );
+    object.insert("fixture".into(), name.into());
+    object.insert("mode".into(), mode_name(mode).into());
+    object.insert("roomFormatTimeline".into(), timeline.into());
+    d3_write(line);
+}
+
+#[test]
+#[ignore = "D3 measurement: CHUNKED_CLEANUP_MODE, D3_OUT, D3_FILES"]
+fn d3_sessions_on_long_files() {
+    let files = std::env::var("D3_FILES").expect("D3_FILES lists .docx paths, separated by ;");
+    let rounds: usize = std::env::var("D3_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+    for path in files.split(';') {
+        let base = std::fs::read(path).unwrap();
+        let name = Path::new(path)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        d3_session(&name, &base, rounds);
+    }
+}
+
+/// The worst case: two peers turn bold on and off over overlapping words at
+/// the same time, again and again (one peer alone leaves nothing redundant:
+/// a local format deletes the markers inside its range), one of them also
+/// typing inside; both synced after every step.
+#[test]
+#[ignore = "D3 measurement: CHUNKED_CLEANUP_MODE, D3_OUT"]
+fn d3_bold_toggled_over_one_range() {
+    let mode = cleanup_mode();
+    let base =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stories.docx"))
+            .unwrap();
+    let mut world = World::new(&base, 2, false);
+    let mut room = RoomTrack::new(&seed_state_of(&base), mode == CleanupMode::On);
+    let toggles: usize = std::env::var("D3_TOGGLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(60);
+    let mut timeline = Vec::new();
+    for toggle in 1..=toggles {
+        let (start, mark) = d3_para(&world.peers[0], 1);
+        d3_op(
+            &mut world,
+            0,
+            Op::Bold("body".into(), start, mark.min(start + 12).max(start + 1)),
+        );
+        let (start, mark) = d3_para(&world.peers[1], 1);
+        d3_op(
+            &mut world,
+            1,
+            Op::Bold(
+                "body".into(),
+                (start + 4).min(mark),
+                mark.min(start + 16).max(start + 5),
+            ),
+        );
+        if toggle % 5 == 0 {
+            d3_op(
+                &mut world,
+                1,
+                Op::Insert("body".into(), start + 6, "x".into()),
+            );
+        }
+        world.sync(0, 1).unwrap();
+        world.sync(1, 0).unwrap();
+        room.catch_up(&world);
+        if [10, 20, 40, 60, 100, 200].contains(&toggle) || toggle == toggles {
+            room.save();
+            let (room_live, room_redundant) = format_items(&room.doc);
+            let (peer_live, peer_redundant) = format_items(world.peers[0].doc.yrs_doc());
+            timeline.push(serde_json::json!({
+                "toggles": toggle,
+                "roomLive": room_live,
+                "roomRedundant": room_redundant,
+                "peerLive": peer_live,
+                "peerRedundant": peer_redundant,
+                "roomBytes": room.state().len(),
+            }));
+        }
+    }
+    world.sync_all();
+    room.catch_up(&world);
+    room.save();
+    let mut line = d3_metrics(&base, &world, &room);
+    let object = line.as_object_mut().unwrap();
+    object.insert("kind".into(), "toggle".into());
+    object.insert("fixture".into(), "stories".into());
+    object.insert("mode".into(), mode_name(mode).into());
+    object.insert("timeline".into(), timeline.into());
+    d3_write(line);
+}
+
+/// A worst case that leaves markers behind: a peer bolds a fresh word while
+/// another peer deletes it, again and again; each round ends synced.
+#[test]
+#[ignore = "D3 measurement: CHUNKED_CLEANUP_MODE, D3_OUT"]
+fn d3_bold_against_a_concurrent_delete() {
+    let mode = cleanup_mode();
+    let base =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stories.docx"))
+            .unwrap();
+    let mut world = World::new(&base, 2, false);
+    let mut room = RoomTrack::new(&seed_state_of(&base), mode == CleanupMode::On);
+    let rounds: usize = std::env::var("D3_TOGGLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(60);
+    let mut timeline = Vec::new();
+    for round in 1..=rounds {
+        let word = format!("w{round:03}");
+        let (start, _) = d3_para(&world.peers[0], 1);
+        d3_op(
+            &mut world,
+            0,
+            Op::Insert("body".into(), start, word.clone()),
+        );
+        world.sync(0, 1).unwrap();
+        let length = word.encode_utf16().count() as u32;
+        d3_op(
+            &mut world,
+            0,
+            Op::Bold("body".into(), start, start + length),
+        );
+        d3_op(
+            &mut world,
+            1,
+            Op::Delete("body".into(), start, start + length),
+        );
+        world.sync(0, 1).unwrap();
+        world.sync(1, 0).unwrap();
+        world.sync(0, 1).unwrap();
+        room.catch_up(&world);
+        if [10, 20, 40, 60, 100, 200].contains(&round) || round == rounds {
+            room.save();
+            let (room_live, room_redundant) = format_items(&room.doc);
+            let (peer_live, peer_redundant) = format_items(world.peers[0].doc.yrs_doc());
+            let (other_live, other_redundant) = format_items(world.peers[1].doc.yrs_doc());
+            timeline.push(serde_json::json!({
+                "rounds": round,
+                "roomLive": room_live,
+                "roomRedundant": room_redundant,
+                "peerLive": peer_live,
+                "peerRedundant": peer_redundant,
+                "otherLive": other_live,
+                "otherRedundant": other_redundant,
+                "roomBytes": room.state().len(),
+            }));
+        }
+    }
+    world.sync_all();
+    room.catch_up(&world);
+    room.save();
+    let mut line = d3_metrics(&base, &world, &room);
+    let object = line.as_object_mut().unwrap();
+    object.insert("kind".into(), "format-vs-delete".into());
+    object.insert("fixture".into(), "stories".into());
+    object.insert("mode".into(), mode_name(mode).into());
+    object.insert("timeline".into(), timeline.into());
+    d3_write(line);
 }
