@@ -112,14 +112,16 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   and `UndoManager::try_process` (`src/undo.rs`) skips an inserted item whose
   redone copy was collected instead of dropping the whole step (CI runs
   their tests in `crates/pptx-edit/tests/yrs_undo.rs` and `yrs_memory.rs`);
-- `Item::redo` (`src/block.rs`) lets Undo restore a map value past another
-  client's value that a later one overwrote, so Undo of a value set
-  concurrently with another client's no longer leaves the key without a
-  value; a live value from another client still blocks it, as in Yjs; a
-  value is restored under its own parent, as Yjs 13.6.31 does (#757); and a
-  restored value's parents are kept, as Yjs's `keepItem` does (CI runs the
-  tests in `crates/pptx-edit/tests/yrs_undo.rs` and
-  `crates/docx-edit/tests/yrs_memory.rs`);
+- `Item::redo` (`src/block.rs`) lets Undo restore a map value past a deleted
+  value whose origin is the value being restored (a value set concurrently
+  and lost), so Undo of a concurrent set no longer leaves the key without a
+  value; every other value blocks as in Yjs, a live one and a later
+  deliberate removal alike (Epo 2026-10-08 narrow Undo rule); a value is
+  restored under its own parent, as Yjs 13.6.31 does (#757); and a restored
+  value's parents are kept, as Yjs's `keepItem` does (CI runs the tests in
+  `crates/pptx-edit/tests/yrs_undo.rs` and `convergence.rs`,
+  `crates/docx-edit/tests/yrs_memory.rs` and `concurrent_undo.rs`, and
+  `crates/betteroffice-xlsx/tests/stable_collaboration.rs`);
 - `UndoManager::clear_undo` and `clear_redo` (`src/undo.rs`) clear only their
   own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`);
 - `Update::decode` (`src/update.rs`) refuses an update in which a client's

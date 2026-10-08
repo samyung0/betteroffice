@@ -118,9 +118,10 @@ fn gc_collects_kept_children_of_a_collected_type() {
     assert_eq!(json(&d1, &s1), json(&d2, &s2));
 }
 
-/// `Item::redo`: d2's set of "x" wins over d1's concurrent one. Undo on d2
-/// restores the value its set replaced (Yjs leaves the key without one); a
-/// later live value from the other peer is kept.
+/// `Item::redo` (Epo 2026-10-08 narrow Undo rule): d2's set of "x" wins over
+/// d1's concurrent one. Undo on d2 restores the value its set replaced (Yjs
+/// leaves the key without one); a later live value from the other peer is
+/// kept.
 #[test]
 fn undo_of_a_concurrent_map_set_restores_the_replaced_value() {
     let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(2));

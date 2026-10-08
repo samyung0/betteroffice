@@ -2303,9 +2303,10 @@ mod test {
 
     #[test]
     fn undo_of_a_concurrent_map_set_restores_the_replaced_value() {
-        // Patched for BetterOffice: d2's set of "x" wins over d1's concurrent one.
-        // Undo on d2 restores the value its set replaced; Yjs leaves the key
-        // without a value. A live value from another client is still kept.
+        // Patched for BetterOffice (Epo 2026-10-08 narrow Undo rule): d2's set of
+        // "x" wins over d1's concurrent one. Undo on d2 restores the value its set
+        // replaced; Yjs leaves the key without a value. A live value from another
+        // client is still kept.
         let d1 = Doc::with_client_id(1);
         let d2 = Doc::with_client_id(2);
         let m1 = d1.get_or_insert_map("m");

@@ -59,16 +59,18 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # left pointing into the type's freed branch, and Undo passes an inserted item
 # whose redone copy was collected (`UndoManager::try_process`), as Yjs does;
 # Undo of a map value set concurrently with another client's restores the
-# value it replaced unless another client's value is live (`Item::redo`;
-# Yjs leaves the key without a value), under its own parent (Yjs #757), and
-# Redo keeps the restored value's parents as Yjs does; `clear_undo` and
-# `clear_redo` clear only their own stack;
+# value it replaced: only a deleted value whose origin is the restored one is
+# passed, every other value blocks as in Yjs (`Item::redo`; Epo 2026-10-08
+# narrow Undo rule; Yjs leaves the key without a value), under its own parent
+# (Yjs #757), and Redo keeps the restored value's parents as Yjs does;
+# `clear_undo` and `clear_redo` clear only their own stack;
 # `Update::decode` refuses a client's section that starts inside or before an
 # earlier one for that client, which yrs placed twice, freeing the first copy
-# (tested in pptx-edit's yrs_memory and yrs_undo and docx-edit's yrs_memory,
-# which CI runs). Carry the patch until upstream has the fixes and an
-# equivalent lookup, or the re-read no longer needs it; re-apply the methods
-# on each yrs upgrade.
+# (tested in pptx-edit's yrs_memory, yrs_undo and convergence, docx-edit's
+# yrs_memory and concurrent_undo, and betteroffice-xlsx's
+# stable_collaboration, which CI runs). Carry the patch until upstream has the
+# fixes and an equivalent lookup, or the re-read no longer needs it; re-apply
+# the methods on each yrs upgrade.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
 

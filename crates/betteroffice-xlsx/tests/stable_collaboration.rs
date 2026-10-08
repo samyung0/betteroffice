@@ -1979,3 +1979,41 @@ fn a_format_not_yet_received_is_no_formatting_effect() {
     assert_eq!(formatting(&c), formatting(&b));
     assert!(!formatting(&c).is_empty());
 }
+
+/// Undo against another person's later edit of the same cell (Epo 2026-10-08
+/// narrow Undo rule): Alice types 5, then 6 into an empty cell; Bob types 7
+/// there, then presses Delete, which removes the cell's override. Alice's
+/// Ctrl+Z leaves the cell empty, as Yjs does, instead of bringing back 5 over
+/// Bob's later delete.
+#[test]
+fn undo_keeps_a_cell_another_person_cleared_empty() {
+    let options = CalculationOptions::default();
+    let mut alice = peer(3101);
+    let mut bob = peer(3102);
+    let b1 = at("B1");
+    let exchange = |left: &mut Workbook, right: &mut Workbook| {
+        let (a, b) = (
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1(),
+        );
+        left.apply_update_v1(&b, options).unwrap();
+        right.apply_update_v1(&a, options).unwrap();
+    };
+    let value = |book: &Workbook| {
+        book.model().sheets[0]
+            .cell(b1)
+            .map(|cell| cell.value.clone())
+    };
+    alice.edit_cell(SheetId(0), b1, "5", options).unwrap();
+    alice.edit_cell(SheetId(0), b1, "6", options).unwrap();
+    exchange(&mut alice, &mut bob);
+    bob.edit_cell(SheetId(0), b1, "7", options).unwrap();
+    bob.edit_cell(SheetId(0), b1, "", options).unwrap();
+    exchange(&mut alice, &mut bob);
+    assert_eq!(value(&alice), None);
+
+    alice.undo(options).unwrap();
+    exchange(&mut alice, &mut bob);
+    assert_eq!(value(&alice), None);
+    assert_eq!(value(&bob), None);
+}
