@@ -173,6 +173,26 @@ pub fn yrs_doc_to_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<Vec<LayoutBlock>, BridgeError> {
+    lower_top_story(doc, story_id, env, None)
+}
+
+/// [`yrs_doc_to_layout_blocks`] with the index [`relower_text_insert`] needs.
+pub fn yrs_doc_to_layout_blocks_indexed(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+) -> Result<(Vec<LayoutBlock>, ParagraphIndex), BridgeError> {
+    let mut index = ParagraphIndex::default();
+    let blocks = lower_top_story(doc, story_id, env, Some(&mut index.entries))?;
+    Ok((blocks, index))
+}
+
+fn lower_top_story(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    paragraphs: Option<&mut Vec<PlainParagraph>>,
+) -> Result<Vec<LayoutBlock>, BridgeError> {
     if doc.yrs_doc().offset_kind() != OffsetKind::Utf16 {
         return Err(BridgeError::WrongOffsetKind);
     }
@@ -190,8 +210,330 @@ pub fn yrs_doc_to_layout_blocks(
         &mut active_stories,
         &mut list_state,
         CellEdges::default(),
+        paragraphs,
     )
     .map(|(blocks, _)| blocks)
+}
+
+/// The paragraphs of a lowered story that a plain text insert re-lowers on
+/// their own: each lowered to exactly one paragraph block from text alone,
+/// with no break slot at its mark, so nothing but its own block depends on
+/// its text.
+#[derive(Clone, Debug, Default)]
+pub struct ParagraphIndex {
+    entries: Vec<PlainParagraph>,
+}
+
+#[derive(Clone, Debug)]
+struct PlainParagraph {
+    /// Story index of its first unit and of its pilcrow.
+    start: u32,
+    mark: u32,
+    /// Its block in the lowered story.
+    block: usize,
+    pm_start: u64,
+    /// List counters before it.
+    list_state: ListState,
+}
+
+/// Re-lowers the indexed paragraph a plain text insert of `len` UTF-16 units
+/// at story index `at` landed in, replaces its block in `blocks` (the story's
+/// lowering before the insert) and shifts the absolute positions of every
+/// later block, keeping `index` in step. `Ok(false)` leaves both untouched:
+/// the insert is outside an indexed paragraph or the paragraph no longer
+/// lowers plainly, and the caller lowers the whole story.
+pub fn relower_text_insert(
+    doc: &EditingDoc,
+    story_id: &str,
+    env: &RenderEnv,
+    blocks: &mut [LayoutBlock],
+    index: &mut ParagraphIndex,
+    at: u32,
+    len: u32,
+) -> Result<bool, BridgeError> {
+    let found = index.entries.partition_point(|entry| entry.start <= at);
+    let Some(slot) = found.checked_sub(1) else {
+        return Ok(false);
+    };
+    let entry = &index.entries[slot];
+    if at > entry.mark || entry.block >= blocks.len() {
+        return Ok(false);
+    }
+    let txn = doc.yrs_doc().transact();
+    let story = story_ref(&txn, story_id)?;
+    let comment_index = resolve_comment_intervals(&txn, env)?;
+    let comments = match comment_index.get(story_id) {
+        Some(Ok(intervals)) => intervals.as_slice(),
+        Some(Err(reason)) => return Err(EditError::InvalidComment((*reason).into()).into()),
+        None => &[],
+    };
+    let mut story_index = 0_u32;
+    let mut runs = Vec::new();
+    let mut pm_units = 0_u32;
+    let mut lowered = None;
+    for diff in story.diff(&txn, YChange::identity) {
+        if story_index < entry.start {
+            story_index += out_width(&diff.insert);
+            if story_index > entry.start {
+                return Ok(false);
+            }
+            continue;
+        }
+        let attributes = diff.attributes.as_deref();
+        match diff.insert {
+            Out::Any(Any::String(text)) => {
+                let text = text.as_ref();
+                push_text_chunks(
+                    &mut runs,
+                    text,
+                    story_index,
+                    attributes,
+                    comments,
+                    env,
+                    pm_units,
+                );
+                story_index += utf16_len(text);
+                pm_units += utf16_len(text);
+            }
+            Out::YMap(pilcrow) if is_pilcrow(&pilcrow, &txn) => {
+                if story_index != entry.mark + len {
+                    return Ok(false);
+                }
+                let values = pilcrow_values(&pilcrow, &txn);
+                if section_break_block(&values, &mut SectionMarginsTwips::default()).is_some() {
+                    return Ok(false);
+                }
+                let mut list_state = entry.list_state.clone();
+                let mut parts = flush_paragraph_parts(
+                    std::mem::take(&mut runs),
+                    Vec::new(),
+                    &values,
+                    attributes,
+                    story_id,
+                    env,
+                    entry.pm_start,
+                    pm_units,
+                    &mut list_state,
+                );
+                suppress_cell_edge_spacing(&mut parts, &values, CellEdges::default());
+                lowered = match parts.as_slice() {
+                    [LayoutBlock::Paragraph(_)] => parts.pop(),
+                    _ => return Ok(false),
+                };
+                break;
+            }
+            _ => return Ok(false),
+        }
+    }
+    let Some(lowered) = lowered else {
+        return Ok(false);
+    };
+    let block = entry.block;
+    blocks[block] = lowered;
+    for later in &mut blocks[block + 1..] {
+        shift_block(later, len, Some(story_id));
+    }
+    index.entries[slot].mark += len;
+    for later in &mut index.entries[slot + 1..] {
+        later.start += len;
+        later.mark += len;
+        later.pm_start += u64::from(len);
+    }
+    Ok(true)
+}
+
+/// Story units one diff item spans.
+fn out_width(out: &Out) -> u32 {
+    match out {
+        Out::Any(Any::String(text)) => utf16_len(text),
+        _ => 1,
+    }
+}
+
+/// Moves a block that sits `units` story units later than it was lowered:
+/// every absolute document position, and the ids derived from one (a body
+/// break's story index, `shape:`/`chart:` and `sdt@` positions). Breaks in
+/// other stories (`story_id` `None`, as inside table cells) keep their ids.
+fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
+    let delta = f64::from(units);
+    let shift = |value: &mut Option<f64>| {
+        if let Some(value) = value {
+            *value += delta;
+        }
+    };
+    match block {
+        LayoutBlock::Paragraph(paragraph) => shift_paragraph(paragraph, units),
+        LayoutBlock::Table(table) => {
+            shift(&mut table.pm_start);
+            shift(&mut table.pm_end);
+            shift_sdt_groups(&mut table.sdt_groups, units);
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    for nested in &mut cell.blocks {
+                        shift_block(nested, units, None);
+                    }
+                }
+            }
+        }
+        LayoutBlock::Image(image) => {
+            shift(&mut image.pm_start);
+            shift(&mut image.pm_end);
+            shift_sdt_groups(&mut image.sdt_groups, units);
+        }
+        LayoutBlock::Shape(shape) => shift_shape(shape, units),
+        LayoutBlock::Chart(chart) => {
+            shift(&mut chart.pm_start);
+            shift(&mut chart.pm_end);
+            shift(&mut chart.doc_start);
+            shift(&mut chart.doc_end);
+            shift_sdt_groups(&mut chart.sdt_groups, units);
+            if let BlockId::Str(id) = &mut chart.id {
+                shift_position_id(id, "chart:", units);
+            }
+        }
+        LayoutBlock::TextBox(text_box) => {
+            shift(&mut text_box.pm_start);
+            shift(&mut text_box.pm_end);
+            shift_sdt_groups(&mut text_box.sdt_groups, units);
+            for paragraph in &mut text_box.content {
+                shift_paragraph(paragraph, units);
+            }
+        }
+        LayoutBlock::SectionBreak(section_break) => {
+            shift_sdt_groups(&mut section_break.sdt_groups, units);
+        }
+        LayoutBlock::PageBreak(page_break) => {
+            shift(&mut page_break.pm_start);
+            shift(&mut page_break.pm_end);
+            shift_sdt_groups(&mut page_break.sdt_groups, units);
+            shift_break_id(&mut page_break.id, story_id, "pageBreak", units);
+        }
+        LayoutBlock::ColumnBreak(column_break) => {
+            shift(&mut column_break.pm_start);
+            shift(&mut column_break.pm_end);
+            shift_sdt_groups(&mut column_break.sdt_groups, units);
+            shift_break_id(&mut column_break.id, story_id, "columnBreak", units);
+        }
+        LayoutBlock::Unsupported => {}
+    }
+}
+
+fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
+    let delta = f64::from(units);
+    let shift = |value: &mut Option<f64>| {
+        if let Some(value) = value {
+            *value += delta;
+        }
+    };
+    shift(&mut paragraph.pm_start);
+    shift(&mut paragraph.pm_end);
+    shift_sdt_groups(&mut paragraph.sdt_groups, units);
+    if let Some(attrs) = &mut paragraph.attrs {
+        for rule in &mut attrs.horizontal_rules {
+            rule.pm_start += delta;
+            rule.pm_end += delta;
+        }
+    }
+    for run in &mut paragraph.runs {
+        match run {
+            Run::Text(text) => {
+                shift(&mut text.pm_start);
+                shift(&mut text.pm_end);
+                if let Some(Value::Object(widget)) = &mut text.inline_sdt_widget {
+                    if let Some(pos) = widget.get("pos").and_then(Value::as_i64) {
+                        widget.insert("pos".to_owned(), Value::from(pos + i64::from(units)));
+                    }
+                    if let Some(Value::String(group)) = widget.get_mut("groupId") {
+                        shift_position_id(group, "sdt@", units);
+                    }
+                }
+            }
+            Run::Tab(tab) => {
+                shift(&mut tab.pm_start);
+                shift(&mut tab.pm_end);
+            }
+            Run::Image(image) => {
+                shift(&mut image.pm_start);
+                shift(&mut image.pm_end);
+                if let Some(shape) = &mut image.inline_shape {
+                    shift_shape(shape, units);
+                }
+            }
+            Run::LineBreak(line_break) => {
+                shift(&mut line_break.pm_start);
+                shift(&mut line_break.pm_end);
+            }
+            Run::Field(field) => {
+                shift(&mut field.pm_start);
+                shift(&mut field.pm_end);
+            }
+            Run::Unsupported => {}
+        }
+    }
+}
+
+fn shift_shape(shape: &mut ShapeBlock, units: u32) {
+    let delta = f64::from(units);
+    for value in [
+        &mut shape.pm_start,
+        &mut shape.pm_end,
+        &mut shape.doc_start,
+        &mut shape.doc_end,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *value += delta;
+    }
+    shift_sdt_groups(&mut shape.sdt_groups, units);
+    if let BlockId::Str(id) = &mut shape.id {
+        shift_position_id(id, "shape:", units);
+    }
+    for paragraph in shape.inner_text.iter_mut().flatten() {
+        shift_paragraph(paragraph, units);
+        if let BlockId::Str(id) = &mut paragraph.id {
+            shift_position_id(id, "shape:", units);
+        }
+    }
+    for child in &mut shape.children {
+        shift_shape(child, units);
+    }
+}
+
+fn shift_sdt_groups(groups: &mut Option<Vec<SdtGroup>>, units: u32) {
+    for group in groups.iter_mut().flatten() {
+        shift_position_id(&mut group.id, "sdt@", units);
+        if let Some(pos) = &mut group.pos {
+            *pos += i64::from(units);
+        }
+    }
+}
+
+/// `{prefix}{position}{rest}` with the position moved by `units`.
+fn shift_position_id(id: &mut String, prefix: &str, units: u32) {
+    let Some(rest) = id.strip_prefix(prefix) else {
+        return;
+    };
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let Ok(position) = rest[..digits].parse::<u64>() else {
+        return;
+    };
+    *id = format!("{prefix}{}{}", position + u64::from(units), &rest[digits..]);
+}
+
+/// A body break's `{story}:{kind}:{story index}` id, moved by `units`.
+fn shift_break_id(id: &mut BlockId, story_id: Option<&str>, kind: &str, units: u32) {
+    let (Some(story_id), BlockId::Str(id)) = (story_id, id) else {
+        return;
+    };
+    let prefix = format!("{story_id}:{kind}:");
+    if id[..].starts_with(&prefix)
+        && let Ok(index) = id[prefix.len()..].parse::<u32>()
+    {
+        *id = format!("{prefix}{}", index + units);
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -210,6 +552,7 @@ fn lower_story<T: ReadTxn>(
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
     cell_edges: CellEdges,
+    mut paragraphs: Option<&mut Vec<PlainParagraph>>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -242,9 +585,16 @@ fn lower_story<T: ReadTxn>(
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
+        // Story index of the last unit that was not text or a pilcrow.
+        let mut last_embed: Option<u32> = None;
 
         for diff in story.diff(txn, YChange::identity) {
             let attributes = diff.attributes.as_deref();
+            if !matches!(&diff.insert, Out::Any(Any::String(_)))
+                && !matches!(&diff.insert, Out::YMap(map) if is_pilcrow(map, txn))
+            {
+                last_embed = Some(story_index);
+            }
             match diff.insert {
                 Out::Any(Any::String(text)) => {
                     let text = text.as_ref();
@@ -306,6 +656,12 @@ fn lower_story<T: ReadTxn>(
                             }
                         }
                     }
+                    let plain = paragraphs.is_some()
+                        && last_embed.is_none_or(|at| at < paragraph_start)
+                        && slot.start.is_none()
+                        && slot.breaks.is_empty()
+                        && slot.list_item.is_none();
+                    let list_before = plain.then(|| list_state.clone());
                     slot.close(&mut blocks, content || reference);
                     let values = pilcrow_values(&pilcrow, txn);
                     let mut paragraph_blocks = flush_paragraph_parts(
@@ -328,18 +684,34 @@ fn lower_story<T: ReadTxn>(
                         },
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
+                    let single = matches!(paragraph_blocks.as_slice(), [LayoutBlock::Paragraph(_)]);
+                    let mut pushed = false;
                     if !value_string(values.get("paraId"))
                         .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
+                        pushed = true;
                     }
                     // The field's own paragraph is the one just closed, so the
                     // range it suppresses opens with the next block.
                     hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
-                    if let Some(section_break) = section_break_block(&values, &mut section_margins)
+                    let section_break = section_break_block(&values, &mut section_margins);
+                    if let (Some(list_state), Some(paragraphs)) = (list_before, paragraphs.as_mut())
+                        && single
+                        && pushed
+                        && section_break.is_none()
                     {
+                        paragraphs.push(PlainParagraph {
+                            start: paragraph_start,
+                            mark: story_index,
+                            block: blocks.len() - 1,
+                            pm_start: paragraph_pm_start,
+                            list_state,
+                        });
+                    }
+                    if let Some(section_break) = section_break {
                         blocks.push(LayoutBlock::SectionBreak(section_break));
                     }
                     paragraph_runs = Vec::new();
@@ -506,6 +878,7 @@ fn lower_story<T: ReadTxn>(
                             before: cell_edges.before && story_index == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
                         },
+                        None,
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     if !hidden_field_blocks.contains(&child_story) {
@@ -1114,6 +1487,7 @@ fn lower_table<T: ReadTxn>(
                     before: true,
                     after: true,
                 },
+                None,
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -2714,7 +3088,7 @@ fn stamp_logical_order(runs: &mut [Run]) {
 }
 
 /// List numbering carried across the whole story.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct ListState {
     /// Live counter stack per abstract numbering id, indexed by level.
     counters: BTreeMap<String, Vec<i64>>,
@@ -4058,6 +4432,123 @@ mod tests {
 
     use super::*;
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
+
+    /// Plain inserts at random places in indexed paragraphs of real
+    /// documents: re-lowering the paragraph alone gives exactly what lowering
+    /// the whole story gives, positions and ids included, and keeps the index.
+    #[test]
+    fn a_plain_insert_relowers_its_paragraph_like_the_whole_story() {
+        let ctx = EditCtx::local("", "");
+        let seeded = |bytes: &[u8]| {
+            let doc = EditingDoc::new(5);
+            crate::seed::seed_from_docx(&doc, bytes).unwrap();
+            doc
+        };
+        // "Alpha" | " be[checkbox]ta" | " gam[chart]ma": an inline content
+        // control and a chart whose positions move with every insert before.
+        let checkbox = EditingDoc::new(5);
+        checkbox
+            .create_story("body", "Alpha beta gamma", "Normal", "left")
+            .unwrap();
+        for at in [5, 11] {
+            checkbox
+                .split_paragraph(&ctx, Position::new("body", at), None)
+                .unwrap();
+        }
+        checkbox
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 8,
+                    kind: "sdt".into(),
+                    payload: vec![
+                        ("embedId".into(), Any::from("control-1")),
+                        ("sdtType".into(), Any::from("checkbox")),
+                        ("checked".into(), Any::Bool(false)),
+                        (
+                            "content".into(),
+                            Any::Array(Arc::from([Any::Map(Arc::new(HashMap::from([
+                                ("kind".to_owned(), Any::from("text")),
+                                ("text".to_owned(), Any::from("\u{2610}")),
+                            ])))])),
+                        ),
+                    ],
+                    attrs: Default::default(),
+                }],
+                &ctx,
+            )
+            .unwrap();
+        checkbox
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 16,
+                    kind: "chart".into(),
+                    payload: vec![("chartJson".into(), Any::from(r#"{"kind":"bar"}"#))],
+                    attrs: Default::default(),
+                }],
+                &ctx,
+            )
+            .unwrap();
+        let fixtures = [
+            (
+                "demo",
+                seeded(include_bytes!(
+                    "../../../../apps/demo/public/betteroffice-demo.docx"
+                )),
+            ),
+            (
+                "comprehensive",
+                seeded(include_bytes!(
+                    "../../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+                )),
+            ),
+            ("checkbox", checkbox),
+        ];
+        let texts = ["a", " ", "x\ty", "\u{4ea4}", "\u{1f600}", "Word "];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |bound: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % u64::from(bound.max(1))) as u32
+        };
+        for (name, doc) in fixtures {
+            let env = RenderEnv::default();
+            let (mut blocks, mut index) =
+                yrs_doc_to_layout_blocks_indexed(&doc, "body", &env).unwrap();
+            assert!(!index.entries.is_empty(), "{name} has plain paragraphs");
+            let mut relowered = 0;
+            for step in 0..60 {
+                let entry = &index.entries[next(index.entries.len() as u32) as usize];
+                let at = entry.start + next(entry.mark - entry.start + 1);
+                let text = texts[next(texts.len() as u32) as usize];
+                doc.insert_text(&ctx, Position::new("body", at), text, FormatPolicy::Inherit)
+                    .unwrap();
+                let units = text.encode_utf16().count() as u32;
+                if relower_text_insert(&doc, "body", &env, &mut blocks, &mut index, at, units)
+                    .unwrap()
+                {
+                    relowered += 1;
+                } else {
+                    (blocks, index) = yrs_doc_to_layout_blocks_indexed(&doc, "body", &env).unwrap();
+                }
+                let (full, full_index) =
+                    yrs_doc_to_layout_blocks_indexed(&doc, "body", &env).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&blocks).unwrap(),
+                    serde_json::to_value(&full).unwrap(),
+                    "{name} step {step}: {text:?} at {at}"
+                );
+                assert_eq!(
+                    format!("{index:?}"),
+                    format!("{full_index:?}"),
+                    "{name} step {step}"
+                );
+            }
+            assert!(relowered > 50, "{name} relowered {relowered} of 60 inserts");
+        }
+    }
 
     const DATE: &str = "2026-07-13T12:00:00Z";
 

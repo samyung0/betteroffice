@@ -29,10 +29,12 @@ use docx_layout::types::{
     ParagraphBlock, ParagraphExtent, Run,
 };
 use serde::Serialize;
-use yrs::Subscription;
+use yrs::{DeepObservable, Subscription};
 
 use crate::EditingDoc;
-use crate::bridge::{BridgeError, RenderEnv, yrs_doc_to_layout_blocks};
+use crate::bridge::{
+    BridgeError, ParagraphIndex, RenderEnv, relower_text_insert, yrs_doc_to_layout_blocks_indexed,
+};
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
 };
@@ -46,6 +48,8 @@ struct LoweredStory {
     blocks: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
+    /// The paragraphs a plain text insert re-lowers on their own.
+    paragraphs: ParagraphIndex,
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +57,55 @@ struct RenderState {
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
+    paragraph_relowerings: u64,
+}
+
+/// What one committed transaction did to the lowering's inputs (stories,
+/// comments, bookmarks).
+#[derive(Clone, Debug, PartialEq)]
+enum StoryEdit {
+    /// Text alone, inserted into one story.
+    PlainInsert {
+        story: String,
+        at: u32,
+        len: u32,
+    },
+    Other,
+}
+
+#[derive(Debug, Default)]
+struct EditLog {
+    /// Seen by the type observers of the transaction committing now.
+    pending: Option<StoryEdit>,
+    /// The last committed transaction's edit and the document epoch it made.
+    last: Option<(u64, StoryEdit)>,
+}
+
+/// A plain insert when `events` hold exactly one story's text event whose
+/// delta inserts text alone.
+fn classify_story_events(txn: &yrs::TransactionMut, events: &yrs::types::Events) -> StoryEdit {
+    use yrs::types::{Delta, Event, PathSegment};
+    let mut events = events.iter();
+    let (Some(Event::Text(event)), None) = (events.next(), events.next()) else {
+        return StoryEdit::Other;
+    };
+    let path = event.path();
+    let (Some(PathSegment::Key(story)), 1) = (path.back(), path.len()) else {
+        return StoryEdit::Other;
+    };
+    let (at, inserted) = match event.delta(txn) {
+        [Delta::Inserted(inserted, _)] => (0, inserted),
+        [Delta::Retain(at, None), Delta::Inserted(inserted, _)] => (*at, inserted),
+        _ => return StoryEdit::Other,
+    };
+    let yrs::Out::Any(yrs::Any::String(text)) = inserted else {
+        return StoryEdit::Other;
+    };
+    StoryEdit::PlainInsert {
+        story: story.to_string(),
+        at,
+        len: text.encode_utf16().count() as u32,
+    }
 }
 
 #[derive(Debug)]
@@ -434,6 +487,8 @@ pub struct EngineStats {
     pub lower_cache_hits: u64,
     pub lower_cache_misses: u64,
     pub retained_measure_templates: usize,
+    /// Story lowerings that re-lowered one paragraph after a plain insert.
+    pub paragraph_relowerings: u64,
     pub compatibility_measure_calls: u64,
     pub resident_measure_calls: u64,
     pub resident_reused_blocks: u64,
@@ -513,6 +568,7 @@ pub struct EngineSession {
     // Kept alive for the lifetime of the document. Dropping it unregisters the
     // observer before the Rc epoch source is released.
     _doc_epoch_observer: Subscription,
+    edits: Rc<RefCell<EditLog>>,
     render: RefCell<RenderState>,
     measurement: RefCell<MeasurementState>,
     regions: RefCell<Option<ResidentRegionState>>,
@@ -881,17 +937,46 @@ impl EngineSession {
     pub fn new(client_id: u64) -> Self {
         let doc = EditingDoc::new(client_id);
         let doc_epoch = Rc::new(Cell::new(0_u64));
+        let edits = Rc::new(RefCell::new(EditLog::default()));
+        // Type observers run before the update observer of the same commit.
+        let yrs_doc = doc.yrs_doc();
+        let log = Rc::clone(&edits);
+        yrs_doc.get_or_insert_map(crate::STORIES).observe_deep_with(
+            "docx-edit-engine",
+            move |txn, events| {
+                let edit = classify_story_events(txn, events);
+                let mut log = log.borrow_mut();
+                log.pending = Some(match log.pending {
+                    None => edit,
+                    Some(_) => StoryEdit::Other,
+                });
+            },
+        );
+        for root in [crate::COMMENTS, crate::bookmarks::ROOT] {
+            let log = Rc::clone(&edits);
+            yrs_doc.get_or_insert_map(root).observe_deep_with(
+                "docx-edit-engine",
+                move |_txn, _events| {
+                    log.borrow_mut().pending = Some(StoryEdit::Other);
+                },
+            );
+        }
         let observer_epoch = Rc::clone(&doc_epoch);
-        let observer = doc
-            .yrs_doc()
+        let log = Rc::clone(&edits);
+        let observer = yrs_doc
             .observe_update_v1(move |_txn, _event| {
-                observer_epoch.set(observer_epoch.get().wrapping_add(1));
+                let epoch = observer_epoch.get().wrapping_add(1);
+                observer_epoch.set(epoch);
+                let mut log = log.borrow_mut();
+                let edit = log.pending.take().unwrap_or(StoryEdit::Other);
+                log.last = Some((epoch, edit));
             })
             .expect("EngineSession document update observer registers");
         Self {
             doc,
             doc_epoch,
             _doc_epoch_observer: observer,
+            edits,
             render: RefCell::new(RenderState::default()),
             measurement: RefCell::new(MeasurementState::default()),
             regions: RefCell::new(None),
@@ -949,7 +1034,10 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        let mut blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        if self.relower_inserted_paragraph(story, epoch, env) {
+            return Ok(());
+        }
+        let (mut blocks, paragraphs) = yrs_doc_to_layout_blocks_indexed(&self.doc, story, env)?;
         resolve_media_refs(&mut blocks, &self.media.borrow());
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
@@ -960,9 +1048,62 @@ impl EngineSession {
                 env: env.clone(),
                 blocks: Rc::new(blocks),
                 serialized_blocks: None,
+                paragraphs,
             },
         );
         Ok(())
+    }
+
+    /// When the only transaction since the cached lowering inserted plain
+    /// text into `story`, re-lowers the paragraph it landed in instead of the
+    /// whole story. `false` leaves the caller to lower the story in full.
+    fn relower_inserted_paragraph(&self, story: &str, epoch: u64, env: &RenderEnv) -> bool {
+        let edit = self.edits.borrow().last.clone();
+        let Some((
+            edit_epoch,
+            StoryEdit::PlainInsert {
+                story: edited,
+                at,
+                len,
+            },
+        )) = edit
+        else {
+            return false;
+        };
+        let mut render = self.render.borrow_mut();
+        if edit_epoch != epoch
+            || edited != story
+            || !render.stories.get(story).is_some_and(|cached| {
+                cached.doc_epoch.wrapping_add(1) == epoch && cached.env == *env
+            })
+        {
+            return false;
+        }
+        let cached = render
+            .stories
+            .remove(story)
+            .expect("cached story checked above");
+        drop(render);
+        let mut blocks = Rc::try_unwrap(cached.blocks).unwrap_or_else(|shared| (*shared).clone());
+        let mut paragraphs = cached.paragraphs;
+        if !relower_text_insert(&self.doc, story, env, &mut blocks, &mut paragraphs, at, len)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let mut render = self.render.borrow_mut();
+        render.paragraph_relowerings = render.paragraph_relowerings.wrapping_add(1);
+        render.stories.insert(
+            story.to_owned(),
+            LoweredStory {
+                doc_epoch: epoch,
+                env: env.clone(),
+                blocks: Rc::new(blocks),
+                serialized_blocks: None,
+                paragraphs,
+            },
+        );
+        true
     }
 
     /// [`Self::with_lowered_story`] with a hook between lowering and the read.
@@ -1029,6 +1170,7 @@ impl EngineSession {
             lower_cache_hits: render.cache_hits,
             lower_cache_misses: render.cache_misses,
             retained_measure_templates: measurement.templates.len(),
+            paragraph_relowerings: render.paragraph_relowerings,
             compatibility_measure_calls: measurement.compatibility_calls,
             resident_measure_calls: measurement.resident_measure_calls,
             resident_reused_blocks: measurement.resident_reused_blocks,
@@ -2744,6 +2886,7 @@ mod tests {
                 lower_cache_hits: 1,
                 lower_cache_misses: 1,
                 retained_measure_templates: 0,
+                paragraph_relowerings: 0,
                 compatibility_measure_calls: 0,
                 resident_measure_calls: 0,
                 resident_reused_blocks: 0,
@@ -2778,7 +2921,9 @@ mod tests {
         let third = engine.lower_story_json("body", &env).unwrap();
         assert_ne!(first, third);
         assert_eq!(engine.stats().doc_epoch, 2);
-        assert_eq!(engine.stats().lower_cache_misses, 2);
+        // The plain insert re-lowers its paragraph rather than the story.
+        assert_eq!(engine.stats().lower_cache_misses, 1);
+        assert_eq!(engine.stats().paragraph_relowerings, 1);
     }
 
     #[test]
@@ -3392,6 +3537,7 @@ mod tests {
         assert_eq!(stats.region_fast_path_hits, 1);
         assert_eq!(stats.region_fast_path_fallback, None);
         assert_eq!(stats.incremental_display_builds, 1);
+        assert_eq!(stats.paragraph_relowerings, 1);
 
         let fresh = engine_with(true);
         let layout_json = |engine: &EngineSession| {
@@ -3411,6 +3557,142 @@ mod tests {
             engine.with_display_list(Clone::clone),
             fresh.with_display_list(Clone::clone)
         );
+    }
+
+    /// Typing re-lowers only the paragraph it lands in; a transaction that
+    /// touches anything else the lowering reads (here a comment) lowers the
+    /// whole story. Either way the engine matches a fresh one's full pass.
+    #[test]
+    fn only_a_plain_insert_relowers_one_paragraph() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let extras = serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string();
+        let ctx = crate::EditCtx::local("", "");
+        let type_x = |engine: &EngineSession, at: u32| {
+            engine
+                .doc()
+                .insert_text(
+                    &ctx,
+                    crate::Position::new("body", at),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+        };
+        let comment = |engine: &EngineSession| {
+            engine
+                .doc()
+                .apply_raw_ops(
+                    "body",
+                    vec![crate::RawOp::SetComment {
+                        id: "7".into(),
+                        ranges: vec![(8, 12)],
+                        author: "Ada".into(),
+                        date: "2026-10-08T00:00:00Z".into(),
+                        body: yrs::Any::Null,
+                    }],
+                    &ctx,
+                )
+                .unwrap();
+        };
+        // One transaction: text into the first paragraph and a comment over
+        // the second, which the first paragraph's lowering alone would miss.
+        let insert_and_comment = |engine: &EngineSession| {
+            engine
+                .doc()
+                .apply_raw_ops(
+                    "body",
+                    vec![
+                        crate::RawOp::Insert {
+                            index: 3,
+                            text: "y".into(),
+                            attrs: Default::default(),
+                        },
+                        crate::RawOp::SetComment {
+                            id: "8".into(),
+                            ranges: vec![(14, 18)],
+                            author: "Ada".into(),
+                            date: "2026-10-08T00:00:00Z".into(),
+                            body: yrs::Any::Null,
+                        },
+                    ],
+                    &ctx,
+                )
+                .unwrap();
+        };
+        let engine_with = |edits: usize| {
+            let engine = EngineSession::new(142);
+            engine
+                .doc()
+                .create_story("body", "Alpha bravo charlie", "Normal", "left")
+                .unwrap();
+            engine
+                .doc()
+                .split_paragraph(&ctx, crate::Position::new("body", 6), None)
+                .unwrap();
+            if edits > 0 {
+                type_x(&engine, 2);
+            }
+            if edits > 1 {
+                comment(&engine);
+            }
+            if edits > 2 {
+                insert_and_comment(&engine);
+            }
+            engine.layout_document_with_regions_json(&request).unwrap();
+            engine.build_display_list_frame(&extras, 0).unwrap();
+            engine
+        };
+        let same_as_fresh = |engine: &EngineSession, edits: usize| {
+            let fresh = engine_with(edits);
+            let json = |engine: &EngineSession| {
+                let pagination = engine.pagination.borrow();
+                serialize_region_layout(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    None,
+                    true,
+                )
+                .unwrap()
+            };
+            assert_eq!(json(engine), json(&fresh), "after {edits} edits");
+            assert_eq!(
+                engine.with_display_list(Clone::clone),
+                fresh.with_display_list(Clone::clone),
+                "after {edits} edits"
+            );
+        };
+
+        let engine = engine_with(0);
+        type_x(&engine, 2);
+        engine.apply_and_layout("body", 1).unwrap();
+        assert_eq!(engine.stats().paragraph_relowerings, 1);
+        same_as_fresh(&engine, 1);
+
+        comment(&engine);
+        let epoch = engine.stats().frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(engine.stats().paragraph_relowerings, 1);
+        same_as_fresh(&engine, 2);
+
+        insert_and_comment(&engine);
+        let epoch = engine.stats().frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(engine.stats().paragraph_relowerings, 1);
+        same_as_fresh(&engine, 3);
     }
 
     /// Compares resident and full region passes on a paragraph-heavy document.
