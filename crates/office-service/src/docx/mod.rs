@@ -90,6 +90,25 @@ pub(crate) fn chunked_layout() -> bool {
     std::env::var("OFFICE_DOCX_LAYOUT").is_ok_and(|layout| layout == "chunked")
 }
 
+/// The base's materialization, from a per-process cache, when
+/// `OFFICE_DOCX_MATERIALIZATION_CACHE=1` (spike).
+fn cached_materialization(base: &[u8]) -> Result<Option<std::sync::Arc<Vec<u8>>>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    if !std::env::var("OFFICE_DOCX_MATERIALIZATION_CACHE").is_ok_and(|value| value == "1") {
+        return Ok(None);
+    }
+    let key = crate::common::sha256_hex(base);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return Ok(Some(Arc::clone(hit)));
+    }
+    let materialization = Arc::new(materialized(base, &[])?);
+    cache.lock().unwrap().insert(key, Arc::clone(&materialization));
+    Ok(Some(materialization))
+}
+
 /// The override layout's meta seed, or today's whole seed.
 pub(crate) fn seed_of_layout(base: &[u8], chunked: bool) -> Vec<u8> {
     if chunked {
@@ -307,16 +326,27 @@ impl DocxSession {
             let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
             engine.set_media(docx_edit::package_media(&envelope));
             let document = decode_document(&envelope)?;
-            docx_edit::overlay::open_chunked(
-                engine.doc(),
-                envelope,
-                &docx_edit::overlay::fingerprint(base),
-            )
-            .map_err(Error::Engine)?;
-            engine
-                .doc()
-                .apply_shared_update(state)
-                .map_err(Error::engine)?;
+            if let Some(materialization) = cached_materialization(base)? {
+                // A materialization cached per base (spike switch): no
+                // lowering; sessions opened this way read and export only.
+                drop(envelope);
+                engine
+                    .doc()
+                    .load_state_v1(&materialization)
+                    .map_err(Error::engine)?;
+                engine.doc().apply_update_v1(state).map_err(Error::engine)?;
+            } else {
+                docx_edit::overlay::open_chunked(
+                    engine.doc(),
+                    envelope,
+                    &docx_edit::overlay::fingerprint(base),
+                )
+                .map_err(Error::Engine)?;
+                engine
+                    .doc()
+                    .apply_shared_update(state)
+                    .map_err(Error::engine)?;
+            }
             return Ok(Self {
                 document: Some(document),
                 engine,
