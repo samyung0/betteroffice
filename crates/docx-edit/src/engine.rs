@@ -1037,7 +1037,7 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
-        if self.relower_inserted_paragraph(story, epoch, env) {
+        if self.relower_inserted_paragraph(story, epoch, env)? {
             return Ok(());
         }
         let (mut blocks, paragraphs) = yrs_doc_to_layout_blocks_indexed(&self.doc, story, env)?;
@@ -1059,8 +1059,13 @@ impl EngineSession {
 
     /// When the only transaction since the cached lowering inserted plain
     /// text into `story`, re-lowers the paragraph it landed in instead of the
-    /// whole story. `false` leaves the caller to lower the story in full.
-    fn relower_inserted_paragraph(&self, story: &str, epoch: u64, env: &RenderEnv) -> bool {
+    /// whole story. `Ok(false)` leaves the caller to lower the story in full.
+    fn relower_inserted_paragraph(
+        &self,
+        story: &str,
+        epoch: u64,
+        env: &RenderEnv,
+    ) -> Result<bool, BridgeError> {
         let edit = self.edits.borrow().last.clone();
         let Some((
             edit_epoch,
@@ -1071,7 +1076,7 @@ impl EngineSession {
             },
         )) = edit
         else {
-            return false;
+            return Ok(false);
         };
         let mut render = self.render.borrow_mut();
         if edit_epoch != epoch
@@ -1080,7 +1085,7 @@ impl EngineSession {
                 cached.doc_epoch.wrapping_add(1) == epoch && cached.env == *env
             })
         {
-            return false;
+            return Ok(false);
         }
         let cached = render
             .stories
@@ -1089,10 +1094,8 @@ impl EngineSession {
         drop(render);
         let mut blocks = Rc::try_unwrap(cached.blocks).unwrap_or_else(|shared| (*shared).clone());
         let mut paragraphs = cached.paragraphs;
-        if !relower_text_insert(&self.doc, story, env, &mut blocks, &mut paragraphs, at, len)
-            .unwrap_or(false)
-        {
-            return false;
+        if !relower_text_insert(&self.doc, story, env, &mut blocks, &mut paragraphs, at, len)? {
+            return Ok(false);
         }
         let mut render = self.render.borrow_mut();
         render.paragraph_relowerings = render.paragraph_relowerings.wrapping_add(1);
@@ -1106,7 +1109,7 @@ impl EngineSession {
                 paragraphs,
             },
         );
-        true
+        Ok(true)
     }
 
     /// [`Self::with_lowered_story`] with a hook between lowering and the read.
