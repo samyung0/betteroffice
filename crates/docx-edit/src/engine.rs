@@ -3509,7 +3509,7 @@ mod tests {
             let doc = engine.doc();
             doc.create_story("body", "AlphaBravo", "Normal", "left")
                 .unwrap();
-            doc.split_paragraph(&ctx, crate::Position::new("body", 5), None)
+            doc.split_paragraph(&ctx, crate::Position::new("body", 5))
                 .unwrap();
             doc.insert_embed(&ctx, crate::Position::new("body", 6), "pageBreak", vec![])
                 .unwrap();
@@ -3647,7 +3647,7 @@ mod tests {
                 .unwrap();
             engine
                 .doc()
-                .split_paragraph(&ctx, crate::Position::new("body", 6), None)
+                .split_paragraph(&ctx, crate::Position::new("body", 6))
                 .unwrap();
             if edits > 0 {
                 type_x(&engine, 2);
@@ -5106,7 +5106,7 @@ mod tests {
             for at in (1..30).map(|paragraph| paragraph * 26 - 1) {
                 engine
                     .doc()
-                    .split_paragraph(&ctx, crate::Position::new("body", at), None)
+                    .split_paragraph(&ctx, crate::Position::new("body", at))
                     .unwrap();
             }
             for &at in edits {

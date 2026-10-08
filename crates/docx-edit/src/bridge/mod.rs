@@ -4562,7 +4562,7 @@ mod tests {
         doc.create_story("body", &text, "Normal", "left").unwrap();
         // Each paragraph is 19 units, so its break sits at 20k - 1.
         for paragraph in 1..PARAGRAPHS {
-            doc.split_paragraph(&ctx, Position::new("body", paragraph * 20 - 1), None)
+            doc.split_paragraph(&ctx, Position::new("body", paragraph * 20 - 1))
                 .unwrap();
         }
         let comments = (0..PARAGRAPHS)
@@ -4607,7 +4607,7 @@ mod tests {
             .unwrap();
         for at in [5, 11] {
             checkbox
-                .split_paragraph(&ctx, Position::new("body", at), None)
+                .split_paragraph(&ctx, Position::new("body", at))
                 .unwrap();
         }
         checkbox
