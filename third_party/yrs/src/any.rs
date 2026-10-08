@@ -44,8 +44,9 @@ impl Any {
 
     fn decode_at<R: Read>(decoder: &mut R, depth: usize) -> Result<Self, Error> {
         // Patched for BetterOffice: arrays and maps count against
-        // MAX_DECODE_DEPTH, and their declared length reserves fallibly (a
-        // huge length is an error, not an aborting allocation).
+        // MAX_DECODE_DEPTH, and grow with the entries actually read. Their
+        // declared length is input: a reservation from it (a map's is written
+        // at once) let 449 bytes of nested maps commit 24 GiB.
         let nested = |depth: usize| {
             if depth >= MAX_DECODE_DEPTH {
                 Err(Error::Custom(format!(
@@ -82,7 +83,6 @@ impl Any {
                 let depth = nested(depth)?;
                 let len: usize = decoder.read_var()?;
                 let mut map = HashMap::new();
-                map.try_reserve(len)?;
                 for _ in 0..len {
                     let key = decoder.read_string()?;
                     map.insert(key.to_owned(), Any::decode_at(decoder, depth)?);
@@ -94,7 +94,6 @@ impl Any {
                 let depth = nested(depth)?;
                 let len: usize = decoder.read_var()?;
                 let mut arr = Vec::new();
-                arr.try_reserve(len)?;
                 for _ in 0..len {
                     arr.push(Any::decode_at(decoder, depth)?);
                 }
@@ -910,5 +909,17 @@ mod decode_limits_test {
             buf.write_var(1u64 << 60);
             assert!(Any::decode(&mut Cursor::new(&buf)).is_err());
         }
+        // 64 nested maps each declaring 2^22 entries and holding one: an end
+        // of input error, without a table sized from the declared length.
+        let mut buf = Vec::new();
+        for _ in 0..64 {
+            buf.write_u8(118);
+            buf.write_var(1u64 << 22);
+            buf.write_string("k");
+        }
+        buf.write_u8(126);
+        let started = std::time::Instant::now();
+        assert!(Any::decode(&mut Cursor::new(&buf)).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 }

@@ -117,7 +117,8 @@ impl FromIterator<(ClientID, u32)> for StateVector {
 impl Decode for StateVector {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, Error> {
         let len = decoder.read_var::<u32>()? as usize;
-        let mut sv = HashMap::with_capacity_and_hasher(len, BuildHasherDefault::default());
+        // Patched for BetterOffice: no reservation from a declared length.
+        let mut sv = HashMap::with_hasher(BuildHasherDefault::default());
         let mut i = 0;
         while i < len {
             let client: u64 = decoder.read_var()?;

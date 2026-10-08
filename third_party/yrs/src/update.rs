@@ -857,8 +857,9 @@ impl Decode for Update {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, Error> {
         // read blocks
         let clients_len: u32 = decoder.read_var()?;
+        // Patched for BetterOffice: the client and struct lists grow with what
+        // is read; their declared lengths are input, not a reservation.
         let mut clients = HashMap::with_hasher(BuildHasherDefault::default());
-        clients.try_reserve(clients_len as usize)?;
 
         let mut blocks = BlockSet { clients };
         for _ in 0..clients_len {
@@ -870,9 +871,6 @@ impl Decode for Update {
                 .clients
                 .entry(client)
                 .or_insert_with(|| VecDeque::new());
-            // Attempt to pre-allocate memory for the blocks. If the capacity overflows and
-            // allocation fails, return an error.
-            blocks.try_reserve(blocks_len)?;
 
             for _ in 0..blocks_len {
                 let id = ID::new(client, clock);

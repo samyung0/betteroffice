@@ -2050,8 +2050,8 @@ impl ItemContent {
             BLOCK_ITEM_DELETED_REF_NUMBER => Ok(ItemContent::Deleted(decoder.read_len()?)),
             BLOCK_ITEM_JSON_REF_NUMBER => {
                 let mut remaining = decoder.read_len()? as i32;
+                // Patched for BetterOffice: no reservation from a declared length.
                 let mut buf = Vec::new();
-                buf.try_reserve(remaining as usize)?;
 
                 while remaining >= 0 {
                     buf.push(decoder.read_string()?.to_owned());
@@ -2073,8 +2073,8 @@ impl ItemContent {
             }
             BLOCK_ITEM_ANY_REF_NUMBER => {
                 let len = decoder.read_len()? as usize;
+                // Patched for BetterOffice: no reservation from a declared length.
                 let mut values = Vec::new();
-                values.try_reserve(len)?;
 
                 let mut i = 0;
                 while i < len {

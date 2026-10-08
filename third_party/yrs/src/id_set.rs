@@ -88,7 +88,8 @@ impl Encode for IdRanges<()> {
 impl Decode for IdRanges<()> {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, Error> {
         let len: u32 = decoder.read_var()?;
-        let mut ranges = SmallVec::with_capacity(len as usize);
+        // Patched for BetterOffice: no reservation from a declared length.
+        let mut ranges = SmallVec::new();
         for _ in 0..len {
             ranges.push((Range::decode(decoder)?, ()));
         }
