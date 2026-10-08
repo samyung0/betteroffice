@@ -94,6 +94,19 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
 
 - one match arm in `clean_format_gap` (`src/types/text.rs`) that counts a
   shared type as content;
+- `insert_attributes` and `insert_negated_attributes` (`src/types/text.rs`)
+  write an edit's format items in key order, not in hash order, so one edit
+  writes the same items on every replica (tests in
+  `crates/docx-edit/tests/yrs_format_order.rs`, which CI runs);
+- a transaction reads its insert set instead of building whole state vectors
+  to tell what it inserted (`emit_update_v1`/`v2` and `write_blocks_since` in
+  `src/store.rs`, `encode_update` and `add_changed_type` in
+  `src/transaction.rs`, `event_keys` in `src/types/mod.rs`), so its cost no
+  longer grows with every client the document saw (tests in
+  `crates/docx-edit/tests/yrs_transaction_work.rs`);
+- `Item::redone` (`src/block.rs`), a read-only accessor of the local link
+  from a deleted item to the copy Undo or Redo made of it, so the DOCX editor
+  re-anchors markers that name restored text;
 - checked UTF-8 decoding instead of `from_utf8_unchecked` at three call sites
   (`src/encoding/read.rs`, `src/updates/decoder.rs`, `src/lib.rs`), so both
   update decoders reject invalid strings (see issue #224), with a unit test;
