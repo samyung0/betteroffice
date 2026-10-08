@@ -375,7 +375,7 @@ impl Update {
                         Self::missing_dependency(&mut stack_head, &mut txn.store)?
                     {
                         next =
-                            picker.switch(stack_head, &missing, |c| txn.store.blocks.get_clock(c));
+                            picker.switch(stack_head, &missing, |c| txn.store.blocks.get_state(c));
                         continue;
                     } else {
                         // block has no missing dependencies, therefore we can integrate it right away
@@ -960,6 +960,9 @@ impl<'a> BlockPicker<'a> {
                 self.missing.set_min(*missing, missing_clock(missing));
                 for item in self.stack.drain(..) {
                     let client = *item.client();
+                    // Patched for BetterOffice: each struct on the stack waits on the
+                    // client of the one above it, not only on `missing`.
+                    self.missing.set_min(client, missing_clock(&client));
                     let mut unapplicable_blocks = match self.store.clients.remove(&client) {
                         Some(blocks) => blocks,
                         None => match &mut self.latest {

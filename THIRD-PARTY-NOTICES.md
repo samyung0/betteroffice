@@ -133,6 +133,11 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
 - `Update::decode` (`src/update.rs`) refuses an update in which a client's
   section starts inside or before an earlier one for that client, which yrs
   placed twice (CI runs its test in `crates/pptx-edit/tests/yrs_memory.rs`);
+- a pending update waits on each client's held state (`BlockStore::get_state`
+  in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
+  instead of its clock past skips, and on every client its stacked structs wait
+  on, so structs that arrive before one they depend on are applied once it
+  arrives (tests in `crates/docx-edit/tests/yrs_pending.rs`);
 - a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for

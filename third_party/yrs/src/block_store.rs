@@ -369,6 +369,17 @@ impl BlockStore {
         StateVector::new(map)
     }
 
+    /// Patched for BetterOffice: the clock below which `client` holds every
+    /// block (its state vector entry). Unlike [Self::get_clock] it stops at the
+    /// first skip, so it grows when that skip is filled.
+    pub(crate) fn get_state(&self, client: &ClientID) -> u32 {
+        let first_skip = self
+            .skips
+            .get(client)
+            .and_then(|ranges| ranges.clock_start());
+        first_skip.unwrap_or_else(|| self.get_clock(client))
+    }
+
     pub(crate) fn known_state(&self, ss: &BlockSet) -> IdSet {
         let mut known_state = IdSet::default();
         for (client, _) in ss.clients.iter() {
