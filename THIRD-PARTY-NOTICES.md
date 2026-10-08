@@ -110,16 +110,16 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   collect a collected type's children even when Undo keeps them, as Yjs does
   (upstream PR #682), so none is left pointing into the type's freed branch,
   and `UndoManager::try_process` (`src/undo.rs`) skips an inserted item whose
-  redone copy was collected instead of dropping the whole step, with unit
-  tests and tests in `crates/pptx-edit`;
+  redone copy was collected instead of dropping the whole step (CI runs
+  their tests in `crates/pptx-edit/tests/yrs_undo.rs` and `yrs_memory.rs`);
 - `Item::redo` (`src/block.rs`) lets Undo restore a map value past another
   client's value that a later one overwrote, so Undo of a value set
   concurrently with another client's no longer leaves the key without a
-  value; a live value from another client still blocks it, as in Yjs (unit
-  test in `src/undo.rs`, and in `crates/pptx-edit`);
+  value; a live value from another client still blocks it, as in Yjs (CI
+  runs its test in `crates/pptx-edit/tests/yrs_undo.rs`);
 - `Update::decode` (`src/update.rs`) refuses an update in which a client's
   section starts inside or before an earlier one for that client, which yrs
-  placed twice (its test lives in `crates/pptx-edit`);
+  placed twice (CI runs its test in `crates/pptx-edit/tests/yrs_memory.rs`);
 - a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for

@@ -63,8 +63,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # Yjs leaves the key without a value);
 # `Update::decode` refuses a client's section that starts inside or before an
 # earlier one for that client, which yrs placed twice, freeing the first copy
-# (tested in pptx-edit's yrs_memory). Carry the patch until upstream has the
-# fixes and an equivalent lookup, or the re-read no longer needs it;
+# (tested in pptx-edit's yrs_memory and yrs_undo, which CI runs). Carry the
+# patch until upstream has the fixes and an equivalent lookup, or the re-read
+# no longer needs it;
 # re-apply the methods on each yrs upgrade.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
