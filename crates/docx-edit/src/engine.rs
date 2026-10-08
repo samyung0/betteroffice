@@ -472,7 +472,10 @@ struct DisplayState {
     binary_frame_epoch: u64,
     pages: Vec<FramePageSnapshot>,
     next_page_id: u64,
-    extras_fingerprint: u64,
+    /// The extras the retained list was built from on the resident path;
+    /// `None` when there is no list or it came through the JSON seam, which
+    /// the next key must not patch.
+    extras_fingerprint: Option<u64>,
     extras_json: Option<String>,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
@@ -2613,6 +2616,7 @@ impl EngineSession {
             serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();
         display.list = Some(list);
+        display.extras_fingerprint = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
         Ok(display_json)
@@ -2659,7 +2663,7 @@ impl EngineSession {
             let mut display = self.display.borrow_mut();
             let rebuilt = pagination.rebuilt_page_start..pagination.rebuilt_page_end;
             let incremental = pagination.last_incremental
-                && display.extras_fingerprint == extras_fingerprint
+                && display.extras_fingerprint == Some(extras_fingerprint)
                 && rebuilt.start <= rebuilt.end
                 && rebuilt.end <= layout.pages.len()
                 && match display.list.as_mut() {
@@ -2697,7 +2701,7 @@ impl EngineSession {
         display.rebuilt_display_pages = display
             .rebuilt_display_pages
             .wrapping_add(rebuilt_display_pages as u64);
-        display.extras_fingerprint = extras_fingerprint;
+        display.extras_fingerprint = Some(extras_fingerprint);
         display.extras_json = Some(extras_json.to_owned());
         let frame_epoch = display.frame_epoch;
         let binary_frame_epoch = display.binary_frame_epoch;
@@ -5049,6 +5053,90 @@ mod tests {
         }
 
         assert!(page_count_changed, "the edit must add a page");
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// A list built through the JSON seam is never the base the next key
+    /// patches: that key rebuilds every page, like a fresh engine.
+    #[test]
+    fn a_json_display_build_is_never_an_incremental_base() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let section = serde_json::json!({
+            "sectionId": "main",
+            "pageSize": { "w": 288.0, "h": 192.0 },
+            "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 20.0 },
+        });
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "options": { "pageSize": section["pageSize"], "margins": section["margins"] },
+            "regions": { "sections": [section] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        let ctx = crate::EditCtx::local("", "");
+        let insert = |engine: &EngineSession, at: u32| {
+            engine
+                .doc()
+                .insert_text(
+                    &ctx,
+                    crate::Position::new("body", at),
+                    "xxxxx",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+        };
+        let build = |edits: &[u32]| {
+            let engine = EngineSession::new(140);
+            let text = (0..30)
+                .map(|i| format!("Paragraph number {i:>2} here "))
+                .collect::<String>();
+            engine
+                .doc()
+                .create_story("body", &text, "Normal", "left")
+                .unwrap();
+            for at in (1..30).map(|paragraph| paragraph * 26 - 1) {
+                engine
+                    .doc()
+                    .split_paragraph(&ctx, crate::Position::new("body", at), None)
+                    .unwrap();
+            }
+            for &at in edits {
+                insert(&engine, at);
+            }
+            engine
+        };
+
+        let engine = build(&[]);
+        let stale = engine.layout_document_with_regions_json(&request).unwrap();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        assert!(engine.stats().retained_pages > 2);
+        insert(&engine, 3);
+        engine
+            .apply_and_layout("body", engine.stats().frame_epoch)
+            .unwrap();
+        engine.build_display_list_json(&stale).unwrap();
+        insert(&engine, 33);
+        let incremental = engine.stats().incremental_display_builds;
+        engine
+            .apply_and_layout("body", engine.stats().frame_epoch)
+            .unwrap();
+        assert_eq!(engine.stats().incremental_display_builds, incremental);
+
+        let fresh = build(&[3, 33]);
+        fresh.layout_document_with_regions_json(&request).unwrap();
+        fresh.build_display_list_frame(&extras, 0).unwrap();
+        assert_eq!(
+            engine.with_display_list(|list| list.pages.clone()).unwrap(),
+            fresh.with_display_list(|list| list.pages.clone()).unwrap()
+        );
         docx_layout::clear_measure_fonts();
     }
 
