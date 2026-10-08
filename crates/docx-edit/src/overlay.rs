@@ -175,6 +175,14 @@ impl Overlay {
         })
     }
 
+    /// The story and chunk a chunk writer copies, in source order.
+    pub fn chunk_of(&self, writer: u64) -> Option<(usize, usize)> {
+        match self.roles.get(&writer) {
+            Some(Role::Chunk(story, chunk)) => Some((*story, *chunk)),
+            _ => None,
+        }
+    }
+
     /// Writers whose copies the room holds.
     pub fn shared(&self) -> HashSet<u64> {
         self.shared.lock().unwrap().clone()

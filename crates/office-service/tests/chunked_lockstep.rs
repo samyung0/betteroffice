@@ -609,6 +609,87 @@ fn object_ids_hidden(text: &str) -> String {
     out
 }
 
+/// The document as the lockstep compares it: [`overlay::read_dump`] with
+/// renamed paragraph ids (`{client}.{clock}`, from the rename after concurrent
+/// splits) kept to their client. The clock is the restored mark's item clock,
+/// which an Undo's restore order sets differently by layout.
+fn dump(doc: &EditingDoc) -> String {
+    let text = overlay::read_dump(doc);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("\"pilcrow\":\"") {
+        let start = at + "\"pilcrow\":\"".len();
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find('"').unwrap_or(0);
+        let id = &rest[..end];
+        match id.split_once('.') {
+            Some((client, clock))
+                if !client.is_empty()
+                    && client.bytes().all(|byte| byte.is_ascii_digit())
+                    && !clock.is_empty()
+                    && clock.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                out.push_str(client);
+                out.push_str(".*");
+            }
+            _ => out.push_str(id),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether two exported packages differ only in `w14:paraId` values (a
+/// renamed paragraph id carries an item clock, see [`dump`]).
+fn same_but_para_ids(left: &[u8], right: &[u8]) -> bool {
+    let mask = |xml: &[u8]| -> String {
+        let text = String::from_utf8_lossy(xml);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text.as_ref();
+        while let Some(at) = rest.find("w14:paraId=\"") {
+            let start = at + "w14:paraId=\"".len();
+            out.push_str(&rest[..start]);
+            rest = &rest[start..];
+            rest = &rest[rest.find('"').unwrap_or(0)..];
+        }
+        out.push_str(rest);
+        out
+    };
+    let (Ok(left), Ok(right)) = (
+        ooxml_opc::unzip_parts(left),
+        ooxml_opc::unzip_parts(right),
+    ) else {
+        return false;
+    };
+    left.len() == right.len()
+        && left.iter().zip(&right).all(|((a, x), (b, y))| a == b && (x == y || mask(x) == mask(y)))
+}
+
+/// Renamed paragraph ids (`{client}.{clock}`) kept to their client, as in
+/// [`dump`].
+fn renamed_ids_hidden(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(":paragraph:") {
+        let start = at + ":paragraph:".len();
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let client = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let clock = rest[client..]
+            .strip_prefix('.')
+            .map(|tail| tail.bytes().take_while(u8::is_ascii_digit).count());
+        if let Some(clock) = clock.filter(|clock| client > 0 && *clock > 0) {
+            out.push_str(&rest[..client]);
+            out.push_str(".*");
+            rest = &rest[client + 1 + clock..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn first_difference(left: &str, right: &str) -> String {
     for (index, (a, b)) in left.lines().zip(right.lines()).enumerate() {
         if a != b {
@@ -668,8 +749,8 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                     world.drain(peer);
                 }
                 let (left, right) = (
-                    overlay::read_dump(&worlds[0].peers[peer].doc),
-                    overlay::read_dump(&worlds[1].peers[peer].doc),
+                    dump(&worlds[0].peers[peer].doc),
+                    dump(&worlds[1].peers[peer].doc),
                 );
                 assert!(
                     left == right,
@@ -699,8 +780,8 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                 eprintln!("r{round} sync {from}->{to}");
             }
             let (left, right) = (
-                overlay::read_dump(&worlds[0].peers[to].doc),
-                overlay::read_dump(&worlds[1].peers[to].doc),
+                dump(&worlds[0].peers[to].doc),
+                dump(&worlds[1].peers[to].doc),
             );
             assert!(
                 left == right,
@@ -712,115 +793,106 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             );
         }
     }
+    finish(&format!("{name} seed {seed}"), base, &mut worlds, &mut stats);
+    stats
+}
+
+fn checkpoint<'a>(sha: &'a str, state: &'a [u8]) -> Checkpoint<'a> {
+    Checkpoint {
+        format: Format::Docx,
+        schema_version: 1,
+        base_sha256: sha,
+        state,
+    }
+}
+
+/// Converges both worlds and checks them: every peer reads the same, the
+/// worlds read the same, a fresh session on the override room reads the
+/// same, and both rooms export the same file and the same baseline.
+fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) {
     for world in worlds.iter_mut() {
         world.sync_all();
-        let first = overlay::read_dump(&world.peers[0].doc);
+        let first = dump(&world.peers[0].doc);
         for (index, peer) in world.peers.iter().enumerate().skip(1) {
-            let other = overlay::read_dump(&peer.doc);
+            let other = dump(&peer.doc);
             if first != other {
-                let state = |doc: &EditingDoc| {
-                    let txn = doc.yrs_doc().transact();
-                    format!(
-                        "pending {} ds {} sv {:?}",
-                        txn.store().pending_update().is_some(),
-                        txn.store().pending_ds().is_some(),
-                        txn.state_vector()
-                    )
-                };
                 if let Ok(dir) = std::env::var("CHUNKED_DUMP_DIR") {
                     let dir = Path::new(&dir);
+                    let state = |doc: &EditingDoc| doc.encode_state_as_update_v1();
                     std::fs::write(dir.join("peer0.txt"), &first).unwrap();
                     std::fs::write(dir.join(format!("peer{index}.txt")), &other).unwrap();
-                    std::fs::write(dir.join("peer0.bin"), world.peers[0].doc.encode_state_as_update_v1()).unwrap();
-                    std::fs::write(dir.join(format!("peer{index}.bin")), peer.doc.encode_state_as_update_v1()).unwrap();
-                    let log: Vec<String> = world.log.iter().map(|(author, message)| format!("{author} {}", message.len())).collect();
-                    std::fs::write(dir.join("log.txt"), log.join("
-")).unwrap();
-                    for (index, (_, message)) in world.log.iter().enumerate() {
-                        std::fs::write(dir.join(format!("msg{index:03}.bin")), message).unwrap();
+                    std::fs::write(dir.join("peer0.bin"), state(&world.peers[0].doc)).unwrap();
+                    std::fs::write(dir.join(format!("peer{index}.bin")), state(&peer.doc)).unwrap();
+                    for (at, (_, message)) in world.log.iter().enumerate() {
+                        std::fs::write(dir.join(format!("msg{at:03}.bin")), message).unwrap();
                     }
                 }
                 panic!(
-                    "{name} seed {seed}: chunked {} peer {index} diverges: {}
-  peer 0 {}
-  peer {index} {}",
+                    "{label}: chunked {} peer {index} diverges: {}",
                     world.chunked,
                     first_difference(&first, &other),
-                    state(&world.peers[0].doc),
-                    state(&peer.doc)
                 );
             }
         }
     }
     let (left, right) = (
-        overlay::read_dump(&worlds[0].peers[0].doc),
-        overlay::read_dump(&worlds[1].peers[0].doc),
+        dump(&worlds[0].peers[0].doc),
+        dump(&worlds[1].peers[0].doc),
     );
     assert!(
         left == right,
-        "{name} seed {seed}: converged worlds differ: {}",
+        "{label}: converged worlds differ: {}",
         first_difference(&left, &right)
     );
-    // The rooms hold everything a fresh session needs.
     let rooms = [worlds[0].room(base), worlds[1].room(base)];
     let fresh = EditingDoc::new(799);
     let envelope = parse_docx_for_edit(base).unwrap();
     overlay::open_chunked(&fresh, envelope, &overlay::fingerprint(base)).unwrap();
     fresh.apply_shared_update(&rooms[1]).unwrap();
-    let reopened = overlay::read_dump(&fresh);
+    let reopened = dump(&fresh);
     assert!(
         reopened == left,
-        "{name} seed {seed}: a fresh session on the chunked room differs: {}",
+        "{label}: a fresh session on the chunked room differs: {}",
         first_difference(&left, &reopened)
     );
     stats.copies = fresh.overlay().map_or(0, |overlay| overlay.shared().len());
     stats.room_seeded = rooms[0].len();
     stats.room_chunked = rooms[1].len();
-    // Both rooms export the same file and the same baseline.
     let sha = office_service::sha256_hex(base);
-    let checkpoint = |state: &[u8]| Checkpoint {
-        format: Format::Docx,
-        schema_version: 1,
-        base_sha256: &sha,
-        state: unsafe { std::mem::transmute::<&[u8], &'static [u8]>(state) },
-    };
     let determinism = Determinism {
         seed: "0000000000000000000000000000000000000000000000000000000000000000",
         now: "2026-10-08T00:00:00.000Z",
     };
     let exports: Vec<_> = rooms
         .iter()
-        .map(|room| office_service::export(base, checkpoint(room), determinism))
+        .map(|room| office_service::export(base, checkpoint(&sha, room), determinism))
         .collect();
     match (&exports[0], &exports[1]) {
-        (Ok(left), Ok(right)) => assert!(left == right, "{name} seed {seed}: exports differ"),
+        (Ok(left), Ok(right)) => assert!(
+            left == right || same_but_para_ids(left, right),
+            "{label}: exports differ"
+        ),
         (left, right) => assert_eq!(
             left.as_ref().err().map(ToString::to_string),
             right.as_ref().err().map(ToString::to_string),
-            "{name} seed {seed}: export outcome differs"
+            "{label}: export outcome differs"
         ),
     }
     let baselines: Vec<_> = rooms
         .iter()
         .map(|room| {
-            office_service::baseline(base, checkpoint(room))
-                .map(|entries| object_ids_hidden(&format!("{entries:?}")))
+            office_service::baseline(base, checkpoint(&sha, room))
+                .map(|entries| renamed_ids_hidden(&object_ids_hidden(&format!("{entries:#?}"))))
                 .map_err(|error| error.to_string())
         })
         .collect();
     if baselines[0] != baselines[1] {
-        let (left, right) = (
-            baselines[0].clone().unwrap_or_else(|error| error).replace("BaselineEntry", "
-BaselineEntry"),
-            baselines[1].clone().unwrap_or_else(|error| error).replace("BaselineEntry", "
-BaselineEntry"),
-        );
+        let text = |baseline: &Result<String, String>| baseline.clone().unwrap_or_else(|error| error);
         panic!(
-            "{name} seed {seed}: baselines differ: {}",
-            first_difference(&left, &right)
+            "{label}: baselines differ: {}",
+            first_difference(&text(&baselines[0]), &text(&baselines[1]))
         );
     }
-    stats
 }
 
 fn fixtures() -> Vec<(String, Vec<u8>)> {
@@ -892,4 +964,381 @@ fn random_schedules_match_the_seeded_layout() {
     }
     eprintln!("lockstep: {schedules} schedules, {totals:?}");
     assert!(totals.applied > totals.refused);
+}
+
+enum Step {
+    Do(usize, Op),
+    Sync(usize, usize),
+}
+
+/// The clocks of the session clients (below the reserved range).
+fn user_clocks(doc: &EditingDoc) -> Vec<(u64, u32)> {
+    let txn = doc.yrs_doc().transact();
+    let mut clocks: Vec<(u64, u32)> = txn
+        .state_vector()
+        .iter()
+        .map(|(client, clock)| (client.get(), *clock))
+        .filter(|(client, _)| *client != 0 && *client < overlay::RESERVED_CLIENTS)
+        .collect();
+    clocks.sort();
+    clocks
+}
+
+fn compare(worlds: &[World; 2], peer: usize, what: &str) {
+    assert_eq!(
+        user_clocks(&worlds[0].peers[peer].doc),
+        user_clocks(&worlds[1].peers[peer].doc),
+        "{what}: peer {peer} wrote different items"
+    );
+    let (left, right) = (
+        dump(&worlds[0].peers[peer].doc),
+        dump(&worlds[1].peers[peer].doc),
+    );
+    assert!(
+        left == right,
+        "{what}: peer {peer} reads differ: {}",
+        first_difference(&left, &right)
+    );
+}
+
+/// Runs scripted steps in both layouts, comparing reads after each, then
+/// [`finish`]. Every scripted op must apply.
+fn script(name: &str, base: &[u8], peers: usize, steps: Vec<Step>) -> [World; 2] {
+    let mut worlds = [World::new(base, peers, false), World::new(base, peers, true)];
+    for (index, step) in steps.into_iter().enumerate() {
+        match step {
+            Step::Do(peer, op) => {
+                let seeded = attempt(&worlds[0].peers[peer], &op);
+                let chunked = attempt(&worlds[1].peers[peer], &op);
+                assert_eq!(seeded, chunked, "{name} step {index} {op:?}");
+                assert!(seeded.is_ok(), "{name} step {index} {op:?}: {seeded:?}");
+                for world in worlds.iter_mut() {
+                    world.drain(peer);
+                }
+                compare(&worlds, peer, &format!("{name} step {index} {op:?}"));
+            }
+            Step::Sync(from, to) => {
+                for world in worlds.iter_mut() {
+                    world.sync(from, to).unwrap();
+                }
+                compare(&worlds, to, &format!("{name} step {index} sync {from}->{to}"));
+            }
+        }
+    }
+    let mut stats = Stats::default();
+    finish(name, base, &mut worlds, &mut stats);
+    worlds
+}
+
+fn mixed() -> Vec<u8> {
+    chunked_fixtures::xml_fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "xml-mixed")
+        .unwrap()
+        .1
+}
+
+/// Paragraph `index` of the body as (paraId, first unit, mark index).
+fn para(base: &[u8], index: usize) -> (String, u32, u32) {
+    let doc = EditingDoc::new(1);
+    seed_from_docx(&doc, base).unwrap();
+    layout(&doc, "body").1[index].clone()
+}
+
+/// The reserved (copy) writers a room state holds.
+fn copies_in(state: &[u8]) -> BTreeSet<u64> {
+    let update = yrs::Update::decode_v1(state).unwrap();
+    update
+        .blocks()
+        .map(|block| match block {
+            yrs::UpdateBlock::Item(item) => item.id().client.get(),
+            yrs::UpdateBlock::Gc(range) | yrs::UpdateBlock::Skip(range) => range.client.get(),
+        })
+        .filter(|client| *client >= overlay::RESERVED_CLIENTS)
+        .collect()
+}
+
+fn body_text(doc: &EditingDoc) -> String {
+    doc.story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter_map(|segment| match segment.content {
+            SegmentContent::Text(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn insert(story: &str, at: u32, text: &str) -> Op {
+    Op::Insert(story.to_owned(), at, text.to_owned())
+}
+
+#[test]
+fn concurrent_first_edits_of_one_chunk_converge_on_one_copy() {
+    let base = mixed();
+    let (_, start, mark) = para(&base, 1);
+    let worlds = script(
+        "concurrent first edits",
+        &base,
+        3,
+        vec![
+            Step::Do(0, insert("body", start, "<A>")),
+            Step::Do(1, insert("body", start + 4, "<B>")),
+            Step::Do(2, insert("body", mark, "<C>")),
+            Step::Sync(1, 0),
+            Step::Sync(2, 0),
+        ],
+    );
+    let room = worlds[1].room(&base);
+    let overlay = worlds[1].peers[0].doc.overlay().unwrap();
+    let body = overlay.stories.iter().find(|story| story.id == "body").unwrap();
+    assert_eq!(
+        copies_in(&room),
+        BTreeSet::from([body.writer, body.chunk_writers[1]]),
+        "one story copy and one chunk copy"
+    );
+    let text = body_text(&worlds[1].peers[0].doc);
+    for marker in ["<A>", "<B>", "<C>", "Beta", "tracked insert"] {
+        assert_eq!(text.matches(marker).count(), 1, "{marker} once in {text}");
+    }
+}
+
+#[test]
+fn enter_at_both_sides_of_a_chunk_boundary() {
+    let base = mixed();
+    let (_, _, end_of_first) = para(&base, 0);
+    let (_, start_of_second, _) = para(&base, 1);
+    script(
+        "enter across a chunk boundary",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Split("body".into(), end_of_first)),
+            Step::Do(1, Op::Split("body".into(), start_of_second)),
+            Step::Do(1, insert("body", start_of_second, "<new>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(0, Op::Undo),
+            Step::Do(1, Op::Undo),
+            Step::Do(1, Op::Redo),
+        ],
+    );
+}
+
+#[test]
+fn backspace_and_delete_join_paragraphs_across_chunks() {
+    let base = mixed();
+    let (second, _, _) = para(&base, 1);
+    let (third, start_of_third, _) = para(&base, 2);
+    script(
+        "joins across chunks",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Merge(third, false)),
+            Step::Do(1, Op::Merge(second, true)),
+            Step::Sync(0, 1),
+            Step::Do(1, insert("body", start_of_third - 2, "<joined>")),
+            Step::Sync(1, 0),
+            Step::Do(0, Op::Undo),
+        ],
+    );
+}
+
+#[test]
+fn select_all_delete_against_a_concurrent_insert() {
+    let base = mixed();
+    let (_, start, _) = para(&base, 4);
+    let worlds = script(
+        "select-all delete",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::SelectAll("body".into())),
+            Step::Do(1, insert("body", start + 2, "<kept>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+        ],
+    );
+    assert!(body_text(&worlds[1].peers[0].doc).contains("<kept>"));
+}
+
+#[test]
+fn paste_over_paragraphs_in_several_chunks() {
+    let base = mixed();
+    let (_, from, _) = para(&base, 1);
+    let (_, to, _) = para(&base, 3);
+    script(
+        "paste spanning chunks",
+        &base,
+        2,
+        vec![
+            Step::Do(
+                0,
+                Op::Paste(
+                    "body".into(),
+                    from + 3,
+                    to + 2,
+                    vec!["<one>".into(), "<two>".into(), "<three>".into()],
+                ),
+            ),
+            Step::Do(1, insert("body", to + 1, "<mid>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(1, Op::Undo),
+        ],
+    );
+}
+
+#[test]
+fn tables_rows_cells_and_deletion() {
+    let base = mixed();
+    script(
+        "tables",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Row("body".into())),
+            Step::Do(1, insert("body:t0:r0c0", 0, "<cell>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(0, Op::DeleteTable("body".into())),
+            Step::Do(1, insert("body:t0:r0c1", 1, "<late>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(0, Op::Undo),
+        ],
+    );
+}
+
+#[test]
+fn tracked_changes_accept_reject_and_suggest() {
+    let base = mixed();
+    let (_, start, mark) = para(&base, 1);
+    script(
+        "tracked changes",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Accept("body".into(), start, mark)),
+            Step::Do(1, Op::Reject("body".into(), start, mark)),
+            Step::Do(1, Op::Suggest("body".into(), start + 1, "<sug>".into())),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(0, Op::Accept("body".into(), start, mark + 6)),
+            Step::Sync(0, 1),
+        ],
+    );
+}
+
+#[test]
+fn a_comment_over_source_text_copies_no_chunk() {
+    let base = mixed();
+    let (_, from, _) = para(&base, 1);
+    let (_, _, to) = para(&base, 4);
+    let worlds = script(
+        "comment across chunks",
+        &base,
+        2,
+        vec![Step::Do(0, Op::Comment("body".into(), from + 2, to)), Step::Sync(0, 1)],
+    );
+    assert!(
+        copies_in(&worlds[1].room(&base)).is_empty(),
+        "a comment's anchors name source items without copying them"
+    );
+    let (_, start, _) = para(&base, 2);
+    script(
+        "comment then edits",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Comment("body".into(), from + 2, to)),
+            Step::Do(1, insert("body", start + 1, "<in>")),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(1, Op::Uncomment("701:0".into())),
+            Step::Sync(1, 0),
+        ],
+    );
+}
+
+#[test]
+fn fields_toc_update_and_typing_in_its_result() {
+    let base = mixed();
+    let (_, toc, _) = para(&base, 4);
+    script(
+        "fields",
+        &base,
+        2,
+        vec![
+            Step::Do(1, insert("body", toc + 3, "<toc>")),
+            Step::Do(0, Op::Toc),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(1, Op::Undo),
+        ],
+    );
+}
+
+#[test]
+fn list_numbering_section_and_page_breaks() {
+    let base = mixed();
+    let (item, start, _) = para(&base, 2);
+    let (_, _, section_end) = para(&base, 7);
+    let (_, leading, _) = para(&base, 9);
+    script(
+        "lists, sections, breaks",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::List(para(&base, 5).0)),
+            Step::Do(1, Op::Split("body".into(), start + 3)),
+            Step::Do(0, Op::SectionBreak("body".into(), section_end)),
+            Step::Do(1, Op::PageBreak("body".into(), leading + 2)),
+            Step::Do(0, Op::Merge(para(&base, 10).0, false)),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+            Step::Do(1, Op::Align(item)),
+        ],
+    );
+}
+
+#[test]
+fn concurrent_mid_splits_rename_paragraph_ids_alike() {
+    let base = mixed();
+    let (_, start, _) = para(&base, 1);
+    script(
+        "paraIds",
+        &base,
+        3,
+        vec![
+            Step::Do(0, Op::Split("body".into(), start + 2)),
+            Step::Do(1, Op::Split("body".into(), start + 5)),
+            Step::Do(2, Op::Split("body".into(), start + 9)),
+            Step::Sync(0, 1),
+            Step::Sync(2, 1),
+            Step::Sync(1, 0),
+            Step::Sync(1, 2),
+        ],
+    );
+}
+
+#[test]
+fn duplicated_source_paragraph_ids_rename_alike() {
+    let base = chunked_fixtures::xml_fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "xml-collapsed-bookmark")
+        .unwrap()
+        .1;
+    let (_, start, _) = para(&base, 0);
+    script(
+        "duplicate source paraIds",
+        &base,
+        2,
+        vec![
+            Step::Do(0, Op::Split("body".into(), start + 1)),
+            Step::Sync(0, 1),
+            Step::Sync(1, 0),
+        ],
+    );
 }
