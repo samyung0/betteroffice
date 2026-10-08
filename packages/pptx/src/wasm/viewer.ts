@@ -6,6 +6,7 @@ import type { InitInput } from './generated/viewer/pptx_view_wasm.js';
 import type {
   DeckSnapshot,
   HitTestResult,
+  PptxEmbeddedFontFace,
   PptxFontFace,
   SlideDisplayList,
 } from '../types';
@@ -17,7 +18,9 @@ export interface PresentationViewerHandle {
   registerFont(face: PptxFontFace): number;
   /** The deck's embedded faces, for the page to paint with; decoded by this
    *  call or the first layout, which then measures with them. */
-  embeddedFonts(): PptxFontFace[];
+  embeddedFonts(): PptxEmbeddedFontFace[];
+  /** Drops an embedded face the page could not load from layout. */
+  refuseEmbeddedFont(fontId: number): void;
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
@@ -67,9 +70,13 @@ export function openPresentation(
   // snapshot never pays for them.
   let embeddedFaces: EmbeddedFace[] | undefined;
   const withEmbeddedFonts = (): PptxViewRenderer => {
-    embeddedFaces ??= parseJson<EmbeddedFace[]>(() =>
-      renderer.registerEmbeddedFontsJson(document)
-    );
+    if (!embeddedFaces) {
+      // Attempted once: a failure leaves the deck without embedded faces.
+      embeddedFaces = [];
+      embeddedFaces = parseJson<EmbeddedFace[]>(() =>
+        renderer.registerEmbeddedFontsJson(document)
+      );
+    }
     return renderer;
   };
   let disposed = false;
@@ -85,13 +92,12 @@ export function openPresentation(
     embeddedFonts: () =>
       read(() => {
         withEmbeddedFonts();
-        return (embeddedFaces ?? []).map(({ family, bold, italic, fontId }) => ({
-          family,
-          bold,
-          italic,
-          bytes: renderer.fontBytes(fontId),
+        return (embeddedFaces ?? []).map((face) => ({
+          ...face,
+          bytes: renderer.fontBytes(face.fontId),
         }));
       }),
+    refuseEmbeddedFont: (fontId) => read(() => renderer.refuseEmbeddedFont(fontId)),
     layoutSlide: (slideIndex) =>
       parseJson(() => read(() => withEmbeddedFonts().layoutSlideJson(document, slideIndex))),
     hitTest: (x, y) => parseJson(() => read(() => renderer.hitTestJson(x, y))),
@@ -164,9 +170,10 @@ function countShapeTextCharacters(shape: DeckSnapshot['slides'][number]['shapes'
   return count;
 }
 
-/** A face of the deck's `p:embeddedFontLst`, as the renderer registered it. */
+/** A part of the deck's `p:embeddedFontLst`, as the renderer registered it. */
 interface EmbeddedFace {
   family: string;
+  typeface: string;
   bold: boolean;
   italic: boolean;
   fontId: number;

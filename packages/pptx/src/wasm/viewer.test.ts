@@ -66,14 +66,18 @@ describe('PPTX viewer wasm', () => {
     const editor = openEditorPresentation(new Uint8Array(deck), { clientId: 812, fonts });
     const other = openViewerPresentation(new Uint8Array(plain), { fonts });
     try {
+      const faces = viewer.embeddedFonts();
       for (const handle of [viewer, editor]) {
-        const faces = handle.embeddedFonts();
-        expect(faces.map(({ family, bold, italic }) => ({ family, bold, italic }))).toEqual([
-          { family: 'Lato', bold: false, italic: false },
-          { family: 'Lato', bold: true, italic: false },
+        const own = handle.embeddedFonts();
+        expect(own.map(({ typeface, bold, italic }) => ({ typeface, bold, italic }))).toEqual([
+          { typeface: 'Lato', bold: false, italic: false },
+          { typeface: 'Lato', bold: true, italic: false },
         ]);
+        // Named by an alias of the bytes, the same for both handles.
+        expect(own.map(({ family }) => family)).toEqual(faces.map(({ family }) => family));
+        for (const face of own) expect(face.family).toMatch(/^bo-embedded-[0-9a-f]{16}$/);
         // Decoded from MicroType Express to a TrueType sfnt the page can load.
-        for (const face of faces) expect([...face.bytes.subarray(0, 4)]).toEqual([0, 1, 0, 0]);
+        for (const face of own) expect([...face.bytes.subarray(0, 4)]).toEqual([0, 1, 0, 0]);
       }
       const frame = viewer.layoutSlide(0);
       expect(frame).toEqual(editor.layoutSlide(0));
@@ -86,8 +90,21 @@ describe('PPTX viewer wasm', () => {
         'it wraps later',
         'Second line',
       ]);
-      expect(box.lines[0].runs[0].fontFamily).toBe('Lato');
+      expect(box.lines[0].runs[0].fontFamily).toBe(faces[0].family);
       expect(other.embeddedFonts()).toEqual([]);
+      // Faces the page refused lay out in the host face again.
+      for (const face of faces) viewer.refuseEmbeddedFont(face.fontId);
+      const refused = viewer.layoutSlide(0);
+      const fallback = refused.primitives.find(
+        (primitive) => primitive.kind === 'textBox' && primitive.objectId === 4
+      );
+      if (fallback?.kind !== 'textBox') throw new Error('shape 4 has no text box');
+      expect(fallback.lines[0].runs[0].fontFamily).toBe('Arial');
+      expect(fallback.lines.map((line) => line.runs.map((run) => run.text).join(''))).toEqual([
+        'Embedded as ',
+        'text it wraps later',
+        'Second line',
+      ]);
     } finally {
       viewer.dispose();
       editor.dispose();

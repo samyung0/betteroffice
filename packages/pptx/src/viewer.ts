@@ -1,5 +1,6 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { installEmbeddedFonts, removeFontFaces } from './render/fonts';
+export type { EmbeddedFontSource } from './render/fonts';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export {
   analyzeOpenPresentation,
@@ -17,6 +18,7 @@ export type {
 export type {
   DeckSnapshot,
   HitTestResult,
+  PptxEmbeddedFontFace,
   PptxFontFace,
   SlideDisplayList,
   SlidePrimitive,

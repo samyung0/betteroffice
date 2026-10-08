@@ -501,9 +501,13 @@ describe('PptxEditor embedded fonts', () => {
         <PptxEditor file={deck} fonts={[{ family: 'Arial', bytes: fontBytes }]} onReady={(api) => opened.push(api)} />
       );
       await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
-      expect(
-        [...fonts].map((face) => `${face.family} ${face.descriptors.weight}`).sort()
-      ).toEqual(['Arial 400', 'Lato 400', 'Lato 700']);
+      const families = [...fonts].map((face) => `${face.family} ${face.descriptors.weight}`);
+      expect(families.filter((family) => family.startsWith('bo-embedded-'))).toHaveLength(2);
+      expect(families.map((family) => family.replace(/^bo-embedded-\w+/, 'alias')).sort()).toEqual([
+        'Arial 400',
+        'alias 400',
+        'alias 700',
+      ]);
       view.unmount();
       expect(fonts.size).toBe(0);
     } finally {

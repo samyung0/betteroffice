@@ -1,18 +1,23 @@
-import type { PptxFontFace } from '../types';
+import type { PptxEmbeddedFontFace } from '../types';
+
+/** A deck's handle, as far as {@link installEmbeddedFonts} needs it. */
+export interface EmbeddedFontSource {
+  embeddedFonts(): PptxEmbeddedFontFace[];
+  refuseEmbeddedFont(fontId: number): void;
+}
 
 /**
- * Adds a deck's embedded faces to the page's fonts, so canvas text paints in
- * the faces layout measured. A face the browser refuses is left out with a
- * warning: its text paints in the page's fallback, as before embedded fonts.
- * Resolves to the faces added, for {@link removeFontFaces} when the deck
- * closes. Does nothing outside a DOM.
+ * Adds a deck's embedded faces to the page's fonts under their per-deck
+ * aliases, so canvas text paints in the faces layout measured and nothing
+ * else on the page changes. A face the browser refuses is left out with a
+ * warning and dropped from the deck's layout too, so its text falls back in
+ * both. Resolves to the faces added, for {@link removeFontFaces} when the
+ * deck closes. Does nothing outside a DOM.
  */
-export async function installEmbeddedFonts(
-  faces: ReadonlyArray<PptxFontFace>
-): Promise<FontFace[]> {
+export async function installEmbeddedFonts(deck: EmbeddedFontSource): Promise<FontFace[]> {
   if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];
   const loaded = await Promise.all(
-    faces.map(async (face) => {
+    deck.embeddedFonts().map(async (face) => {
       try {
         const font = await new FontFace(face.family, face.bytes.slice().buffer as ArrayBuffer, {
           style: face.italic ? 'italic' : 'normal',
@@ -21,7 +26,12 @@ export async function installEmbeddedFonts(
         document.fonts.add(font);
         return font;
       } catch (error) {
-        console.warn(`[pptx] the embedded face "${face.family}" did not load`, error);
+        console.warn(`[pptx] the embedded face "${face.typeface}" did not load`, error);
+        try {
+          deck.refuseEmbeddedFont(face.fontId);
+        } catch {
+          // The deck closed while the face loaded.
+        }
         return null;
       }
     })

@@ -352,6 +352,13 @@ export interface PptxFontFace {
   bytes: Uint8Array;
 }
 
+/** A face the deck embeds, under the per-deck alias its display lists name. */
+export interface PptxEmbeddedFontFace extends PptxFontFace {
+  /** `p:font/@typeface` of the first slot naming the part. */
+  typeface: string;
+  fontId: number;
+}
+
 export type GeometryPathCommand =
   | { type: 'move'; x: number; y: number }
   | { type: 'line'; x: number; y: number }

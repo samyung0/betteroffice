@@ -13,6 +13,7 @@ export const pptxrenderer_layoutSlideAtCaretJson: (a: number, b: number, c: numb
 export const pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_new: () => number;
+export const pptxrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
 export const pptxrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
 export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const rendererVersion: () => [number, number];

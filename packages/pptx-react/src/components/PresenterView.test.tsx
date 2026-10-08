@@ -1,6 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, it, spyOn } from 'bun:test';
 import type { SlideDisplayList } from '@betteroffice/pptx/viewer';
+import * as viewer from '@betteroffice/pptx/viewer';
 import { Window as HappyWindow } from 'happy-dom';
 import { NotesWindow } from '../notesWindow';
 import { PresentationOverlay } from './PresentationOverlay';
@@ -57,6 +58,29 @@ function setup({
     [...popup.document.body.querySelectorAll('button')].find((each) => each.textContent === name)!;
   return { calls, notes, view, popup, attach, inPopup, popupText, press, button };
 }
+
+it('paints the notes window slides in this document, which holds the deck faces', async () => {
+  const owners: Document[] = [];
+  const painting = spyOn(viewer, 'paintSlide').mockImplementation(async (context) => {
+    owners.push((context as CanvasRenderingContext2D).canvas.ownerDocument);
+  });
+  const contexts = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+    this: HTMLCanvasElement
+  ) {
+    return { canvas: this, drawImage() {} } as unknown as CanvasRenderingContext2D;
+  } as unknown as typeof HTMLCanvasElement.prototype.getContext);
+  try {
+    const { attach, inPopup } = setup();
+    attach();
+    // The show, then the current and next slide in the notes window.
+    await waitFor(() => expect(owners.length).toBeGreaterThanOrEqual(3));
+    expect(inPopup('canvas')).toBeTruthy();
+    expect(owners.every((owner) => owner === document)).toBe(true);
+  } finally {
+    painting.mockRestore();
+    contexts.mockRestore();
+  }
+});
 
 it('draws Presenter view in the notes window, and both windows drive one slide', () => {
   const { view, attach, inPopup, popupText, popup, press } = setup();

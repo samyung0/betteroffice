@@ -867,7 +867,7 @@ function PptxEditorContent({
             initialUpdate: collaborationInitialUpdate,
           });
           // The deck's own faces, so the page paints what layout measured.
-          const embedded = await installEmbeddedFonts(handle.embeddedFonts());
+          const embedded = await installEmbeddedFonts(handle);
           if (disposed) {
             removeBrowserFonts(embedded);
             return;
