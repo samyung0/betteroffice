@@ -690,6 +690,100 @@ fn renamed_ids_hidden(text: &str) -> String {
     out
 }
 
+/// The items around paragraph mark `para_id` in `story`, for diagnosis.
+fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
+    use yrs::Map;
+    let txn = doc.yrs_doc().transact();
+    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story)) else {
+        return String::new();
+    };
+    let mut items = Vec::new();
+    let mut target = None;
+    let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&text).start();
+    while let Some(current) = item {
+        let summary = match current.content() {
+            yrs::block::ItemContent::String(text) => {
+                if !para_id.is_empty() && text.as_str().contains(para_id) {
+                    target = Some(items.len());
+                }
+                format!("{:?}", text.as_str())
+            }
+            yrs::block::ItemContent::Format(key, value) => format!("fmt {key}={value}"),
+            yrs::block::ItemContent::Type(_) => {
+                let map = yrs::MapRef::from(yrs::branch::BranchPtr::from(match current.content() {
+                    yrs::block::ItemContent::Type(branch) => branch.as_ref(),
+                    _ => unreachable!(),
+                }));
+                let kind = map.get(&txn, "_kind").map(|value| value.to_string(&txn)).unwrap_or_default();
+                let id = map.get(&txn, "paraId").map(|value| value.to_string(&txn)).unwrap_or_default();
+                if id == para_id {
+                    target = Some(items.len());
+                }
+                format!("embed {kind} {id}")
+            }
+            yrs::block::ItemContent::Deleted(len) => format!("deleted {len}"),
+            other => format!("{other:?}").chars().take(40).collect(),
+        };
+        let id = current.id();
+        let client = if id.client.get() >= overlay::RESERVED_CLIENTS { "W".to_owned() } else { id.client.get().to_string() };
+        items.push(format!(
+            "{}{client}:{} {summary}",
+            if current.is_deleted() { "x " } else { "  " },
+            id.clock
+        ));
+        item = current.right();
+    }
+    let at = target.unwrap_or(0);
+    let after: usize = std::env::var("CHUNKED_WINDOW_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    items[at.saturating_sub(std::env::var("CHUNKED_WINDOW_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(14))..(at + after).min(items.len())].join("
+")
+}
+
+/// A story's live items (content and format markers, no ids, no deleted
+/// items): equal in both layouts when an op wrote the same structure.
+fn live_structure(doc: &EditingDoc, story: &str) -> Vec<String> {
+    use yrs::Map;
+    let txn = doc.yrs_doc().transact();
+    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&text).start();
+    while let Some(current) = item {
+        if !current.is_deleted() {
+            out.push(match current.content() {
+                yrs::block::ItemContent::String(text) => format!("{:?}", text.as_str()),
+                yrs::block::ItemContent::Format(key, value) => format!("fmt {key}={}", canon(value)),
+                yrs::block::ItemContent::Type(_) => "embed".to_owned(),
+                other => format!("{other:?}").chars().take(30).collect(),
+            });
+        }
+        item = current.right();
+    }
+    fn canon(value: &Any) -> String {
+        match value {
+            Any::Map(map) => {
+                let mut entries: Vec<_> = map.iter().map(|(key, value)| format!("{key}:{}", canon(value))).collect();
+                entries.sort();
+                format!("{{{}}}", entries.join(","))
+            }
+            Any::Array(values) => format!("[{}]", values.iter().map(canon).collect::<Vec<_>>().join(",")),
+            other => other.to_string(),
+        }
+    }
+    // Text items split differently; join adjacent strings.
+    let mut joined: Vec<String> = Vec::new();
+    for entry in out {
+        if entry.starts_with('"') && joined.last().is_some_and(|last| last.starts_with('"')) {
+            let last = joined.pop().unwrap();
+            joined.push(format!("{}{}", &last[..last.len() - 1], &entry[1..]));
+        } else {
+            joined.push(entry);
+        }
+    }
+    joined
+}
+
 fn first_difference(left: &str, right: &str) -> String {
     for (index, (a, b)) in left.lines().zip(right.lines()).enumerate() {
         if a != b {
@@ -716,7 +810,9 @@ struct Stats {
 fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops: usize) -> Stats {
     let trace = std::env::var("CHUNKED_TRACE").ok() == Some(seed.to_string());
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let mut worlds = [World::new(base, peers, false), World::new(base, peers, true)];
+    // CHUNKED_CONTROL=1 runs today's layout in both worlds (a control).
+    let control = std::env::var("CHUNKED_CONTROL").is_ok_and(|value| value == "1");
+    let mut worlds = [World::new(base, peers, false), World::new(base, peers, !control)];
     let mut stats = Stats::default();
     let focus = layout(&worlds[0].peers[0].doc, "body")
         .1
@@ -748,6 +844,32 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                 for world in worlds.iter_mut() {
                     world.drain(peer);
                 }
+                if let (Ok(step_id), Ok(marker)) = (
+                    std::env::var("CHUNKED_WINDOW_STEP"),
+                    std::env::var("CHUNKED_WINDOW"),
+                ) && step_id == format!("r{round}s{step}p{peer}")
+                {
+                    eprintln!("after r{round}s{step}p{peer} seeded:
+{}", item_window(&worlds[0].peers[peer].doc, "body", &marker));
+                    eprintln!("after r{round}s{step}p{peer} chunked:
+{}", item_window(&worlds[1].peers[peer].doc, "body", &marker));
+                }
+                if std::env::var("CHUNKED_STRUCTURE").is_ok() {
+                    let (a, b) = (
+                        live_structure(&worlds[0].peers[peer].doc, "body"),
+                        live_structure(&worlds[1].peers[peer].doc, "body"),
+                    );
+                    if a != b {
+                        let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                        eprintln!(
+                            "structure differs after r{round}s{step}p{peer} {op:?} at {at}:
+  seeded:  {:?}
+  chunked: {:?}",
+                            &a[at.saturating_sub(4)..(at + 6).min(a.len())],
+                            &b[at.saturating_sub(4)..(at + 6).min(b.len())]
+                        );
+                    }
+                }
                 let (left, right) = (
                     dump(&worlds[0].peers[peer].doc),
                     dump(&worlds[1].peers[peer].doc),
@@ -767,6 +889,13 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             .filter(|(from, to)| from != to)
             .collect();
         for (from, to) in pairs {
+            let watch = std::env::var("CHUNKED_WINDOW_SYNC").ok() == Some(format!("r{round} {from}->{to}"));
+            if watch && let Ok(marker) = std::env::var("CHUNKED_WINDOW") {
+                eprintln!("before seeded:
+{}", item_window(&worlds[0].peers[to].doc, "body", &marker));
+                eprintln!("before chunked:
+{}", item_window(&worlds[1].peers[to].doc, "body", &marker));
+            }
             for world in worlds.iter_mut() {
                 let chunked = world.chunked;
                 world.sync(from, to).unwrap_or_else(|error| {
@@ -779,18 +908,47 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             if trace {
                 eprintln!("r{round} sync {from}->{to}");
             }
+            if watch && let Ok(marker) = std::env::var("CHUNKED_WINDOW") {
+                eprintln!("after seeded:
+{}", item_window(&worlds[0].peers[to].doc, "body", &marker));
+                eprintln!("after chunked:
+{}", item_window(&worlds[1].peers[to].doc, "body", &marker));
+            }
+            if std::env::var("CHUNKED_STRUCTURE").is_ok() {
+                let (a, b) = (
+                    live_structure(&worlds[0].peers[to].doc, "body"),
+                    live_structure(&worlds[1].peers[to].doc, "body"),
+                );
+                if a != b {
+                    let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                    eprintln!(
+                        "structure differs after r{round} sync {from}->{to} at {at}:
+  seeded:  {:?}
+  chunked: {:?}",
+                        &a[at.saturating_sub(6)..(at + 8).min(a.len())],
+                        &b[at.saturating_sub(6)..(at + 8).min(b.len())]
+                    );
+                }
+            }
             let (left, right) = (
                 dump(&worlds[0].peers[to].doc),
                 dump(&worlds[1].peers[to].doc),
             );
-            assert!(
-                left == right,
-                "{}",
-                context(
-                    round,
-                    &format!("sync {from}->{to}: {}", first_difference(&left, &right))
-                )
-            );
+            if left != right {
+                if let Ok(para) = std::env::var("CHUNKED_WINDOW") {
+                    eprintln!("seeded:
+{}", item_window(&worlds[0].peers[to].doc, "body", &para));
+                    eprintln!("chunked:
+{}", item_window(&worlds[1].peers[to].doc, "body", &para));
+                }
+                panic!(
+                    "{}",
+                    context(
+                        round,
+                        &format!("sync {from}->{to}: {}", first_difference(&left, &right))
+                    )
+                );
+            }
         }
     }
     finish(&format!("{name} seed {seed}"), base, &mut worlds, &mut stats);
@@ -845,6 +1003,9 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         first_difference(&left, &right)
     );
     let rooms = [worlds[0].room(base), worlds[1].room(base)];
+    if !worlds[1].chunked {
+        return;
+    }
     let fresh = EditingDoc::new(799);
     let envelope = parse_docx_for_edit(base).unwrap();
     overlay::open_chunked(&fresh, envelope, &overlay::fingerprint(base)).unwrap();
@@ -854,6 +1015,26 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         reopened == left,
         "{label}: a fresh session on the chunked room differs: {}",
         first_difference(&left, &reopened)
+    );
+    // Read straight from the room and the source, nothing materialized.
+    let logical = overlay::LogicalBase::new(base).unwrap();
+    let room_doc = {
+        let mut options = yrs::Options::with_client_id(yrs::ClientID::new(9));
+        options.offset_kind = yrs::OffsetKind::Utf16;
+        let doc = yrs::Doc::with_options(options);
+        doc.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&rooms[1]).unwrap())
+            .unwrap();
+        doc
+    };
+    let (engine_view, room_view) = (
+        overlay::session_segments_dump(&worlds[1].peers[0].doc),
+        overlay::room_segments_dump(&logical, &room_doc),
+    );
+    assert!(
+        engine_view == room_view,
+        "{label}: the room read through the source differs: {}",
+        first_difference(&engine_view, &room_view)
     );
     stats.copies = fresh.overlay().map_or(0, |overlay| overlay.shared().len());
     stats.room_seeded = rooms[0].len();
@@ -945,7 +1126,11 @@ fn random_schedules_match_the_seeded_layout() {
         .unwrap_or(4);
     let mut totals = Stats::default();
     let mut schedules = 0;
+    let fixture = std::env::var("CHUNKED_FIXTURE").ok();
     for (name, base) in fixtures() {
+        if fixture.as_ref().is_some_and(|only| *only != name) {
+            continue;
+        }
         for seed in 0..seeds {
             for peers in [2, 3] {
                 let seed = seed * 31 + peers as u64;

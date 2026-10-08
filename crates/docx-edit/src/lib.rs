@@ -323,6 +323,9 @@ impl EditingDoc {
     pub fn new(client_id: u64) -> Self {
         let mut options = Options::with_client_id(ClientID::new(client_id));
         options.offset_kind = OffsetKind::Utf16;
+        // Spike switch: yrs's formatting cleanup after a remote update deletes
+        // format items locally, in an order that follows client ids.
+        options.cleanup_formatting = !std::env::var("DOCX_EDIT_FORMAT_CLEANUP").is_ok_and(|v| v == "0");
         let doc = Doc::with_options(options);
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.

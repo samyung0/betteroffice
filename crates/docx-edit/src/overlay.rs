@@ -673,3 +673,241 @@ pub fn read_dump(doc: &EditingDoc) -> String {
     }
     out
 }
+
+/// The source as a reader without a materialized session sees it: each
+/// chunk's segments, read once from the chunk alone.
+pub struct LogicalBase {
+    overlay: Overlay,
+    chunks: Vec<Vec<Vec<crate::StorySegment>>>,
+}
+
+fn segments_of_text<T: ReadTxn>(txn: &T, story: &yrs::TextRef) -> Vec<crate::StorySegment> {
+    use yrs::types::text::YChange;
+    story
+        .diff(txn, YChange::identity)
+        .into_iter()
+        .map(|diff| crate::StorySegment {
+            content: crate::segment_content(diff.insert, txn),
+            attributes: crate::ordered_attrs(diff.attributes.as_deref()),
+        })
+        .collect()
+}
+
+/// Joins adjacent text segments with equal attributes, as `story_segments`
+/// reads them.
+fn merged(segments: Vec<crate::StorySegment>) -> Vec<crate::StorySegment> {
+    let mut out: Vec<crate::StorySegment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if let (crate::SegmentContent::Text(text), Some(previous)) = (&segment.content, out.last_mut())
+            && let crate::SegmentContent::Text(before) = &mut previous.content
+            && previous.attributes == segment.attributes
+        {
+            before.push_str(text);
+            continue;
+        }
+        out.push(segment);
+    }
+    out
+}
+
+fn split_text(segment: &crate::StorySegment, at: u32) -> (crate::StorySegment, crate::StorySegment) {
+    let crate::SegmentContent::Text(text) = &segment.content else {
+        unreachable!("only text spans more than one unit");
+    };
+    let mut units = 0;
+    let mut byte = text.len();
+    for (index, ch) in text.char_indices() {
+        if units >= at {
+            byte = index;
+            break;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    let part = |text: &str| crate::StorySegment {
+        content: crate::SegmentContent::Text(text.to_owned()),
+        attributes: segment.attributes.clone(),
+    };
+    (part(&text[..byte]), part(&text[byte..]))
+}
+
+fn segment_len(segment: &crate::StorySegment) -> u32 {
+    match &segment.content {
+        crate::SegmentContent::Text(text) => text.encode_utf16().count() as u32,
+        _ => 1,
+    }
+}
+
+impl LogicalBase {
+    pub fn new(base: &[u8]) -> Result<Self, String> {
+        let envelope = crate::seed::parse_docx_for_edit(base)?;
+        let source = crate::seed::chunk_source(crate::seed::lower(envelope)?)?;
+        let overlay = Overlay::new(&fingerprint(base), &source)?;
+        let mut chunks = Vec::with_capacity(source.stories.len());
+        for (story, entry) in source.stories.iter().zip(&overlay.stories) {
+            let finished = story_update(story, entry.writer, false);
+            let live = story_update(story, entry.writer, true);
+            let mut segments = Vec::with_capacity(story.chunks.len());
+            for (index, writer) in entry.chunk_writers.iter().enumerate() {
+                let doc = scratch(1);
+                apply_merged(&doc, vec![finished.clone(), chunk_update(story, &live, index, *writer)?])?;
+                let txn = doc.transact();
+                let text = crate::story_ref(&txn, &story.id).map_err(|error| error.to_string())?;
+                segments.push(segments_of_text(&txn, &text));
+            }
+            chunks.push(segments);
+        }
+        Ok(Self { overlay, chunks })
+    }
+
+    /// Story ids a room holds: the source's (unless the room deleted them)
+    /// and the room's own.
+    pub fn story_ids<T: ReadTxn>(&self, room: &T) -> Vec<String> {
+        let sv = room.state_vector();
+        let stories = room.get_map(STORIES);
+        let mut ids: BTreeSet<String> = self
+            .overlay
+            .stories
+            .iter()
+            .filter(|story| {
+                sv.get(&ClientID::new(story.writer)) == 0
+                    || stories.as_ref().is_some_and(|map| map.get(room, &story.id).is_some())
+            })
+            .map(|story| story.id.clone())
+            .collect();
+        if let Some(map) = stories {
+            ids.extend(map.keys(room).map(str::to_owned));
+        }
+        ids.into_iter().collect()
+    }
+
+    /// `story_id`'s segments (without projected bookmarks) from `room`.
+    pub fn story_segments<T: ReadTxn>(&self, room: &T, story_id: &str) -> Option<Vec<crate::StorySegment>> {
+        let sv = room.state_vector();
+        let position = self.overlay.stories.iter().position(|story| story.id == story_id);
+        let text = crate::story_ref(room, story_id).ok();
+        let Some(position) = position else {
+            return text.map(|text| merged(segments_of_text(room, &text)));
+        };
+        let entry = &self.overlay.stories[position];
+        let copied = |writer: u64| sv.get(&ClientID::new(writer)) > 0;
+        if !copied(entry.writer) {
+            return Some(merged(self.chunks[position].concat()));
+        }
+        let text = text?;
+        // Visible offsets of the anchors in the room's story.
+        let anchors = entry.chunk_writers.len() + 1;
+        let mut boundaries = vec![0u32; anchors];
+        let mut offset = 0u32;
+        let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&text).start();
+        while let Some(current) = item {
+            let id = current.id();
+            if id.client.get() == entry.writer {
+                for clock in id.clock..id.clock + current.len() {
+                    if (1..=anchors as u32).contains(&clock) {
+                        boundaries[clock as usize - 1] = offset;
+                    }
+                }
+            } else if !current.is_deleted() && current.is_countable() {
+                offset += current.len();
+            }
+            item = current.right();
+        }
+        // The room's visible segments, cut at the anchors.
+        let mut gaps: Vec<Vec<crate::StorySegment>> = vec![Vec::new(); anchors + 1];
+        let mut at = 0u32;
+        let mut gap = 0usize;
+        for mut segment in segments_of_text(room, &text) {
+            loop {
+                while gap < anchors && boundaries[gap] <= at {
+                    gap += 1;
+                }
+                let len = segment_len(&segment);
+                let limit = if gap < anchors { boundaries[gap] } else { u32::MAX };
+                if at + len <= limit {
+                    at += len;
+                    gaps[gap].push(segment);
+                    break;
+                }
+                let (head, tail) = split_text(&segment, limit - at);
+                at = limit;
+                gaps[gap].push(head);
+                segment = tail;
+            }
+        }
+        // Gap k + 1 lies between anchors k and k + 1: chunk k.
+        let mut out = std::mem::take(&mut gaps[0]);
+        for (index, writer) in entry.chunk_writers.iter().enumerate() {
+            if copied(*writer) {
+                out.append(&mut gaps[index + 1]);
+            } else {
+                debug_assert!(gaps[index + 1].is_empty(), "content in an uncopied chunk's gap");
+                out.extend(self.chunks[position][index].iter().cloned());
+            }
+        }
+        out.append(&mut gaps[anchors]);
+        Some(merged(out))
+    }
+}
+
+/// Stories' segments as canonical JSON lines, without the bookmarks a
+/// paragraph mark projects (what [`LogicalBase`] reads).
+pub fn segments_dump(stories: &[(String, Vec<crate::StorySegment>)]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for (story, segments) in stories {
+        let _ = writeln!(out, "story {story}");
+        for segment in segments {
+            let attributes: serde_json::Map<String, serde_json::Value> = segment
+                .attributes
+                .iter()
+                .map(|(key, value)| (key.clone(), json(value)))
+                .collect();
+            let content = match &segment.content {
+                crate::SegmentContent::Text(text) => serde_json::json!({ "text": text }),
+                crate::SegmentContent::Pilcrow(properties) => serde_json::json!({
+                    "pilcrow": properties.para_id,
+                    "values": properties
+                        .values
+                        .iter()
+                        .filter(|(key, _)| key.as_str() != "bookmarks")
+                        .map(|(key, value)| (key.clone(), json(value)))
+                        .collect::<serde_json::Map<_, _>>(),
+                }),
+                crate::SegmentContent::OtherEmbed { kind, payload } => serde_json::json!({
+                    "embed": kind,
+                    "payload": payload
+                        .iter()
+                        .map(|(key, value)| (key.clone(), json(value)))
+                        .collect::<serde_json::Map<_, _>>(),
+                }),
+            };
+            let _ = writeln!(out, "  {content} {}", serde_json::Value::Object(attributes));
+        }
+    }
+    out
+}
+
+/// [`segments_dump`] of a session's every story.
+pub fn session_segments_dump(doc: &EditingDoc) -> String {
+    let mut ids: Vec<String> = doc.all_story_segments().into_keys().collect();
+    ids.sort();
+    let stories: Vec<_> = ids
+        .into_iter()
+        .map(|id| {
+            let segments = doc.story_segments(&id).unwrap_or_default();
+            (id, segments)
+        })
+        .collect();
+    segments_dump(&stories)
+}
+
+/// [`segments_dump`] of a room read through [`LogicalBase`].
+pub fn room_segments_dump(base: &LogicalBase, room: &Doc) -> String {
+    let txn = room.transact();
+    let stories: Vec<_> = base
+        .story_ids(&txn)
+        .into_iter()
+        .filter_map(|id| base.story_segments(&txn, &id).map(|segments| (id, segments)))
+        .collect();
+    segments_dump(&stories)
+}

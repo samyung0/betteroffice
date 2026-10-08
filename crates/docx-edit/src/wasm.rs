@@ -1097,13 +1097,29 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 
 impl EditSession {
     fn open_docx_inner(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
+        self.open_docx_layout(bytes, seed_stories, false)
+    }
+
+    fn open_docx_layout(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        chunked: bool,
+    ) -> Result<String, JsValue> {
         let envelope = crate::seed::parse_docx_for_edit(bytes).map_err(js_err)?;
         self.engine.set_media(crate::seed::package_media(&envelope));
         self.engine
             .doc()
             .set_package(Some(crate::seed::PackageContext::new(&envelope)));
         let host_envelope = thin_docx_envelope(&envelope);
-        let referenced_fonts = if seed_stories {
+        let referenced_fonts = if chunked {
+            crate::overlay::open_chunked(
+                self.engine.doc(),
+                envelope,
+                &crate::overlay::fingerprint(bytes),
+            )
+            .map_err(js_err)?
+        } else if seed_stories {
             crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?
         } else {
             let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
@@ -1824,6 +1840,27 @@ impl EditSession {
     /// readable DOCX.
     pub fn open_docx(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
         self.open_docx_inner(bytes, seed_stories)
+    }
+
+    /// [`EditSession::open_docx`] in the override layout (spike): every
+    /// source block materialized under its copy writer; feed the room's
+    /// state to [`EditSession::apply_shared_update`].
+    pub fn open_docx_chunked(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        self.open_docx_layout(bytes, false, true)
+    }
+
+    /// Applies an update from the room, recording the copies it carries
+    /// (override layout).
+    pub fn apply_shared_update(&self, update: &[u8]) -> Result<(), JsValue> {
+        self.engine
+            .doc()
+            .apply_shared_update(update)
+            .map_err(js_err)
+    }
+
+    /// The override layout's meta seed for `bytes` (spike).
+    pub fn chunked_meta_seed(bytes: &[u8]) -> Vec<u8> {
+        crate::overlay::meta_seed(&crate::overlay::fingerprint(bytes))
     }
 
     /// The media [`EditSession::open_docx`] attached, as JSON
