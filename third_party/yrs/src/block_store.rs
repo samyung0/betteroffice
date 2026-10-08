@@ -360,6 +360,15 @@ impl BlockStore {
                         let clock_start = block.clock_start();
                         let mut index = list.find_index(clock_start).unwrap();
                         let skip = unsafe { &*list.inner[index].get() };
+                        // Patched for BetterOffice: only a skip is a placeholder. Any
+                        // other block there is placed and may be linked: replacing it
+                        // would free it while its sequence still points at it. The
+                        // new block is linked too, so it is kept alive, unlisted.
+                        if !matches!(skip, Block::Skip(_)) || block.next_clock() > skip.next_clock()
+                        {
+                            std::mem::forget(block);
+                            return;
+                        }
                         let diff_start = clock_start - skip.clock_start();
                         let diff_end = skip.next_clock() - block.next_clock();
                         if diff_start > 0 {

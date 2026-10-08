@@ -1941,6 +1941,21 @@ mod inspection_test {
         assert_eq!(txn.work(), 1 + 300 / 128);
     }
 
+    // Patched for BetterOffice: a block pushed over one already placed (an
+    // update placing a struct twice) leaves the placed one where it is.
+    #[test]
+    fn a_push_never_replaces_a_placed_block() {
+        use crate::block::{Block, BlockRange};
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "ab");
+        let mut txn = doc.transact_mut();
+        let store = txn.store_mut();
+        store.blocks.push(Block::GC(BlockRange::new(id(1, 0), 1)));
+        let item = store.blocks.get_item(&id(1, 0)).expect("still the item");
+        assert_eq!(item.len(), 2);
+    }
+
     // Patched for BetterOffice: a budget ends with its transaction.
     #[test]
     fn a_work_budget_ends_with_its_transaction() {
