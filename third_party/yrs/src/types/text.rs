@@ -1001,6 +1001,10 @@ fn insert_attributes(
 ) -> Attrs {
     let mut negated_attrs = HashMap::with_capacity(attrs.len());
     let mut store = txn.store_mut();
+    // Patched for BetterOffice: format items in key order, so one edit writes
+    // the same items on every replica (the map iterates in hash order).
+    let mut attrs: Vec<_> = attrs.into_iter().collect();
+    attrs.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, v) in attrs {
         let current_value = pos
             .current_attrs
@@ -1058,6 +1062,8 @@ fn insert_negated_attributes(
     }
 
     let mut store = txn.store_mut();
+    let mut attrs: Vec<_> = attrs.into_iter().collect();
+    attrs.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, v) in attrs {
         let client_id = store.client_id;
         let parent = this.into();
