@@ -41,37 +41,46 @@ vsdx-validate = { package = "betteroffice-vsdx-validate", path = "crates/vsdx-va
 vsdx-edit = { package = "betteroffice-vsdx-edit", path = "crates/vsdx-edit", version = "0.2.0" }
 betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 
-# yrs 0.27.3 from crates.io (upstream y-crdt ac476a47) with two fixes:
-# `clean_format_gap` (src/types/text.rs), so a delete no longer spreads the
-# deleted text's attributes onto a shared type embedded right after it, such
-# as a field or a paragraph mark; and `follow_redone` (src/store.rs), which
-# keeps the offset into a redone item as Yjs does, so a position inside text
-# Undo and Redo restored stays on its unit and Undo after a delete, Undo and
-# Redo removes only its own step. It also retains the native viewer's UTF-8
-# validation, and adds one read-only API, `Store::next_live_item` (the first
-# live item right of a deleted one, for the DOCX peer re-read of a field's
-# shown text; tested in docx-edit's field_changes), and
-# `Text::apply_delta_as_yjs` (src/types/text.rs: a delta whose deletions clean
-# format items as Yjs 13.6.31's `cleanupFormattingGap`, for the native Office
-# rebase; tested in office-service). Garbage collection takes a collected
-# type's children even when Undo keeps them (`Item::gc`,
-# `GCCollector::collect_marked`; upstream PR #682 for #667/#676), so none is
-# left pointing into the type's freed branch, and Undo passes an inserted item
-# whose redone copy was collected (`UndoManager::try_process`), as Yjs does;
-# Undo of a map value set concurrently with another client's restores the
-# value it replaced: only a value set concurrently that lost (deleted, its
-# origin the restored value, the winner to its right) is passed, every other
-# value blocks as in Yjs (`Item::redo`; Epo 2026-10-08 narrow Undo rule; Yjs
-# leaves the key without a value), under its own parent (Yjs #757), and Redo
-# keeps the restored value's parents as Yjs does;
-# `clear_undo` and `clear_redo` clear only their own stack;
-# `Update::decode` refuses a client's section that starts inside or before an
-# earlier one for that client, which yrs placed twice, freeing the first copy
-# (tested in pptx-edit's yrs_memory, yrs_undo and convergence, docx-edit's
-# yrs_memory and concurrent_undo, and betteroffice-xlsx's
-# stable_collaboration, which CI runs). Carry the patch until upstream has the
-# fixes and an equivalent lookup, or the re-read no longer needs it; re-apply
-# the methods on each yrs upgrade.
+# yrs 0.27.3 from crates.io (upstream y-crdt ac476a47), patched for
+# BetterOffice (THIRD-PARTY-NOTICES.md lists the patches; the code is marked
+# "Patched for BetterOffice"):
+# - text: `clean_format_gap` (src/types/text.rs), so a delete no longer spreads
+#   the deleted text's attributes onto a shared type embedded right after it,
+#   such as a field or a paragraph mark; `Text::apply_delta_as_yjs`, a delta
+#   whose deletions clean format items as Yjs 13.6.31's `cleanupFormattingGap`,
+#   for the native Office rebase (tested in office-service);
+# - Undo and Redo: `follow_redone` (src/store.rs) keeps the offset into a
+#   redone item as Yjs does, so a position inside text Undo and Redo restored
+#   stays on its unit and Undo after a delete, Undo and Redo removes only its
+#   own step; `UndoManager::try_process` restores a step's items in deletion
+#   order, passes an inserted item whose redone copy was collected, as Yjs
+#   does, and deletes no more of a restored copy than its step inserted;
+#   `Item::redo` restores a map value set concurrently with another client's
+#   past only a value set concurrently that lost (deleted, its origin the
+#   restored value, the winner to its right), every other value blocking as
+#   in Yjs (Epo 2026-10-08 narrow Undo rule; Yjs leaves the key without a
+#   value), under its own parent (Yjs #757), and Redo keeps the restored
+#   value's parents as Yjs does; `clear_undo` and `clear_redo` clear only
+#   their own stack;
+# - garbage collection takes a collected type's children even when Undo keeps
+#   them (`Item::gc`, `GCCollector::collect_marked`; upstream PR #682 for
+#   #667/#676), so none is left pointing into the type's freed branch;
+# - updates: `Update::decode` refuses a client's section that starts inside or
+#   before an earlier one for that client, which yrs placed twice, freeing the
+#   first copy; limits for hostile updates (nesting, reservations, the native
+#   viewer's UTF-8 validation, a client without structs); pending structs are
+#   retried once the unit they wait on arrives; a surrogate pair splits into
+#   two replacement characters as in Yjs;
+# - read-only APIs: item, branch, store and update accessors,
+#   `Store::next_live_item` (the first live item right of a deleted one, for
+#   the DOCX peer re-read of a field's shown text; tested in docx-edit's
+#   field_changes) and `StickyIndex::get_offsets`.
+# CI runs their tests in pptx-edit's yrs_memory, yrs_undo, yrs_undo_order,
+# yrs_hostile, yrs_decode_alloc and convergence, docx-edit's yrs_memory,
+# yrs_pending and concurrent_undo, and betteroffice-xlsx's
+# stable_collaboration. Carry the patches until upstream has the fixes and
+# equivalent lookups, or the re-read no longer needs it; re-apply them on each
+# yrs upgrade.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
 
