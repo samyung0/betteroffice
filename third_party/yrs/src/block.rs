@@ -558,6 +558,15 @@ impl ItemPtr {
             } else {
                 left = parent_branch.map.get(sub).cloned();
             }
+            // Patched for BetterOffice, as Yjs 13.6.31 (#757): a left reached
+            // through redone copies in another parent would make peers place the
+            // value under that parent; take the key's current value instead.
+            if left
+                .as_deref()
+                .is_some_and(|left| left.parent.as_branch().and_then(|b| b.item) != parent_block)
+            {
+                left = parent_branch.map.get(sub).cloned();
+            }
         } else {
             // Is an array item. Insert at the old position
             left = item.left;
