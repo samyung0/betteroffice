@@ -2024,14 +2024,23 @@ impl EditSession {
     /// a second call replaces the first, and a throwing callback is ignored.
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
+        let overlay = self.engine.doc().overlay();
         let subscription = self
             .engine
             .doc()
             .yrs_doc()
             .observe_update_v1(move |txn, event| {
+                // In the override layout a local update carries the copies it
+                // needs (spike).
+                let update = match (&overlay, txn.origin()) {
+                    (Some(overlay), Some(_)) => overlay
+                        .augment(txn, &event.update)
+                        .unwrap_or_else(|_| event.update.clone()),
+                    _ => event.update.clone(),
+                };
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
-                let bytes = Uint8Array::from(event.update.as_slice());
+                let bytes = Uint8Array::from(update.as_slice());
                 let origin = if txn.origin().is_none() { 1.0 } else { 0.0 };
                 let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
@@ -2054,14 +2063,21 @@ impl EditSession {
         }
         let pending = Rc::new(RefCell::new(VecDeque::new()));
         let observed = Rc::clone(&pending);
+        let overlay = self.engine.doc().overlay();
         let subscription = self
             .engine
             .doc()
             .yrs_doc()
             .observe_update_v1(move |txn, event| {
-                let mut encoded = Vec::with_capacity(event.update.len() + 1);
+                let update = match (&overlay, txn.origin()) {
+                    (Some(overlay), Some(_)) => overlay
+                        .augment(txn, &event.update)
+                        .unwrap_or_else(|_| event.update.clone()),
+                    _ => event.update.clone(),
+                };
+                let mut encoded = Vec::with_capacity(update.len() + 1);
                 encoded.push(if txn.origin().is_none() { 1 } else { 0 });
-                encoded.extend_from_slice(&event.update);
+                encoded.extend_from_slice(&update);
                 observed.borrow_mut().push_back(encoded);
             })
             .map_err(js_err)?;

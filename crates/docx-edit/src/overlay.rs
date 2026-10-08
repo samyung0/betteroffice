@@ -794,9 +794,13 @@ impl LogicalBase {
             return Some(merged(self.chunks[position].concat()));
         }
         let text = text?;
-        // Visible offsets of the anchors in the room's story.
+        // Visible offsets of the anchors in the room's story, and the
+        // formatting a span around an uncopied chunk gives its content: a
+        // format edit across chunks writes markers only at its ends.
         let anchors = entry.chunk_writers.len() + 1;
         let mut boundaries = vec![0u32; anchors];
+        let mut active: Vec<std::collections::BTreeMap<String, Any>> = vec![Default::default(); anchors];
+        let mut current_attrs = std::collections::BTreeMap::new();
         let mut offset = 0u32;
         let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&text).start();
         while let Some(current) = item {
@@ -805,10 +809,19 @@ impl LogicalBase {
                 for clock in id.clock..id.clock + current.len() {
                     if (1..=anchors as u32).contains(&clock) {
                         boundaries[clock as usize - 1] = offset;
+                        active[clock as usize - 1] = current_attrs.clone();
                     }
                 }
-            } else if !current.is_deleted() && current.is_countable() {
-                offset += current.len();
+            } else if !current.is_deleted() {
+                if let yrs::block::ItemContent::Format(key, value) = current.content() {
+                    if **value == Any::Null {
+                        current_attrs.remove(key.as_ref());
+                    } else {
+                        current_attrs.insert(key.to_string(), (**value).clone());
+                    }
+                } else if current.is_countable() {
+                    offset += current.len();
+                }
             }
             item = current.right();
         }
@@ -841,7 +854,16 @@ impl LogicalBase {
                 out.append(&mut gaps[index + 1]);
             } else {
                 debug_assert!(gaps[index + 1].is_empty(), "content in an uncopied chunk's gap");
-                out.extend(self.chunks[position][index].iter().cloned());
+                out.extend(self.chunks[position][index].iter().map(|segment| {
+                    let mut segment = segment.clone();
+                    for (key, value) in &active[index] {
+                        segment
+                            .attributes
+                            .entry(key.clone())
+                            .or_insert_with(|| value.clone());
+                    }
+                    segment
+                }));
             }
         }
         out.append(&mut gaps[anchors]);
@@ -910,4 +932,12 @@ pub fn room_segments_dump(base: &LogicalBase, room: &Doc) -> String {
         .filter_map(|id| base.story_segments(&txn, &id).map(|segments| (id, segments)))
         .collect();
     segments_dump(&stories)
+}
+
+/// The source lowered and cut into chunks without writing any Yrs: what a
+/// session that reads uncopied chunks from the source pays at open (spike
+/// measure). Returns the number of chunks.
+pub fn lower_only(envelope: docx_parse::S9WireEnvelope) -> Result<usize, String> {
+    let source = crate::seed::chunk_source(crate::seed::lower(envelope)?)?;
+    Ok(source.stories.iter().map(|story| story.chunks.len()).sum())
 }

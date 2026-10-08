@@ -195,12 +195,6 @@ fn main() {
             .to_string_lossy()
             .into_owned();
         let sha = office_service::sha256_hex(&base);
-        let checkpoint = |state| Checkpoint {
-            format: Format::Docx,
-            schema_version: 1,
-            base_sha256: &sha,
-            state,
-        };
         let determinism = Determinism {
             seed: "0000000000000000000000000000000000000000000000000000000000000000",
             now: "2026-10-08T00:00:00.000Z",
@@ -217,6 +211,13 @@ fn main() {
                 for chunked in order {
                     let seed = if chunked { &meta_seed } else { &seeded_seed };
                     let (peer, open_ms) = ms(|| open(&base, chunked, 701));
+                    let entries = peer.doc.overlay().map(|overlay| {
+                        (
+                            overlay.stories.len(),
+                            overlay.stories.iter().map(|story| story.chunk_writers.len()).sum::<usize>(),
+                            overlay.comment_writers.len(),
+                        )
+                    });
                     let messages = run(&peer, scenario);
                     let sent: usize = messages.iter().map(Vec::len).sum();
                     let room = {
@@ -224,6 +225,21 @@ fn main() {
                         layers.extend(messages.iter().map(Vec::as_slice));
                         state(&load(&layers))
                     };
+                    if let Ok(dir) = std::env::var("BENCH_DUMP_DIR")
+                        && run_index == 0
+                        && !messages.is_empty()
+                    {
+                        let stem = format!(
+                            "{dir}/{name}.{}.{scenario}",
+                            if chunked { "chunked" } else { "seeded" }
+                        );
+                        let before: Vec<&[u8]> = std::iter::once(seed.as_slice())
+                            .chain(messages[..messages.len() - 1].iter().map(Vec::as_slice))
+                            .collect();
+                        std::fs::write(format!("{stem}.state.bin"), &room).unwrap();
+                        std::fs::write(format!("{stem}.before.bin"), state(&load(&before))).unwrap();
+                        std::fs::write(format!("{stem}.last.bin"), messages.last().unwrap()).unwrap();
+                    }
                     let seed_sv = load(&[seed]).transact().state_vector();
                     let change = load(&[&room]).transact().encode_state_as_update_v1(&seed_sv);
                     let state_vector = load(&[&room]).transact().state_vector().len();
@@ -250,6 +266,9 @@ fn main() {
                         "roomHeapBytes": room_heap,
                         "wholeEncodeMs": encode_ms,
                         "peerOpenMs": open_ms,
+                        "sourceStories": entries.map(|entries| entries.0),
+                        "sourceChunks": entries.map(|entries| entries.1),
+                        "sourceComments": entries.map(|entries| entries.2),
                     });
                     drop(peer);
                     if heavy {
@@ -307,15 +326,27 @@ fn main() {
                             ms(|| doc.apply_peer_update_v1(&keystroke).unwrap()).1
                         });
                         drop(engine);
-                        let indexed = office_service::baseline(&base, checkpoint(seed)).unwrap();
+                        let indexed = office_service::baseline(&base, checkpoint(&sha, seed)).unwrap();
                         let (_, effects_ms) = ms(|| {
-                            office_service::save_effects(&base, &indexed, checkpoint(&room)).unwrap()
+                            office_service::save_effects(&base, &indexed, checkpoint(&sha, &room)).unwrap()
                         });
                         let (_, export_ms) = ms(|| {
-                            office_service::export(&base, checkpoint(&room), determinism).unwrap()
+                            office_service::export(&base, checkpoint(&sha, &room), determinism).unwrap()
                         });
                         let object = line.as_object_mut().unwrap();
                         object.insert("engineOpenFirstMs".into(), engine_open_first_ms(&base, chunked).into());
+                        object.insert(
+                            "parseMs".into(),
+                            best(2, || docx_edit::parse_docx_for_edit(&base).unwrap()).into(),
+                        );
+                        object.insert(
+                            "parseAndLowerMs".into(),
+                            best(2, || {
+                                overlay::lower_only(docx_edit::parse_docx_for_edit(&base).unwrap())
+                                    .unwrap()
+                            })
+                            .into(),
+                        );
                         object.insert("engineOpenMs".into(), engine_open_ms.into());
                         object.insert("engineHeapBytes".into(), engine_heap.into());
                         object.insert("enginePeakBytes".into(), engine_peak.into());
@@ -328,6 +359,15 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+fn checkpoint<'a>(sha: &'a str, state: &'a [u8]) -> Checkpoint<'a> {
+    Checkpoint {
+        format: Format::Docx,
+        schema_version: 1,
+        base_sha256: sha,
+        state,
     }
 }
 
