@@ -7,7 +7,7 @@
  */
 
 import type { DisplayList, GridMeta } from '../display-list/types';
-import { normalizeRange } from '../selection/index';
+import { cellAddress, columnLetter, normalizeRange } from '../selection/index';
 import type { CellRange, Selection } from '../selection/index';
 import type {
   A11yCell,
@@ -25,21 +25,6 @@ export type {
   A11yRow,
   A11yStrings,
 } from './types';
-
-// bijective base-26 column letter: 0 -> A, 25 -> Z, 26 -> AA.
-function columnLetter(col: number): string {
-  let n = col;
-  let out = '';
-  do {
-    out = String.fromCharCode(65 + (n % 26)) + out;
-    n = Math.floor(n / 26) - 1;
-  } while (n >= 0);
-  return out;
-}
-
-function cellAddress(row: number, col: number): string {
-  return `${columnLetter(col)}${row + 1}`;
-}
 
 function fill(template: string, vars: Record<string, string | number>): string {
   return template.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? ''));

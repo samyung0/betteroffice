@@ -10,6 +10,7 @@ import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
+import { StaleProposalError } from './staleProposal';
 
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
@@ -294,20 +295,7 @@ export interface Proposal {
   cells: ProposalCell[];
 }
 
-/**
- * Thrown by {@link WorkbookHandle.acceptProposal} when the workbook changed
- * under a proposal since it was staged (an edit touched one of its base cells)
- * and `force` was not set. `cells` are the a1 addresses that moved, so the UI
- * can name them and offer a force-apply.
- */
-export class StaleProposalError extends Error {
-  readonly cells: string[];
-  constructor(cells: string[]) {
-    super(`stale: ${cells.join(', ')}`);
-    this.name = 'StaleProposalError';
-    this.cells = cells;
-  }
-}
+export { StaleProposalError };
 
 // the wasm signals a stale accept with a string starting `"stale: "` followed
 // by a comma-separated a1 list; parse it back into the typed error.

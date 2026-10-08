@@ -15,6 +15,8 @@ export type {
 } from './types';
 
 export {
+  cellAddress,
+  columnLetter,
   selectionAt,
   normalizeRange,
   rangeContains,

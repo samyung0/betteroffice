@@ -8,6 +8,8 @@ export default defineConfig({
     viewer: 'src/viewer.ts',
     headless: 'src/headless.ts',
     collaboration: 'src/collaboration/index.ts',
+    // The dedicated worker, at the URL the proxy loads it from (src/worker/client.ts).
+    workbookWorker: 'src/worker/workbookWorker.ts',
   },
   format: ['esm'],
   dts: true,
