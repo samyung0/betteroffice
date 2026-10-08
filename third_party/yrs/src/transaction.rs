@@ -624,7 +624,15 @@ impl<'doc> TransactionMut<'doc> {
     ///   is extracted and integrated into the document structure.
     pub fn encode_update<E: Encoder>(&self, encoder: &mut E) {
         let store = self.store();
-        store.write_blocks_from(self.before_state(), encoder);
+        // The clients this transaction inserted into, each from its first
+        // inserted clock: what diffing the state vectors gives, without
+        // building them (O(clients)).
+        let diff = self
+            .insert_set
+            .iter()
+            .filter_map(|(client, ranges)| Some((*client, ranges.clock_start()?)))
+            .collect();
+        store.write_blocks_since(diff, encoder);
         self.delete_set.encode(encoder);
     }
 
@@ -1313,7 +1321,9 @@ impl<'doc> TransactionMut<'doc> {
 
     pub(crate) fn add_changed_type(&mut self, parent: BranchPtr, parent_sub: Option<Arc<str>>) {
         let trigger = if let Some(ptr) = parent.item {
-            (ptr.id().clock < self.before_state().get(&ptr.id().client)) && !ptr.is_deleted()
+            // Created before this transaction: the insert set answers that in
+            // O(1); the before state vector costs O(clients).
+            !self.has_added(ptr.id()) && !ptr.is_deleted()
         } else {
             true
         };

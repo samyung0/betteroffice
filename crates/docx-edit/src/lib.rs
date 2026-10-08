@@ -331,7 +331,10 @@ impl EditingDoc {
         // after_transaction: bumps on any store-changing commit without encoding an update.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
-                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                // The insert set, not the state vectors: those cost O(clients)
+                // per transaction, and an override-layout session holds one
+                // client per copy writer.
+                if !txn.delete_set().is_empty() || !txn.insert_set().is_empty() {
                     observed.fetch_add(1, Ordering::Relaxed);
                 }
             })
