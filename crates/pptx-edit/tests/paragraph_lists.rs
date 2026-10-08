@@ -1275,9 +1275,16 @@ fn undo_restores_the_file_markup_after_a_list_edit() {
     );
 }
 
+/// Security regression (pptx-parity REVIEW-1 F6): a peer's run value lands in
+/// a schema-typed attribute on save, so a snapshot refuses one outside it.
 #[test]
-fn a_peer_writing_a_junk_strike_or_highlight_is_refused() {
-    for (key, value) in [("strike", "wavy"), ("highlight", "red")] {
+fn a_peer_writing_a_junk_run_value_is_refused() {
+    for (key, value) in [
+        ("strike", "wavy"),
+        ("highlight", "red"),
+        ("underline", "bar"),
+        ("color", "red"),
+    ] {
         let left = DeckSession::open(DEMO, 36).unwrap();
         let right = DeckSession::open(DEMO, 37).unwrap();
         let (_, _, story) = story_of(&left, "Subtitle");
