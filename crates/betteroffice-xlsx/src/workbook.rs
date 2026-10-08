@@ -24,9 +24,8 @@ use xlsx_ops::{
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    autofit_relevant, build_display_list_with_charts_and_ghosts,
-    build_print_display_list_with_charts, chart_at_point, chart_regions, display_text,
-    moved_chart_anchor, resolve_chart_anchor,
+    autofit_relevant, build_display_list_on, build_print_display_list_with_charts, chart_at_point,
+    chart_regions_on, display_text, moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -195,7 +194,7 @@ struct PreservedStateHistory {
 struct SheetInfoCache {
     info: SheetInfo,
     bounds: Option<CellRange>,
-    geometry: GridGeometry,
+    geometry: Arc<GridGeometry>,
 }
 
 impl SheetInfoCache {
@@ -1281,7 +1280,7 @@ impl Workbook {
             return Ok(cached.info.clone());
         }
         let sheet = self.sheet(self.active_sheet)?;
-        let geometry = GridGeometry::new(sheet, &self.model.styles);
+        let geometry = Arc::new(GridGeometry::new(sheet, &self.model.styles));
         let bounds = sheet.used_range();
         let content = sheet_content(bounds, sheet.freeze_pane, &geometry);
         let sheet_ids = match &self.mode {
@@ -1341,6 +1340,13 @@ impl Workbook {
                 geometry.row_y(cell.row + 1) - top,
             )
         };
+        let geometry = self.sheet_geometry(sheet)?;
+        Ok(bounds(&geometry))
+    }
+
+    /// A sheet's grid geometry: the active sheet's from the `sheet_info` memo
+    /// (building one walks every cell for row autofit), another sheet's afresh.
+    fn sheet_geometry(&self, sheet: SheetId) -> Result<Arc<GridGeometry>> {
         if sheet == self.active_sheet {
             self.sheet_info()?;
             let slot = self
@@ -1348,10 +1354,13 @@ impl Workbook {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(cache) = &*slot {
-                return Ok(bounds(&cache.geometry));
+                return Ok(cache.geometry.clone());
             }
         }
-        Ok(bounds(&GridGeometry::new(sheet_ref, &self.model.styles)))
+        Ok(Arc::new(GridGeometry::new(
+            self.sheet(sheet)?,
+            &self.model.styles,
+        )))
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
@@ -2227,7 +2236,8 @@ impl Workbook {
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
-        validate_display_region(sheet_ref, &self.model.styles, viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(sheet_ref, &geometry, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -2267,9 +2277,14 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
-            self.resolve_chart_space(&owner, chart)
-        })
+        build_display_list_on(
+            &self.model,
+            sheet,
+            viewport,
+            &ghosts,
+            |chart| self.resolve_chart_space(&owner, chart),
+            &geometry,
+        )
         .map_err(Error::from)
     }
 
@@ -2292,7 +2307,8 @@ impl Workbook {
         x: f32,
         y: f32,
     ) -> Result<Option<ChartRegion>> {
-        let regions = chart_regions(self.sheet(sheet)?, &self.model.styles, viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let regions = chart_regions_on(self.sheet(sheet)?, &geometry, viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -2395,7 +2411,8 @@ impl Workbook {
         let width = ((viewport.width * options.scale).ceil() as u32).max(1);
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
         validate_render_size(width, height)?;
-        validate_display_region(sheet_ref, &self.model.styles, &viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
         let display_list =
             build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
@@ -4470,9 +4487,12 @@ impl Workbook {
     }
 }
 
-fn validate_display_region(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport) -> Result<()> {
+fn validate_display_region(
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+) -> Result<()> {
     validate_viewport(viewport)?;
-    let geometry = GridGeometry::new(sheet, styles);
     let right = viewport.x + viewport.width;
     let bottom = viewport.y + viewport.height;
     if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
@@ -4503,7 +4523,7 @@ fn renderable(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport, scale: f3
     let width = ((viewport.width * scale).ceil() as u32).max(1);
     let height = ((viewport.height * scale).ceil() as u32).max(1);
     validate_render_size(width, height).is_ok()
-        && validate_display_region(sheet, styles, viewport).is_ok()
+        && validate_display_region(sheet, &GridGeometry::new(sheet, styles), viewport).is_ok()
 }
 
 #[cfg(feature = "raster")]

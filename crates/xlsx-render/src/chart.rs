@@ -303,12 +303,20 @@ pub fn chart_regions(
     styles: &Stylesheet,
     viewport: &Viewport,
 ) -> Result<Vec<ChartRegion>, RenderError> {
-    let geometry = GridGeometry::new(sheet, styles);
+    chart_regions_on(sheet, &GridGeometry::new(sheet, styles), viewport)
+}
+
+/// [`chart_regions`] on a sheet geometry the caller already holds.
+pub fn chart_regions_on(
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+) -> Result<Vec<ChartRegion>, RenderError> {
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
     Ok(
-        visible_charts(sheet, &geometry, viewport, frozen_rows, frozen_cols)?
+        visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)?
             .into_iter()
             .map(|visible| visible.region)
             .collect(),
