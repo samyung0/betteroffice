@@ -215,3 +215,30 @@ fn redo_keeps_the_restored_values_parent() {
     exchange(&[&d1, &d2]);
     assert!(d2.transact().store().get_item(&restored).is_some());
 }
+
+/// `Item::redo` (Epo 2026-10-08 narrow Undo rule) skips only a concurrent
+/// value that lost. d1 and d2 set "x" at once and d2 wins; d2 then sets 3
+/// and removes "x". After GC, d2's winner and its 3 merge into one deleted
+/// block that keeps the winner's origin, the value d1's Undo restores. That
+/// block was current when removed (nothing to its right), so it blocks, as
+/// in Yjs: "x" stays absent.
+#[test]
+fn undo_does_not_restore_past_a_removed_winner() {
+    let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(2));
+    let (m1, m2) = (d1.get_or_insert_map("m"), d2.get_or_insert_map("m"));
+    m1.insert(&mut d1.transact_mut(), "x", 0);
+    exchange(&[&d1, &d2]);
+    let mut undo = manager(&d1, &m1);
+    m1.insert(&mut d1.transact_mut(), "x", 1);
+    m2.insert(&mut d2.transact_mut(), "x", 2);
+    exchange(&[&d1, &d2]);
+    assert_eq!(json(&d1, &m1), object(&[("x", 2.0)]));
+    m2.insert(&mut d2.transact_mut(), "x", 3);
+    m2.remove(&mut d2.transact_mut(), "x");
+    exchange(&[&d1, &d2]);
+
+    undo.undo_blocking();
+    exchange(&[&d1, &d2]);
+    assert_eq!(json(&d1, &m1), object(&[]));
+    assert_eq!(json(&d2, &m2), object(&[]));
+}

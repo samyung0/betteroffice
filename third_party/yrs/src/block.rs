@@ -513,17 +513,20 @@ impl ItemPtr {
                 // If it is intended to delete right while item is redone,
                 // we can expect that item should replace right.
                 // Patched for BetterOffice (Epo 2026-10-08 narrow Undo rule): a
-                // deleted value whose origin is the value being restored (set
-                // concurrently with the step being undone, and lost) does not block
-                // the redo, so Undo of a concurrent set restores the value it
-                // replaced instead of leaving the key without one. Every other value
-                // blocks as in Yjs: a live one, and a later deliberate removal.
+                // value set concurrently with the step being undone that lost does
+                // not block the redo: it is deleted, its origin is the value being
+                // restored, and the winner sits to its right. So Undo of a
+                // concurrent set restores the value it replaced instead of leaving
+                // the key without one. Every other value blocks as in Yjs: a live
+                // one, and a removal of the value that was current (the winner
+                // removed later, alone or merged with its author's later values).
                 while let Some(left_item) = left.as_deref() {
                     if let Some(left_right) = left_item.right {
                         let id = left_right.id();
                         if left_right.redone.is_some()
                             || (left_right.is_deleted()
-                                && left_right.origin == Some(self_ptr.last_id()))
+                                && left_right.origin == Some(self_ptr.last_id())
+                                && left_right.right.is_some())
                             || items_to_delete.contains(id)
                             || s1.is_deleted(id)
                             || s2.is_deleted(id)

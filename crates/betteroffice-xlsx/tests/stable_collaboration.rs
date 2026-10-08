@@ -2017,3 +2017,41 @@ fn undo_keeps_a_cell_another_person_cleared_empty() {
     assert_eq!(value(&alice), None);
     assert_eq!(value(&bob), None);
 }
+
+/// The narrow Undo rule skips only a concurrent value that lost: B1 is 4;
+/// Alice types 5 while Bob types 7, and Bob's 7 wins; then Bob clears B1.
+/// Alice's Ctrl+Z leaves B1 empty, as Yjs does: Bob's 7 was current when he
+/// cleared it, so the clear is his deliberate edit.
+#[test]
+fn undo_keeps_a_cell_cleared_after_a_concurrent_edit_won() {
+    let options = CalculationOptions::default();
+    let (mut seed, mut alice, mut bob) = (peer(3200), peer(3201), peer(3202));
+    let b1 = at("B1");
+    let exchange = |left: &mut Workbook, right: &mut Workbook| {
+        let (a, b) = (
+            left.encode_state_as_update_v1(),
+            right.encode_state_as_update_v1(),
+        );
+        left.apply_update_v1(&b, options).unwrap();
+        right.apply_update_v1(&a, options).unwrap();
+    };
+    let value = |book: &Workbook| {
+        book.model().sheets[0]
+            .cell(b1)
+            .map(|cell| cell.value.clone())
+    };
+    seed.edit_cell(SheetId(0), b1, "4", options).unwrap();
+    exchange(&mut seed, &mut alice);
+    exchange(&mut seed, &mut bob);
+    alice.edit_cell(SheetId(0), b1, "5", options).unwrap();
+    bob.edit_cell(SheetId(0), b1, "7", options).unwrap();
+    exchange(&mut alice, &mut bob);
+    assert_eq!(value(&alice), Some(CellValue::Number { value: 7.0 }));
+    bob.edit_cell(SheetId(0), b1, "", options).unwrap();
+    exchange(&mut alice, &mut bob);
+
+    alice.undo(options).unwrap();
+    exchange(&mut alice, &mut bob);
+    assert_eq!(value(&alice), None);
+    assert_eq!(value(&bob), None);
+}

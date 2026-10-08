@@ -59,10 +59,11 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # left pointing into the type's freed branch, and Undo passes an inserted item
 # whose redone copy was collected (`UndoManager::try_process`), as Yjs does;
 # Undo of a map value set concurrently with another client's restores the
-# value it replaced: only a deleted value whose origin is the restored one is
-# passed, every other value blocks as in Yjs (`Item::redo`; Epo 2026-10-08
-# narrow Undo rule; Yjs leaves the key without a value), under its own parent
-# (Yjs #757), and Redo keeps the restored value's parents as Yjs does;
+# value it replaced: only a value set concurrently that lost (deleted, its
+# origin the restored value, the winner to its right) is passed, every other
+# value blocks as in Yjs (`Item::redo`; Epo 2026-10-08 narrow Undo rule; Yjs
+# leaves the key without a value), under its own parent (Yjs #757), and Redo
+# keeps the restored value's parents as Yjs does;
 # `clear_undo` and `clear_redo` clear only their own stack;
 # `Update::decode` refuses a client's section that starts inside or before an
 # earlier one for that client, which yrs placed twice, freeing the first copy

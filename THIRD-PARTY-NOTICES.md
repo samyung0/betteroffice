@@ -112,11 +112,12 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   and `UndoManager::try_process` (`src/undo.rs`) skips an inserted item whose
   redone copy was collected instead of dropping the whole step (CI runs
   their tests in `crates/pptx-edit/tests/yrs_undo.rs` and `yrs_memory.rs`);
-- `Item::redo` (`src/block.rs`) lets Undo restore a map value past a deleted
-  value whose origin is the value being restored (a value set concurrently
-  and lost), so Undo of a concurrent set no longer leaves the key without a
-  value; every other value blocks as in Yjs, a live one and a later
-  deliberate removal alike (Epo 2026-10-08 narrow Undo rule); a value is
+- `Item::redo` (`src/block.rs`) lets Undo restore a map value past a value
+  set concurrently that lost (deleted, its origin the value being restored,
+  the winner to its right), so Undo of a concurrent set no longer leaves the
+  key without a value; every other value blocks as in Yjs, a live one and a
+  removal of the current value alike, also when that was the concurrent
+  winner (Epo 2026-10-08 narrow Undo rule); a value is
   restored under its own parent, as Yjs 13.6.31 does (#757); and a restored
   value's parents are kept, as Yjs's `keepItem` does (CI runs the tests in
   `crates/pptx-edit/tests/yrs_undo.rs` and `convergence.rs`,

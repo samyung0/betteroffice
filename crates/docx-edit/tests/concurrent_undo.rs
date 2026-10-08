@@ -56,3 +56,41 @@ fn undo_keeps_a_paragraph_another_person_outdented_to_the_margin() {
     assert_eq!(indent(&alice), None);
     assert_eq!(indent(&bob), None);
 }
+
+/// The narrow Undo rule skips only a concurrent value that lost: the
+/// paragraph is indented once; Alice and Bob press Increase Indent at the
+/// same time and Bob's wins; Bob then outdents to the margin. Bob's winning
+/// value and his later ones merge into one removed block that keeps the
+/// winner's origin. Alice's Ctrl+Z leaves the paragraph at the margin, as
+/// Yjs does.
+#[test]
+fn undo_keeps_a_paragraph_outdented_after_a_concurrent_indent_won() {
+    let seed = EditingDoc::new(500);
+    let paragraph = seed
+        .create_story("body", "indented", "Normal", "left")
+        .unwrap();
+    let selector = ParaSelector::One(paragraph);
+    seed.increase_indent(&ctx(), &selector, None).unwrap();
+    let state = seed.encode_state_as_update_v1();
+    let (alice, bob) = (EditingDoc::new(601), EditingDoc::new(602));
+    alice.apply_update_v1(&state).unwrap();
+    bob.apply_update_v1(&state).unwrap();
+    let mut undo = alice.undo_manager();
+    undo.set_capture_mode(UndoCaptureMode::Manual);
+
+    alice.increase_indent(&ctx(), &selector, None).unwrap();
+    undo.add_undo_barrier();
+    bob.increase_indent(&ctx(), &selector, None).unwrap();
+    sync(&alice, &bob);
+    sync(&bob, &alice);
+    assert_eq!(indent(&alice), Some(Any::Number(1440.0)));
+    while indent(&bob).is_some() {
+        bob.decrease_indent(&ctx(), &selector, None).unwrap();
+    }
+    sync(&bob, &alice);
+
+    undo.undo();
+    sync(&alice, &bob);
+    assert_eq!(indent(&alice), None);
+    assert_eq!(indent(&bob), None);
+}
