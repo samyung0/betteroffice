@@ -6567,8 +6567,8 @@ fn join_cluster_glyph_runs(prims: &mut Vec<Primitive>, from: usize) {
             && prims.len() > from
             && let Some(Primitive::GlyphRun(run)) = prims.last_mut()
             && joined_order.is_some_and(|order| glyph_run_continues(run, &next, order))
+            && let Ok(offset) = u32::try_from(run.text.len())
         {
-            let offset = u32::try_from(run.text.len()).unwrap_or(u32::MAX);
             run.cluster_runs = true;
             run.text.push_str(&next.text);
             run.glyphs.extend(next.glyphs.into_iter().map(|mut glyph| {
@@ -6588,9 +6588,15 @@ fn join_cluster_glyph_runs(prims: &mut Vec<Primitive>, from: usize) {
 
 /// A run of one glyph cluster at its text's start, covering exactly its
 /// text's UTF-16 length of the document: what a joined run can split back into.
+/// It must also paint the same alone or joined: painters scale a run about its
+/// left edge and rotate it about its centre, and a w14 effect (a gradient fill)
+/// spans its run's rect, so scaled, rotated and effect runs stay apart.
 fn one_cluster_piece(run: &GlyphRunPrimitive) -> bool {
     let utf16_len = run.text.encode_utf16().count() as i64;
-    !run.glyphs.is_empty()
+    run.horizontal_scale.is_none()
+        && run.rotation_deg.is_none()
+        && run.attrs.modern_effects.is_none()
+        && !run.glyphs.is_empty()
         && run.glyphs.iter().all(|glyph| glyph.cluster == 0)
         && run
             .attrs
@@ -10817,8 +10823,10 @@ mod tests {
     }
 
     /// Joining a line's one-cluster glyph runs changes neither paint nor
-    /// interaction: the same glyphs land in the same order at the same
+    /// interaction: after each run's own transform (painters scale a run about
+    /// its left edge) the same glyphs land in the same order at the same
     /// positions, and caret, hit, range and vertical-move queries answer alike.
+    /// Scaled and w14-effect runs stay one per cluster.
     #[test]
     fn joined_cluster_glyph_runs_paint_and_hit_like_the_cluster_runs() {
         use crate::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
@@ -10865,6 +10873,53 @@ mod tests {
                 vec![(
                     format!("{lorem}Hebrew שלום עולם mixed in, then 合作大學提供宿舍 {lorem}"),
                     plain.clone(),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Scaled office text with fluffy affirmations and first flights.".to_owned(),
+                    serde_json::json!({ "horizontalScale": 150.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Cafe\u{301} nai\u{308}ve re\u{301}sume\u{301} office first fluff waffle"
+                        .to_owned(),
+                    plain.clone(),
+                )],
+            ),
+            (
+                "justify",
+                vec![(
+                    format!("{lorem} The office staff affirm the first fluffy waffles offered."),
+                    plain.clone(),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Letter spaced words in the official office file".to_owned(),
+                    serde_json::json!({ "letterSpacing": 2.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Condensed text office file with fifty fine flags".to_owned(),
+                    serde_json::json!({ "horizontalScale": 80.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Gradient filled heading".to_owned(),
+                    serde_json::json!({ "modernEffects": { "textFill": {
+                        "gradient": { "angle": 45, "stops": [
+                            { "pos": 0, "color": "FF0000" }, { "pos": 100000, "color": "0000FF" }
+                        ] }
+                    } } }),
                 )],
             ),
         ];
@@ -10938,14 +10993,38 @@ mod tests {
         let clusters = clusters.unwrap();
         crate::clear_measure_fonts();
 
+        // Runs of the kinds the join may take.
         let glyph_runs = |list: &DisplayList| {
             list.pages
                 .iter()
                 .flat_map(|page| &page.primitives)
-                .filter(|primitive| matches!(primitive, Primitive::GlyphRun(_)))
+                .filter(|primitive| {
+                    matches!(primitive, Primitive::GlyphRun(run)
+                        if run.horizontal_scale.is_none() && run.attrs.modern_effects.is_none())
+                })
                 .count()
         };
         assert!(layout.pages.len() > 1);
+        let unjoinable = joined
+            .pages
+            .iter()
+            .flat_map(|page| &page.primitives)
+            .filter_map(|primitive| match primitive {
+                Primitive::GlyphRun(run)
+                    if run.horizontal_scale.is_some() || run.attrs.modern_effects.is_some() =>
+                {
+                    Some(run)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unjoinable
+                .iter()
+                .any(|run| run.attrs.modern_effects.is_some())
+        );
+        assert!(unjoinable.iter().any(|run| run.horizontal_scale.is_some()));
+        assert!(unjoinable.iter().all(|run| !run.cluster_runs));
         assert!(
             glyph_runs(&clusters) > 8 * glyph_runs(&joined),
             "{} cluster runs became {}",
@@ -10960,15 +11039,18 @@ mod tests {
                     for primitive in &page.primitives {
                         match primitive {
                             Primitive::GlyphRun(run) => {
+                                // Canvas and raster scale a run about its rect's
+                                // left edge, the leftmost glyph.
+                                let scale = run.horizontal_scale.as_ref().map(num_f64);
+                                let left =
+                                    run.glyphs.iter().map(|g| g.x).fold(f64::INFINITY, f64::min);
                                 out.extend(run.glyphs.iter().map(|glyph| {
+                                    let x = scale.map_or(glyph.x, |scale| {
+                                        left + (glyph.x - left) * scale / 100.0
+                                    });
                                     format!(
-                                        "{} {} {} {} {} {}",
-                                        run.font_id,
-                                        run.size,
-                                        run.color,
-                                        glyph.id,
-                                        glyph.x,
-                                        glyph.y
+                                        "{} {} {} {} {:.6} {}",
+                                        run.font_id, run.size, run.color, glyph.id, x, glyph.y
                                     )
                                 }))
                             }
@@ -10986,6 +11068,22 @@ mod tests {
         // a joined run's caret can take the other edge. Geometry compares
         // within 0.002 px.
         let near = |left: f64, right: f64| (left - right).abs() < 2e-3;
+        let inside_cluster = |position: i64| {
+            clusters
+                .pages
+                .iter()
+                .flat_map(|page| &page.primitives)
+                .any(|primitive| match primitive {
+                    Primitive::GlyphRun(run) => run
+                        .attrs
+                        .doc_start
+                        .zip(run.attrs.doc_end)
+                        .is_some_and(|(start, end)| {
+                            end - start > 1 && start < position && position < end
+                        }),
+                    _ => false,
+                })
+        };
         let end = i64::try_from(pm).unwrap();
         for position in 0..=end {
             match (
@@ -11019,12 +11117,17 @@ mod tests {
                     range_rects(&clusters, position, to),
                 );
                 assert_eq!(left.len(), right.len(), "range {position}..{to}");
+                // A range edge inside a multi-unit cluster (a combining mark)
+                // gave the one-cluster run a zero-width slice, floored to a
+                // 1 px sliver; the joined run adds none.
+                let inside_cluster = inside_cluster(position) || inside_cluster(to);
                 for (left, right) in left.iter().zip(&right) {
                     assert!(
                         left.page_index == right.page_index
                             && near(left.x, right.x)
                             && near(left.y, right.y)
-                            && near(left.width, right.width)
+                            && (near(left.width, right.width)
+                                || inside_cluster && near(left.width + 1.0, right.width))
                             && near(left.height, right.height),
                         "range {position}..{to}: {left:?} vs {right:?}"
                     );
