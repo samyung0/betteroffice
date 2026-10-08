@@ -109,6 +109,24 @@ fn filing(range: CellRange) -> Filing {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static EXAMINED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a read a lookup examined; tests check lookups stay near the cell.
+#[inline(always)]
+fn examined_one() {
+    #[cfg(test)]
+    EXAMINED.with(|count| count.set(count.get() + 1));
+}
+
+/// Reads lookups on this thread examined so far.
+#[cfg(test)]
+pub(crate) fn examined() -> u64 {
+    EXAMINED.with(std::cell::Cell::get)
+}
+
 impl Readers {
     fn insert(&mut self, sheet: SheetId, range: CellRange, node: NodeKey) {
         match filing(range) {
@@ -180,6 +198,7 @@ impl Readers {
             .chain(columns.filter_map(move |col| self.columns.get(&(sheet, col))))
             .chain(self.wide.get(&sheet))
             .flatten()
+            .inspect(|_| examined_one())
             .filter(move |(range, _)| range.overlaps(&area))
     }
 
