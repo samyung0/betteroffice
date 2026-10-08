@@ -25,6 +25,7 @@ import JSZip from 'jszip';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
+import { useState } from 'react';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -1556,6 +1557,34 @@ describe('XlsxEditor with a peer', () => {
 });
 
 describe('XlsxEditor host integration', () => {
+  it('reports its command state a bounded number of times while the worker opens', async () => {
+    // a host that keeps the command state, as Capy's does: a fresh value per
+    // render would re-render the host, and so the editor, without end.
+    let reports = 0;
+    let painted = false;
+    const file = plain.bytes.slice();
+    function Host() {
+      const [, setState] = useState<XlsxCommandState | null>(null);
+      return (
+        <XlsxEditor
+          file={file}
+          onCommandStateChange={(state) => {
+            reports += 1;
+            // past the bound the host stops re-rendering, so a loop ends.
+            if (reports < 10) setState(state);
+          }}
+          onFirstPaint={() => {
+            painted = true;
+          }}
+        />
+      );
+    }
+    render(<Host />);
+    // the loop shows before the worker answers: count until the first paint.
+    await waitFor(() => expect(painted || reports >= 10).toBe(true));
+    expect(reports).toBeLessThan(10);
+  });
+
   it('reports the first painted grid once per opened workbook', async () => {
     let painted = 0;
     const onFirstPaint = () => {
