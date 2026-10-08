@@ -10,6 +10,22 @@ function clamp(value: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, value));
 }
 
+/** Bijective base-26 column letters: 0 is A, 25 is Z, 26 is AA. */
+export function columnLetter(col: number): string {
+  let n = col;
+  let out = '';
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
+
+/** A cell's A1 address, zero-based row and column. */
+export function cellAddress(row: number, col: number): string {
+  return `${columnLetter(col)}${row + 1}`;
+}
+
 /**
  * A collapsed selection at a single cell.
  */

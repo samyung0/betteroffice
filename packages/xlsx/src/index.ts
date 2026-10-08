@@ -52,6 +52,8 @@ export type {
 } from './selection/index';
 
 export {
+  cellAddress,
+  columnLetter,
   selectionAt,
   normalizeRange,
   rangeContains,
@@ -91,8 +93,20 @@ export {
   isProposalsAvailable,
   openWorkbook,
   wasmVersion,
-  StaleProposalError,
 } from './wasm/loader';
+export { StaleProposalError } from './wasm/staleProposal';
+export {
+  isWorkbookWorkerAvailable,
+  openWorkbookWorker,
+  SheetGoneError,
+} from './worker/client';
+export type {
+  WorkbookCalls,
+  WorkbookProxy,
+  WorkbookWorkerOptions,
+  WorkbookWorkerPort,
+} from './worker/client';
+export type { WorkbookFrame, WorkbookView } from './worker/protocol';
 export type {
   WasmInitInput,
   OpenWorkbookOptions,
