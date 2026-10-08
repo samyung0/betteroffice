@@ -103,8 +103,8 @@ export class EditSession {
     /**
      * [`EditSession::apply_update_with_inference`] for the replica peers edit
      * through: it then re-reads what each field a deleted range now ends at
-     * shows, as a local system edit its peers and mirrors (the resident
-     * engine) receive.
+     * shows, and renames paragraph ids concurrent splits duplicated, as local
+     * system edits its peers and mirrors (the resident engine) receive.
      */
     apply_peer_update(update: Uint8Array): string;
     /**

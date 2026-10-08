@@ -1958,11 +1958,14 @@ impl EditSession {
 
     /// [`EditSession::apply_update_with_inference`] for the replica peers edit
     /// through: it then re-reads what each field a deleted range now ends at
-    /// shows, as a local system edit its peers and mirrors (the resident
-    /// engine) receive.
+    /// shows, and renames paragraph ids concurrent splits duplicated, as local
+    /// system edits its peers and mirrors (the resident engine) receive.
     pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
-        crate::ops::field_changes::refreshing_fields(self.engine.doc().yrs_doc(), || {
-            self.apply_update_with_inference(update)
+        let doc = self.engine.doc();
+        doc.applying_peer_update(|| {
+            crate::ops::field_changes::refreshing_fields(doc.yrs_doc(), || {
+                self.apply_update_with_inference(update)
+            })
         })
     }
 

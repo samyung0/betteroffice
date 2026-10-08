@@ -83,26 +83,80 @@ test('editor paragraph ids save as unique hex w14:paraIds and source ids stay', 
   expect(paraIds(reopened)).toEqual(ids);
 });
 
-test('two peers splitting one paragraph mid-text save each paragraph its own id', async () => {
+test('two or three peers splitting one paragraph mid-text rename the duplicate id the same way', async () => {
   const bytes = fixture();
   const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
-  const [left, right] = await Promise.all([2002, 2003].map((clientId) => createYrsSession({ clientId })));
-  try {
-    for (const [session, offset] of [[left, 2], [right, 4]] as const) {
-      session.seedFromDocx(bytes);
-      session.splitParagraph({ story: 'body', paraId: '1A2B3C4D', offset });
+  for (const count of [2, 3]) {
+    const sessions = await Promise.all(
+      [2002, 2003, 2004].slice(0, count).map((clientId) => createYrsSession({ clientId }))
+    );
+    try {
+      for (const [index, session] of sessions.entries()) {
+        session.seedFromDocx(bytes);
+        session.splitParagraph({ story: 'body', paraId: '1A2B3C4D', offset: index + 1 });
+      }
+      // Twice, so the renames themselves reach every peer.
+      for (let round = 0; round < 2; round += 1)
+        for (const from of sessions)
+          for (const to of sessions) if (from !== to) to.applyUpdate(from.encodeStateAsUpdate(to.encodeStateVector()));
+      const ids = sessions[0]!.paragraphs('body').map((p) => p.paraId);
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const session of sessions) expect(session.paragraphs('body').map((p) => p.paraId)).toEqual(ids);
+      // Typing reaches every half by its id.
+      for (const paraId of ids) sessions[0]!.insertText({ story: 'body', paraId, offset: 0 }, 'X');
+      expect(sessions[0]!.paragraphs('body').every((p) => p.text.startsWith('X'))).toBe(true);
+      const saved = paraIds(yrsToDocument(sessions[1]!, parsed));
+      sessions[1]!.applyUpdate(sessions[0]!.encodeStateAsUpdate(sessions[1]!.encodeStateVector()));
+      expect(paraIds(yrsToDocument(sessions[0]!, parsed))).toEqual(paraIds(yrsToDocument(sessions[1]!, parsed)));
+      expect(saved[0]).toBe('1A2B3C4D');
+    } finally {
+      for (const session of sessions) session.destroy();
     }
-    left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
-    right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
-    // Both new marks carry the source id in the session (Epo, 2026-10-08).
-    expect(left.paragraphs('body').filter((p) => p.paraId === '1A2B3C4D')).toHaveLength(2);
-    const ids = paraIds(yrsToDocument(left, parsed));
-    expect(paraIds(yrsToDocument(right, parsed))).toEqual(ids);
-    expect(ids[0]).toBe('1A2B3C4D');
-    const present = ids.filter((id): id is string => id !== undefined);
-    expect(new Set(present).size).toBe(present.length);
+  }
+});
+
+test('a state still holding a duplicated source id saves it once, as the native engine does', async () => {
+  // The same file, clients and splits as office-service's `a_duplicated_source_para_id_saves_once`.
+  const parts: PartsMap = new Map();
+  parts.set(
+    '[Content_Types].xml',
+    toBytes(
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+    )
+  );
+  parts.set(
+    '_rels/.rels',
+    toBytes(
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'
+    )
+  );
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="1A2B3C4D"><w:r><w:t>Alpha beta</w:t></w:r></w:p><w:p w14:paraId="2B3C4D5E"><w:r><w:t>Delta</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>'
+    )
+  );
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(parts));
+  const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+  const seeder = await createYrsSession({ clientId: 0 });
+  seeder.seedFromDocx(bytes);
+  const seeded = seeder.encodeState();
+  seeder.destroy();
+  const peers = await Promise.all(
+    ([[3001, 2], [3002, 7]] as const).map(async ([clientId, offset]) => {
+      const session = await createYrsSession({ clientId });
+      session.openDocx(bytes, false);
+      session.loadState(seeded);
+      session.splitParagraph({ story: 'body', paraId: '1A2B3C4D', offset });
+      return session;
+    })
+  );
+  try {
+    // A plain load, as a stored state reaches an export: no rename.
+    peers[0]!.loadState(peers[1]!.encodeState());
+    expect(peers[0]!.paragraphs('body').filter((p) => p.paraId === '1A2B3C4D')).toHaveLength(2);
+    expect(paraIds(yrsToDocument(peers[0]!, parsed))).toEqual(['1A2B3C4D', '1EF04F1E', '067EA25D', '2B3C4D5E']);
   } finally {
-    left.destroy();
-    right.destroy();
+    for (const session of peers) session.destroy();
   }
 });

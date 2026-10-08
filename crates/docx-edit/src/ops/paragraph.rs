@@ -1040,6 +1040,98 @@ impl EditingDoc {
             Ok(delta)
         })
     }
+
+    /// Runs `apply` (a peer's update), then renames the paragraph ids that
+    /// concurrent splits duplicated when it brought an embed, such as a
+    /// paragraph mark ([`Self::rename_duplicate_para_ids`]).
+    pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
+        let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
+        let subscription = {
+            let inserted = Arc::clone(&inserted);
+            self.yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    inserted
+                        .lock()
+                        .unwrap()
+                        .merge_with(txn.insert_set().clone());
+                })
+                .ok()
+        };
+        let result = apply();
+        drop(subscription);
+        let inserted = std::mem::take(&mut *inserted.lock().unwrap());
+        let embeds = {
+            let txn = yrs::Transact::transact(self.yrs_doc());
+            inserted.iter().any(|(client, ranges)| {
+                ranges.iter().any(|range| {
+                    let mut clock = range.start;
+                    while clock < range.end {
+                        let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
+                            return false;
+                        };
+                        if matches!(item.content(), yrs::block::ItemContent::Type(_)) {
+                            return true;
+                        }
+                        clock = item.id().clock + item.len();
+                    }
+                    false
+                })
+            })
+        };
+        if embeds {
+            self.rename_duplicate_para_ids();
+        }
+        result
+    }
+
+    /// Renames paragraph ids that concurrent splits of one paragraph
+    /// duplicated, the same way on every peer: the mark whose yrs item has the
+    /// lowest `(client, clock)` keeps the id and each other mark takes
+    /// `{client}.{clock}` of its own item. A system edit, outside Undo.
+    /// Returns the `(old, new)` pairs.
+    pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
+        let mut marks: BTreeMap<String, Vec<(yrs::ID, MapRef)>> = BTreeMap::new();
+        {
+            let txn = yrs::Transact::transact(self.yrs_doc());
+            let Some(stories) = txn.get_map(crate::STORIES) else {
+                return Vec::new();
+            };
+            for (_, story) in stories.iter(&txn) {
+                let Out::YText(story) = story else {
+                    continue;
+                };
+                for (_, map) in crate::pilcrows(&story, &txn) {
+                    let yrs::branch::BranchID::Nested(id) =
+                        <MapRef as AsRef<yrs::branch::Branch>>::as_ref(&map).id()
+                    else {
+                        continue;
+                    };
+                    if let Some(para_id) = map_string(&map, &txn, PARA_ID) {
+                        marks.entry(para_id).or_default().push((id, map));
+                    }
+                }
+            }
+        }
+        let mut renames = Vec::new();
+        let duplicates: Vec<_> = marks
+            .into_values()
+            .filter(|marks| marks.len() > 1)
+            .collect();
+        if duplicates.is_empty() {
+            return renames;
+        }
+        let mut txn = yrs::Transact::transact_mut_with(self.yrs_doc(), "system");
+        for mut marks in duplicates {
+            marks.sort_by_key(|(id, _)| (id.client, id.clock));
+            let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
+            for (id, map) in &marks[1..] {
+                let renamed = format!("{}.{}", id.client, id.clock);
+                map.insert(&mut txn, PARA_ID, renamed.as_str());
+                renames.push((kept.clone(), renamed));
+            }
+        }
+        renames
+    }
 }
 
 fn paragraph_revision_id<T: ReadTxn>(

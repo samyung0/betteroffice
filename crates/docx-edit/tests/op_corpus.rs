@@ -1910,6 +1910,73 @@ fn apply_paragraph_style_replaces_style_numbering_and_keeps_direct_numbering() {
     assert_eq!(paragraphs[1].properties.get("numPr"), Some(&numbering(7.0)));
 }
 
+/// Concurrent mid-paragraph splits on two or three peers both give their
+/// first half the paragraph's id; every peer renames the duplicates the same
+/// way after applying the others' updates, so each paragraph's id reaches it
+/// (typing at each mark lands in that paragraph) and all peers agree.
+#[test]
+fn concurrent_mid_splits_leave_every_peer_the_same_distinct_ids() {
+    for count in [2_u64, 3] {
+        let base = EditingDoc::new(1);
+        let original = base
+            .create_story("body", "Alpha beta gamma", "Normal", "left")
+            .unwrap();
+        let update = base.encode_state_as_update_v1();
+        let peers: Vec<_> = (0..count)
+            .map(|index| {
+                let doc = EditingDoc::new(2 + index);
+                doc.apply_update_v1(&update).unwrap();
+                doc
+            })
+            .collect();
+        for (peer, at) in peers.iter().zip([2, 7, 12]) {
+            peer.split_paragraph(&ctx(), Position::new("body", at))
+                .unwrap();
+        }
+        // Twice, so the renames themselves reach every peer.
+        for _ in 0..2 {
+            for from in &peers {
+                for to in &peers {
+                    let update = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+                    to.applying_peer_update(|| to.apply_update_v1(&update).unwrap());
+                }
+            }
+        }
+        let ids = |doc: &EditingDoc| -> Vec<ParagraphId> {
+            doc.paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .map(|paragraph| paragraph.para_id)
+                .collect()
+        };
+        let first = ids(&peers[0]);
+        assert_eq!(first.len() as u64, count + 1);
+        assert_eq!(
+            first.iter().collect::<std::collections::HashSet<_>>().len(),
+            first.len(),
+            "{first:?}"
+        );
+        assert!(first.contains(&original));
+        for peer in &peers[1..] {
+            assert_eq!(ids(peer), first);
+        }
+        let doc = &peers[0];
+        for id in &first {
+            let at = doc.paragraph_mark_position(id).unwrap();
+            doc.insert_text(&ctx(), at, "X", FormatPolicy::Inherit)
+                .unwrap();
+        }
+        assert!(
+            doc.paragraphs("body")
+                .unwrap()
+                .iter()
+                .all(|paragraph| paragraph.text.ends_with('X')),
+            "{:?}",
+            doc.paragraphs("body").unwrap()
+        );
+    }
+}
+
 /// Enter at a paragraph's end puts the new mark after the source one, so a
 /// peer's concurrent alignment change stays on the text, and two peers'
 /// Enters at that end give each new paragraph an id of its own.
