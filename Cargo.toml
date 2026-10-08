@@ -53,7 +53,12 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # shown text; tested in docx-edit's field_changes), and
 # `Text::apply_delta_as_yjs` (src/types/text.rs: a delta whose deletions clean
 # format items as Yjs 13.6.31's `cleanupFormattingGap`, for the native Office
-# rebase; tested in office-service). Carry the patch until upstream has the
+# rebase; tested in office-service). Garbage collection takes a collected
+# type's children even when Undo keeps them (`Item::gc`,
+# `GCCollector::collect_marked`; upstream PR #682 for #667/#676), so none is
+# left pointing into the type's freed branch, and Undo passes an inserted item
+# whose redone copy was collected (`UndoManager::try_process`), as Yjs does
+# (tested in pptx-edit's yrs_memory). Carry the patch until upstream has the
 # fixes and an equivalent lookup, or the re-read no longer needs it;
 # re-apply the methods on each yrs upgrade.
 [patch.crates-io]

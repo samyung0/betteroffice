@@ -673,9 +673,12 @@ where
             if let BlockSlice::Item(slice) = slice {
                 let mut item = txn.store.materialize(slice);
                 if item.redone.is_some() {
+                    // Patched for BetterOffice: a redone copy garbage collection took
+                    // with its parent is skipped, as Yjs's `followRedone` reaches a GC
+                    // struct; the rest of the step is still undone.
                     let slice = match txn.store_mut().follow_redone(item.id()) {
                         Some(slice) => slice,
-                        None => return false,
+                        None => continue,
                     };
                     item = txn.store.materialize(slice);
                 }
@@ -1007,8 +1010,8 @@ mod test {
     use crate::updates::decoder::Decode;
     use crate::{
         any, Any, Array, ArrayPrelim, Doc, GetString, Map, MapPrelim, MapRef, ReadTxn, StateVector,
-        Text, TextPrelim, TextRef, Transact, UndoManager, Update, Xml, XmlElementPrelim,
-        XmlElementRef, XmlFragment, XmlTextPrelim,
+        Text, TextPrelim, TextRef, Transact, TransactionMut, UndoManager, Update, Xml,
+        XmlElementPrelim, XmlElementRef, XmlFragment, XmlTextPrelim, ID,
     };
 
     #[test]
@@ -2206,6 +2209,93 @@ mod test {
         assert!(!um.can_redo(), "should not be redoable (6)");
         assert_eq!(txt1.get_string(&d1.transact()), "abc");
         assert_eq!(txt2.get_string(&d2.transact()), "xyz");
+    }
+
+    #[test]
+    fn gc_collects_kept_children_of_a_collected_type() {
+        // Patched for BetterOffice (upstream y-crdt #667, PR #682): clearing the
+        // redo stack un-keeps map "p" though "number", which the undo stack still
+        // holds, stays kept. Collecting "p" after a remote removal freed its branch
+        // and left "number" pointing into it, so encoding read freed memory.
+        let d1 = Doc::with_client_id(1);
+        let d2 = Doc::with_client_id(2);
+        let styles1 = d1.get_or_insert_map("styles");
+        let styles2 = d2.get_or_insert_map("styles");
+        styles1.insert(
+            &mut d1.transact_mut(),
+            "p",
+            MapPrelim::from([("kind", "number")]),
+        );
+        exchange_updates(&[&d1, &d2]);
+        let number = ID::new(ClientID::new(1), 1);
+
+        let mut mgr = UndoManager::new();
+        mgr.expand_scope(&d2, &styles2);
+        {
+            let mut txn = d2.transact_mut();
+            let p = styles2.get(&txn, "p").unwrap().cast::<MapRef>().unwrap();
+            p.insert(&mut txn, "kind", "bullet");
+        }
+        mgr.undo_blocking();
+        mgr.reset();
+        styles2.insert(&mut d2.transact_mut(), "q", MapPrelim::default()); // clears the redo stack
+
+        styles1.remove(&mut d1.transact_mut(), "p");
+        exchange_updates(&[&d1, &d2]);
+
+        // "number" went with its map, as in Yjs.
+        assert!(d2.transact().store().blocks.get_item(&number).is_none());
+        d2.transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        while mgr.undo_blocking() {}
+        exchange_updates(&[&d1, &d2]);
+        assert_eq!(
+            styles1.to_json(&d1.transact()),
+            styles2.to_json(&d2.transact())
+        );
+    }
+
+    #[test]
+    fn undo_passes_an_insertion_whose_redone_copy_was_collected() {
+        // Patched for BetterOffice: an Undo step skips an inserted item whose redone
+        // copy garbage collection took with a removed parent, and still undoes the
+        // rest of the step, as Yjs's `followRedone` reaches a GC struct and skips it.
+        let d1 = Doc::with_client_id(1);
+        let d2 = Doc::with_client_id(2);
+        let m1 = d1.get_or_insert_map("m");
+        let m2 = d2.get_or_insert_map("m");
+        m1.insert(&mut d1.transact_mut(), "p", MapPrelim::default());
+        exchange_updates(&[&d1, &d2]);
+        let mut mgr = UndoManager::with_options(Options {
+            capture_timeout_millis: 0,
+            ..Options::default()
+        });
+        mgr.expand_scope(&d2, &m2);
+        let p = |txn: &TransactionMut| m2.get(txn, "p").unwrap().cast::<MapRef>().unwrap();
+        {
+            // step 1: "x" in p and "y" beside it
+            let mut txn = d2.transact_mut();
+            p(&txn).insert(&mut txn, "x", 1);
+            m2.insert(&mut txn, "y", 1);
+        }
+        m2.remove(&mut d2.transact_mut(), "p"); // step 2
+        mgr.undo_blocking(); // restores p as a redone copy, with "x" in it
+        {
+            let mut txn = d2.transact_mut();
+            p(&txn).insert(&mut txn, "x", 2); // step 3
+        }
+        mgr.undo_blocking();
+        m2.insert(&mut d2.transact_mut(), "z", 1); // clears the redo stack: un-keeps p's copy
+
+        exchange_updates(&[&d1, &d2]);
+        m1.remove(&mut d1.transact_mut(), "p");
+        exchange_updates(&[&d1, &d2]); // collects p's copy and the "x" copies in it
+
+        mgr.undo_blocking(); // takes back "z"
+        mgr.undo_blocking(); // takes back step 1: "y" goes, though "x" is gone
+        exchange_updates(&[&d1, &d2]);
+        assert_eq!(m2.to_json(&d2.transact()), any!({}));
+        assert_eq!(m1.to_json(&d1.transact()), any!({}));
     }
 
     #[test]
