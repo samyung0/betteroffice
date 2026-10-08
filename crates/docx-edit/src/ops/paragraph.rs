@@ -1065,10 +1065,8 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
-        let markers = crate::bookmarks::writes_markers(
-            &yrs::Transact::transact(self.yrs_doc()),
-            &inserted,
-        );
+        let markers =
+            crate::bookmarks::writes_markers(&yrs::Transact::transact(self.yrs_doc()), &inserted);
         let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
             let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();

@@ -186,7 +186,11 @@ pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &IdSet) -> bool {
                 clock = item.id().clock + item.len();
                 let parent = item.parent_branch();
                 if in_roots(parent)
-                    || in_roots(parent.and_then(|entry| entry.item()).and_then(|entry| entry.parent_branch()))
+                    || in_roots(
+                        parent
+                            .and_then(|entry| entry.item())
+                            .and_then(|entry| entry.parent_branch()),
+                    )
                 {
                     return true;
                 }

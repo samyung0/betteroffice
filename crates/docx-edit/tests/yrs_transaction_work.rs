@@ -47,7 +47,14 @@ fn each_update_holds_the_structs_a_state_vector_diff_gives() {
         let writer_text = writer.get_or_insert_text("story");
         writer
             .transact_mut()
-            .apply_update(Update::decode_v1(&main.transact().encode_state_as_update_v1(&StateVector::default())).unwrap())
+            .apply_update(
+                Update::decode_v1(
+                    &main
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default()),
+                )
+                .unwrap(),
+            )
             .unwrap();
         {
             let mut txn = writer.transact_mut();
