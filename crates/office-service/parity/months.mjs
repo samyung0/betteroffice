@@ -13,7 +13,7 @@ const month = (language, y, m, d, width) => {
   const locale = language && known(language) ? language : "en";
   return new Intl.DateTimeFormat(locale, { month: width, timeZone: "UTC" }).format(date);
 };
-const languages = ["en-US", "ja-JP", "zh-TW", "zh-CN", "zh-HK", "ko-KR", "fr-FR", "de-DE", "es-ES", "pt-BR", "it-IT", "ru-RU", "vi-VN", "th-TH", "ar-SA", "he-IL", "fa-IR", "hi-IN", "nl-NL", "pl-PL", "en_US", "", "not a tag", "xx-XX", "und", "qaa", "x-none", "en-ZZ", "zz", "tlh"];
+const languages = ["en-US", "ja-JP", "zh-TW", "zh-CN", "zh-HK", "ko-KR", "fr-FR", "de-DE", "es-ES", "pt-BR", "it-IT", "ru-RU", "vi-VN", "th-TH", "ar-SA", "he-IL", "fa-IR", "hi-IN", "nl-NL", "pl-PL", "en_US", "", "not a tag", "xx-XX", "und", "qaa", "x-none", "en-ZZ", "zz", "tlh", "in-ID", "iw-IL", "jw", "mo", "sh", "tl-PH"];
 const rows = [];
 for (const language of languages)
   for (let m = 1; m <= 12; m++) rows.push([language, m, month(language, 2026, m, 15, "long"), month(language, 2026, m, 15, "short")]);

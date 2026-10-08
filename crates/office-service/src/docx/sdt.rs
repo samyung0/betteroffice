@@ -176,7 +176,7 @@ fn valid_iso_date(year: Option<i64>, month: Option<i64>, day: Option<i64>) -> bo
 /// language's calendar. `None` when the language is not a valid tag.
 fn month_name(language: &str, (year, month, day): (i64, i64, i64), long: bool) -> Option<String> {
     use icu_datetime::fieldsets::M;
-    let locale: icu_locale_core::Locale = language.parse().ok()?;
+    let locale: icu_locale_core::Locale = canonical_language(language).parse().ok()?;
     let date = icu_calendar::Date::try_new_iso(
         i32::try_from(year).ok()?,
         u8::try_from(month).ok()?,
@@ -186,6 +186,33 @@ fn month_name(language: &str, (year, month, day): (i64, i64, i64), long: bool) -
     let fields = if long { M::long() } else { M::medium() };
     let formatter = icu_datetime::DateTimeFormatter::try_new(locale.into(), fields).ok()?;
     Some(formatter.format(&date).to_string())
+}
+
+/// Deprecated language codes `Intl` canonicalizes and ICU4X does not, mapped
+/// to their replacements (`iw-IL` reads as `he-IL`).
+fn canonical_language(tag: &str) -> String {
+    const ALIASES: [(&str, &str); 7] = [
+        ("in", "id"),
+        ("iw", "he"),
+        ("ji", "yi"),
+        ("jw", "jv"),
+        ("mo", "ro"),
+        ("sh", "sr-Latn"),
+        ("tl", "fil"),
+    ];
+    let (language, rest) = tag
+        .split_once('-')
+        .map_or((tag, None), |(language, rest)| (language, Some(rest)));
+    match ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(language))
+    {
+        Some((_, canonical)) => match rest {
+            Some(rest) => format!("{canonical}-{rest}"),
+            None => (*canonical).to_owned(),
+        },
+        None => tag.to_owned(),
+    }
 }
 
 /// contentControlValues.ts `formatSdtDate`: month names in `language`,
@@ -537,7 +564,7 @@ mod tests {
         );
     }
 
-    const MONTHS_BY_INTL: [(&str, &str, &str); 30] = [
+    const MONTHS_BY_INTL: [(&str, &str, &str); 36] = [
         (
             "en-US",
             "January|February|March|April|May|June|July|August|September|October|November|December",
@@ -688,5 +715,58 @@ mod tests {
             "January|February|March|April|May|June|July|August|September|October|November|December",
             "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec",
         ),
+        (
+            "in-ID",
+            "Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember",
+            "Jan|Feb|Mar|Apr|Mei|Jun|Jul|Agu|Sep|Okt|Nov|Des",
+        ),
+        (
+            "iw-IL",
+            "ינואר|פברואר|מרץ|אפריל|מאי|יוני|יולי|אוגוסט|ספטמבר|אוקטובר|נובמבר|דצמבר",
+            "ינו׳|פבר׳|מרץ|אפר׳|מאי|יוני|יולי|אוג׳|ספט׳|אוק׳|נוב׳|דצמ׳",
+        ),
+        (
+            "jw",
+            "Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember",
+            "Jan|Feb|Mar|Apr|Mei|Jun|Jul|Agt|Sep|Okt|Nov|Des",
+        ),
+        (
+            "mo",
+            "ianuarie|februarie|martie|aprilie|mai|iunie|iulie|august|septembrie|octombrie|noiembrie|decembrie",
+            "ian.|feb.|mar.|apr.|mai|iun.|iul.|aug.|sept.|oct.|nov.|dec.",
+        ),
+        (
+            "sh",
+            "januar|februar|mart|april|maj|jun|jul|avgust|septembar|oktobar|novembar|decembar",
+            "jan|feb|mar|apr|maj|jun|jul|avg|sep|okt|nov|dec",
+        ),
+        (
+            "tl-PH",
+            "Enero|Pebrero|Marso|Abril|Mayo|Hunyo|Hulyo|Agosto|Setyembre|Oktubre|Nobyembre|Disyembre",
+            "Ene|Peb|Mar|Abr|May|Hun|Hul|Ago|Set|Okt|Nob|Dis",
+        ),
     ];
+
+    /// A known data difference, pinned so a CLDR or ICU4X data change shows:
+    /// Node 22.19 (CLDR 47) gives Estonian short months as the long names
+    /// ("jaanuar"), ICU4X 2.3 abbreviates them ("jaan"). The long names agree.
+    #[test]
+    fn estonian_short_months_are_icu4x_abbreviations() {
+        let months = |pattern: &str| {
+            (1..=12)
+                .map(|month| {
+                    format_sdt_date(&format!("2026-{month:02}-15"), Some(pattern), Some("et-EE"))
+                })
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(
+            months("MMMM"),
+            "jaanuar|veebruar|märts|aprill|mai|juuni|juuli|august|september|oktoober|november|detsember"
+        );
+        assert_eq!(
+            months("MMM"),
+            "jaan|veebr|märts|apr|mai|juuni|juuli|aug|sept|okt|nov|dets"
+        );
+    }
 }
