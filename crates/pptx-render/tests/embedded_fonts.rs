@@ -1,3 +1,6 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
 use ooxml_text::{FontStore, decode_embedded_font, shape};
 use pptx_edit::DeckSession;
 use pptx_parse::EmbeddedFont;
@@ -310,6 +313,7 @@ fn a_host_face_registered_later_leaves_the_embedded_one_in_place() {
     );
 }
 
+/// Security regression (REVIEW1 S2).
 #[test]
 fn a_face_the_page_refuses_leaves_layout_too() {
     let fallback = lay_out(&deck(&[], false));
@@ -324,22 +328,58 @@ fn a_face_the_page_refuses_leaves_layout_too() {
 const EXPAND: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/hostile-expand.fntdata");
 const RLE: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/hostile-rle.fntdata");
 
+/// Bytes this thread allocates: the security tests bound the work a deck's
+/// fonts take by allocation, not by time.
+struct Counting;
+
+thread_local! {
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count(bytes: usize) {
+    let _ = ALLOCATED.try_with(|total| total.set(total.get() + bytes));
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count(layout.size());
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        count(size.saturating_sub(layout.size()));
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+const MIB: usize = 1024 * 1024;
+
+/// Registers `deck`'s embedded fonts: the faces, and the bytes allocated
+/// doing it.
+fn register(deck: &[u8]) -> (Vec<EmbeddedFace>, usize) {
+    let session = DeckSession::open(deck, 8_021).unwrap();
+    let mut renderer = SlideRenderer::new();
+    renderer.register_font("Arial", false, false, SANS).unwrap();
+    let before = ALLOCATED.with(Cell::get);
+    let faces = renderer.register_embedded_fonts(session.package());
+    (faces, ALLOCATED.with(Cell::get) - before)
+}
+
 #[test]
 fn a_part_named_by_many_slots_is_decoded_once() {
-    // 1,000 typefaces x 4 slots on one 150-byte part that unpacks 16 MiB
-    // before failing: 4,000 decodes (minutes) before parts were decoded once.
-    let fallback = lay_out(&deck(&[], false));
-    for count in [25, 1_000] {
-        let started = std::time::Instant::now();
-        let laid = lay_out(&many(count, false, EXPAND));
-        assert!(laid.faces.is_empty());
-        assert_eq!(laid.lines, fallback.lines);
-        assert!(
-            started.elapsed().as_secs() < 30,
-            "{count}: {:?}",
-            started.elapsed()
-        );
-    }
+    // Security regression (REVIEW1 M2): 25 typefaces x 4 slots on one
+    // 150-byte part that unpacks 16 MiB before failing. Decoded per slot,
+    // that was 100 unpacks (1.6 GiB); decoded once, one.
+    let (faces, allocated) = register(&many(25, false, EXPAND));
+    assert!(faces.is_empty());
+    assert!(allocated < 24 * MIB, "{allocated} bytes");
     // One good part named by 1,000 typefaces: one face, every slot served.
     let laid = lay_out(&many(1_000, false, LATO));
     assert_eq!(laid.faces.len(), 1);
@@ -348,19 +388,25 @@ fn a_part_named_by_many_slots_is_decoded_once() {
 
 #[test]
 fn failing_parts_spend_the_deck_budget_before_their_work() {
-    // 1,000 distinct copies: each is charged its declared 16 MiB before it
-    // unpacks, so the 64 MiB budget stops the decoding after three.
-    let started = std::time::Instant::now();
-    let laid = lay_out(&many(1_000, true, EXPAND));
-    assert!(laid.faces.is_empty());
-    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
-    // 1,000 distinct 145-byte parts whose run-length stage expands past the
-    // per-face limit: the expansion is charged as it grows.
-    let started = std::time::Instant::now();
-    let laid = lay_out(&many(1_000, true, RLE));
-    assert!(laid.faces.is_empty());
-    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
-    // Distinct good parts register up to the face cap.
-    let laid = lay_out(&many(70, true, LATO));
-    assert_eq!(laid.faces.len(), pptx_render::MAX_EMBEDDED_FACES);
+    // Security regression (REVIEW1 M2): 20 distinct copies, each charged its
+    // declared 16 MiB before it unpacks, so the 64 MiB budget stops the work
+    // after three (charged only on success, all twenty unpacked: 320 MiB).
+    let (faces, allocated) = register(&many(20, true, EXPAND));
+    assert!(faces.is_empty());
+    assert!(allocated < 56 * MIB, "{allocated} bytes");
+    // Security regression (REVIEW1 M2): distinct good parts register up to
+    // the face cap.
+    let (faces, _) = register(&many(70, true, LATO));
+    assert_eq!(faces.len(), pptx_render::MAX_EMBEDDED_FACES);
+}
+
+#[test]
+fn run_length_expansion_spends_the_deck_budget_as_it_grows() {
+    // Security regression (REVIEW2 N1): 200 distinct 145-byte parts whose
+    // run-length stage expands each to 32 MiB. Charged as it grows, two
+    // expand before the 64 MiB budget runs out; charged by declared length
+    // only (393 KB each), about 170 did (5 GiB).
+    let (faces, allocated) = register(&many(200, true, RLE));
+    assert!(faces.is_empty());
+    assert!(allocated < 80 * MIB, "{allocated} bytes");
 }

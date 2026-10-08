@@ -26,6 +26,7 @@ const face = (family: string, fontId: number, bold = false, italic = false): Ppt
 });
 
 describe('installEmbeddedFonts', () => {
+  // Security regression (REVIEW1 S2): a refused face is dropped from layout too.
   test('adds the faces the page loads under their aliases and drops refused ones from layout', async () => {
     const globals = globalThis as Record<string, unknown>;
     const saved = { FontFace: globals.FontFace, document: globals.document };

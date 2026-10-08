@@ -119,6 +119,7 @@ fn a_font_whose_blocks_use_the_run_length_stage_decodes_the_same() {
     assert_eq!(decode_embedded_font(&part, PART).unwrap(), expected);
 }
 
+/// Security regression (REVIEW1 M1, and S1 for the empty directory).
 #[test]
 fn directories_with_no_table_a_table_twice_or_too_much_are_refused() {
     let [rest, push, code] = lato_blocks();
@@ -152,6 +153,7 @@ fn directories_with_no_table_a_table_twice_or_too_much_are_refused() {
     );
 }
 
+/// Security regression (REVIEW1 S1).
 #[test]
 fn coordinates_beyond_sixteen_bits_are_refused() {
     // One glyph of 65,536 points, each 65,535 units right of the last.

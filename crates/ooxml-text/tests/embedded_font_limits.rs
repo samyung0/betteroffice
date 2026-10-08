@@ -1,11 +1,11 @@
-//! Hostile parts from the 2026-10-08 review, decoded under a counting
-//! allocator: a CTF directory of 256 entries each spanning a 1, 8 or 15 MiB
-//! block (which used to copy every entry, up to 3.8 GiB), and a 150-byte part
-//! that unpacks 16 MiB before the CTF stage refuses it.
+//! Security regression (REVIEW1 M1). Hostile parts from the 2026-10-08
+//! review, decoded under a counting allocator: a CTF directory of 256
+//! entries each spanning a 1, 8 or 15 MiB block (which used to copy every
+//! entry, up to 3.8 GiB), and a 150-byte part that unpacks 16 MiB before the
+//! CTF stage refuses it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 
 use ooxml_text::decode_embedded_font;
 
@@ -52,7 +52,7 @@ static ALLOCATOR: Counting = Counting;
 const MIB: usize = 1024 * 1024;
 
 #[test]
-fn hostile_parts_are_refused_within_bounded_memory_and_time() {
+fn hostile_parts_are_refused_within_bounded_memory() {
     for (name, part) in [
         (
             "256 tables over 1 MiB",
@@ -73,14 +73,10 @@ fn hostile_parts_are_refused_within_bounded_memory_and_time() {
     ] {
         let base = CURRENT.load(Ordering::Relaxed);
         PEAK.store(base, Ordering::Relaxed);
-        let started = Instant::now();
         let result = decode_embedded_font(part, "ppt/fonts/font1.fntdata").map(|font| font.len());
-        let elapsed = started.elapsed();
         let peak = PEAK.load(Ordering::Relaxed) - base;
-        println!("{name}: {result:?}, peak {peak} bytes, {elapsed:?}");
         assert!(result.is_err(), "{name}: {result:?}");
         // The block itself (at most 16 MiB) is the only large allocation.
         assert!(peak <= 17 * MIB, "{name}: peak {peak} bytes");
-        assert!(elapsed < Duration::from_secs(30), "{name}: {elapsed:?}");
     }
 }

@@ -140,8 +140,8 @@ fn damaged_parts_fail_without_panicking() {
 
 #[test]
 fn run_length_output_is_charged_as_it_grows() {
-    // 145 bytes declaring 393,001 that the run-length stage expands to
-    // 33,405,000, past the per-face limit (review 2's N1).
+    // Security regression (REVIEW2 N1): 145 bytes declaring 393,001 that the
+    // run-length stage expands to 33,405,000, past the per-face limit.
     let part = include_bytes!("fonts/hostile-rle.fntdata");
     let mut budget = 64 * 1024 * 1024;
     let mut expanded = 0;
