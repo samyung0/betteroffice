@@ -376,7 +376,7 @@ impl DeckSession {
         }
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
-        let order = required_order(&txn)?;
+        let order = compact_slide_order(&mut txn)?;
         let length = order.len(&txn);
         if index > length {
             return Err(EditError::OutOfBounds { index, length });
@@ -410,7 +410,7 @@ impl DeckSession {
 
     pub fn delete_slide(&self, context: &EditCtx, slide_id: &str) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
-        let order = required_order(&txn)?;
+        let order = compact_slide_order(&mut txn)?;
         let index = array_index(&order, &txn, slide_id)
             .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
         let slides = required_map(&txn, SLIDES)?;
@@ -446,7 +446,7 @@ impl DeckSession {
         to_index: u32,
     ) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
-        let order = required_order(&txn)?;
+        let order = compact_slide_order(&mut txn)?;
         let length = order.len(&txn);
         if to_index >= length {
             return Err(EditError::OutOfBounds {
@@ -1087,6 +1087,26 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
     let meta = required_map(&txn, META)?;
     map_string(&meta, &txn, "fingerprint")
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
+}
+
+/// The slide order for a writer, with ids whose slide record is gone and
+/// repeated ids removed in the writer's transaction, as `reorder_shape`
+/// compacts a shape list: its positions are then the indices readers show.
+fn compact_slide_order(txn: &mut TransactionMut<'_>) -> EditResult<ArrayRef> {
+    let order = required_order(txn)?;
+    let slides = required_map(txn, SLIDES)?;
+    let mut seen = HashSet::new();
+    let stale: Vec<u32> = string_array_ref(&order, txn)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| {
+            (!slides.contains_key(txn, id) || !seen.insert(id.clone())).then_some(index as u32)
+        })
+        .collect();
+    for index in stale.into_iter().rev() {
+        order.remove(txn, index);
+    }
+    Ok(order)
 }
 
 /// Slide ids in deck order, first occurrence of each. An id whose slide

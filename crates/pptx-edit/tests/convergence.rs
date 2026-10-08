@@ -574,6 +574,26 @@ fn a_slide_deleted_while_a_peer_moves_it_stays_deleted() {
     .unwrap();
     let reopened = DeckSession::open_from_update_with_source(&stored, FIXTURE, 903).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), merged);
+
+    // Moves and inserts afterwards take the indices readers show: Move Down
+    // on the first slide moves it, and an insert at the end lands there.
+    let (first, last) = (expected[0], expected[1]);
+    let moved = right.move_slide(&EditCtx::local("b"), first, 1).unwrap();
+    assert_eq!((moved.from_index, moved.to_index), (Some(0), Some(1)));
+    assert_eq!(right.slide_ids().unwrap(), [last, first]);
+    let inserted = right.insert_slide(&EditCtx::local("b"), 2, None).unwrap();
+    assert_eq!(inserted.to_index, Some(2));
+    assert_eq!(
+        right.slide_ids().unwrap(),
+        [last, first, inserted.slide_id.as_str()]
+    );
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left).unwrap();
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let deleted = left.delete_slide(&EditCtx::local("a"), first).unwrap();
+    assert_eq!(deleted.from_index, Some(1));
 }
 
 /// Schedule 159 of the GC scan, shrunk: two peers move one shape at once and
