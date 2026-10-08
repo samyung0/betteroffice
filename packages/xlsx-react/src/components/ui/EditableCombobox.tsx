@@ -96,10 +96,13 @@ export function EditableCombobox({
     if (!disabled && onCommit && draft.trim()) onCommit(draft.trim());
     setDraft(value);
   }, [disabled, onCommit, draft, value]);
-  // The blur's deferred commit runs after an Enter has already committed and
-  // the value moved on: it must read that render's draft and value.
+  // The blur's deferred commit reads the latest render's draft and value.
   const commitRef = useRef(commit);
   commitRef.current = commit;
+  // Enter commits and then blurs. The host may not have re-rendered the new
+  // value by the blur's frame, so that commit is skipped: it would commit the
+  // old value again.
+  const enteredRef = useRef(false);
 
   return (
     <div
@@ -127,14 +130,19 @@ export function EditableCombobox({
         disabled={disabled}
         value={draft}
         onFocus={(event) => {
+          enteredRef.current = false;
           if (disabled) return;
           setOpen(true);
           event.currentTarget.select();
         }}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => {
+          enteredRef.current = false;
+          setDraft(event.target.value);
+        }}
         onKeyDown={(event) => {
           if (event.key === 'Enter') {
             commit();
+            enteredRef.current = true;
             close();
             event.currentTarget.blur();
           } else if (event.key === 'ArrowDown') {
@@ -144,7 +152,8 @@ export function EditableCombobox({
         }}
         onBlur={() => {
           requestAnimationFrame(() => {
-            if (!menuRef.current?.contains(document.activeElement)) commitRef.current();
+            if (enteredRef.current) enteredRef.current = false;
+            else if (!menuRef.current?.contains(document.activeElement)) commitRef.current();
           });
         }}
         style={{

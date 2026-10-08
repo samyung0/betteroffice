@@ -48,6 +48,27 @@ describe('EditableCombobox', () => {
 
     expect(input.value).toBe('120%');
   });
+
+  it('commits once when Enter blurs before the host shows the new value', async () => {
+    const commits: string[] = [];
+    // The host applies the commit later, as a busy editor does.
+    const { getByRole } = render(
+      <EditableCombobox
+        value="100%"
+        options={[]}
+        label="Zoom"
+        onCommit={(value) => commits.push(value)}
+      />
+    );
+    const input = getByRole('combobox') as HTMLInputElement;
+
+    input.focus();
+    fireEvent.input(input, { target: { value: '120' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+
+    expect(commits).toEqual(['120']);
+  });
 });
 
 function ZoomCombobox({ onCommit }: { onCommit?: (value: string) => void }) {
