@@ -1620,7 +1620,10 @@ impl Item {
     }
 
     pub(crate) fn gc(&mut self, collector: &mut GCCollector, parent_gc: bool) {
-        if self.is_deleted() && !self.info.is_keep() {
+        // Patched for BetterOffice (upstream y-crdt PR #682): a collected type's
+        // children go with it, kept or not, as in Yjs; a kept child left behind
+        // would point into the type's freed branch.
+        if self.is_deleted() && (parent_gc || !self.info.is_keep()) {
             self.content.gc(collector);
             let len = self.len();
             if parent_gc {
