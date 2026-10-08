@@ -181,10 +181,11 @@ enum Op {
     Delete(String, u32, u32),
     Replace(String, u32, u32, String),
     Split(String, u32),
-    Merge(String, bool),
+    /// A paragraph by story and index (its id differs by layout once renamed).
+    Merge(String, usize, bool),
     Bold(String, u32, u32),
-    Align(String),
-    List(String),
+    Align(String, usize),
+    List(String, usize),
     Paste(String, u32, u32, Vec<String>),
     PageBreak(String, u32),
     SectionBreak(String, u32),
@@ -252,6 +253,15 @@ fn choose(rng: &mut Rng, doc: &EditingDoc, focus: Option<&str>, marker: String) 
         return Op::Undo;
     }
     let focused = focus.and_then(|id| paragraphs.iter().find(|(para, _, _)| para == id));
+    let focused_index = focus.and_then(|id| paragraphs.iter().position(|(para, _, _)| para == id));
+    let in_body = story == "body";
+    let count = paragraphs.len();
+    let pick_index = move |rng: &mut Rng| -> usize {
+        match focused_index {
+            Some(index) if in_body => index,
+            _ => rng.below(count),
+        }
+    };
     let pick = |rng: &mut Rng| -> (String, u32, u32) {
         match focused {
             Some(paragraph) if story == "body" => paragraph.clone(),
@@ -305,7 +315,10 @@ fn choose(rng: &mut Rng, doc: &EditingDoc, focus: Option<&str>, marker: String) 
             let paragraph = pick(rng);
             Op::Split(story, at(rng, &paragraph))
         }
-        12 | 13 => Op::Merge(pick(rng).0, rng.chance(50)),
+        12 | 13 => {
+            let index = pick_index(rng);
+            Op::Merge(story, index, rng.chance(50))
+        }
         14 => {
             let first = rng.below(paragraphs.len());
             let last = (first + rng.below(3)).min(paragraphs.len() - 1);
@@ -313,8 +326,14 @@ fn choose(rng: &mut Rng, doc: &EditingDoc, focus: Option<&str>, marker: String) 
             let to = at(rng, &paragraphs[last]).max(from + 1).min(len);
             Op::Bold(story, from, to)
         }
-        15 => Op::Align(pick(rng).0),
-        16 => Op::List(pick(rng).0),
+        15 => {
+            let index = pick_index(rng);
+            Op::Align(story, index)
+        }
+        16 => {
+            let index = pick_index(rng);
+            Op::List(story, index)
+        }
         17 => {
             let first = rng.below(paragraphs.len());
             let last = (first + rng.below(3)).min(paragraphs.len() - 1);
@@ -379,6 +398,13 @@ fn choose(rng: &mut Rng, doc: &EditingDoc, focus: Option<&str>, marker: String) 
 
 fn run(peer: &Peer, op: &Op) -> Result<(), String> {
     let doc = &peer.doc;
+    let para_at = |story: &str, index: usize| -> Result<String, String> {
+        layout(doc, story)
+            .1
+            .get(index)
+            .map(|paragraph| paragraph.0.clone())
+            .ok_or_else(|| format!("no paragraph {index} in {story}"))
+    };
     let text = |result: Result<(), String>| result;
     let result: Result<(), String> = match op {
         Op::Insert(story, at, text) => doc
@@ -397,10 +423,10 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
             .split_paragraph(&ctx(), Position::new(story, *at), None)
             .map(drop)
             .map_err(|error| error.to_string()),
-        Op::Merge(para, forward) => doc
+        Op::Merge(story, index, forward) => para_at(story, *index).and_then(|para| doc
             .merge_paragraphs(
                 &ctx(),
-                para,
+                &para,
                 if *forward {
                     MergeDirection::Forward
                 } else {
@@ -408,26 +434,26 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
                 },
             )
             .map(drop)
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())),
         Op::Bold(story, from, to) => doc
             .toggle_format(&ctx(), StoryRange::new(story, *from, *to), SimpleFormat::Bold)
             .map(drop)
             .map_err(|error| error.to_string()),
-        Op::Align(para) => doc
+        Op::Align(story, index) => para_at(story, *index).and_then(|para| doc
             .set_paragraph_attrs(
                 &ctx(),
-                &ParaSelector::One(para.clone()),
+                &ParaSelector::One(para),
                 &ParaAttrDelta {
                     alignment: Patch::Set("center".into()),
                     ..Default::default()
                 },
             )
             .map(drop)
-            .map_err(|error| error.to_string()),
-        Op::List(para) => doc
+            .map_err(|error| error.to_string())),
+        Op::List(story, index) => para_at(story, *index).and_then(|para| doc
             .set_paragraph_attrs(
                 &ctx(),
-                &ParaSelector::One(para.clone()),
+                &ParaSelector::One(para),
                 &ParaAttrDelta {
                     other: [(
                         "numPr".to_owned(),
@@ -442,7 +468,7 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
                 },
             )
             .map(drop)
-            .map_err(|error| error.to_string()),
+            .map_err(|error| error.to_string())),
         Op::Paste(story, from, to, lines) => (|| {
             let index_of = |landed: Receipt| -> Result<u32, String> {
                 let end = landed.range.ok_or("no landed range")?.end;
@@ -1384,15 +1410,14 @@ fn enter_at_both_sides_of_a_chunk_boundary() {
 #[test]
 fn backspace_and_delete_join_paragraphs_across_chunks() {
     let base = mixed();
-    let (second, _, _) = para(&base, 1);
-    let (third, start_of_third, _) = para(&base, 2);
+    let (_, start_of_third, _) = para(&base, 2);
     script(
         "joins across chunks",
         &base,
         2,
         vec![
-            Step::Do(0, Op::Merge(third, false)),
-            Step::Do(1, Op::Merge(second, true)),
+            Step::Do(0, Op::Merge("body".into(), 2, false)),
+            Step::Do(1, Op::Merge("body".into(), 1, true)),
             Step::Sync(0, 1),
             Step::Do(1, insert("body", start_of_third - 2, "<joined>")),
             Step::Sync(1, 0),
@@ -1539,7 +1564,7 @@ fn fields_toc_update_and_typing_in_its_result() {
 #[test]
 fn list_numbering_section_and_page_breaks() {
     let base = mixed();
-    let (item, start, _) = para(&base, 2);
+    let (_, start, _) = para(&base, 2);
     let (_, _, section_end) = para(&base, 7);
     let (_, leading, _) = para(&base, 9);
     script(
@@ -1547,14 +1572,14 @@ fn list_numbering_section_and_page_breaks() {
         &base,
         2,
         vec![
-            Step::Do(0, Op::List(para(&base, 5).0)),
+            Step::Do(0, Op::List("body".into(), 5)),
             Step::Do(1, Op::Split("body".into(), start + 3)),
             Step::Do(0, Op::SectionBreak("body".into(), section_end)),
             Step::Do(1, Op::PageBreak("body".into(), leading + 2)),
-            Step::Do(0, Op::Merge(para(&base, 10).0, false)),
+            Step::Do(0, Op::Merge("body".into(), 10, false)),
             Step::Sync(0, 1),
             Step::Sync(1, 0),
-            Step::Do(1, Op::Align(item)),
+            Step::Do(1, Op::Align("body".into(), 2)),
         ],
     );
 }
