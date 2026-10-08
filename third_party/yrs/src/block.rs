@@ -914,6 +914,12 @@ impl Item {
         }
     }
 
+    /// Patched for BetterOffice: the copy this replica's Undo or Redo made of
+    /// this deleted item. The link is local; peers never see it.
+    pub fn redone(&self) -> Option<&ID> {
+        self.redone.as_ref()
+    }
+
     #[inline]
     pub fn range(&self) -> BlockRange {
         BlockRange::new(self.id, self.len)

@@ -1046,7 +1046,9 @@ impl EditingDoc {
     /// Runs `apply` (a peer's update), then renames the paragraph ids that
     /// concurrent splits duplicated ([`Self::rename_duplicate_para_ids`]),
     /// looking only at the ids of paragraph marks the update inserted or
-    /// re-identified and only in their stories.
+    /// re-identified and only in their stories, and re-anchors the markers it
+    /// wrote that name text this replica's Undo restored
+    /// ([`crate::bookmarks::rebind`]).
     pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
         let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
         let subscription = {
@@ -1063,6 +1065,10 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
+        let markers = crate::bookmarks::writes_markers(
+            &yrs::Transact::transact(self.yrs_doc()),
+            &inserted,
+        );
         let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
             let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
@@ -1084,6 +1090,9 @@ impl EditingDoc {
         };
         if !touched.is_empty() {
             self.rename_duplicates(Some(&touched));
+        }
+        if markers {
+            crate::bookmarks::rebind(self.yrs_doc());
         }
         result
     }
