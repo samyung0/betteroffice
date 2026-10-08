@@ -82,3 +82,27 @@ test('editor paragraph ids save as unique hex w14:paraIds and source ids stay', 
   const reopened = await parseDocx(await repackDocx(saved), { preloadFonts: false });
   expect(paraIds(reopened)).toEqual(ids);
 });
+
+test('two peers splitting one paragraph mid-text save each paragraph its own id', async () => {
+  const bytes = fixture();
+  const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+  const [left, right] = await Promise.all([2002, 2003].map((clientId) => createYrsSession({ clientId })));
+  try {
+    for (const [session, offset] of [[left, 2], [right, 4]] as const) {
+      session.seedFromDocx(bytes);
+      session.splitParagraph({ story: 'body', paraId: '1A2B3C4D', offset });
+    }
+    left.applyUpdate(right.encodeStateAsUpdate(left.encodeStateVector()));
+    right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
+    // Both new marks carry the source id in the session (Epo, 2026-10-08).
+    expect(left.paragraphs('body').filter((p) => p.paraId === '1A2B3C4D')).toHaveLength(2);
+    const ids = paraIds(yrsToDocument(left, parsed));
+    expect(paraIds(yrsToDocument(right, parsed))).toEqual(ids);
+    expect(ids[0]).toBe('1A2B3C4D');
+    const present = ids.filter((id): id is string => id !== undefined);
+    expect(new Set(present).size).toBe(present.length);
+  } finally {
+    left.destroy();
+    right.destroy();
+  }
+});
