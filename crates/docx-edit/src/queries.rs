@@ -329,6 +329,36 @@ impl EditingDoc {
             .collect()
     }
 
+    /// `para_id`'s units in `story_id` as text, one UTF-16 unit per embed so
+    /// offsets are its Loc offsets: a soft, page or column break as `\n`,
+    /// any other embed as U+FFFC.
+    pub fn paragraph_unit_text(&self, story_id: &str, para_id: &str) -> OpResult<String> {
+        let (start, pilcrow) = self
+            .segment_index(story_id)?
+            .para_span(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        let txn = self.yrs_doc().transact();
+        let story = story_ref(&txn, story_id)?;
+        let chunks = self.chunk_snapshot(story_id, &story, &txn);
+        let first = chunks.partition_point(|chunk| chunk.end() <= start);
+        Ok(chunks[first..]
+            .iter()
+            .take_while(|chunk| chunk.start < pilcrow)
+            .map(|chunk| match &chunk.kind {
+                ChunkKind::Text(text) => text.as_str(),
+                ChunkKind::Embed(Some(map))
+                    if matches!(
+                        map_string(map, &txn, KIND_KEY).as_deref(),
+                        Some(BREAK_KIND | "pageBreak" | "columnBreak")
+                    ) =>
+                {
+                    "\n"
+                }
+                _ => "\u{FFFC}",
+            })
+            .collect())
+    }
+
     /// The text of one paragraph in the requested view.
     pub fn para_text(&self, para_id: &str, view: TextView) -> OpResult<String> {
         for (_, views) in self.views_everywhere(view) {

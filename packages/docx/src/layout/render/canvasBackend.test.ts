@@ -19,6 +19,7 @@ import type {
   TextRunPrimitive,
 } from './displayList';
 import type { GlyphCache } from './glyphCache';
+import { clusterPieces } from './clusterRuns';
 
 interface Bounds {
   left: number;
@@ -435,5 +436,106 @@ describe('Canvas text-run slot clipping', () => {
     expect(paints).toHaveLength(1);
     expect(paints[0].right).toBe(paints[0].naturalRight);
     expect(paints[0].right).toBeGreaterThan(run.width);
+  });
+});
+
+describe('Canvas glyph-run clusters', () => {
+  // The Rust join equivalence test models this transform; joined runs never
+  // carry a scale, since it would scale the shaped pen positions again.
+  it('scales a run about its leftmost glyph', async () => {
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'abc',
+      horizontalScale: 150,
+      glyphs: [
+        { id: 1, x: 100, y: 20, cluster: 0, advance: 12 },
+        { id: 2, x: 112, y: 20, cluster: 1, advance: 12 },
+        { id: 3, x: 124, y: 20, cluster: 2, advance: 12 },
+      ],
+    };
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = {
+      get: () => ({ path: glyphPath, upem: 2048 }),
+    } as unknown as GlyphCache;
+    const { ctx, paints } = recordingContext(new Map());
+
+    await drawPrimitive(ctx, run, { glyphCache });
+
+    expect(paints.map((paint) => paint.left)).toEqual([100, 118, 136]);
+  });
+
+  it('paints a joined run exactly like its cluster pieces, outlined or not', async () => {
+    // UTF-8 clusters: 'W' 0, 'e' + U+0301 1 (two glyphs), ' ' 4, 'x' 5
+    const joined: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'We\u0301 x',
+      glyphs: [
+        { id: 1, x: 10, y: 20, cluster: 0, advance: 14 },
+        { id: 2, x: 24, y: 20, cluster: 1, advance: 9 },
+        { id: 3, x: 25, y: 20, cluster: 1, advance: 0 },
+        { id: 4, x: 33, y: 20, cluster: 4, advance: 5 },
+        { id: 5, x: 38, y: 20, cluster: 5, advance: 8 },
+      ],
+      docStart: 1,
+      docEnd: 6,
+      logicalOrder: 3,
+      clusterRuns: true,
+    };
+    const pieces = clusterPieces(joined);
+    expect(pieces.map((piece) => piece.text)).toEqual(['W', 'e\u0301', ' ', 'x']);
+    const ink = new Map(pieces.map((piece) => [piece.text, { width: 8, ascent: 12, descent: 3 }]));
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = {
+      get: () => ({ path: glyphPath, upem: 2048 }),
+    } as unknown as GlyphCache;
+
+    for (const options of [{ glyphCache }, undefined]) {
+      const whole = recordingContext(ink);
+      await drawPrimitive(whole.ctx, joined, options);
+      const split = recordingContext(ink);
+      for (const piece of pieces) await drawPrimitive(split.ctx, piece, options);
+      expect(whole.paints.length).toBeGreaterThanOrEqual(pieces.length);
+      expect(whole.paints).toEqual(split.paints);
+    }
+  });
+
+  it('paints a joined run cluster by cluster at the shaped glyph x', async () => {
+    // 'W' then 'e' + U+0301 in one two-glyph cluster at UTF-8 byte 1
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'We\u0301',
+      glyphs: [
+        { id: 1, x: 10, y: 20, cluster: 0, advance: 14 },
+        { id: 2, x: 30, y: 20, cluster: 1, advance: 9 },
+        { id: 3, x: 31, y: 20, cluster: 1, advance: 0 },
+      ],
+      docStart: 1,
+      docEnd: 4,
+    };
+    const ink = new Map([
+      ['W', { width: 14, ascent: 12, descent: 3 }],
+      ['e\u0301', { width: 9, ascent: 12, descent: 3 }],
+      ['We\u0301', { width: 22, ascent: 12, descent: 3 }],
+    ]);
+
+    const joined = recordingContext(ink);
+    await drawPrimitive(joined.ctx, { ...run, clusterRuns: true });
+    expect(joined.paints.map((paint) => [paint.left, paint.right])).toEqual([
+      [10, 24],
+      [30, 39],
+    ]);
+
+    const single = recordingContext(ink);
+    await drawPrimitive(single.ctx, run);
+    expect(single.paints.map((paint) => [paint.left, paint.right])).toEqual([[10, 32]]);
   });
 });

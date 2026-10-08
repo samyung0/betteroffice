@@ -116,21 +116,27 @@ export interface YrsSeedSources {
 
 /**
  * Hydrates a fresh session. Shared collaboration state wins over both seed
- * shapes so a client joining a room never seeds an independent replica.
+ * shapes so a client joining a room never seeds an independent replica. A
+ * shared state stored before its peers renamed the paragraph ids concurrent
+ * splits duplicated gets the same renames here.
  */
 export function seedYrsSession(
-  session: Pick<YrsSession, 'openDocx' | 'loadState'>,
+  session: Pick<YrsSession, 'openDocx' | 'loadState' | 'renameDuplicateParaIds'>,
   seedDocumentIntoYrs: (document: Document) => void,
   seed: YrsSeedSources
 ): YrsDocxHost | null {
   const { bytes, document, initialUpdate } = seed;
+  const load = (update: Uint8Array) => {
+    session.loadState(update.slice());
+    session.renameDuplicateParaIds();
+  };
   if (bytes) {
     const host = session.openDocx(bytes, !initialUpdate);
-    if (initialUpdate) session.loadState(initialUpdate.slice());
+    if (initialUpdate) load(initialUpdate);
     return host;
   }
   if (initialUpdate) {
-    session.loadState(initialUpdate.slice());
+    load(initialUpdate);
     return null;
   }
   if (document) seedDocumentIntoYrs(document);

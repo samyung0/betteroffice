@@ -12,7 +12,10 @@ import {
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import { configureDefaultFonts, initWasm, openDocumentViewer } from '@betteroffice/docx/viewer';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { preloadOpcWasm, rezipContainer } from '@betteroffice/docx/wasm/opc';
+import { createYrsSession } from '@betteroffice/docx/yrs';
+import { yrsSelectionText } from './DocxEditor/yrsCommands';
 import { markerText, selectAround, selectStory, textLayerText, useTextLayer } from './textLayer';
 
 const { renderHook } = await import('@testing-library/react');
@@ -318,11 +321,18 @@ describe('text layer over a laid-out document', () => {
   const sdt = (content: string) =>
     `<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
 
+  // One bar chart, which an inline drawing (`chart`) shows on a line of its own.
+  const CHART =
+    '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>';
+  const chart =
+    '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:extent cx="914400" cy="457200"/><wp:docPr id="2" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart1"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+
   function docx(body: string, footnotes = ''): Uint8Array {
     const parts: Record<string, string> = {
-      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/></Types>`,
+      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>`,
       '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
-      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/></Relationships>`,
+      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdChart1" Type="${R}/chart" Target="charts/chart1.xml"/></Relationships>`,
+      'word/charts/chart1.xml': CHART,
       'word/styles.xml': `<w:styles ${W}><w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/></w:style></w:styles>`,
       'word/footnotes.xml': `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>${footnotes}</w:footnotes>`,
       'word/document.xml': `<w:document ${W}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`,
@@ -351,6 +361,7 @@ describe('text layer over a laid-out document', () => {
     const generated = resolve(import.meta.dir, '../../../docx/src/wasm/generated');
     await initWasm(await readFile(resolve(generated, 'viewer/docx_view_wasm_bg.wasm')));
     await preloadOpcWasm(await readFile(resolve(generated, 'opc/ooxml_opc_bg.wasm')));
+    preloadEditWasm(await readFile(resolve(generated, 'edit/docx_edit_bg.wasm')));
     // Real metrics, so runs are per glyph cluster and lines wrap as in Capy.
     const font = await readFile(
       resolve(import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')
@@ -402,12 +413,64 @@ describe('text layer over a laid-out document', () => {
     );
   });
 
-  test('copies the text around a page or column break inside a paragraph once, in order', async () => {
-    for (const kind of ['page', 'column']) {
-      const body = p(`${t('Aa')}<w:r><w:br w:type="${kind}"/></w:r>${t('Bb')}`) + p(t('Cc'));
-      expect(await copied(p(t('Lead')) + body)).toBe('Lead\nAa\nBb\nCc');
+  /** The editor's copy of the whole body (`yrsSelectionText`). */
+  async function editCopied(body: string): Promise<string> {
+    const session = await createYrsSession({ clientId: 31 });
+    try {
+      session.openDocx(docx(body), true);
+      const paragraphs = session.paragraphs('body');
+      const last = paragraphs.at(-1)!;
+      const end = session.paragraphSpans('body').find((span) => span.paraId === last.paraId)!.length;
+      session.setSelection(
+        { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
+        { story: 'body', paraId: last.paraId, offset: end }
+      );
+      return yrsSelectionText(session).text;
+    } finally {
+      session.destroy();
     }
-  });
+  }
+
+  const pb = '<w:r><w:br w:type="page"/></w:r>';
+  const cb = '<w:r><w:br w:type="column"/></w:r>';
+  // An inline text box: a block between two parts of its paragraph that is no break.
+  const shape = `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  // A page or column break inside a paragraph copies as a soft line break does, in both modes.
+  test.each([
+    ['a page break', `${t('Aa')}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a column break', `${t('Aa')}${cb}${t('Bb')}`, 'Aa\nBb'],
+    ['two page breaks', `${t('Aa')}${pb}${pb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a page then a column break', `${t('Aa')}${pb}${cb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['two soft breaks', `${t('Aa')}${br}${br}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a soft then a page break', `${t('Aa')}${br}${pb}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a page then a soft break', `${t('Aa')}${pb}${br}${t('Bb')}`, 'Aa\n\nBb'],
+    ['a shape then a page break', `${t('Aa')}${shape}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a page break then a shape', `${t('Aa')}${pb}${shape}${t('Bb')}`, 'Aa\nBb'],
+    ['an inline chart', `${t('Aa')}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['two inline charts', `${t('Aa')}${chart}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart then a page break', `${t('Aa')}${chart}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a page break then a chart', `${t('Aa')}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart, a page break, a chart', `${t('Aa')}${chart}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart opening the paragraph', `${chart}${t('Bb')}`, 'Bb'],
+    ['a chart ending the paragraph', `${t('Aa')}${chart}`, 'Aa'],
+    ['a break opening the paragraph', `${pb}${t('Bb')}`, 'Bb'],
+    ['a break ending the paragraph', `${t('Aa')}${pb}`, 'Aa'],
+    ['only a break', pb, ''],
+  ])(
+    'copies %s the same in view and edit mode',
+    async (_, runs, text) => {
+      const body = p(t('Lead')) + p(runs) + p(t('Cc'));
+      expect(await copied(body)).toBe(`Lead\n${text}\nCc`);
+      expect(await editCopied(body)).toBe(`Lead\n${text}\nCc`);
+    },
+    30_000
+  );
+
+  // Edit mode writes nothing for them; view mode paints them on a line of their own.
+  test('copies one newline in view mode for shapes between two parts of a paragraph', async () => {
+    const body = p(t('Lead')) + p(`${t('Aa')}${shape}${shape}${t('Bb')}`) + p(t('Cc'));
+    expect(await copied(body)).toBe('Lead\nAa\nBb\nCc');
+  }, 30_000);
 
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');

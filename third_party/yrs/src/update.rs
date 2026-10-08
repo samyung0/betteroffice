@@ -82,8 +82,13 @@ impl BlockSet {
         for client_id in client_ids {
             if let Some(id_range) = exclude.get(&client_id) {
                 if let Some(structs) = self.clients.get_mut(&client_id) {
-                    let clock_start = structs.front().unwrap().clock_start();
-                    let clock_end = structs.back().unwrap().next_clock();
+                    // Patched for BetterOffice: an update may list a client with
+                    // no structs (`01 00 01 01 00`); there is nothing to exclude.
+                    let (Some(first), Some(last)) = (structs.front(), structs.back()) else {
+                        continue;
+                    };
+                    let clock_start = first.clock_start();
+                    let clock_end = last.next_clock();
                     for (range, _) in id_range.iter() {
                         let mut start_index = 0;
                         if range.start >= clock_end {
@@ -858,8 +863,9 @@ impl Decode for Update {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, Error> {
         // read blocks
         let clients_len: u32 = decoder.read_var()?;
+        // Patched for BetterOffice: the client and struct lists grow with what
+        // is read; their declared lengths are input, not a reservation.
         let mut clients = HashMap::with_hasher(BuildHasherDefault::default());
-        clients.try_reserve(clients_len as usize)?;
 
         let mut blocks = BlockSet { clients };
         for _ in 0..clients_len {
@@ -871,9 +877,6 @@ impl Decode for Update {
                 .clients
                 .entry(client)
                 .or_insert_with(|| VecDeque::new());
-            // Attempt to pre-allocate memory for the blocks. If the capacity overflows and
-            // allocation fails, return an error.
-            blocks.try_reserve(blocks_len)?;
 
             for _ in 0..blocks_len {
                 let id = ID::new(client, clock);
@@ -1774,6 +1777,21 @@ mod inspection_test {
             })
             .collect();
         assert_eq!(kinds, vec![('i', 0), ('s', 1), ('i', 2)]);
+    }
+
+    // Patched for BetterOffice: a client listed with no structs applies as
+    // nothing instead of panicking in `BlockSet::exclude`.
+    #[test]
+    fn applies_a_client_with_no_structs() {
+        use crate::GetString;
+        let doc = Doc::with_client_id(9);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "abc");
+        let before = doc.transact().state_vector();
+        let update = Update::decode_v1(&[0x01, 0x00, 0x01, 0x01, 0x00, 0x18]).unwrap();
+        doc.transact_mut().apply_update(update).unwrap();
+        assert_eq!(text.get_string(&doc.transact()), "abc");
+        assert_eq!(doc.transact().state_vector(), before);
     }
 
     // Patched for BetterOffice: a garbage-collected run reads as Gc or deleted content.

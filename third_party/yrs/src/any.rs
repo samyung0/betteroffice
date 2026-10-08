@@ -6,6 +6,10 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 
 pub const F64_MAX_SAFE_INTEGER: f64 = (i64::pow(2, 53) - 1) as f64;
+/// Patched for BetterOffice: the deepest nesting of arrays and maps
+/// [Any::decode] reads, as serde_json's default limit for JSON content. A
+/// deeper value is an error instead of a stack overflow on the decoding thread.
+pub const MAX_DECODE_DEPTH: usize = 128;
 pub const F64_MIN_SAFE_INTEGER: f64 = -F64_MAX_SAFE_INTEGER;
 
 /// Any is an enum with a potentially associated value that is used to represent JSON values
@@ -35,6 +39,23 @@ impl Any {
     }
 
     pub fn decode<R: Read>(decoder: &mut R) -> Result<Self, Error> {
+        Self::decode_at(decoder, 0)
+    }
+
+    fn decode_at<R: Read>(decoder: &mut R, depth: usize) -> Result<Self, Error> {
+        // Patched for BetterOffice: arrays and maps count against
+        // MAX_DECODE_DEPTH, and grow with the entries actually read. Their
+        // declared length is input: a reservation from it (a map's is written
+        // at once) let 449 bytes of nested maps commit 24 GiB.
+        let nested = |depth: usize| {
+            if depth >= MAX_DECODE_DEPTH {
+                Err(Error::Custom(format!(
+                    "Any nests deeper than {MAX_DECODE_DEPTH} levels"
+                )))
+            } else {
+                Ok(depth + 1)
+            }
+        };
         Ok(match decoder.read_u8()? {
             // CASE 127: undefined
             127 => Any::Undefined,
@@ -59,20 +80,22 @@ impl Any {
             }
             // CASE 118: Map<string,Any>
             118 => {
+                let depth = nested(depth)?;
                 let len: usize = decoder.read_var()?;
-                let mut map = HashMap::with_capacity(len);
+                let mut map = HashMap::new();
                 for _ in 0..len {
                     let key = decoder.read_string()?;
-                    map.insert(key.to_owned(), Any::decode(decoder)?);
+                    map.insert(key.to_owned(), Any::decode_at(decoder, depth)?);
                 }
                 Any::Map(Arc::new(map))
             }
             // CASE 117: Array<Any>
             117 => {
+                let depth = nested(depth)?;
                 let len: usize = decoder.read_var()?;
-                let mut arr = Vec::with_capacity(len);
+                let mut arr = Vec::new();
                 for _ in 0..len {
-                    arr.push(Any::decode(decoder)?);
+                    arr.push(Any::decode_at(decoder, depth)?);
                 }
                 Any::Array(Arc::from(arr))
             }
@@ -848,4 +871,55 @@ macro_rules! any_unexpected {
 #[doc(hidden)]
 macro_rules! any_expect_expr_comma {
     ($e:expr , $($tt:tt)*) => {};
+}
+
+// Patched for BetterOffice: decoding limits.
+#[cfg(test)]
+mod decode_limits_test {
+    use super::{Any, MAX_DECODE_DEPTH};
+    use crate::encoding::read::Cursor;
+    use crate::encoding::write::Write;
+
+    fn nested_arrays(depth: usize) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for _ in 0..depth {
+            buf.write_u8(117);
+            buf.write_var(1u32);
+        }
+        buf.write_u8(126);
+        buf
+    }
+
+    #[test]
+    fn nesting_past_the_limit_is_an_error() {
+        let ok = nested_arrays(MAX_DECODE_DEPTH);
+        assert!(Any::decode(&mut Cursor::new(&ok)).is_ok());
+        let over = nested_arrays(MAX_DECODE_DEPTH + 1);
+        assert!(Any::decode(&mut Cursor::new(&over)).is_err());
+        // About 20 KB that overflowed a 2 MiB stack before.
+        let deep = nested_arrays(10_000);
+        assert!(Any::decode(&mut Cursor::new(&deep)).is_err());
+    }
+
+    #[test]
+    fn a_huge_declared_length_is_an_error() {
+        for tag in [117u8, 118] {
+            let mut buf = Vec::new();
+            buf.write_u8(tag);
+            buf.write_var(1u64 << 60);
+            assert!(Any::decode(&mut Cursor::new(&buf)).is_err());
+        }
+        // 64 nested maps each declaring 2^22 entries and holding one: an end
+        // of input error, without a table sized from the declared length.
+        let mut buf = Vec::new();
+        for _ in 0..64 {
+            buf.write_u8(118);
+            buf.write_var(1u64 << 22);
+            buf.write_string("k");
+        }
+        buf.write_u8(126);
+        let started = std::time::Instant::now();
+        assert!(Any::decode(&mut Cursor::new(&buf)).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
 }

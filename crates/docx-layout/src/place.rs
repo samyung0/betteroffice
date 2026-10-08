@@ -40,7 +40,7 @@ use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
 };
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
-use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
+use crate::resolve_lines::utf16_len;
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
@@ -716,13 +716,18 @@ fn place(
     })
 }
 
-fn block_id_key(id: &crate::types::BlockId) -> String {
-    serde_json::to_string(id).expect("block ids always serialize")
+/// A block id as a map key; numeric ids (fixtures) take a prefix no
+/// string id carries.
+fn block_id_key(id: &crate::types::BlockId) -> std::borrow::Cow<'_, str> {
+    match id {
+        crate::types::BlockId::Str(value) => std::borrow::Cow::Borrowed(value),
+        crate::types::BlockId::Num(value) => std::borrow::Cow::Owned(format!("\0{value}")),
+    }
 }
 
 /// Retained suffix pages keep their geometry but absolute document positions move
-/// after an earlier edit. Refresh fragment ranges and resolved run slices from
-/// the new measured arena before the display list consumes them.
+/// after an earlier edit. Refresh fragment ranges from the new measured arena
+/// before the display list consumes them.
 fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
     let blocks: std::collections::HashMap<_, _> = measured
         .iter()
@@ -735,15 +740,15 @@ fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBl
         .collect();
     for page in pages {
         for fragment in &mut page.fragments {
-            let key = match fragment {
-                Fragment::Paragraph(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Table(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Image(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Shape(fragment) => block_id_key(&fragment.block_id),
-                Fragment::Chart(fragment) => block_id_key(&fragment.block_id),
-                Fragment::TextBox(fragment) => block_id_key(&fragment.block_id),
+            let id = match fragment {
+                Fragment::Paragraph(fragment) => &fragment.block_id,
+                Fragment::Table(fragment) => &fragment.block_id,
+                Fragment::Image(fragment) => &fragment.block_id,
+                Fragment::Shape(fragment) => &fragment.block_id,
+                Fragment::Chart(fragment) => &fragment.block_id,
+                Fragment::TextBox(fragment) => &fragment.block_id,
             };
-            let Some(measured) = blocks.get(&key) else {
+            let Some(measured) = blocks.get(block_id_key(id).as_ref()) else {
                 continue;
             };
             match (fragment, &measured.block, &measured.measure) {
@@ -758,12 +763,6 @@ fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBl
                         fragment.from_line,
                         fragment.to_line,
                     );
-                    fragment.resolved_lines = Some(build_resolved_lines(
-                        block,
-                        extent,
-                        fragment.from_line,
-                        fragment.to_line,
-                    ));
                 }
                 (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
                     fragment.pm_start = block.pm_start;
@@ -798,25 +797,6 @@ fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBl
 // ---------------------------------------------------------------------------
 // per-kind placers
 // ---------------------------------------------------------------------------
-
-/// Materializes resolved run segments for a fragment line range.
-fn build_resolved_lines(
-    block: &ParagraphBlock,
-    measure: &ParagraphExtent,
-    from_line: usize,
-    to_line: usize,
-) -> Vec<ResolvedLine> {
-    let mut resolved = Vec::new();
-    for line_index in from_line..to_line {
-        let Some(line) = measure.lines.get(line_index) else {
-            continue;
-        };
-        resolved.push(ResolvedLine {
-            segments: resolve_line_segments(&block.runs, line),
-        });
-    }
-    resolved
-}
 
 /// Places a paragraph's measured lines, splitting into carried fragments
 /// whenever the page or column runs out of room.
@@ -870,7 +850,6 @@ fn layout_paragraph(
             pm_end: block.pm_end,
             carried_from_prev: None,
             carried_to_next: None,
-            resolved_lines: Some(Vec::new()),
         });
 
         paginator.add_fragment(fragment, 0.0, space_before, space_after);
@@ -975,12 +954,6 @@ fn layout_paragraph(
             pm_end,
             carried_from_prev: Some(!is_first_fragment),
             carried_to_next: Some(!is_last_fragment),
-            resolved_lines: Some(build_resolved_lines(
-                block,
-                measure,
-                current_line_index,
-                current_line_index + fitting_lines,
-            )),
         });
 
         paginator.add_fragment(

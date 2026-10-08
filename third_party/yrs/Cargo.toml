@@ -46,6 +46,12 @@ doctest = true
 bench = true
 doc = true
 
+# Patched for BetterOffice: the decoders' memory test (its own binary, for
+# its counting allocator).
+[[test]]
+name = "decode_memory"
+path = "tests/decode_memory.rs"
+
 [[bench]]
 name = "benches"
 path = "benches/benches.rs"

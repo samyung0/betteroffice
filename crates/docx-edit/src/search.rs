@@ -306,7 +306,7 @@ mod tests {
         let ctx = EditCtx::local("test", "2026-09-18T00:00:00Z");
         doc.create_story("body", "needle before needle after", "Normal", "left")
             .unwrap();
-        doc.split_paragraph(&ctx, Position::new("body", 14), None)
+        doc.split_paragraph(&ctx, Position::new("body", 14))
             .unwrap();
         let table = doc
             .insert_table(&ctx, Position::new("body", 14), 12, 1, 12)

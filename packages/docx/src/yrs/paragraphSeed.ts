@@ -295,22 +295,32 @@ export function endEmptyListItem(
   return true;
 }
 
+/** What the paragraph Enter made keeps for a next style: the style it replaces and the section it ends. */
+const KEPT_FOR_NEXT_STYLE = new Set(['pStyle', 'sectPr', 'sectionBreakType']);
+
 /**
  * Gives the paragraph Enter made after one whose style names another next
- * style that style, starting clean as Word does: without the list the
- * previous paragraph set on itself, which the split carries.
+ * style that style, starting clean as Word does: without the direct
+ * properties and list the split copied from the previous paragraph.
  */
 export function applyNextStyle(
   session: YrsSession,
   range: YrsStoryRange,
   nextStyleId: string,
   currentStyleId: string | null,
-  styleValues: ParagraphStyleValues
+  styleValues: ParagraphStyleValues,
+  suggesting?: YrsAuthor
 ): void {
-  session.setParagraphAttrs(range, NO_LIST);
-  session.applyParagraphStyle(range, nextStyleId, styleValues(nextStyleId, range.story), {
-    [currentStyleId ?? '']: styleValues(currentStyleId, range.story),
-  });
+  const copied = Object.keys(session.selectionContext(range).paragraphProperties);
+  const other = Object.fromEntries(copied.filter((key) => !KEPT_FOR_NEXT_STYLE.has(key)).map((key) => [key, null]));
+  session.setParagraphAttrs(range, { ...NO_LIST, other }, suggesting);
+  session.applyParagraphStyle(
+    range,
+    nextStyleId,
+    styleValues(nextStyleId, range.story),
+    { [currentStyleId ?? '']: styleValues(currentStyleId, range.story) },
+    suggesting
+  );
 }
 
 /**

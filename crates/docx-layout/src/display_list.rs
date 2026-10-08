@@ -824,6 +824,13 @@ pub struct GlyphRunPrimitive {
     pub emphasis_mark: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_effect: Option<String>,
+    /// Joined from the one-cluster runs an authoritatively measured line
+    /// paints: each glyph cluster at byte offset `cluster` was a run of its
+    /// own covering its text's UTF-16 length of the document, with logical
+    /// orders counting up from this run's. The accessibility mirror splits
+    /// such a run back into one element per cluster.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cluster_runs: bool,
     #[serde(flatten)]
     pub attrs: DocAttrs,
 }
@@ -1180,23 +1187,6 @@ pub struct BuildInput {
     resolved_comment_ids: Vec<i64>,
     comment_authors: Vec<CommentAuthorIn>,
     comment_threads: Vec<CommentThreadIn>,
-}
-
-/// Parsed display input retained by the editing engine across edits. Its fields
-/// stay private so the display-input contract can evolve without becoming a
-/// second public layout model.
-pub struct ResidentDisplayInput {
-    input: BuildInput,
-}
-
-impl std::fmt::Debug for ResidentDisplayInput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResidentDisplayInput")
-            .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len())
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Deserialize)]
@@ -5229,6 +5219,8 @@ fn build_display_list_selected(
         }
         let note_areas = emit_note_regions(page, &ctx);
         let (content_bounds, column_bounds) = page_content_geometry(page);
+        // Retained for the session: drop the growth slack.
+        prims.shrink_to_fit();
 
         pages.push(DisplayPage {
             page_index: page_index as u64,
@@ -5885,6 +5877,7 @@ fn emit_line(
     block_ref: &BlockRef,
     ctx: &RenderCtx<'_>,
 ) -> Option<LinePaintMetrics> {
+    let line_from = prims.len();
     let segments = resolve_line_segments(&block.runs, line);
     let attrs = block.attrs.as_ref();
     let auto_space = ooxml_text::AutoSpace::from_options(
@@ -6489,6 +6482,9 @@ fn emit_line(
     }
 
     let (trailing_tabs, trailing_breaks) = stamp_copy_separators(prims, &segments, &text_prims);
+    if authoritative_active && joins_cluster_glyph_runs() {
+        join_cluster_glyph_runs(prims, line_from);
+    }
 
     // A line with no positioned text still needs a doc position for hit
     // testing. A blank row from a line break carries the break's own inline
@@ -6534,6 +6530,256 @@ fn emit_line(
         end_x: pen_x,
         baseline,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Off only in tests that compare against the one-run-per-cluster list.
+    static JOIN_CLUSTER_GLYPH_RUNS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn joins_cluster_glyph_runs() -> bool {
+    JOIN_CLUSTER_GLYPH_RUNS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn joins_cluster_glyph_runs() -> bool {
+    true
+}
+
+/// Joins the one-cluster glyph runs an authoritatively measured line emits
+/// into one run per stretch the next cluster merely continues. Every glyph
+/// keeps its own position and paint order, so the page paints the same; the
+/// list just stops carrying a full primitive per character.
+fn join_cluster_glyph_runs(prims: &mut Vec<Primitive>, from: usize) {
+    let tail = prims.split_off(from);
+    // Logical order of the last cluster joined into the run at the end.
+    let mut joined_order = None;
+    for primitive in tail {
+        let Primitive::GlyphRun(next) = primitive else {
+            joined_order = None;
+            prims.push(primitive);
+            continue;
+        };
+        let piece = one_cluster_piece(&next);
+        if piece
+            && prims.len() > from
+            && let Some(Primitive::GlyphRun(run)) = prims.last_mut()
+            && joined_order.is_some_and(|order| glyph_run_continues(run, &next, order))
+            && let Ok(offset) = u32::try_from(run.text.len())
+        {
+            run.cluster_runs = true;
+            run.text.push_str(&next.text);
+            run.glyphs.extend(next.glyphs.into_iter().map(|mut glyph| {
+                glyph.cluster += offset;
+                glyph
+            }));
+            run.attrs.doc_end = next.attrs.doc_end;
+            run.attrs.tabs_after = next.attrs.tabs_after;
+            run.attrs.breaks_after = next.attrs.breaks_after;
+            joined_order = next.attrs.logical_order;
+            continue;
+        }
+        joined_order = next.attrs.logical_order.filter(|_| piece);
+        prims.push(Primitive::GlyphRun(next));
+    }
+}
+
+/// A run of one glyph cluster at its text's start, covering exactly its
+/// text's UTF-16 length of the document: what a joined run can split back into.
+/// It must also paint the same alone or joined: painters scale a run about its
+/// left edge and rotate it about its centre, and a w14 effect (a gradient fill)
+/// spans its run's rect, so scaled, rotated and effect runs stay apart.
+fn one_cluster_piece(run: &GlyphRunPrimitive) -> bool {
+    let utf16_len = run.text.encode_utf16().count() as i64;
+    run.horizontal_scale.is_none()
+        && run.rotation_deg.is_none()
+        && run.attrs.modern_effects.is_none()
+        && !run.glyphs.is_empty()
+        && run.glyphs.iter().all(|glyph| glyph.cluster == 0)
+        && run
+            .attrs
+            .doc_start
+            .zip(run.attrs.doc_end)
+            .is_some_and(|(start, end)| end - start == utf16_len)
+}
+
+/// Whether `next` continues `run` left to right: the same paint and document
+/// attributes, with its document range and logical order following on from
+/// `run`'s last cluster (`run_order`), and no copy separator between them.
+fn glyph_run_continues(run: &GlyphRunPrimitive, next: &GlyphRunPrimitive, run_order: u64) -> bool {
+    let GlyphRunPrimitive {
+        font_id,
+        size,
+        color,
+        text: _,
+        glyphs: _,
+        paint_clip,
+        word_spacing,
+        rtl,
+        opacity,
+        rotation_deg,
+        horizontal_scale,
+        all_caps,
+        small_caps,
+        hidden,
+        text_shadow,
+        text_outline,
+        emphasis_mark,
+        text_effect,
+        cluster_runs,
+        attrs,
+    } = next;
+    let DocAttrs {
+        doc_start,
+        doc_end,
+        block_id,
+        block_key,
+        fragment_doc_start,
+        fragment_doc_end,
+        para_id,
+        from_line,
+        to_line,
+        line_index,
+        cell,
+        comment_ids,
+        field,
+        note_ref,
+        revision,
+        list_marker,
+        list_marker_revision,
+        structural_revision,
+        href,
+        tooltip,
+        link_title,
+        link_target,
+        link_history,
+        link_doc_location,
+        sdt,
+        sdt_path,
+        inline_sdt_widget,
+        chart,
+        logical_order,
+        bidi_level,
+        lang,
+        decorative,
+        aria_label,
+        aria_description,
+        hidden_object,
+        group_id,
+        comment,
+        clip_group,
+        leader_glyphs,
+        tabs_before,
+        breaks_before,
+        tabs_after: _,
+        breaks_after: _,
+        highlight_slice,
+        style,
+        primitive_opacity,
+        image_flip_h,
+        image_flip_v,
+        image_shape_type,
+        content_frame,
+        effects,
+        border,
+        fill_paint,
+        stroke_paint,
+        effect_extent,
+        drawing_scene,
+        text_body_properties,
+        fallback_font,
+        modern_effects,
+        table,
+        inline_shape_atom,
+    } = attrs;
+    let previous = &run.attrs;
+    !cluster_runs
+        && run.paint_clip.is_none()
+        && paint_clip.is_none()
+        && run.rtl.is_none()
+        && rtl.is_none()
+        && bidi_level.is_some_and(|level| level % 2 == 0)
+        && previous.doc_end.is_some()
+        && previous.doc_end == *doc_start
+        && doc_end.is_some()
+        && *logical_order == run_order.checked_add(1)
+        && previous.tabs_after.is_none()
+        && previous.breaks_after.is_none()
+        && tabs_before.is_none()
+        && breaks_before.is_none()
+        && previous.inline_sdt_widget.is_none()
+        && inline_sdt_widget.is_none()
+        && previous.note_ref.is_none()
+        && note_ref.is_none()
+        && previous.leader_glyphs.is_none()
+        && leader_glyphs.is_none()
+        && run.font_id == *font_id
+        && run.size == *size
+        && run.color == *color
+        && run.word_spacing == *word_spacing
+        && run.opacity == *opacity
+        && run.rotation_deg == *rotation_deg
+        && run.horizontal_scale == *horizontal_scale
+        && run.all_caps == *all_caps
+        && run.small_caps == *small_caps
+        && run.hidden == *hidden
+        && run.text_shadow == *text_shadow
+        && run.text_outline == *text_outline
+        && run.emphasis_mark == *emphasis_mark
+        && run.text_effect == *text_effect
+        && previous.block_id == *block_id
+        && previous.block_key == *block_key
+        && previous.fragment_doc_start == *fragment_doc_start
+        && previous.fragment_doc_end == *fragment_doc_end
+        && previous.para_id == *para_id
+        && previous.from_line == *from_line
+        && previous.to_line == *to_line
+        && previous.line_index == *line_index
+        && previous.cell == *cell
+        && previous.comment_ids == *comment_ids
+        && previous.field == *field
+        && previous.revision == *revision
+        && previous.list_marker == *list_marker
+        && previous.list_marker_revision == *list_marker_revision
+        && previous.structural_revision == *structural_revision
+        && previous.href == *href
+        && previous.tooltip == *tooltip
+        && previous.link_title == *link_title
+        && previous.link_target == *link_target
+        && previous.link_history == *link_history
+        && previous.link_doc_location == *link_doc_location
+        && previous.sdt == *sdt
+        && previous.sdt_path == *sdt_path
+        && previous.chart == *chart
+        && previous.bidi_level == *bidi_level
+        && previous.lang == *lang
+        && previous.decorative == *decorative
+        && previous.aria_label == *aria_label
+        && previous.aria_description == *aria_description
+        && previous.hidden_object == *hidden_object
+        && previous.group_id == *group_id
+        && previous.comment == *comment
+        && previous.clip_group == *clip_group
+        && previous.highlight_slice == *highlight_slice
+        && previous.style == *style
+        && previous.primitive_opacity == *primitive_opacity
+        && previous.image_flip_h == *image_flip_h
+        && previous.image_flip_v == *image_flip_v
+        && previous.image_shape_type == *image_shape_type
+        && previous.content_frame == *content_frame
+        && previous.effects == *effects
+        && previous.border == *border
+        && previous.fill_paint == *fill_paint
+        && previous.stroke_paint == *stroke_paint
+        && previous.effect_extent == *effect_extent
+        && previous.drawing_scene == *drawing_scene
+        && previous.text_body_properties == *text_body_properties
+        && previous.fallback_font == *fallback_font
+        && previous.modern_effects == *modern_effects
+        && previous.table == *table
+        && previous.inline_shape_atom == *inline_shape_atom
 }
 
 /// Stamps `tabs_before`, `breaks_before`, `tabs_after` and `breaks_after`
@@ -7330,6 +7576,7 @@ fn try_emit_glyph_runs(
             text_outline: fmt.text_outline == Some(true),
             emphasis_mark: fmt.emphasis_mark.clone(),
             text_effect: fmt.text_effect.clone(),
+            cluster_runs: false,
             attrs: sub_attrs,
         }));
     }
@@ -10226,274 +10473,136 @@ pub fn build_display_list_value_from_resident_with_fonts(
     extras: &str,
     fonts: &ooxml_text::FontStore,
 ) -> Result<DisplayList, String> {
-    build_display_list_value_from_resident_with_fonts_observed(
+    build_resident_display_pages_with_fonts_observed(
         pagination,
         layout,
         extras,
         fonts,
+        0..layout.pages.len(),
         &mut || {},
     )
 }
 
-pub fn build_display_list_value_from_resident_with_fonts_observed(
+/// Pages converted into the display input at a time, which bounds the
+/// transient copy of typed pagination state a whole-list build holds.
+const RESIDENT_DISPLAY_BATCH: usize = 8;
+
+/// Builds display pages `pages` straight from typed pagination state. Each
+/// batch converts only its pages and the blocks they place, then drops them,
+/// so no second copy of the measured arena or the layout outlives the build.
+/// `observe_phase` fires after the first batch is converted and after the
+/// last one is built.
+pub fn build_resident_display_pages_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
     extras: &str,
     fonts: &ooxml_text::FontStore,
+    pages: std::ops::Range<usize>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<DisplayList, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let list = build_display_list(&parsed, fonts);
-    observe_phase();
-    Ok(list)
-}
-
-/// Build and retain the parsed display-input mirror alongside its first list.
-/// Incremental engine frames can then refresh only the pages they rebuild.
-pub fn build_resident_display_list_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    observe_phase: &mut impl FnMut(),
-) -> Result<(ResidentDisplayInput, DisplayList), String> {
-    let input = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    let list = build_display_list(&input, fonts);
-    observe_phase();
-    Ok((ResidentDisplayInput { input }, list))
-}
-
-fn resident_build_input(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-) -> Result<BuildInput, String> {
+    if pages.start > pages.end || pages.end > layout.pages.len() {
+        return Err("resident display page range is invalid".to_owned());
+    }
     let mut wire: serde_json::Map<String, Value> =
         serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
-    wire.insert(
-        "measured".to_owned(),
-        serde_json::to_value(&pagination.measured)
-            .map_err(|e| format!("encode resident measured blocks: {e}"))?,
-    );
     wire.insert(
         "options".to_owned(),
         serde_json::to_value(&pagination.options)
             .map_err(|e| format!("encode resident layout options: {e}"))?,
     );
-    wire.insert(
-        "layout".to_owned(),
-        serde_json::to_value(layout).map_err(|e| format!("encode resident layout: {e}"))?,
-    );
+    // Pages and the blocks they place come from pagination, never the extras.
+    wire.insert("layout".to_owned(), serde_json::json!({}));
+    wire.insert("measured".to_owned(), serde_json::json!([]));
     let mut wire = Value::Object(wire);
     normalize_integral_json_numbers(&mut wire);
-    serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))
-}
-
-/// Rebuild only pages dirtied by incremental pagination, retain the remaining
-/// typed display pages, and patch absolute body positions on the converged
-/// suffix. The caller gates extras/page-count changes before selecting this
-/// path; violations widen to a full display build here as a final safeguard.
-pub fn build_display_list_value_from_resident_incremental_with_fonts(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    previous: &DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-) -> Result<DisplayList, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    if previous.pages.len() != parsed.layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > parsed.layout.pages.len()
-    {
-        return Ok(build_display_list(&parsed, fonts));
-    }
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&parsed, fonts, Some(&selected));
-    let mut rebuilt_by_index: HashMap<usize, DisplayPage> = rebuilt
-        .pages
-        .into_iter()
-        .map(|page| (page.page_index as usize, page))
+    let mut input: BuildInput =
+        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
+    input.layout.pages = std::iter::repeat_with(PageIn::default)
+        .take(layout.pages.len())
         .collect();
-    let mut pages = Vec::with_capacity(previous.pages.len());
-    for (page_index, previous_page) in previous.pages.iter().enumerate() {
-        if let Some(page) = rebuilt_by_index.remove(&page_index) {
-            pages.push(page);
-            continue;
+
+    let mut list = DisplayList {
+        contract_version: input.contract_version,
+        pages: Vec::with_capacity(pages.len()),
+    };
+    let mut converted = false;
+    let mut start = pages.start;
+    while start < pages.end {
+        let batch = start..(start + RESIDENT_DISPLAY_BATCH).min(pages.end);
+        let mut keys = HashSet::new();
+        for index in batch.clone() {
+            let page: PageIn =
+                convert_resident_value(&layout.pages[index], "resident display layout page")?;
+            keys.extend(page.fragments.iter().filter_map(fragment_block_key));
+            input.layout.pages[index] = page;
         }
-        let mut page = previous_page.clone();
-        page.page_index = page_index as u64;
-        if page_index >= rebuilt_page_end {
-            shift_page_body_positions(&mut page, position_deltas);
+        for measured in &pagination.measured {
+            if crate_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref())) {
+                input.measured.push(convert_resident_value(
+                    measured,
+                    "resident display measured block",
+                )?);
+            }
         }
-        pages.push(page);
+        if !converted {
+            converted = true;
+            observe_phase();
+        }
+        let selected: HashSet<usize> = batch.clone().collect();
+        list.pages
+            .extend(build_display_list_selected(&input, fonts, Some(&selected)).pages);
+        for index in batch.clone() {
+            input.layout.pages[index] = PageIn::default();
+        }
+        input.measured.clear();
+        start = batch.end;
     }
-    Ok(DisplayList {
-        contract_version: rebuilt.contract_version,
-        pages,
-    })
+    if !converted {
+        observe_phase();
+    }
+    observe_phase();
+    Ok(list)
 }
 
-/// In-place counterpart to
-/// [`build_display_list_value_from_resident_incremental_with_fonts`]. Engine
-/// sessions already own the previous display arena, so unchanged pages do not
-/// need to be deep-cloned for every keystroke. Dirty pages are replaced after
-/// they have been built successfully; the converged suffix receives only its
-/// absolute-position adjustment.
-pub fn update_display_list_value_from_resident_incremental_with_fonts(
+/// Rebuilds the pages pagination dirtied in `previous` and patches absolute
+/// body positions on the converged suffix after them. `Ok(false)` leaves
+/// `previous` untouched when its page count no longer matches the layout.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_pages_with_fonts_observed(
     pagination: &crate::types::Input,
     layout: &crate::types::Layout,
     extras: &str,
     fonts: &ooxml_text::FontStore,
     previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
+    rebuilt_pages: std::ops::Range<usize>,
     position_deltas: &HashMap<String, i64>,
+    observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
-    update_display_list_value_from_resident_incremental_with_fonts_observed(
+    if previous.pages.len() != layout.pages.len() {
+        return Ok(false);
+    }
+    let rebuilt = build_resident_display_pages_with_fonts_observed(
         pagination,
         layout,
         extras,
         fonts,
-        previous,
-        rebuilt_page_start,
-        rebuilt_page_end,
-        position_deltas,
-        &mut || {},
-    )
-}
-
-pub fn update_display_list_value_from_resident_incremental_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    extras: &str,
-    fonts: &ooxml_text::FontStore,
-    previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    let parsed = resident_build_input(pagination, layout, extras)?;
-    observe_phase();
-    if previous.pages.len() != parsed.layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > parsed.layout.pages.len()
-    {
-        *previous = build_display_list(&parsed, fonts);
-        observe_phase();
-        return Ok(false);
-    }
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&parsed, fonts, Some(&selected));
-    observe_phase();
-    previous.contract_version = rebuilt.contract_version;
-    for page in rebuilt.pages {
-        let page_index = page.page_index as usize;
-        previous.pages[page_index] = page;
-    }
-    for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
-        page.page_index = page_index as u64;
-        shift_page_body_positions(page, position_deltas);
-    }
-    Ok(true)
-}
-
-/// Incremental engine path backed by a retained parsed display input. Only
-/// rebuilt layout pages and the measured blocks referenced by those pages
-/// cross the typed-layout compatibility adapter on each edit.
-pub fn update_resident_display_list_incremental_with_fonts_observed(
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    fonts: &ooxml_text::FontStore,
-    resident: &mut ResidentDisplayInput,
-    previous: &mut DisplayList,
-    rebuilt_page_start: usize,
-    rebuilt_page_end: usize,
-    position_deltas: &HashMap<String, i64>,
-    observe_phase: &mut impl FnMut(),
-) -> Result<bool, String> {
-    if previous.pages.len() != layout.pages.len()
-        || resident.input.layout.pages.len() != layout.pages.len()
-    {
-        return Ok(false);
-    }
-    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
-        return Err("resident display incremental page range is invalid".to_owned());
-    }
-
-    refresh_resident_display_pages(
-        &mut resident.input,
-        pagination,
-        layout,
-        rebuilt_page_start..rebuilt_page_end,
+        rebuilt_pages.clone(),
+        observe_phase,
     )?;
-    observe_phase();
-
-    let selected: HashSet<_> = (rebuilt_page_start..rebuilt_page_end).collect();
-    let rebuilt = build_display_list_selected(&resident.input, fonts, Some(&selected));
-    observe_phase();
     previous.contract_version = rebuilt.contract_version;
-    for page in rebuilt.pages {
-        let page_index = page.page_index as usize;
+    for (page_index, page) in rebuilt_pages.clone().zip(rebuilt.pages) {
         previous.pages[page_index] = page;
     }
-    for (page_index, page) in previous.pages.iter_mut().enumerate().skip(rebuilt_page_end) {
+    for (page_index, page) in previous
+        .pages
+        .iter_mut()
+        .enumerate()
+        .skip(rebuilt_pages.end)
+    {
         page.page_index = page_index as u64;
         shift_page_body_positions(page, position_deltas);
     }
     Ok(true)
-}
-
-fn refresh_resident_display_pages(
-    input: &mut BuildInput,
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    rebuilt_pages: std::ops::Range<usize>,
-) -> Result<(), String> {
-    let mut selected_blocks = HashSet::new();
-    for page_index in rebuilt_pages {
-        let page: PageIn =
-            convert_resident_value(&layout.pages[page_index], "resident display layout page")?;
-        for fragment in &page.fragments {
-            if let Some(key) = fragment_block_key(fragment) {
-                selected_blocks.insert(key);
-            }
-        }
-        input.layout.pages[page_index] = page;
-    }
-
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| measured_block_key(measured).map(|key| (key, index)))
-        .collect();
-    let mut pending_blocks = selected_blocks;
-    for measured in &pagination.measured {
-        let key = crate_block_key(&measured.block);
-        if !pending_blocks.remove(&key) {
-            continue;
-        }
-        let index = current_indices
-            .get(&key)
-            .copied()
-            .ok_or_else(|| format!("resident display measured block {key:?} is missing"))?;
-        input.measured[index] =
-            convert_resident_value(measured, "resident display measured block")?;
-    }
-    if let Some(key) = pending_blocks.into_iter().next() {
-        return Err(format!(
-            "resident pagination measured block {key:?} is missing"
-        ));
-    }
-    Ok(())
 }
 
 fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
@@ -10506,38 +10615,25 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
     serde_json::from_value(value).map_err(|error| format!("parse {label}: {error}"))
 }
 
-fn crate_block_key(block: &crate::types::LayoutBlock) -> String {
-    match block {
-        crate::types::LayoutBlock::Paragraph(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Table(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Image(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::TextBox(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Shape(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Chart(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::SectionBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::PageBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::ColumnBreak(value) => crate_block_id_key(&value.id),
-        crate::types::LayoutBlock::Unsupported => "unsupported".to_owned(),
-    }
-}
-
-fn crate_block_id_key(id: &crate::types::BlockId) -> String {
-    match id {
-        crate::types::BlockId::Str(value) => value.clone(),
-        crate::types::BlockId::Num(value) => value.to_string(),
-    }
-}
-
-fn measured_block_key(measured: &MeasuredBlockIn) -> Option<String> {
-    match &measured.block {
-        BlockIn::Paragraph(value) => Some(block_key(&value.id)),
-        BlockIn::Table(value) => Some(block_key(&value.id)),
-        BlockIn::Image(value) => Some(block_key(&value.id)),
-        BlockIn::TextBox(value) => Some(block_key(&value.id)),
-        BlockIn::Shape(value) => Some(block_key(&value.id)),
-        BlockIn::Chart(value) => Some(block_key(&value.id)),
-        BlockIn::Unsupported => None,
-    }
+/// Key of a block a layout fragment can place.
+fn crate_block_key(block: &crate::types::LayoutBlock) -> Option<std::borrow::Cow<'_, str>> {
+    use crate::types::{BlockId, LayoutBlock};
+    let id = match block {
+        LayoutBlock::Paragraph(value) => &value.id,
+        LayoutBlock::Table(value) => &value.id,
+        LayoutBlock::Image(value) => &value.id,
+        LayoutBlock::TextBox(value) => &value.id,
+        LayoutBlock::Shape(value) => &value.id,
+        LayoutBlock::Chart(value) => &value.id,
+        LayoutBlock::SectionBreak(_)
+        | LayoutBlock::PageBreak(_)
+        | LayoutBlock::ColumnBreak(_)
+        | LayoutBlock::Unsupported => return None,
+    };
+    Some(match id {
+        BlockId::Str(value) => std::borrow::Cow::Borrowed(value),
+        BlockId::Num(value) => std::borrow::Cow::Owned(value.to_string()),
+    })
 }
 
 fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
@@ -10553,6 +10649,9 @@ fn fragment_block_key(fragment: &FragmentIn) -> Option<String> {
 }
 
 fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i64>) {
+    if deltas.is_empty() {
+        return;
+    }
     for primitive in &mut page.primitives {
         let attrs = match primitive {
             Primitive::Text(value) => &mut value.attrs,
@@ -10563,11 +10662,12 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
             Primitive::Shape(value) => &mut value.attrs,
             Primitive::Decoration(value) => &mut value.attrs,
         };
-        let key = attrs
-            .block_key
-            .clone()
-            .or_else(|| attrs.block_id.as_ref().map(ToString::to_string));
-        let Some(delta) = key.as_ref().and_then(|key| deltas.get(key)).copied() else {
+        let delta = match (&attrs.block_key, &attrs.block_id) {
+            (Some(key), _) => deltas.get(key.as_str()),
+            (None, Some(id)) => deltas.get(id.to_string().as_str()),
+            (None, None) => None,
+        };
+        let Some(&delta) = delta else {
             continue;
         };
         attrs.doc_start = attrs.doc_start.map(|value| value + delta);
@@ -10663,6 +10763,479 @@ mod tests {
         let chains: HashMap<String, Vec<u32>> =
             serde_json::from_value(value["fontChains"].clone()).unwrap();
         assert_eq!(chains["calibri|0|0"], vec![1]);
+    }
+
+    /// The accessibility mirror's inverse of the join: one run per cluster.
+    fn split_cluster_runs(list: &DisplayList) -> DisplayList {
+        let mut list = list.clone();
+        for page in &mut list.pages {
+            page.primitives = std::mem::take(&mut page.primitives)
+                .into_iter()
+                .flat_map(|primitive| {
+                    let Primitive::GlyphRun(run) = primitive else {
+                        return vec![primitive];
+                    };
+                    if !run.cluster_runs {
+                        return vec![Primitive::GlyphRun(run)];
+                    }
+                    let mut starts: Vec<u32> =
+                        run.glyphs.iter().map(|glyph| glyph.cluster).collect();
+                    starts.dedup();
+                    let order = run.attrs.logical_order.unwrap();
+                    let mut doc = run.attrs.doc_start.unwrap();
+                    (0..starts.len())
+                        .map(|k| {
+                            let start = starts[k] as usize;
+                            let end = starts
+                                .get(k + 1)
+                                .map_or(run.text.len(), |end| *end as usize);
+                            let mut piece = run.clone();
+                            piece.cluster_runs = false;
+                            piece.text = run.text[start..end].to_owned();
+                            piece.glyphs = run
+                                .glyphs
+                                .iter()
+                                .filter(|glyph| glyph.cluster == starts[k])
+                                .map(|glyph| PlacedGlyph {
+                                    cluster: 0,
+                                    ..glyph.clone()
+                                })
+                                .collect();
+                            piece.attrs.doc_start = Some(doc);
+                            doc += piece.text.encode_utf16().count() as i64;
+                            piece.attrs.doc_end = Some(doc);
+                            piece.attrs.logical_order = Some(order + k as u64);
+                            if k > 0 {
+                                piece.attrs.tabs_before = None;
+                                piece.attrs.breaks_before = None;
+                            }
+                            if k + 1 < starts.len() {
+                                piece.attrs.tabs_after = None;
+                                piece.attrs.breaks_after = None;
+                            }
+                            Primitive::GlyphRun(piece)
+                        })
+                        .collect()
+                })
+                .collect();
+        }
+        list
+    }
+
+    /// Joining a line's one-cluster glyph runs changes neither paint nor
+    /// interaction: after each run's own transform (painters scale a run about
+    /// its left edge) the same glyphs land in the same order at the same
+    /// positions, and caret, hit, range and vertical-move queries answer alike.
+    /// Scaled and w14-effect runs stay one per cluster.
+    #[test]
+    fn joined_cluster_glyph_runs_paint_and_hit_like_the_cluster_runs() {
+        use crate::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
+        const LIBERATION: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        const NOTO_SC: &[u8] =
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansSC-Regular.otf");
+        crate::clear_measure_fonts();
+        let latin = crate::register_measure_font(LIBERATION).unwrap();
+        let cjk = crate::register_measure_font(NOTO_SC).unwrap();
+        let chains = serde_json::json!({ "liberation sans|0|0": [latin, cjk] });
+        let lorem = "The committee reviews every application against the published \
+                     criteria before the spring deadline. Late submissions wait. ";
+        let plain = serde_json::json!({});
+        let paragraphs = [
+            ("justify", vec![(lorem.repeat(3), plain.clone())]),
+            (
+                "left",
+                vec![
+                    ("Plain words then ".to_owned(), plain.clone()),
+                    (
+                        "underlined words".to_owned(),
+                        serde_json::json!({ "underline": { "style": "single" } }),
+                    ),
+                    (" and a".to_owned(), plain.clone()),
+                    ("\t".to_owned(), plain.clone()),
+                    (
+                        "commented tail".to_owned(),
+                        serde_json::json!({ "commentIds": [7.0] }),
+                    ),
+                    (" ends here.".to_owned(), plain.clone()),
+                ],
+            ),
+            (
+                "left",
+                vec![(
+                    "交換學生計畫每年春季開放申請 exchange plan 2026 申請人須提交學習計畫與預算表。"
+                        .to_owned(),
+                    serde_json::json!({ "language": { "eastAsia": "zh-TW" } }),
+                )],
+            ),
+            (
+                "justify",
+                vec![(
+                    format!("{lorem}Hebrew שלום עולם mixed in, then 合作大學提供宿舍 {lorem}"),
+                    plain.clone(),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Scaled office text with fluffy affirmations and first flights.".to_owned(),
+                    serde_json::json!({ "horizontalScale": 150.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Cafe\u{301} nai\u{308}ve re\u{301}sume\u{301} office first fluff waffle"
+                        .to_owned(),
+                    plain.clone(),
+                )],
+            ),
+            (
+                "justify",
+                vec![(
+                    format!("{lorem} The office staff affirm the first fluffy waffles offered."),
+                    plain.clone(),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Letter spaced words in the official office file".to_owned(),
+                    serde_json::json!({ "letterSpacing": 2.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Condensed text office file with fifty fine flags".to_owned(),
+                    serde_json::json!({ "horizontalScale": 80.0 }),
+                )],
+            ),
+            (
+                "left",
+                vec![(
+                    "Gradient filled heading".to_owned(),
+                    serde_json::json!({ "modernEffects": { "textFill": {
+                        "gradient": { "angle": 45, "stops": [
+                            { "pos": 0, "color": "FF0000" }, { "pos": 100000, "color": "0000FF" }
+                        ] }
+                    } } }),
+                )],
+            ),
+        ];
+        let mut pm = 0_usize;
+        let mut blocks = Vec::new();
+        for (index, (alignment, runs)) in paragraphs.iter().enumerate() {
+            let start = pm;
+            let mut cursor = start + 1;
+            let runs: Vec<Value> = runs
+                .iter()
+                .map(|(text, formatting)| {
+                    let len = text.encode_utf16().count();
+                    let mut run = if text == "\t" {
+                        serde_json::json!({ "kind": "tab" })
+                    } else {
+                        serde_json::json!({ "kind": "text", "text": text })
+                    };
+                    let fields = run.as_object_mut().unwrap();
+                    fields.extend(formatting.as_object().unwrap().clone());
+                    fields.insert("fontFamily".into(), "Liberation Sans".into());
+                    fields.insert("fontSize".into(), 11.0.into());
+                    fields.insert("pmStart".into(), cursor.into());
+                    fields.insert("pmEnd".into(), (cursor + len).into());
+                    cursor += len;
+                    run
+                })
+                .collect();
+            pm = cursor + 1;
+            blocks.push(
+                serde_json::from_value::<crate::types::LayoutBlock>(serde_json::json!({
+                    "kind": "paragraph",
+                    "id": format!("p{index}"),
+                    "runs": runs,
+                    "attrs": {
+                        "alignment": alignment,
+                        "defaultFontFamily": "Liberation Sans",
+                        "defaultFontSize": 11.0
+                    },
+                    "pmStart": start,
+                    "pmEnd": pm
+                }))
+                .unwrap(),
+            );
+        }
+        let config = crate::measure_blocks::MeasurementConfig {
+            font_chains: serde_json::from_value(chains.clone()).unwrap(),
+            defaults: serde_json::json!({ "fontSize": 11.0, "fontFamily": "Liberation Sans" }),
+            compat: Value::Null,
+            authoritative_shaping: true,
+        };
+        let extents = crate::measure_blocks::measure_blocks(&mut blocks, 400.0, &config).unwrap();
+        let mut input = crate::types::Input {
+            measured: blocks
+                .into_iter()
+                .zip(extents)
+                .map(|(block, measure)| crate::types::MeasuredBlock { block, measure })
+                .collect(),
+            options: serde_json::from_value(serde_json::json!({
+                "pageSize": { "w": 500.0, "h": 300.0 },
+                "margins": { "top": 50.0, "right": 50.0, "bottom": 50.0, "left": 50.0 }
+            }))
+            .unwrap(),
+        };
+        let layout = crate::compute_layout_input(&mut input).unwrap();
+        let extras = serde_json::json!({ "fontChains": chains }).to_string();
+        let joined =
+            crate::build_display_list_value_from_resident(&input, &layout, &extras).unwrap();
+        JOIN_CLUSTER_GLYPH_RUNS.with(|join| join.set(false));
+        let clusters = crate::build_display_list_value_from_resident(&input, &layout, &extras);
+        JOIN_CLUSTER_GLYPH_RUNS.with(|join| join.set(true));
+        let clusters = clusters.unwrap();
+        crate::clear_measure_fonts();
+
+        // Runs of the kinds the join may take.
+        let glyph_runs = |list: &DisplayList| {
+            list.pages
+                .iter()
+                .flat_map(|page| &page.primitives)
+                .filter(|primitive| {
+                    matches!(primitive, Primitive::GlyphRun(run)
+                        if run.horizontal_scale.is_none() && run.attrs.modern_effects.is_none())
+                })
+                .count()
+        };
+        assert!(layout.pages.len() > 1);
+        let unjoinable = joined
+            .pages
+            .iter()
+            .flat_map(|page| &page.primitives)
+            .filter_map(|primitive| match primitive {
+                Primitive::GlyphRun(run)
+                    if run.horizontal_scale.is_some() || run.attrs.modern_effects.is_some() =>
+                {
+                    Some(run)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unjoinable
+                .iter()
+                .any(|run| run.attrs.modern_effects.is_some())
+        );
+        assert!(unjoinable.iter().any(|run| run.horizontal_scale.is_some()));
+        assert!(unjoinable.iter().all(|run| !run.cluster_runs));
+        assert!(
+            glyph_runs(&clusters) > 8 * glyph_runs(&joined),
+            "{} cluster runs became {}",
+            glyph_runs(&clusters),
+            glyph_runs(&joined)
+        );
+        let paint = |list: &DisplayList| -> Vec<Vec<String>> {
+            list.pages
+                .iter()
+                .map(|page| {
+                    let mut out = Vec::new();
+                    for primitive in &page.primitives {
+                        match primitive {
+                            Primitive::GlyphRun(run) => {
+                                // Canvas and raster scale a run about its rect's
+                                // left edge, the leftmost glyph.
+                                let scale = run.horizontal_scale.as_ref().map(num_f64);
+                                let left =
+                                    run.glyphs.iter().map(|g| g.x).fold(f64::INFINITY, f64::min);
+                                out.extend(run.glyphs.iter().map(|glyph| {
+                                    let x = scale.map_or(glyph.x, |scale| {
+                                        left + (glyph.x - left) * scale / 100.0
+                                    });
+                                    format!(
+                                        "{} {} {} {} {:.6} {}",
+                                        run.font_id, run.size, run.color, glyph.id, x, glyph.y
+                                    )
+                                }))
+                            }
+                            other => out.push(serde_json::to_string(other).unwrap()),
+                        }
+                    }
+                    out
+                })
+                .collect()
+        };
+        assert_eq!(paint(&joined), paint(&clusters));
+        assert_eq!(split_cluster_runs(&joined), clusters);
+        // Glyph x and advance round to 3 decimals each, so a cluster's right
+        // edge and the next one's left edge may differ by one rounding unit;
+        // a joined run's caret can take the other edge. Geometry compares
+        // within 0.002 px.
+        let near = |left: f64, right: f64| (left - right).abs() < 2e-3;
+        let inside_cluster = |position: i64| {
+            clusters
+                .pages
+                .iter()
+                .flat_map(|page| &page.primitives)
+                .any(|primitive| match primitive {
+                    Primitive::GlyphRun(run) => run
+                        .attrs
+                        .doc_start
+                        .zip(run.attrs.doc_end)
+                        .is_some_and(|(start, end)| {
+                            end - start > 1 && start < position && position < end
+                        }),
+                    _ => false,
+                })
+        };
+        let end = i64::try_from(pm).unwrap();
+        for position in 0..=end {
+            match (
+                caret_rect(&joined, position),
+                caret_rect(&clusters, position),
+            ) {
+                (Some(left), Some(right)) => assert!(
+                    left.page_index == right.page_index
+                        && near(left.x, right.x)
+                        && near(left.y, right.y)
+                        && near(left.height, right.height),
+                    "caret at {position}: {left:?} vs {right:?}"
+                ),
+                (left, right) => assert_eq!(left, right, "caret at {position}"),
+            }
+            for direction in [VerticalDirection::Up, VerticalDirection::Down] {
+                match (
+                    vertical_move(&joined, position, direction, None),
+                    vertical_move(&clusters, position, direction, None),
+                ) {
+                    (Some(left), Some(right)) => assert!(
+                        left.position == right.position && near(left.goal_x, right.goal_x),
+                        "vertical move from {position}: {left:?} vs {right:?}"
+                    ),
+                    (left, right) => assert_eq!(left, right, "vertical move from {position}"),
+                }
+            }
+            for to in [position + 1, position + 17, end] {
+                let (left, right) = (
+                    range_rects(&joined, position, to),
+                    range_rects(&clusters, position, to),
+                );
+                assert_eq!(left.len(), right.len(), "range {position}..{to}");
+                // A range edge inside a multi-unit cluster (a combining mark)
+                // gave the one-cluster run a zero-width slice, floored to a
+                // 1 px sliver; the joined run adds none.
+                let inside_cluster = inside_cluster(position) || inside_cluster(to);
+                for (left, right) in left.iter().zip(&right) {
+                    assert!(
+                        left.page_index == right.page_index
+                            && near(left.x, right.x)
+                            && near(left.y, right.y)
+                            && (near(left.width, right.width)
+                                || inside_cluster && near(left.width + 1.0, right.width))
+                            && near(left.height, right.height),
+                        "range {position}..{to}: {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+        for page in 0..layout.pages.len() {
+            for y in (0..300).step_by(4) {
+                for x in (0..500).step_by(3) {
+                    let (x, y) = (f64::from(x), f64::from(y));
+                    let (left, right) = (
+                        hit_test(&joined, page, x, y),
+                        hit_test(&clusters, page, x, y),
+                    );
+                    // A click on a cluster's midpoint is a tie between its two
+                    // edges, which the rounding unit above may break either way.
+                    let tie = || {
+                        let (Some(left), Some(right)) = (left, right) else {
+                            return false;
+                        };
+                        clusters.pages[page].primitives.iter().any(|primitive| {
+                            let Primitive::GlyphRun(run) = primitive else {
+                                return false;
+                            };
+                            run.attrs.doc_start == Some(left.min(right))
+                                && run.attrs.doc_end == Some(left.max(right))
+                                && run
+                                    .glyphs
+                                    .iter()
+                                    .any(|glyph| near(x, glyph.x + glyph.advance / 2.0))
+                        })
+                    };
+                    assert!(
+                        left == right || tie(),
+                        "hit at page {page} ({x}, {y}): {left:?} vs {right:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_pages_build_in_batches_like_the_json_envelope() {
+        let measured: Vec<Value> = (0..40)
+            .map(|index| {
+                let text = format!("para {index}");
+                let start = index * 10;
+                serde_json::json!({
+                    "block": {
+                        "kind": "paragraph",
+                        "id": format!("p{index}"),
+                        "runs": [{
+                            "kind": "text",
+                            "text": text,
+                            "pmStart": start + 1,
+                            "pmEnd": start + 1 + text.len()
+                        }],
+                        "pmStart": start,
+                        "pmEnd": start + 2 + text.len()
+                    },
+                    "measure": {
+                        "kind": "paragraph",
+                        "totalHeight": 20,
+                        "lines": [{
+                            "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": text.len(),
+                            "width": 40, "ascent": 14, "descent": 4, "lineHeight": 20
+                        }]
+                    }
+                })
+            })
+            .collect();
+        let mut input: crate::types::Input = serde_json::from_value(serde_json::json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 300, "h": 100},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            }
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut input).unwrap();
+        assert!(layout.pages.len() > RESIDENT_DISPLAY_BATCH);
+        let fonts = ooxml_text::FontStore::new();
+        let envelope = serde_json::json!({
+            "measured": input.measured,
+            "options": input.options,
+            "layout": layout
+        })
+        .to_string();
+
+        let expected = build_display_list_value_with_fonts(&envelope, &fonts).unwrap();
+        assert_eq!(
+            build_display_list_value_from_resident_with_fonts(&input, &layout, "{}", &fonts)
+                .unwrap(),
+            expected
+        );
+        // Blocks or pages riding in the extras never stand in for pagination's.
+        let mut stale: Value = serde_json::from_str(&envelope).unwrap();
+        stale["measured"][0]["block"]["runs"][0]["text"] = "stale".into();
+        assert_eq!(
+            build_display_list_value_from_resident_with_fonts(
+                &input,
+                &layout,
+                &stale.to_string(),
+                &fonts
+            )
+            .unwrap(),
+            expected
+        );
     }
     use serde_json::json;
 

@@ -1318,7 +1318,6 @@ fn table_cell_auto_spacing_recomputes_boundaries_after_a_split() {
         .split_paragraph(
             &docx_edit::EditCtx::local("", "2026-09-14T00:00:00Z"),
             docx_edit::Position::new(cell["id"].as_str().unwrap(), 1),
-            None,
         )
         .unwrap();
     let split = lower();

@@ -195,4 +195,3 @@ export type {
   Page,
   FootnoteContent,
 } from './layout/pagination/types';
-export type { ResolvedLine, ResolvedSegment } from './layout/pagination/types';

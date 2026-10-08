@@ -34,30 +34,6 @@ export interface InlineSdtWidget {
 }
 
 /**
- * One run's visible slice on a laid-out line: the run to render/measure plus
- * its on-line text. For a boundary text run this is a shallow copy sliced to
- * the line's head/tail char (document positions shifted to match); tabs, images,
- * line breaks, and fields pass through whole with an empty `text`. `text` is
- * the run's textual contribution to the line (empty for non-text runs), so
- * joining a line's segment texts reconstructs the line's visible characters.
- * Materialized during layout by the Rust engine.
- * @public
- */
-export type ResolvedSegment = {
-  run: Run;
-  text: string;
-};
-
-/**
- * A laid-out line's resolved run segments (see {@link ResolvedSegment}). One
- * is carried per line on `ParagraphFragment.resolvedLines`.
- * @public
- */
-export type ResolvedLine = {
-  segments: ResolvedSegment[];
-};
-
-/**
  * Key that identifies a flow block across measure/paginate/paint passes —
  * usually the block's index, sometimes an `${index}-${type}` compound.
  */
@@ -1260,8 +1236,6 @@ export type ParagraphFragment = FragmentBase & {
   carriedFromPrev?: boolean;
   /** True if this continues onto the next page. */
   carriedToNext?: boolean;
-  /** Per-line resolved run segments for `[fromLine, toLine)`, aligned so `resolvedLines[k]` is line `fromLine + k` (see {@link ResolvedLine}); materialized during layout, omitted from golden serialization. */
-  resolvedLines?: ResolvedLine[];
 };
 
 /**

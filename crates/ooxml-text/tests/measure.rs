@@ -1501,7 +1501,7 @@ fn tab_font_size_drives_line_metrics() {
 
 // ---- field runs ---------------------------------------------------------
 
-// 17. fields use fallback text, run formatting, and a `"1"` default
+// 17. fields use fallback text and run formatting; an empty page field measures as `"1"`
 #[test]
 fn field_measures_at_fallback_text() {
     // '1' and '0' share the 1139-unit digit advance
@@ -1513,13 +1513,27 @@ fn field_measures_at_fallback_text() {
         "fallback",
     );
 
-    // absent and empty fallback both measure as "1"
-    for runs in [
-        json!([{ "kind": "field" }]),
-        json!([{ "kind": "field", "fallback": "" }]),
+    // An absent or empty fallback shows nothing, but a page field's text
+    // each page resolves, so it measures as "1".
+    for (runs, width) in [
+        (json!([{ "kind": "field" }]), 0.0),
+        (json!([{ "kind": "field", "fallback": "" }]), 0.0),
+        (
+            json!([{ "kind": "field", "fieldType": "OTHER", "fallback": "" }]),
+            0.0,
+        ),
+        (json!([{ "kind": "field", "fieldType": "PAGE" }]), W0),
+        (
+            json!([{ "kind": "field", "fieldType": "NUMPAGES", "fallback": "" }]),
+            W0,
+        ),
     ] {
         let v = measure(runs, 200.0).unwrap();
-        approx(v["lines"][0]["width"].as_f64().unwrap(), W0, "default '1'");
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            width,
+            "empty field",
+        );
     }
 
     // Field font size drives line metrics like any run.

@@ -13,6 +13,7 @@ import type {
   TableCellRef,
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
+import { splitClusterRuns } from './clusterRuns';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -282,7 +283,7 @@ function appendMirrorPrimitives(
 ): void {
   const blocks = new Map<number | string, BlockGroup>();
 
-  for (const p of primitives) {
+  for (const p of splitClusterRuns(primitives)) {
     // live-pipeline blocks carry string ids in blockKey, goldens numeric ids
     // in blockId — exactly one is set when the primitive has block identity
     const blockId = p.kind === 'line' ? undefined : (p.blockKey ?? p.blockId);

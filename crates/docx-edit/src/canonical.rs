@@ -581,7 +581,7 @@ mod tests {
         )
         .unwrap();
         let split = doc
-            .split_paragraph(&direct(), Position::new("body", 7), None)
+            .split_paragraph(&direct(), Position::new("body", 7))
             .unwrap();
 
         doc.toggle_format(&direct(), StoryRange::new("body", 0, 3), SimpleFormat::Bold)
@@ -679,7 +679,7 @@ mod tests {
             .create_story("body", "stable", "Normal", "left")
             .unwrap();
         let split = churned_doc
-            .split_paragraph(&direct(), Position::new("body", 3), None)
+            .split_paragraph(&direct(), Position::new("body", 3))
             .unwrap();
         churned_doc
             .merge_paragraphs(&direct(), &split.first_para_id, MergeDirection::Forward)

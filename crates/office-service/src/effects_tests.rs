@@ -79,7 +79,7 @@ fn an_empty_paragraph_inserted_before_others_reports_only_itself() {
             .map(|paragraph| doc.paragraph_mark_position(&paragraph.para_id))
             .expect("a paragraph")
             .expect("its mark");
-        doc.split_paragraph(&ctx, end, None).expect("splits");
+        doc.split_paragraph(&ctx, end).expect("splits");
     }]);
     let sha = sha256_hex(STORIES);
     let before = baseline(STORIES, checkpoint(Format::Docx, &sha, &states[0])).expect("baseline");

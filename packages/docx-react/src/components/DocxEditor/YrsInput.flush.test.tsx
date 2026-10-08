@@ -250,6 +250,31 @@ test("Enter before a table leaves the table paragraph's style alone", async () =
   expect(styled[0]).not.toBe(seed.paraId);
 });
 
+test('Enter at the visible end of a paragraph ending in a field, or before comment references, takes the next style', async () => {
+  for (const [payload, caret] of [
+    [{ fieldType: 'SEQ', instruction: ' SEQ Figure ', displayText: '1' }, 5],
+    [{ modelKind: 'commentReference' }, 4],
+  ] as const) {
+    const { session, input, view } = await mount(undefined, undefined, () => 'Normal');
+    const [seed] = session.paragraphs('body');
+    session.applyRawOps('body', [{ op: 'insertEmbed', index: 4, kind: 'field', payload }]);
+    const styled: string[] = [];
+    session.applyParagraphStyle = (range) => {
+      styled.push(range.start.paraId);
+    };
+    act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: caret }));
+    fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter' });
+    await act(async () => {
+      await input.current!.flushPendingInput();
+    });
+    const segments = session.storySegments('body').map((segment) => segment.kind);
+    // The field or reference stays with the text, and the new paragraph takes the next style.
+    expect(segments).toEqual(['text', 'embed', 'pilcrow', 'pilcrow']);
+    expect(styled).toEqual([session.paragraphs('body')[1]!.paraId]);
+    cleanup();
+  }
+});
+
 test('Delete before a field that shows nothing at the story end leaves input working', async () => {
   const { session, input, view } = await mount();
   const [seed] = session.paragraphs('body');
@@ -463,4 +488,23 @@ test('a continued field with no end marker is the field only to its paragraph en
 
   expect(await cut(first.paraId, 1, 5)).toEqual(['Seed', 'line two']);
   expect(await cut(second, 0, 5)).toEqual(['Seed', 'two']);
+});
+
+// Se[break]ed: arrows step over the break as one unit, word steps stop at it.
+test('arrow keys step through a paragraph holding a break unit by unit', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  session.applyRawOps('body', [{ op: 'insertEmbed', index: 2, kind: 'break', payload: {} }]);
+  const textarea = view.getByTestId('yrs-input');
+  const press = async (from: number, key: string, ctrlKey = false) => {
+    act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: from }));
+    fireEvent.keyDown(textarea, { key, ctrlKey });
+    await flush(input);
+    return session.selection()?.head.offset;
+  };
+
+  expect(await press(4, 'ArrowRight')).toBe(5);
+  expect(await press(3, 'ArrowLeft')).toBe(2);
+  expect(await press(0, 'ArrowRight', true)).toBe(3);
+  expect(await press(5, 'ArrowLeft', true)).toBe(3);
 });

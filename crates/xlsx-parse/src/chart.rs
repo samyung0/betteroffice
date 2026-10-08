@@ -344,10 +344,10 @@ pub(crate) fn sheet_images(
     sheet_path: &str,
 ) -> Result<Vec<EmbeddedImage>, ParseError> {
     fn images<'a>(element: &'a Element, out: &mut Vec<&'a str>) {
-        if element.local_name() == "blip" {
-            if let Some(id) = element.attribute_ns(NS_RELATIONSHIPS, "embed") {
-                out.push(id);
-            }
+        if element.local_name() == "blip"
+            && let Some(id) = element.attribute_ns(NS_RELATIONSHIPS, "embed")
+        {
+            out.push(id);
         }
         for child in element.child_elements() {
             images(child, out);

@@ -2574,6 +2574,8 @@ class SaveContext {
   private readonly baseParagraphs: Map<string, Paragraph>;
   /** Every `w14:paraId` the base holds, then each one minted by {@link savedParaId}. */
   private readonly paraIds: Set<number>;
+  /** Source ids already saved: concurrent splits of one paragraph give both new marks its id. */
+  private readonly savedSourceIds = new Set<string>();
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly source: SourceStories;
   private readonly seedSources: SeedSources;
@@ -2614,13 +2616,17 @@ class SaveContext {
   }
 
   /**
-   * The `w14:paraId` a story paragraph saves with. A source id is kept. An
-   * editor id (`<client>:<clock>`, or a seeded `body:pN` that moved) is no
-   * ST_LongHexNumber, so it saves as a hex id hashed from it and probed past
-   * every id already taken; the same state always saves the same ids.
+   * The `w14:paraId` a story paragraph saves with. A source id is kept the
+   * first time. An editor id (`<client>:<clock>`, or a seeded `body:pN` that
+   * moved) is no ST_LongHexNumber, so it saves as a hex id hashed from it and
+   * probed past every id already taken, as does a source id's repeat; the
+   * same state always saves the same ids.
    */
   private savedParaId(id: string): string {
-    if (isParaId(id)) return id;
+    if (isParaId(id) && !this.savedSourceIds.has(id)) {
+      this.savedSourceIds.add(id);
+      return id;
+    }
     let hash = 2166136261;
     for (let index = 0; index < id.length; index += 1)
       hash = Math.imul(hash ^ id.charCodeAt(index), 16777619);

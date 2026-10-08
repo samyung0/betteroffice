@@ -209,6 +209,8 @@ pub(crate) struct SaveContext<'a> {
     pub projected_comments: Vec<V>,
     base_paragraphs: HashMap<String, V>,
     para_ids: HashSet<u32>,
+    /// Source ids already saved (`savedSourceIds`).
+    saved_source_ids: HashSet<String>,
     base_stories: HashMap<String, Vec<V>>,
     source: SourceStories,
     seed_sources: SeedSources,
@@ -274,6 +276,7 @@ impl<'a> SaveContext<'a> {
             projected_comments,
             base_paragraphs,
             para_ids,
+            saved_source_ids: HashSet::new(),
             base_stories,
             source,
             seed_sources,
@@ -292,9 +295,10 @@ impl<'a> SaveContext<'a> {
         self.hooks
     }
 
-    /// The `w14:paraId` a story paragraph saves with (`savedParaId`).
+    /// The `w14:paraId` a story paragraph saves with (`savedParaId`): a
+    /// source id the first time, a hashed one for an editor id or a repeat.
     fn saved_para_id(&mut self, id: &str) -> String {
-        if is_para_id(id) {
+        if is_para_id(id) && self.saved_source_ids.insert(id.to_owned()) {
             return id.to_owned();
         }
         let mut hash: u32 = 2_166_136_261;
@@ -1838,4 +1842,78 @@ pub(crate) fn project_document(context: &mut SaveContext, base: &V) -> Result<V>
         context.visit_reachable_stories(&document);
     }
     Ok(document)
+}
+
+#[cfg(test)]
+mod tests {
+    use docx_edit::{EditCtx, EditingDoc, Position};
+
+    use crate::common::sha256_hex;
+    use crate::types::{Checkpoint, Determinism, Format};
+    use crate::{export, seed};
+
+    /// Two peers' concurrent mid splits of `1A2B3C4D` in a state that still
+    /// holds the duplicate (no rename yet) save each paragraph its own id, the
+    /// source one first, as the TS save does (`paraIdSave.test.ts`).
+    #[test]
+    fn a_duplicated_source_para_id_saves_once() {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="1A2B3C4D"><w:r><w:t>Alpha beta</w:t></w:r></w:p><w:p w14:paraId="2B3C4D5E"><w:r><w:t>Delta</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#;
+        let base = ooxml_opc::rezip_parts(&[
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), document.as_bytes().to_vec()),
+        ])
+        .unwrap();
+        let seeded = seed(Format::Docx, &base).unwrap();
+        let peers: Vec<EditingDoc> = [(3001, 2), (3002, 7)]
+            .into_iter()
+            .map(|(client, offset)| {
+                let doc = EditingDoc::new(client);
+                doc.load_state_v1(&seeded).unwrap();
+                doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", offset))
+                    .unwrap();
+                doc
+            })
+            .collect();
+        peers[0]
+            .load_state_v1(&peers[1].encode_state_as_update_v1())
+            .unwrap();
+        let state = peers[0].encode_state_as_update_v1();
+        let sha = sha256_hex(&base);
+        let saved = export(
+            &base,
+            Checkpoint {
+                format: Format::Docx,
+                schema_version: 1,
+                base_sha256: &sha,
+                state: &state,
+            },
+            Determinism {
+                seed: &"a".repeat(64),
+                now: "2026-10-08T00:00:00.000Z",
+            },
+        )
+        .unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let xml = String::from_utf8(
+            parts
+                .into_iter()
+                .find(|(name, _)| name == "word/document.xml")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let ids: Vec<&str> = xml
+            .split("w14:paraId=\"")
+            .skip(1)
+            .map(|rest| &rest[..8])
+            .collect();
+        assert_eq!(ids, ["1A2B3C4D", "1EF04F1E", "067EA25D", "2B3C4D5E"]);
+    }
 }

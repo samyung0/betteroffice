@@ -252,19 +252,54 @@ fn a_list_item_continues_after_its_break_without_a_number() {
     assert_eq!(line(&pages, "Bb").2, line(&pages, "Lead").2);
 }
 
-/// The seed moves a break that ends a paragraph's text onto the next
-/// paragraph, so this covers the seed, not a part after a trailing break.
+/// A page break ending a paragraph's text keeps the paragraph's mark on the
+/// break's page, as Word does without `splitPgBreakAndParaMark`: the next
+/// paragraph opens the next page, and the caret at the mark stays after the
+/// text. Enter right after a mid-paragraph break, which leaves the break in
+/// the first paragraph, lays out as the file does (the seed moves the file's
+/// break onto the next paragraph).
 #[test]
-fn a_file_break_ending_a_paragraphs_text_moves_the_next_paragraph_to_the_next_page() {
-    let body = format!(
+fn a_page_break_ending_a_paragraphs_text_keeps_its_mark_on_the_breaks_page() {
+    let file = format!(
         "{}{}{}",
         p("", &t("Lead")),
         p("", &format!("{}{}", t("Aa"), br("page"))),
         p("", &t("Cc"))
     );
-    let pages = lines(&lay_out(&document(&body, ONE_COLUMN)));
-    assert_eq!(texts(&pages), [vec!["Lead", "Aa"], vec!["Cc"]]);
-    assert_eq!(line(&pages, "Cc").2, line(&pages, "Lead").2);
+    let mid = format!(
+        "{}{}",
+        p("", &t("Lead")),
+        p("", &format!("{}{}{}", t("Aa"), br("page"), t("Cc")))
+    );
+    let enter = |doc: &EditingDoc| {
+        doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 8))
+            .unwrap();
+    };
+    for laid in [
+        lay_out(&document(&file, ONE_COLUMN)),
+        lay_out_edited(&document(&mid, ONE_COLUMN), enter),
+    ] {
+        let pages = lines(&laid);
+        assert_eq!(texts(&pages), [vec!["Lead", "Aa"], vec!["Cc"]]);
+        assert_eq!(line(&pages, "Cc").2, line(&pages, "Lead").2);
+        let aa = laid.engine.doc().paragraphs("body").unwrap()[1]
+            .para_id
+            .clone();
+        let mark = laid
+            .engine
+            .doc()
+            .paragraph_unit_text("body", &aa)
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let caret = laid
+            .engine
+            .resident_caret_snapshot(Some((&aa, mark)))
+            .unwrap()
+            .caret_rect
+            .expect("a caret at the paragraph's mark");
+        assert_eq!(caret.page_index, 0);
+    }
 }
 
 /// Typing before the break relays out only what changed; the reused page

@@ -129,7 +129,7 @@ fn enter_after_a_source_trailing_column_break_keeps_the_new_line_after_it() {
     let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
     let doc = EditingDoc::new(7);
     seed_from_docx(&doc, &bytes).unwrap();
-    doc.split_paragraph(&ctx(), Position::new("body", 5), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 5))
         .unwrap();
     assert_eq!(slot_units(&doc), "prev¶[columnBreak]¶Heading¶");
 }
@@ -166,7 +166,7 @@ fn continued_field_ends_follow_edits_and_disappear_with_their_owner() {
     doc.insert_text(&ctx(), Position::new("body", 7), "x", FormatPolicy::Inherit)
         .unwrap();
     assert_eq!(ends(&doc), vec![Any::Number(7.0)]);
-    doc.split_paragraph(&ctx(), Position::new("body", 10), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 10))
         .unwrap();
     assert_eq!(ends(&doc), vec![Any::Number(4.0)]);
     doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
@@ -424,7 +424,7 @@ fn enter_in_a_projected_link_shows_what_the_seed_of_its_save_shows() {
             let doc = seeded(&[("11111111", &paragraph)]);
             let at = units.find('A').unwrap() as u32 + 1;
             let split = doc
-                .split_paragraph(&ctx(), Position::new("body", at), None)
+                .split_paragraph(&ctx(), Position::new("body", at))
                 .unwrap();
             assert_eq!(shown(&doc), shown(&saved), "{result}");
             let para = if forward {
@@ -483,7 +483,7 @@ fn a_split_field_left_without_its_link_shows_its_whole_result() {
     ]);
     let doc = seeded(&[("11111111", &paragraph)]);
     let mut undo = doc.undo_manager();
-    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     let split = shown(&doc);
     undo.add_undo_barrier();
@@ -566,7 +566,7 @@ fn a_split_fields_shown_text_follows_every_edit_that_drops_its_link() {
     for (paragraph, edit, saved, kept) in cases {
         let doc = seeded(&[("11111111", &paragraph)]);
         let mut undo = doc.undo_manager();
-        doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+        doc.split_paragraph(&ctx(), Position::new("body", 3))
             .unwrap();
         let split = (slot_units(&doc), shown(&doc));
         undo.add_undo_barrier();
@@ -614,7 +614,7 @@ fn a_moved_run_holding_a_break_or_nothing_rejoins_in_place() {
             let doc = seeded(&[("11111111", &paragraph)]);
             let (units, text) = (slot_units(&doc), shown(&doc));
             let split = doc
-                .split_paragraph(&ctx(), Position::new("body", 3), None)
+                .split_paragraph(&ctx(), Position::new("body", 3))
                 .unwrap();
             let para = if forward {
                 split.first_para_id
@@ -641,7 +641,7 @@ fn a_join_after_enter_in_a_continued_fields_link_keeps_its_tail_text() {
         let original = slot_units(&doc);
         assert_eq!(original, "a AA[field]yy¶zz b¶");
         let split = doc
-            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .split_paragraph(&ctx(), Position::new("body", 3))
             .unwrap();
         let para = if forward {
             split.first_para_id
@@ -797,7 +797,7 @@ fn seeded_bookmarks_follow_typing_splits_joins_and_remote_typing() {
     };
     doc.insert_text(&ctx(), Position::new("body", 0), "Z", FormatPolicy::Inherit)
         .unwrap();
-    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     assert_eq!(
         boundaries(&doc),
@@ -957,7 +957,7 @@ fn delete_range_suggesting_is_three_way() {
 fn delete_range_suggesting_marks_pilcrow_ppr_del_and_keeps_other_authors_ins() {
     let (doc, first) = doc_with("onetwo");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 3), None)
+        .split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     assert_eq!(split.first_para_id, first);
     // Alice suggests an insertion; Bob suggest-deletes across it and the pilcrow.
@@ -987,7 +987,7 @@ fn delete_range_suggesting_marks_pilcrow_ppr_del_and_keeps_other_authors_ins() {
 fn plain_delete_across_pilcrow_adopts_first_paragraph_identity() {
     let (doc, first) = doc_with("aaabbb");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 3), None)
+        .split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     let second = split.second_para_id.clone();
     // Give the FIRST paragraph distinctive pPr.
@@ -1067,7 +1067,7 @@ fn same_author_typing_and_splits_coalesce_to_one_revision_id() {
         .revision_ids[0]
         .clone();
     let split = doc
-        .split_paragraph(&sug("Ada"), Position::new("body", 3), None)
+        .split_paragraph(&sug("Ada"), Position::new("body", 3))
         .unwrap();
     assert_eq!(split.revision_ids, vec![first.clone()]);
     let second = doc
@@ -1080,7 +1080,7 @@ fn same_author_typing_and_splits_coalesce_to_one_revision_id() {
         .unwrap();
     assert_eq!(second.revision_ids, vec![first.clone()]);
     let second_split = doc
-        .split_paragraph(&sug("Ada"), Position::new("body", 7), None)
+        .split_paragraph(&sug("Ada"), Position::new("body", 7))
         .unwrap();
     assert_eq!(second_split.revision_ids, vec![first.clone()]);
     let third = doc
@@ -1106,7 +1106,7 @@ fn same_author_typing_and_splits_coalesce_to_one_revision_id() {
 fn backspace_over_own_pending_split_retracts_the_paragraph_mark() {
     let (doc, _) = doc_with("abc");
     let split = doc
-        .split_paragraph(&sug("Ada"), Position::new("body", 3), None)
+        .split_paragraph(&sug("Ada"), Position::new("body", 3))
         .unwrap();
     doc.merge_paragraphs(&sug("Ada"), &split.second_para_id, MergeDirection::Backward)
         .unwrap();
@@ -1288,7 +1288,7 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
     )
     .unwrap();
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 5), None)
+        .split_paragraph(&ctx(), Position::new("body", 5))
         .unwrap();
     assert_eq!(split.first_para_id, original);
     assert_ne!(split.second_para_id, original);
@@ -1306,21 +1306,24 @@ fn split_first_half_keeps_original_para_id_and_full_ppr() {
         paragraphs[0].properties.get("borders"),
         Some(&Any::from("boxed"))
     );
-    // Mid-split second half keeps its pPr — except borders, ALWAYS cleared.
+    // Mid-split second half keeps its pPr, borders included, as in Word.
     assert_eq!(
         paragraphs[1].properties.get("alignment"),
         Some(&Any::from("center"))
     );
-    assert_eq!(paragraphs[1].properties.get("borders"), None);
+    assert_eq!(
+        paragraphs[1].properties.get("borders"),
+        Some(&Any::from("boxed"))
+    );
+    assert!(!split.at_end);
 }
 
 #[test]
-fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
+fn split_at_end_copies_every_property_but_the_mark_revision_to_the_new_half() {
+    use std::collections::HashMap;
     let (doc, original) = doc_with("heading");
     let dtf: BTreeMap<String, Any> = [
         ("fontFamily".to_string(), Any::from("Georgia")),
-        ("fontSize".to_string(), Any::Number(48.0)),
-        ("color".to_string(), Any::from("336699")),
         ("bold".to_string(), Any::Bool(true)),
     ]
     .into_iter()
@@ -1337,71 +1340,62 @@ fn split_at_end_inherits_subset_and_reduces_dtf_to_font_size_color() {
         },
     )
     .unwrap();
-    // Split at the end of the paragraph text → empty second half.
-    doc.split_paragraph(&ctx(), Position::new("body", 7), None)
+    let change = |id: &str| {
+        let info = HashMap::from([("id".to_owned(), Any::from(id))]);
+        let change = HashMap::from([("info".to_owned(), Any::Map(Arc::new(info)))]);
+        Any::Array(Arc::from([Any::Map(Arc::new(change))]))
+    };
+    for (key, value) in [
+        ("borders", Any::from("boxed")),
+        ("pageBreakBefore", Any::Bool(true)),
+        ("keepNext", Any::Bool(true)),
+        ("_originalFormatting", Any::from("source")),
+        ("_originalRunBoundaries", Any::from("runs")),
+        ("pPrIns", Any::from("mark")),
+        ("pPrChange", change("5")),
+    ] {
+        doc.set_paragraph_attr(&original, key, value).unwrap();
+    }
+    // Split at the end of the paragraph text: an empty second half.
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 7))
         .unwrap();
+    assert!(split.at_end);
     let paragraphs = doc.paragraphs("body").unwrap();
     assert_eq!(paragraphs[1].text, "");
-    let second = &paragraphs[1].properties;
-    // Inherited subset kept: pStyle, spaceAfter; alignment (not in the subset) dropped.
-    assert_eq!(second.get("pStyle"), Some(&Any::from("Normal")));
-    assert_eq!(second.get("spaceAfter"), Some(&Any::Number(240.0)));
-    assert_eq!(second.get("alignment"), None);
-    // dtf reduced to the font/size/color carry — bold dropped.
-    let dtf = second.get("defaultTextFormatting").expect("dtf kept");
-    assert_eq!(map_get(dtf, "fontFamily"), Some(&Any::from("Georgia")));
-    assert_eq!(map_get(dtf, "fontSize"), Some(&Any::Number(48.0)));
-    assert_eq!(map_get(dtf, "color"), Some(&Any::from("336699")));
-    assert_eq!(map_get(dtf, "bold"), None);
-    // First half untouched.
-    assert_eq!(
-        paragraphs[0].properties.get("alignment"),
-        Some(&Any::from("center"))
-    );
-}
-
-#[test]
-fn split_at_end_with_next_style_switches_the_second_half() {
-    let (doc, _) = doc_with("Heading text");
-    let next = ResolvedStyleProjection {
-        style_id: "BodyText".into(),
-        known: true,
-        paragraph_attrs: [("spaceBefore".to_string(), Any::Number(120.0))]
-            .into_iter()
-            .collect(),
+    let (first, second) = (&paragraphs[0].properties, &paragraphs[1].properties);
+    for key in [
+        "pStyle",
+        "alignment",
+        "spaceAfter",
+        "defaultTextFormatting",
+        "borders",
+        "pageBreakBefore",
+        "keepNext",
+        "_originalFormatting",
+    ] {
+        assert_eq!(second.get(key), first.get(key), "{key}");
+        assert!(active(second, key), "{key}");
+    }
+    // The mark revision stays with the text, the run cache with its runs, and
+    // the copied property change takes a new revision id.
+    assert!(active(first, "pPrIns") && !active(second, "pPrIns"));
+    assert!(active(first, "_originalRunBoundaries") && !active(second, "_originalRunBoundaries"));
+    let id = |props: &BTreeMap<String, Any>| match props.get("pPrChange") {
+        Some(Any::Array(changes)) => map_get(&changes[0], "info")
+            .and_then(|info| map_get(info, "id"))
+            .cloned(),
+        _ => None,
     };
-    doc.split_paragraph(&ctx(), Position::new("body", 12), Some(&next))
-        .unwrap();
-    let paragraphs = doc.paragraphs("body").unwrap();
-    let second = &paragraphs[1].properties;
-    assert_eq!(second.get("pStyle"), Some(&Any::from("BodyText")));
-    assert_eq!(second.get("spaceBefore"), Some(&Any::Number(120.0)));
-    assert_eq!(second.get("alignment"), None); // reset by the projection
-    assert_eq!(second.get("borders"), None);
-    // First half keeps the source style.
-    assert_eq!(
-        paragraphs[0].properties.get("pStyle"),
-        Some(&Any::from("Normal"))
-    );
-
-    // An unknown next style must fail BEFORE mutating.
-    let unknown = ResolvedStyleProjection {
-        style_id: "Ghost".into(),
-        known: false,
-        ..ResolvedStyleProjection::default()
-    };
-    assert_eq!(
-        doc.split_paragraph(&ctx(), Position::new("body", 3), Some(&unknown)),
-        Err(OpError::UnknownStyle("Ghost".into()))
-    );
-    assert_eq!(doc.paragraphs("body").unwrap().len(), 2);
+    assert_eq!(id(first), Some(Any::from("5")));
+    assert!(id(second).is_some_and(|id| id != Any::from("5")));
 }
 
 #[test]
 fn suggesting_split_stamps_ppr_ins_on_the_first_half() {
     let (doc, original) = doc_with("onetwo");
     let split = doc
-        .split_paragraph(&sug("Alice"), Position::new("body", 3), None)
+        .split_paragraph(&sug("Alice"), Position::new("body", 3))
         .unwrap();
     assert_eq!(split.revision_ids.len(), 1);
     let paragraphs = doc.paragraphs("body").unwrap();
@@ -1429,7 +1423,7 @@ fn suggesting_split_stamps_ppr_ins_on_the_first_half() {
 fn merge_directions_adopt_the_earlier_paragraph_and_guard_edges() {
     let (doc, first) = doc_with("onetwo");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 3), None)
+        .split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     // Edges error.
     assert_eq!(
@@ -1467,7 +1461,7 @@ fn merge_directions_adopt_the_earlier_paragraph_and_guard_edges() {
 #[test]
 fn suggesting_merge_retains_the_mark_with_ppr_del() {
     let (doc, first) = doc_with("onetwo");
-    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     let receipt = doc
         .merge_paragraphs(&sug("Bob"), &first, MergeDirection::Forward)
@@ -1862,7 +1856,7 @@ fn apply_paragraph_style_replaces_style_numbering_and_keeps_direct_numbering() {
     };
     let (doc, para) = doc_with("from style");
     let second = doc
-        .split_paragraph(&ctx(), Position::new("body", 4), None)
+        .split_paragraph(&ctx(), Position::new("body", 4))
         .unwrap()
         .second_para_id;
     let selector = ParaSelector::Many(vec![para.clone(), second.clone()]);
@@ -1916,48 +1910,122 @@ fn apply_paragraph_style_replaces_style_numbering_and_keeps_direct_numbering() {
     assert_eq!(paragraphs[1].properties.get("numPr"), Some(&numbering(7.0)));
 }
 
+/// Concurrent mid-paragraph splits on two or three peers both give their
+/// first half the paragraph's id; every peer renames the duplicates the same
+/// way after applying the others' updates, so each paragraph's id reaches it
+/// (typing at each mark lands in that paragraph) and all peers agree.
 #[test]
-fn dedupe_para_ids_first_occurrence_keeps_its_id() {
-    // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.
+fn concurrent_mid_splits_leave_every_peer_the_same_distinct_ids() {
+    for count in [2_u64, 3] {
+        let base = EditingDoc::new(1);
+        let original = base
+            .create_story("body", "Alpha beta gamma", "Normal", "left")
+            .unwrap();
+        let update = base.encode_state_as_update_v1();
+        let peers: Vec<_> = (0..count)
+            .map(|index| {
+                let doc = EditingDoc::new(2 + index);
+                doc.apply_update_v1(&update).unwrap();
+                doc
+            })
+            .collect();
+        for (peer, at) in peers.iter().zip([2, 7, 12]) {
+            peer.split_paragraph(&ctx(), Position::new("body", at))
+                .unwrap();
+        }
+        // Twice, so the renames themselves reach every peer.
+        for _ in 0..2 {
+            for from in &peers {
+                for to in &peers {
+                    let update = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+                    to.applying_peer_update(|| to.apply_update_v1(&update).unwrap());
+                }
+            }
+        }
+        let ids = |doc: &EditingDoc| -> Vec<ParagraphId> {
+            doc.paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .map(|paragraph| paragraph.para_id)
+                .collect()
+        };
+        let first = ids(&peers[0]);
+        assert_eq!(first.len() as u64, count + 1);
+        assert_eq!(
+            first.iter().collect::<std::collections::HashSet<_>>().len(),
+            first.len(),
+            "{first:?}"
+        );
+        assert!(first.contains(&original));
+        for peer in &peers[1..] {
+            assert_eq!(ids(peer), first);
+        }
+        let doc = &peers[0];
+        for id in &first {
+            let at = doc.paragraph_mark_position(id).unwrap();
+            doc.insert_text(&ctx(), at, "X", FormatPolicy::Inherit)
+                .unwrap();
+        }
+        assert!(
+            doc.paragraphs("body")
+                .unwrap()
+                .iter()
+                .all(|paragraph| paragraph.text.ends_with('X')),
+            "{:?}",
+            doc.paragraphs("body").unwrap()
+        );
+    }
+}
+
+/// Enter at a paragraph's end puts the new mark after the source one, so a
+/// peer's concurrent alignment change stays on the text, and two peers'
+/// Enters at that end give each new paragraph an id of its own.
+#[test]
+fn enter_at_the_end_leaves_the_text_its_mark_for_peers() {
     let base = EditingDoc::new(1);
-    let original = base
-        .create_story("body", "abcdef", "Normal", "left")
-        .unwrap();
+    let original = base.create_story("body", "abc", "Normal", "left").unwrap();
     let update = base.encode_state_as_update_v1();
-    let a = EditingDoc::new(2);
-    let b = EditingDoc::new(3);
-    a.apply_update_v1(&update).unwrap();
-    b.apply_update_v1(&update).unwrap();
-    a.split_paragraph(&ctx(), Position::new("body", 2), None)
-        .unwrap();
-    b.split_paragraph(&ctx(), Position::new("body", 4), None)
-        .unwrap();
-    let from_a = a.encode_state_as_update_v1();
-    let from_b = b.encode_state_as_update_v1();
-    a.apply_update_v1(&from_b).unwrap();
-    b.apply_update_v1(&from_a).unwrap();
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
+    let peers: Vec<_> = (2..5)
+        .map(|client| {
+            let doc = EditingDoc::new(client);
+            doc.apply_update_v1(&update).unwrap();
+            doc
+        })
         .collect();
+    for peer in &peers[..2] {
+        let split = peer
+            .split_paragraph(&ctx(), Position::new("body", 3))
+            .unwrap();
+        assert!(split.at_end);
+        assert_eq!(split.first_para_id, original);
+    }
+    peers[2]
+        .set_paragraph_attr(&original, "alignment", Any::from("right"))
+        .unwrap();
+    let updates: Vec<_> = peers
+        .iter()
+        .map(|peer| peer.encode_state_as_update_v1())
+        .collect();
+    for peer in &peers {
+        for update in &updates {
+            peer.apply_update_v1(update).unwrap();
+        }
+    }
+    let paragraphs = peers[0].paragraphs("body").unwrap();
     assert_eq!(
-        ids.iter().filter(|id| **id == original).count(),
-        2,
-        "concurrent splits duplicate the original id"
+        paragraphs
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>(),
+        ["abc", "", ""]
     );
-    let renames = a.dedupe_para_ids(DATE).unwrap();
-    assert_eq!(renames.len(), 1);
-    assert_eq!(renames[0].0, original);
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(ids.iter().filter(|id| **id == original).count(), 1);
-    assert_eq!(ids[0], original, "FIRST occurrence keeps the id");
+    let ids: std::collections::HashSet<_> = paragraphs.iter().map(|p| &p.para_id).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(paragraphs[0].para_id, original);
+    let alignment = |index: usize| paragraphs[index].properties.get("alignment").cloned();
+    assert_eq!(alignment(0), Some(Any::from("right")));
+    assert_eq!(alignment(1), Some(Any::from("left")));
+    assert_eq!(alignment(2), Some(Any::from("left")));
 }
 
 // ---------------------------------------------------------------------------
@@ -2083,7 +2151,7 @@ fn text_between_uses_the_requested_view() {
 fn find_in_document_windows_and_skips_ambiguous_paragraphs() {
     let (doc, _) = doc_with("prefix prefix target here");
     // Second paragraph contains the needle twice → skipped entirely.
-    doc.split_paragraph(&ctx(), Position::new("body", 25), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 25))
         .unwrap();
     let end = doc.story_len("body").unwrap() - 1;
     doc.insert_text(
@@ -2145,7 +2213,7 @@ fn list_changes_and_find_change_range_cover_text_and_marks() {
         .delete_range(&sug("Bob"), StoryRange::new("body", 0, 2))
         .unwrap();
     let split = doc
-        .split_paragraph(&sug("Carol"), Position::new("body", 9), None)
+        .split_paragraph(&sug("Carol"), Position::new("body", 9))
         .unwrap();
     let changes = doc.list_changes("body").unwrap();
     let kinds: Vec<ChangeKind> = changes.iter().map(|change| change.kind).collect();
@@ -2219,7 +2287,7 @@ fn nav_boundary_walks_graphemes_words_and_paragraph_edges() {
 
     let (doc2, para2) = doc_with("foo bar");
     let split = doc2
-        .split_paragraph(&ctx(), Position::new("body", 7), None)
+        .split_paragraph(&ctx(), Position::new("body", 7))
         .unwrap();
     assert_eq!(split.first_para_id, para2);
     let next = doc2
@@ -2269,7 +2337,7 @@ impl LayoutBridge for FakeBridge {
 fn page_content_dedupes_split_paragraph_fragments() {
     let (doc, first) = doc_with("onetwo");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 3), None)
+        .split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     // The first paragraph is split across the page boundary → its id repeats.
     let bridge = FakeBridge {
@@ -2320,7 +2388,7 @@ fn slot_units(doc: &EditingDoc) -> String {
 fn page_break_slot() -> (EditingDoc, ParagraphId, ParagraphId) {
     let (doc, _) = doc_with("BeforeChapter");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 6), None)
+        .split_paragraph(&ctx(), Position::new("body", 6))
         .unwrap();
     doc.insert_embed(&ctx(), Position::new("body", 7), "pageBreak", vec![])
         .unwrap();
@@ -2400,7 +2468,7 @@ fn a_merge_into_a_slot_that_opens_with_a_table_removes_only_an_empty_paragraph()
         // An empty one goes; the slot keeps its own paragraph.
         for forward in [true, false] {
             let (doc, _) = block_slot(kind);
-            doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+            doc.split_paragraph(&ctx(), Position::new("body", 6))
                 .unwrap();
             assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
             let ids = para_ids(&doc);
@@ -2415,7 +2483,7 @@ fn a_merge_into_a_slot_that_opens_with_a_table_removes_only_an_empty_paragraph()
     }
     // Suggesting marks the empty paragraph's mark deleted.
     let (doc, _) = block_slot("table");
-    doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 6))
         .unwrap();
     let receipt = merge(&doc, &sug("Bob"), &para_ids(&doc)[1], true);
     assert_eq!(slot_units(&doc), "Before¶¶[table]After¶");
@@ -2434,7 +2502,7 @@ fn a_merge_never_joins_two_tables() {
     // Before¶[table]¶[table]After¶: the paragraph between the tables belongs
     // to the first table's slot.
     let (doc, _) = block_slot("table");
-    doc.split_paragraph(&ctx(), Position::new("body", 8), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 8))
         .unwrap();
     doc.insert_table(&ctx(), Position::new("body", 9), 1, 1, 12)
         .unwrap();
@@ -2498,7 +2566,7 @@ fn a_replacement_of_a_leading_block_lands_after_the_blocks_left() {
 fn block_slot(kind: &str) -> (EditingDoc, ParagraphId) {
     let (doc, _) = doc_with("BeforeAfter");
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 6), None)
+        .split_paragraph(&ctx(), Position::new("body", 6))
         .unwrap();
     if kind == "table" {
         doc.insert_table(&ctx(), Position::new("body", 7), 1, 1, 12)
@@ -2525,7 +2593,7 @@ fn a_range_delete_ending_at_a_block_led_slot_keeps_the_mark_before_it() {
 #[test]
 fn a_range_delete_across_paragraphs_keeps_the_last_mark_with_the_first_identity() {
     let (doc, first) = block_slot("table");
-    doc.split_paragraph(&ctx(), Position::new("body", 3), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 3))
         .unwrap();
     assert_eq!(slot_units(&doc), "Bef¶ore¶[table]After¶");
     doc.delete_range(&ctx(), StoryRange::new("body", 1, 8))
@@ -2619,7 +2687,7 @@ fn delete_or_backspace_beside_an_empty_paragraph_before_a_break_removes_the_para
                 // Enter at the break's slot, then Delete or Backspace.
                 let (doc, _) = block_slot(kind);
                 let split = doc
-                    .split_paragraph(&context, Position::new("body", 7), None)
+                    .split_paragraph(&context, Position::new("body", 7))
                     .unwrap();
                 assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
                 let target = if forward {
@@ -2654,7 +2722,7 @@ fn an_empty_paragraph_ending_a_section_keeps_its_section_before_a_block() {
         for forward in [true, false] {
             let (doc, _) = block_slot(kind);
             let split = doc
-                .split_paragraph(&ctx(), Position::new("body", 7), None)
+                .split_paragraph(&ctx(), Position::new("body", 7))
                 .unwrap();
             doc.set_paragraph_attr(
                 &split.first_para_id,
@@ -2701,7 +2769,7 @@ fn a_removed_empty_paragraph_before_a_block_hands_its_bookmarks_to_the_next() {
     for kind in ["pageBreak", "columnBreak", "table"] {
         let (doc, _) = block_slot(kind);
         let split = doc
-            .split_paragraph(&ctx(), Position::new("body", 7), None)
+            .split_paragraph(&ctx(), Position::new("body", 7))
             .unwrap();
         doc.set_paragraph_attr(
             &split.first_para_id,
@@ -2730,7 +2798,7 @@ fn a_removed_empty_paragraph_before_a_block_hands_its_bookmarks_to_the_next() {
 fn a_suggested_delete_in_an_original_empty_paragraph_before_a_break_marks_it_deleted() {
     let (doc, _, _) = page_break_slot();
     let split = doc
-        .split_paragraph(&ctx(), Position::new("body", 7), None)
+        .split_paragraph(&ctx(), Position::new("body", 7))
         .unwrap();
     let receipt = merge(&doc, &sug("Bob"), &split.first_para_id, true);
     assert_eq!(slot_units(&doc), "Before¶¶[pageBreak]Chapter¶");
@@ -2743,7 +2811,7 @@ fn a_suggested_delete_in_an_original_empty_paragraph_before_a_break_marks_it_del
 fn accepting_a_deleted_mark_keeps_it_while_its_paragraph_holds_content_before_a_block() {
     for typed in [true, false] {
         let (doc, _) = block_slot("table");
-        doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+        doc.split_paragraph(&ctx(), Position::new("body", 6))
             .unwrap();
         let receipt = merge(&doc, &sug("Bob"), &para_ids(&doc)[1], true);
         if typed {
@@ -2788,7 +2856,7 @@ fn enter_then_delete_before_a_block_leaves_its_paragraph_as_it_was() {
             .unwrap();
             let before = doc.story_segments("body").unwrap();
             let split = doc
-                .split_paragraph(&context, Position::new("body", 7), None)
+                .split_paragraph(&context, Position::new("body", 7))
                 .unwrap();
             assert_eq!(slot_units(&doc), format!("Before¶¶[{kind}]After¶"));
             // Enter inserts an empty paragraph before the block.
@@ -2803,7 +2871,7 @@ fn enter_then_delete_before_a_block_leaves_its_paragraph_as_it_was() {
 #[test]
 fn a_paragraph_holding_only_comment_reference_fields_is_empty_before_a_table() {
     let (doc, _) = block_slot("table");
-    doc.split_paragraph(&ctx(), Position::new("body", 6), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 6))
         .unwrap();
     let reference = vec![(
         "modelKind".to_owned(),
@@ -2816,6 +2884,23 @@ fn a_paragraph_holding_only_comment_reference_fields_is_empty_before_a_table() {
     let receipt = merge(&doc, &ctx(), &para_ids(&doc)[1], true);
     assert_eq!(slot_units(&doc), "Before¶[table]After¶");
     assert_eq!(receipt.range.unwrap().start, Loc::new("body", slot, 0));
+}
+
+#[test]
+fn enter_before_comment_references_ending_a_paragraph_is_enter_at_its_end() {
+    let (doc, _) = doc_with("Body");
+    let reference = vec![(
+        "modelKind".to_owned(),
+        Any::String("commentReference".into()),
+    )];
+    doc.insert_embed(&ctx(), Position::new("body", 4), "field", reference)
+        .unwrap();
+    let split = doc
+        .split_paragraph(&ctx(), Position::new("body", 4))
+        .unwrap();
+    assert!(split.at_end);
+    // The reference stays with the text; the new paragraph is empty.
+    assert_eq!(slot_units(&doc), "Body[field]¶¶");
 }
 
 #[test]
@@ -2893,7 +2978,7 @@ fn rejecting_an_inserted_mark_keeps_it_while_its_paragraph_holds_content_before_
         let (doc, _) = block_slot("table");
         // Ann suggests Enter before the table; someone types into the new paragraph.
         let split = doc
-            .split_paragraph(&sug("Ann"), Position::new("body", 7), None)
+            .split_paragraph(&sug("Ann"), Position::new("body", 7))
             .unwrap();
         let context = typist.map_or_else(ctx, sug);
         doc.insert_text(
@@ -2960,7 +3045,7 @@ fn undoing_a_comment_removal_restores_the_comment_with_its_field() {
 }
 
 #[test]
-fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new_half() {
+fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_on_both_halves() {
     let section = || {
         let attr = |key: &str, value: Any| RawOp::SetEmbedAttr {
             index: 9,
@@ -2994,7 +3079,7 @@ fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new
         // "AfterText" ends a section; Enter mid-paragraph or at its end.
         let (doc, _) = doc_with("AfterText");
         doc.apply_raw_ops("body", section(), &ctx()).unwrap();
-        doc.split_paragraph(&ctx(), Position::new("body", at), None)
+        doc.split_paragraph(&ctx(), Position::new("body", at))
             .unwrap();
         let [first, second] = marks(&doc).try_into().unwrap();
         assert!(
@@ -3005,12 +3090,14 @@ fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new
             second.contains_key("sectPr") && second.contains_key("sectionBreakType"),
             "{at}"
         );
-        assert!(
-            !second.contains_key("borders") && !original_borders(&second),
-            "{at}"
-        );
+        for mark in [&first, &second] {
+            assert!(
+                mark.contains_key("borders") && original_borders(mark),
+                "{at}"
+            );
+        }
     }
-    // Enter before a table: the new paragraph takes neither the section nor borders.
+    // Enter before a table: the new paragraph takes the borders but not the section.
     let (doc, _) = block_slot("table");
     doc.apply_raw_ops(
         "body",
@@ -3028,10 +3115,10 @@ fn a_split_leaves_the_section_with_the_mark_that_ends_it_and_borders_off_the_new
         &ctx(),
     )
     .unwrap();
-    doc.split_paragraph(&ctx(), Position::new("body", 7), None)
+    doc.split_paragraph(&ctx(), Position::new("body", 7))
         .unwrap();
     let [_, inserted, slot] = marks(&doc).try_into().unwrap();
-    assert!(!inserted.contains_key("sectPr") && !inserted.contains_key("borders"));
-    assert!(!original_borders(&inserted));
+    assert!(!inserted.contains_key("sectPr"));
+    assert!(inserted.contains_key("borders") && original_borders(&inserted));
     assert!(slot.contains_key("sectPr") && slot.contains_key("borders") && original_borders(&slot));
 }

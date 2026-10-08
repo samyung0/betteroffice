@@ -156,6 +156,9 @@ pub struct SplitReceipt {
     pub second_para_id: ParagraphId,
     /// Revision IDs stamped by this op (suggesting mode).
     pub revision_ids: Vec<RevisionId>,
+    /// The split fell at the paragraph's end (comment references aside), so
+    /// the second half is the new empty paragraph.
+    pub at_end: bool,
 }
 
 /// Paragraph-keyed public position with UTF-16 offsets.

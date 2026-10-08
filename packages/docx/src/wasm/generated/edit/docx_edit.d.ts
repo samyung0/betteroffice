@@ -569,6 +569,10 @@ export class EditSession {
      */
     paragraph_spans(story: string): string;
     /**
+     * [`EditingDoc::paragraph_unit_text`].
+     */
+    paragraph_unit_text(story: string, para_id: string): string;
+    /**
      * `[{"paraId","text","properties"}, …]` in document order. `text` is the
      * paragraph's plain text without its pilcrow; `properties` is the
      * pilcrow's authored property map (`pStyle`, `alignment` and whatever
@@ -602,6 +606,11 @@ export class EditSession {
      * receipt and error contract.
      */
     reject_change(target_json: string): string;
+    /**
+     * [`EditingDoc::rename_duplicate_para_ids`], for a client that loaded a
+     * stored state: returns how many paragraph ids it renamed.
+     */
+    rename_duplicate_para_ids(): number;
     /**
      * Replaces `[start, end)` with `text` in one transaction. The inserted
      * text adopts the first replaced unit's formatting; in suggesting mode
@@ -827,11 +836,11 @@ export class EditSession {
     /**
      * Splits a paragraph at `(story, para_id, offset)` by inserting one
      * pilcrow. The FIRST half keeps the original paraId and the second is
-     * re-minted. A split at the paragraph end leaves the empty second half
-     * with only the inherited property subset and its list; a mid-paragraph
-     * split keeps its properties. Paragraph borders are cleared either way. Suggesting
-     * mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
-     * `{"firstParaId","secondParaId","revisionId": string|null}`.
+     * re-minted; both keep the paragraph's properties, as Word does.
+     * Suggesting mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
+     * `{"firstParaId","secondParaId","revisionId": string|null,"atEnd"}`,
+     * `atEnd` when the split fell at the paragraph's end (comment
+     * references aside), so the second half is the new empty paragraph.
      */
     split_paragraph(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -1155,11 +1164,13 @@ export interface InitOutput {
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_paragraph_unit_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_rename_duplicate_para_ids: (a: number) => number;
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];

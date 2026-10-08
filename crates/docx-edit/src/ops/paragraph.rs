@@ -15,8 +15,7 @@
 //! opposite rule, for the reasons its own module docs give.
 //!
 //! Style resolution stays outside the CRDT. Ops that apply a style take
-//! host-resolved values (a [`ResolvedStyleProjection`] for a split's next
-//! style) rather than reading `styles.xml`.
+//! host-resolved values rather than reading `styles.xml`.
 //!
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
@@ -24,6 +23,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use yrs::block::{ItemContent, ItemPtr};
+use yrs::branch::BranchPtr;
 use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
@@ -100,30 +101,10 @@ pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
     "listStartOverride",
 ];
 
-/// The only paragraph properties an EMPTY second half inherits on split —
-/// pressing Enter at the end of a paragraph starts a clean one that keeps the
-/// style and vertical rhythm but nothing else.
-const INHERITED_PARA_ATTRS: [&str; 11] = [
-    "defaultTextFormatting",
-    "pStyle",
-    "lineSpacing",
-    "lineSpacingRule",
-    "spaceAfter",
-    "spaceBefore",
-    "spaceBeforeLines",
-    "spaceAfterLines",
-    "beforeAutospacing",
-    "afterAutospacing",
-    "contextualSpacing",
-];
-
-/// The `defaultTextFormatting` keys that cross a split: font, size and color
-/// only. Bold, italic, underline and the rest deliberately do not carry.
-const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
-
-const BORDERS: &str = "borders";
-/// The source formatting a save compares against; it names borders too.
+/// The source formatting a save compares against.
 const ORIGINAL_FORMATTING: &str = "_originalFormatting";
+/// The source paragraph's runs, which a save restores when its text is unchanged.
+const ORIGINAL_RUN_BOUNDARIES: &str = "_originalRunBoundaries";
 /// The properties of a mark that ends a section. A split leaves them on the
 /// original mark, which still ends the section, and never copies them.
 const SECTION_KEYS: [&str; 2] = ["sectPr", "sectionBreakType"];
@@ -199,20 +180,6 @@ pub struct ParaAttrDelta {
     /// readers treat as unset but which wins over a concurrent write as a value
     /// does. Schema-managed identity keys are rejected.
     pub other: BTreeMap<String, Option<Any>>,
-}
-
-/// A split's next style (`w:next`) already resolved by the host, injected
-/// because the `styles.xml` cascade lives outside the CRDT.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ResolvedStyleProjection {
-    pub style_id: String,
-    /// Host-verified existence. `false` yields [`OpError::UnknownStyle`]
-    /// before any mutation.
-    pub known: bool,
-    /// Values for the [`STYLE_CONTROLLED_PARA_ATTRS`] keys — a missing or null
-    /// entry clears that attribute — plus any list attributes when the style
-    /// defines numbering.
-    pub paragraph_attrs: BTreeMap<String, Any>,
 }
 
 struct TargetPara {
@@ -343,70 +310,6 @@ fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: O
     }
 }
 
-/// Writes a style's paragraph-attribute projection: each
-/// [`STYLE_CONTROLLED_PARA_ATTRS`] key is reset to the projection's value or
-/// cleared when it has none, and any extra key (list attributes) is applied as
-/// given. Errors on a schema-managed identity key.
-fn apply_paragraph_attr_projection(
-    txn: &mut TransactionMut<'_>,
-    map: &MapRef,
-    attrs: &BTreeMap<String, Any>,
-) -> OpResult<()> {
-    for key in STYLE_CONTROLLED_PARA_ATTRS {
-        set_or_remove(txn, map, key, attrs.get(key).cloned());
-    }
-    for (key, value) in attrs {
-        if STYLE_CONTROLLED_PARA_ATTRS.contains(&key.as_str()) {
-            continue;
-        }
-        if matches!(key.as_str(), PARA_ID | KIND_KEY) {
-            return Err(OpError::ReservedKey(key.clone()));
-        }
-        set_or_remove(txn, map, key, Some(value.clone()));
-    }
-    if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
-        let mut original = (*original).clone();
-        for key in [
-            "spaceBefore",
-            "spaceAfter",
-            "spaceBeforeLines",
-            "spaceAfterLines",
-            "beforeAutospacing",
-            "afterAutospacing",
-        ] {
-            match attrs.get(key) {
-                Some(value) if *value != Any::Null => {
-                    original.insert(key.to_owned(), value.clone());
-                }
-                _ => {
-                    original.remove(key);
-                }
-            }
-        }
-        map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
-    }
-    Ok(())
-}
-
-/// The paragraph's numbering, and whether its style gives it
-/// (`numPrFromStyle`, on the paragraph or in its source formatting, equal to
-/// `numPr`).
-fn list_numbering(props: &[(String, Any)]) -> Option<(Any, bool)> {
-    let get = |key: &str| {
-        props
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value)
-            .filter(|value| !matches!(value, Any::Null))
-    };
-    let num_pr = get("numPr")?;
-    let from_style = get("numPrFromStyle").or_else(|| match get(ORIGINAL_FORMATTING) {
-        Some(Any::Map(original)) => original.get("numPrFromStyle"),
-        _ => None,
-    });
-    Some((num_pr.clone(), from_style == Some(num_pr)))
-}
-
 /// `pPrChange` records under new revision ids.
 fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -> Any {
     let Any::Array(changes) = changes else {
@@ -432,46 +335,6 @@ fn with_fresh_revision_ids(changes: &Any, mut next_id: impl FnMut() -> String) -
     )
 }
 
-/// `_originalFormatting` without its borders.
-fn original_without_borders(value: &Any) -> Option<Any> {
-    match value {
-        Any::Map(original) if original.contains_key(BORDERS) => {
-            let mut original = (**original).clone();
-            original.remove(BORDERS);
-            Some(Any::Map(Arc::new(original)))
-        }
-        _ => None,
-    }
-}
-
-/// Drops a mark's borders, in its properties and its source formatting alike,
-/// so a save does not write them back from the source.
-fn remove_borders(txn: &mut TransactionMut<'_>, map: &MapRef) {
-    map.remove(txn, BORDERS);
-    if let Some(Out::Any(original)) = map.get(txn, ORIGINAL_FORMATTING)
-        && let Some(original) = original_without_borders(&original)
-    {
-        map.insert(txn, ORIGINAL_FORMATTING, original);
-    }
-}
-
-/// Reduces a `defaultTextFormatting` map to the font/size/color subset that crosses a split.
-fn style_carry_dtf(value: &Any) -> Option<Any> {
-    let Any::Map(map) = value else {
-        return None;
-    };
-    let subset: HashMap<String, Any> = map
-        .iter()
-        .filter(|(key, _)| STYLE_CARRY_DTF_KEYS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    if subset.is_empty() {
-        None
-    } else {
-        Some(Any::Map(Arc::new(subset)))
-    }
-}
-
 /// Whether `chunk` is the reference field of a comment, which shows nothing.
 fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
     matches!(&chunk.kind, ChunkKind::Embed(Some(map))
@@ -481,49 +344,32 @@ fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
 impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
-    /// The new pilcrow terminates the FIRST half, carrying the source
-    /// paragraph's properties (but the section it ends) and its ORIGINAL
-    /// paraId. Where the source mark keeps its own properties (a split
-    /// mid-paragraph or before a block), the new mark leaves out the source
-    /// mark's tracked insertion or deletion, and its copy of a tracked
-    /// property change takes new revision ids. The original
-    /// pilcrow is re-minted with a fresh paraId and becomes the second half's
-    /// mark. What the second half then keeps depends on where the split fell:
-    ///
-    /// - mid-paragraph: it keeps its own properties;
-    /// - at the paragraph end, so the second half is empty: only
-    ///   the `INHERITED_PARA_ATTRS` subset survives, with
-    ///   `defaultTextFormatting` reduced to the font/size/color carry keys,
-    ///   plus the list's numbering and level indents, so the list goes on;
-    /// - at the end WITH a `next_style`: it switches to that style's
-    ///   projection outright instead.
-    ///
-    /// Paragraph borders are cleared in every case, because Word never
-    /// propagates `w:pBdr` across a split. A section the paragraph ends stays
-    /// with the second half's mark, which still ends it: the new mark never
-    /// takes `sectPr` or `sectionBreakType`. Suggesting mode stamps the inserted
-    /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
-    /// author when there is one.
+    /// Both halves keep the paragraph's properties, borders included, as Word
+    /// copies the paragraph mark. The new pilcrow terminates the FIRST half
+    /// and takes the ORIGINAL paraId; the original pilcrow is re-minted with a
+    /// fresh paraId and ends the second half. At the paragraph end the new
+    /// pilcrow goes after the original one instead and takes the fresh paraId,
+    /// so the text keeps its mark, unless that mark ends a section. A section
+    /// the paragraph ends stays with the original mark, which still ends it:
+    /// the new mark never takes `sectPr` or `sectionBreakType`. The new mark
+    /// leaves out the source mark's tracked insertion or deletion, and its
+    /// copy of a tracked property change takes new revision ids; at the end of
+    /// a section's last paragraph the mark revision and the source runs go
+    /// with the text's paragraph, and the empty one's property change takes
+    /// the new ids. Comment references show nothing, so Enter before ones that
+    /// end the paragraph splits after them: it is Enter at the end, and they
+    /// stay with the text. Suggesting mode stamps the inserted pilcrow `ins`
+    /// and `pPrIns`, reusing an adjacent revision by the same author when there
+    /// is one.
     ///
     /// At the start of a slot that opens with a table, block content control
     /// or break, the split inserts an empty paragraph before the block
     /// instead, as Word does: the new mark takes the fresh paraId and the
-    /// properties but borders, and the block's paragraph keeps its own, so
-    /// removing the new paragraph restores the document.
+    /// properties, and the block's paragraph keeps its own, so removing the
+    /// new paragraph restores the document.
     ///
-    /// Errors when `next_style` is not known, before any mutation, and when
-    /// `at` does not address a position inside a story.
-    pub fn split_paragraph(
-        &self,
-        ctx: &EditCtx,
-        mut at: Position,
-        next_style: Option<&ResolvedStyleProjection>,
-    ) -> OpResult<SplitReceipt> {
-        if let Some(projection) = next_style
-            && !projection.known
-        {
-            return Err(OpError::UnknownStyle(projection.style_id.clone()));
-        }
+    /// Errors when `at` does not address a position inside a story.
+    pub fn split_paragraph(&self, ctx: &EditCtx, mut at: Position) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
         let slot = self
             .segment_index(&at.story)?
@@ -548,6 +394,17 @@ impl EditingDoc {
                 before_block = false;
             }
         }
+        let (orig_index, orig_map) =
+            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
+                story: at.story.clone(),
+                index: at.index,
+            })?;
+        if snapshot_range(&story, &txn, at.index, orig_index)
+            .iter()
+            .all(|chunk| is_comment_reference(chunk, &txn))
+        {
+            at.index = orig_index;
+        }
         let chunks = snapshot_range(
             &story,
             &txn,
@@ -561,45 +418,49 @@ impl EditingDoc {
                 })
                 .unwrap_or_else(|| self.next_id())
         });
-        let (orig_index, orig_map) =
-            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
-                story: at.story.clone(),
-                index: at.index,
-            })?;
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
+        // At the end the new mark goes after the source one, which keeps the
+        // text and its id, so a peer's concurrent change to the source mark
+        // stays on the text. A section's last paragraph keeps inserting before
+        // it, so the section still ends after the new paragraph, and so does
+        // suggesting mode, whose Backspace retracts the mark it deletes.
+        let after = second_half_empty
+            && !before_block
+            && !ctx.is_suggesting()
+            && !props
+                .iter()
+                .any(|(key, _)| SECTION_KEYS.contains(&key.as_str()));
 
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
         let new_pilcrow = story.insert_embed_with_attributes(
             &mut txn,
-            at.index,
+            if after { orig_index + 1 } else { at.index },
             MapPrelim::default(),
             insertion_attrs(ins, None),
         );
         new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
-        let new_para_id = if before_block {
+        let new_para_id = if before_block || after {
             &second_para_id
         } else {
             &first_para_id
         };
         new_pilcrow.insert(&mut txn, PARA_ID, new_para_id.as_str());
-        // Where the source mark keeps its properties, the new mark is a plain
+        // Where the source mark keeps its paragraph, the new mark is a plain
         // one, as in Word: the source mark's own insertion or deletion stays
         // on it, and the new mark's copy of a tracked property change is a
         // change of its own.
-        let source_keeps = before_block || !second_half_empty;
+        let source_keeps = before_block || after || !second_half_empty;
         for (key, value) in &props {
             if SECTION_KEYS.contains(&key.as_str())
-                || (before_block && key == BORDERS)
                 || (source_keeps && (key == PPR_INS || key == PPR_DEL))
+                || (after && key == ORIGINAL_RUN_BOUNDARIES)
             {
                 continue;
             }
-            let value = if before_block && key == ORIGINAL_FORMATTING {
-                original_without_borders(value).unwrap_or_else(|| value.clone())
-            } else if source_keeps && key == PPR_CHANGE {
+            let value = if source_keeps && key == PPR_CHANGE {
                 with_fresh_revision_ids(value, || self.next_id())
             } else {
                 value.clone()
@@ -618,55 +479,31 @@ impl EditingDoc {
                 first_para_id: second_para_id,
                 second_para_id: first_para_id,
                 revision_ids: revision_id.into_iter().collect(),
+                at_end: false,
+            });
+        }
+        if after {
+            return Ok(SplitReceipt {
+                first_para_id,
+                second_para_id,
+                revision_ids: revision_id.into_iter().collect(),
+                at_end: true,
             });
         }
 
-        // The original pilcrow now terminates the second half: re-mint its identity, then apply
-        // post-split inheritance.
+        // The original pilcrow now terminates the second half: re-mint its identity.
         orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
-            if let Some(next) = next_style {
-                // A `w:next` switch starts from nothing: drop the source
-                // properties before writing the projection.
-                for (key, _) in &props {
-                    if !SECTION_KEYS.contains(&key.as_str()) {
-                        orig_map.remove(&mut txn, key);
-                    }
-                }
-                orig_map.insert(&mut txn, "pStyle", next.style_id.as_str());
-                apply_paragraph_attr_projection(&mut txn, &orig_map, &next.paragraph_attrs)?;
-                orig_map.remove(&mut txn, BORDERS);
-            } else {
-                // Blank-attr inheritance: keep only the inherited subset; dtf reduced to the
-                // font/size/color carry. Borders fall out of the sweep. The list goes on,
-                // as in Word, with its numbering and level indents.
-                let list = list_numbering(&props);
-                for (key, value) in &props {
-                    if SECTION_KEYS.contains(&key.as_str()) {
-                        continue;
-                    }
-                    let list_key = STYLE_NUMBERING_ATTRS.contains(&key.as_str())
-                        || LIST_INDENT_ATTRS.contains(&key.as_str());
-                    if !INHERITED_PARA_ATTRS.contains(&key.as_str())
-                        && !(list.is_some() && list_key)
-                    {
-                        orig_map.remove(&mut txn, key);
-                    } else if key == DEFAULT_TEXT_FORMATTING {
-                        set_or_remove(
-                            &mut txn,
-                            &orig_map,
-                            DEFAULT_TEXT_FORMATTING,
-                            style_carry_dtf(value),
-                        );
-                    }
-                }
-                if let Some((num_pr, true)) = list {
-                    orig_map.insert(&mut txn, "numPrFromStyle", num_pr);
-                }
+            // The section's new last paragraph is a copy: the mark revision went
+            // to the text's mark with the run cache, and its property change
+            // becomes one of its own.
+            for key in [PPR_INS, PPR_DEL, ORIGINAL_RUN_BOUNDARIES] {
+                orig_map.remove(&mut txn, key);
             }
-        } else {
-            // Mid-paragraph split keeps the second half's pPr; Word never propagates w:pBdr.
-            remove_borders(&mut txn, &orig_map);
+            if let Some((_, changes)) = props.iter().find(|(key, _)| key == PPR_CHANGE) {
+                let changes = with_fresh_revision_ids(changes, || self.next_id());
+                orig_map.insert(&mut txn, PPR_CHANGE, changes);
+            }
         }
         if !ctx.is_suggesting() {
             crate::ops::field_changes::split_field(
@@ -682,6 +519,7 @@ impl EditingDoc {
             first_para_id,
             second_para_id,
             revision_ids: revision_id.into_iter().collect(),
+            at_end: second_half_empty,
         })
     }
 
@@ -1205,31 +1043,10 @@ impl EditingDoc {
         })
     }
 
-    /// Restores paraId uniqueness after a merge of divergent replicas: every
-    /// duplicate is re-minted, with the first occurrence in document order
-    /// keeping its id. Runs under a system origin so the pass never enters
-    /// undo history. Returns the `(old, new)` pairs.
-    pub fn dedupe_para_ids(&self, now_iso: &str) -> OpResult<Vec<(ParagraphId, ParagraphId)>> {
-        let ctx = EditCtx::system(now_iso);
-        let mut renames = Vec::new();
-        let mut txn = self.transact_for(&ctx);
-        let targets = all_targets(&txn);
-        let mut seen: HashSet<String> = HashSet::new();
-        for target in targets {
-            let id = target.bounds.para_id.clone();
-            if seen.insert(id.clone()) {
-                continue;
-            }
-            let minted = self.next_id();
-            target.map.insert(&mut txn, PARA_ID, minted.as_str());
-            renames.push((id, minted));
-        }
-        Ok(renames)
-    }
-
     /// Runs `apply` (a peer's update), then renames the paragraph ids that
-    /// concurrent splits duplicated when it brought an embed, such as a
-    /// paragraph mark ([`Self::rename_duplicate_para_ids`]).
+    /// concurrent splits duplicated ([`Self::rename_duplicate_para_ids`]),
+    /// looking only at the ids of paragraph marks the update inserted or
+    /// re-identified and only in their stories.
     pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
         let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
         let subscription = {
@@ -1246,63 +1063,96 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
-        let embeds = {
+        let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
-            inserted.iter().any(|(client, ranges)| {
-                ranges.iter().any(|range| {
+            let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
+            for (client, ranges) in inserted.iter() {
+                for range in ranges.iter() {
                     let mut clock = range.start;
                     while clock < range.end {
                         let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
-                            return false;
+                            break;
                         };
-                        if matches!(item.content(), yrs::block::ItemContent::Type(_)) {
-                            return true;
-                        }
                         clock = item.id().clock + item.len();
+                        if let Some((story, para_id)) = inserted_para_id(&txn, item) {
+                            touched.entry(story).or_default().insert(para_id);
+                        }
                     }
-                    false
-                })
-            })
+                }
+            }
+            touched
         };
-        if embeds {
-            self.rename_duplicate_para_ids();
+        if !touched.is_empty() {
+            self.rename_duplicates(Some(&touched));
         }
         result
     }
 
     /// Renames paragraph ids that concurrent splits of one paragraph
-    /// duplicated, the same way on every peer: the mark whose yrs item has the
-    /// lowest `(client, clock)` keeps the id and each other mark takes
-    /// `{client}.{clock}` of its own item. A system edit, outside Undo.
-    /// Returns the `(old, new)` pairs.
+    /// duplicated within a story, the same way on every peer: source marks
+    /// rank first, in source order, then the rest by `(client, clock)`; the
+    /// first keeps the id and each other mark takes `{client}.{clock}` of its
+    /// own item. A system edit, outside
+    /// Undo. Returns the `(old, new)` pairs. Run over a loaded state, which
+    /// may have been stored before any peer renamed.
     pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
-        let mut marks: BTreeMap<String, Vec<(yrs::ID, MapRef)>> = BTreeMap::new();
+        self.rename_duplicates(None)
+    }
+
+    /// [`Self::rename_duplicate_para_ids`] over every story, or only over the
+    /// given ids of the given stories.
+    fn rename_duplicates(
+        &self,
+        only: Option<&HashMap<BranchPtr, HashSet<String>>>,
+    ) -> Vec<(ParagraphId, ParagraphId)> {
+        let mut duplicates: Vec<Vec<(yrs::ID, MapRef)>> = Vec::new();
         {
             let txn = yrs::Transact::transact(self.yrs_doc());
-            let Some(stories) = txn.get_map(crate::STORIES) else {
-                return Vec::new();
+            let stories: Vec<BranchPtr> = match only {
+                Some(only) => only.keys().copied().collect(),
+                None => {
+                    let Some(stories) = txn.get_map(crate::STORIES) else {
+                        return Vec::new();
+                    };
+                    stories
+                        .iter(&txn)
+                        .filter_map(|(_, story)| match story {
+                            Out::YText(story) => {
+                                Some(BranchPtr::from(
+                                    <TextRef as AsRef<yrs::branch::Branch>>::as_ref(&story),
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                }
             };
-            for (_, story) in stories.iter(&txn) {
-                let Out::YText(story) = story else {
-                    continue;
-                };
-                for (_, map) in crate::pilcrows(&story, &txn) {
-                    let yrs::branch::BranchID::Nested(id) =
-                        <MapRef as AsRef<yrs::branch::Branch>>::as_ref(&map).id()
-                    else {
+            for story in stories {
+                let wanted = only.and_then(|only| only.get(&story));
+                let mut marks: HashMap<String, Vec<(yrs::ID, MapRef)>> = HashMap::new();
+                let mut next = story.start();
+                while let Some(item) = next {
+                    next = item.right();
+                    if item.is_deleted() {
+                        continue;
+                    }
+                    let ItemContent::Type(branch) = item.content() else {
                         continue;
                     };
-                    if let Some(para_id) = map_string(&map, &txn, PARA_ID) {
-                        marks.entry(para_id).or_default().push((id, map));
+                    let map = MapRef::from(BranchPtr::from(branch));
+                    let Some(para_id) = map_string(&map, &txn, PARA_ID) else {
+                        continue;
+                    };
+                    if wanted.is_none_or(|wanted| wanted.contains(&para_id))
+                        && crate::is_pilcrow(&map, &txn)
+                    {
+                        marks.entry(para_id).or_default().push((*item.id(), map));
                     }
                 }
+                duplicates.extend(marks.into_values().filter(|marks| marks.len() > 1));
             }
         }
         let mut renames = Vec::new();
-        let duplicates: Vec<_> = marks
-            .into_values()
-            .filter(|marks| marks.len() > 1)
-            .collect();
         if duplicates.is_empty() {
             return renames;
         }
@@ -1321,7 +1171,13 @@ impl EditingDoc {
         };
         let mut txn = yrs::Transact::transact_mut_with(self.yrs_doc(), "system");
         for mut marks in duplicates {
-            marks.sort_by_key(|(id, _)| rank(id));
+            // A mark an earlier rename gave `{client}.{clock}` of its own item
+            // owns that id and keeps it: renaming it would write the same id
+            // again, and peers would echo that write forever.
+            let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
+            marks.sort_by_key(|(id, _)| {
+                (format!("{}.{}", id.client, id.clock) != duplicated, rank(id))
+            });
             let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             for (id, map) in &marks[1..] {
                 let renamed = format!("{}.{}", id.client, id.clock);
@@ -1331,6 +1187,30 @@ impl EditingDoc {
         }
         renames
     }
+}
+
+/// The story and paragraph id an inserted item gives a paragraph mark: the
+/// mark itself, or a `paraId` written onto one (a merge's survivor).
+fn inserted_para_id<T: ReadTxn>(txn: &T, item: ItemPtr) -> Option<(BranchPtr, String)> {
+    if item.is_deleted() {
+        return None;
+    }
+    let mark = match item.content() {
+        ItemContent::Type(_) if item.parent_sub().is_none() => item,
+        ItemContent::Any(_) if item.parent_sub().is_some_and(|key| &**key == PARA_ID) => {
+            item.parent_branch()?.item()?
+        }
+        _ => return None,
+    };
+    let ItemContent::Type(branch) = mark.content() else {
+        return None;
+    };
+    let story = mark.parent_branch()?;
+    let map = MapRef::from(BranchPtr::from(branch));
+    (crate::is_pilcrow(&map, txn) && story.item()?.parent_sub().is_some())
+        .then(|| map_string(&map, txn, PARA_ID))
+        .flatten()
+        .map(|para_id| (story, para_id))
 }
 
 fn paragraph_revision_id<T: ReadTxn>(

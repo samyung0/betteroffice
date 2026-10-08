@@ -941,33 +941,32 @@ pub fn formula_references(source: &str) -> Result<Vec<LocatedReference>, String>
             Scanned::Reference(token) => token,
         };
         index = token.span.end;
-        if let Some(joined) = &token.joined {
-            if token.first.sheet == joined.endpoint.sheet || joined.endpoint.sheet.is_none() {
-                if let (Some(Address::Cell(start_cell)), Some(Address::Cell(end_cell))) = (
-                    classify_address(token.first.address),
-                    classify_address(joined.endpoint.address),
-                ) {
-                    if start_cell.row <= end_cell.row && start_cell.col <= end_cell.col {
-                        result.push(LocatedReference {
-                            start: token.span.start,
-                            end: token.span.end,
-                            sheet: token.first.sheet.clone(),
-                            address: ReferenceAddress::Cells(CellRange::new(start_cell, end_cell)),
-                            prefix: if token.first.qualifier.starts_with('@') {
-                                "@".into()
-                            } else {
-                                String::new()
-                            },
-                            suffix: if joined.endpoint.spill {
-                                "#".into()
-                            } else {
-                                String::new()
-                            },
-                        });
-                        continue;
-                    }
-                }
-            }
+        if let Some(joined) = &token.joined
+            && (token.first.sheet == joined.endpoint.sheet || joined.endpoint.sheet.is_none())
+            && let (Some(Address::Cell(start_cell)), Some(Address::Cell(end_cell))) = (
+                classify_address(token.first.address),
+                classify_address(joined.endpoint.address),
+            )
+            && start_cell.row <= end_cell.row
+            && start_cell.col <= end_cell.col
+        {
+            result.push(LocatedReference {
+                start: token.span.start,
+                end: token.span.end,
+                sheet: token.first.sheet.clone(),
+                address: ReferenceAddress::Cells(CellRange::new(start_cell, end_cell)),
+                prefix: if token.first.qualifier.starts_with('@') {
+                    "@".into()
+                } else {
+                    String::new()
+                },
+                suffix: if joined.endpoint.spill {
+                    "#".into()
+                } else {
+                    String::new()
+                },
+            });
+            continue;
         }
         let mut endpoints = vec![token.first];
         if let Some(joined) = token.joined {

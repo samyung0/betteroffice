@@ -130,7 +130,21 @@ impl World {
     }
 
     fn sync_all(&mut self) {
+        let mut passes = 0;
         loop {
+            passes += 1;
+            if passes > 40 {
+                let tail: Vec<String> = self.log[self.log.len().saturating_sub(4)..]
+                    .iter()
+                    .map(|(peer, message)| {
+                        let update = yrs::Update::decode_v1(message).unwrap();
+                        let text = format!("{update:?}");
+                        format!("peer {peer}, {} B: {}", message.len(), &text[..text.len().min(1200)])
+                    })
+                    .collect();
+                panic!("sync_all does not settle (chunked {}): {}", self.chunked, tail.join("
+"));
+            }
             let before = self.log.len();
             for from in 0..self.peers.len() {
                 for to in 0..self.peers.len() {
@@ -420,7 +434,7 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
             .map(drop)
             .map_err(|error| error.to_string()),
         Op::Split(story, at) => doc
-            .split_paragraph(&ctx(), Position::new(story, *at), None)
+            .split_paragraph(&ctx(), Position::new(story, *at))
             .map(drop)
             .map_err(|error| error.to_string()),
         Op::Merge(story, index, forward) => para_at(story, *index).and_then(|para| doc
@@ -484,7 +498,7 @@ fn run(peer: &Peer, op: &Op) -> Result<(), String> {
                     .map_err(|error| error.to_string())?,
             )?;
             for line in &lines[1..] {
-                doc.split_paragraph(&ctx(), Position::new(story, caret), None)
+                doc.split_paragraph(&ctx(), Position::new(story, caret))
                     .map_err(|error| error.to_string())?;
                 caret += 1;
                 caret = index_of(
@@ -1031,9 +1045,15 @@ fn checkpoint<'a>(sha: &'a str, state: &'a [u8]) -> Checkpoint<'a> {
 /// worlds read the same, a fresh session on the override room reads the
 /// same, and both rooms export the same file and the same baseline.
 fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) {
+    let phase = |name: &str| {
+        if std::env::var("CHUNKED_PHASES").is_ok() {
+            eprintln!("{label}: {name}");
+        }
+    };
     for world in worlds.iter_mut() {
         world.sync_all();
     }
+    phase("synced");
     // Peers of today's layout that do not converge (a fault of today's
     // engine, e.g. anchors that follow yrs's local-only redone links) must
     // read the same in the override layout, peer by peer.
@@ -1056,6 +1076,7 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         stats.diverged += 1;
         return;
     }
+    phase("dumped");
     let (left, right) = (
         dump(&worlds[0].peers[0].doc),
         dump(&worlds[1].peers[0].doc),
@@ -1083,6 +1104,7 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
             first_difference(&split(&left_blocks), &split(&right_blocks))
         );
     }
+    phase("blocks compared");
     let rooms = [worlds[0].room(base), worlds[1].room(base)];
     if !worlds[1].chunked {
         return;
@@ -1125,9 +1147,14 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         seed: "0000000000000000000000000000000000000000000000000000000000000000",
         now: "2026-10-08T00:00:00.000Z",
     };
+    phase("room read through the source");
     let exports: Vec<_> = rooms
         .iter()
-        .map(|room| office_service::export(base, checkpoint(&sha, room), determinism))
+        .map(|room| {
+            let export = office_service::export(base, checkpoint(&sha, room), determinism);
+            phase("exported one room");
+            export
+        })
         .collect();
     if exports[0].is_ok() {
         stats.exported += 1;
@@ -1143,6 +1170,7 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
             "{label}: export outcome differs"
         ),
     }
+    phase("exports compared");
     let baselines: Vec<_> = rooms
         .iter()
         .map(|room| {

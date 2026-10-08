@@ -20,6 +20,7 @@ import type {
 } from './displayList';
 import type { GlyphCache } from './glyphCache';
 import { glyphRunRect, textRunRect, type GeoRect } from './displayListGeometry';
+import { clusterPieces } from './clusterRuns';
 
 /**
  * Resolves an image relationship id to a drawable source. Media decode stays
@@ -491,11 +492,16 @@ function drawGlyphRun(
 }
 
 // browser-text safety net for a glyph run: paints the source text at the first
-// glyph's pen origin. `fallbackFont` carries the resolved CSS shorthand of the
+// glyph's pen origin, cluster by cluster for a joined run so each keeps its
+// shaped x. `fallbackFont` carries the resolved CSS shorthand of the
 // face the run was shaped with, so the fallback keeps the measured
 // family/weight/style; pre-contract emissions without it degrade to a generic
 // family at the run's size.
 function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimitive): void {
+  if (run.clusterRuns) {
+    for (const piece of clusterPieces(run)) drawGlyphRunFallback(ctx, piece);
+    return;
+  }
   const first = run.glyphs[0];
   if (!first) return;
   ctx.font = fontWithVariant(run.fallbackFont ?? `${run.size}px sans-serif`, run.smallCaps);

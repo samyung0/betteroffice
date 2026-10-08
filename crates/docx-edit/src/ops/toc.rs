@@ -445,8 +445,15 @@ impl EditingDoc {
                 len: self.story_len(BODY)?,
             })?;
         let index = if at.index > para.0 {
-            self.split_paragraph(ctx, at.clone(), None)?;
-            at.index + 1
+            // The split may land past comment references that end the paragraph.
+            let split = self.split_paragraph(ctx, at.clone())?;
+            self.segment_index(BODY)?
+                .para_span(&split.second_para_id)
+                .map(|(start, _)| start)
+                .ok_or(OpError::ExpectedPilcrow {
+                    story: BODY.to_owned(),
+                    index: at.index,
+                })?
         } else {
             para.0
         };
@@ -487,7 +494,7 @@ impl EditingDoc {
             .map(|para| para.node_start)
             .unwrap_or(field.start);
         let field = if head < field.start {
-            self.split_paragraph(ctx, Position::new(BODY, field.start), None)?;
+            self.split_paragraph(ctx, Position::new(BODY, field.start))?;
             // The new mark went in ahead of the field, which now opens the next paragraph.
             let Some(field) = self
                 .toc_fields(BODY)?
@@ -1172,6 +1179,27 @@ mod tests {
         assert!(named(&doc).contains("[PAGEREF _Toc10000006 \\h|4]¶world¶¶Introduction"));
     }
 
+    /// Insert at the visible end of a paragraph a comment ends leaves the
+    /// comment's reference with the text and the TOC in paragraphs of its own.
+    #[test]
+    fn insert_before_a_trailing_comment_reference_takes_its_own_paragraphs() {
+        let bytes = package(&format!("{}{}", p("20000001", None, "Body"), body()), false);
+        let doc = open(&bytes, 15);
+        let at = index_of(&doc, "Body") + 4;
+        let reference = vec![(
+            "modelKind".to_owned(),
+            Any::String("commentReference".into()),
+        )];
+        doc.insert_embed(&ctx(), Position::new(BODY, at), "field", reference)
+            .unwrap();
+        doc.insert_toc(&ctx(), Position::new(BODY, at), &layout(&PAGES))
+            .unwrap();
+        assert!(named(&doc).starts_with(
+            r#"Body[|]¶Introduction	<[PAGEREF _Toc10000002 \h|2][TOC \o "1-3" \h \z \u|]¶Background"#
+        ));
+        assert!(named(&doc).contains("[PAGEREF _Toc10000006 \\h|4]¶¶¶Introduction"));
+    }
+
     #[test]
     fn insert_without_headings_shows_words_message() {
         let bytes = package(&p("10000001", None, ""), false);
@@ -1584,8 +1612,7 @@ mod tests {
                     .unwrap();
             } else {
                 let at = index_of(&b, "Some text.") + 10;
-                b.split_paragraph(&ctx(), Position::new(BODY, at), None)
-                    .unwrap();
+                b.split_paragraph(&ctx(), Position::new(BODY, at)).unwrap();
                 b.insert_text(
                     &ctx(),
                     Position::new(BODY, at + 1),

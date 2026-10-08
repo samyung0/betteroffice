@@ -198,6 +198,7 @@ fn run_in(run: &Run) -> Option<RunIn> {
         Run::Field(field) => {
             let mut out = formatted_run("field", &field.fmt);
             out.fallback = field.fallback.clone();
+            out.field_type = Some(field.field_type.clone());
             Some(out)
         }
         Run::Image(image) => image_run(image),
@@ -265,6 +266,7 @@ fn bare_run(kind: &str) -> RunIn {
         rtl: false,
         snap_to_grid: None,
         fallback: None,
+        field_type: None,
         width: None,
         height: None,
         rotation_bounds: None,
@@ -1020,7 +1022,10 @@ mod parity_tests {
             }
             5 => {
                 m.insert("kind".to_owned(), json!("field"));
-                m.insert("fieldType".to_owned(), json!("PAGE"));
+                m.insert(
+                    "fieldType".to_owned(),
+                    json!(["PAGE", "REF"][rng.below(2) as usize]),
+                );
                 put(&mut m, "fallback", maybe_str(rng, &["42", "", "iv"]));
                 formatting(rng, &mut m);
             }

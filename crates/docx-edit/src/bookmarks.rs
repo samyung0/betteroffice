@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use yrs::{
-    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, TextRef, Transact,
-    TransactionMut,
+    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, StickyIndex, TextRef,
+    Transact, TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -155,37 +155,27 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
 }
 
 pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> {
-    let Some(root) = txn.get_map(ROOT) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    for (_, value) in root.iter(txn) {
-        let Out::YMap(entry) = value else {
-            continue;
-        };
-        let (Some(Out::Any(data)), Some(Out::Any(Any::Array(anchors)))) =
-            (entry.get(txn, "data"), entry.get(txn, "anchors"))
-        else {
-            continue;
-        };
-        for encoded in anchors.iter() {
-            if let Ok(anchor) = decode_anchor(encoded)
-                && anchor.story == story_id
-                && let Some(at) = anchor.start.get_offset(txn)
-            {
-                result.push((at.index, data.clone()));
-            }
-        }
-    }
-    ordered(result)
+    positions_by_story_where(txn, |story| story == story_id)
+        .remove(story_id)
+        .unwrap_or_default()
 }
 
 /// `positions` of every story, reading the anchors once.
 pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u32, Any)>> {
+    positions_by_story_where(txn, |_| true)
+}
+
+/// Markers of the stories `wanted` picks, every anchor resolved in one walk
+/// of its story rather than one walk per anchor.
+fn positions_by_story_where<T: ReadTxn>(
+    txn: &T,
+    wanted: impl Fn(&str) -> bool,
+) -> HashMap<String, Vec<(u32, Any)>> {
     let Some(root) = txn.get_map(ROOT) else {
         return HashMap::new();
     };
-    let mut stories: HashMap<String, Vec<(u32, Any)>> = HashMap::new();
+    let mut found: Vec<(String, Any)> = Vec::new();
+    let mut starts: Vec<StickyIndex> = Vec::new();
     for (_, value) in root.iter(txn) {
         let Out::YMap(entry) = value else {
             continue;
@@ -197,13 +187,22 @@ pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u3
         };
         for encoded in anchors.iter() {
             if let Ok(anchor) = decode_anchor(encoded)
-                && let Some(at) = anchor.start.get_offset(txn)
+                && wanted(&anchor.story)
             {
-                stories
-                    .entry(anchor.story)
-                    .or_default()
-                    .push((at.index, data.clone()));
+                found.push((anchor.story, data.clone()));
+                starts.push(anchor.start);
             }
+        }
+    }
+    #[cfg(test)]
+    tests::RESOLVED_BATCHES.with(|batches| batches.borrow_mut().push(starts.len()));
+    let mut stories: HashMap<String, Vec<(u32, Any)>> = HashMap::new();
+    for ((story, data), at) in found
+        .into_iter()
+        .zip(StickyIndex::get_offsets(txn, &starts))
+    {
+        if let Some(at) = at {
+            stories.entry(story).or_default().push((at.index, data));
         }
     }
     stories
@@ -469,5 +468,192 @@ pub(crate) fn project(
 ) {
     if let Some(value) = bookmarks.get(id) {
         properties.insert("bookmarks".into(), value.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::{EditCtx, EditingDoc, FormatPolicy, Position, RawOp};
+
+    thread_local! {
+        /// The anchor count of every batch a bookmark read resolved.
+        pub(super) static RESOLVED_BATCHES: RefCell<Vec<usize>> =
+            const { RefCell::new(Vec::new()) };
+    }
+
+    fn resolved_batches() -> Vec<usize> {
+        RESOLVED_BATCHES.with(|batches| batches.take())
+    }
+
+    fn bookmark(doc: &EditingDoc, story: &str, id: usize, start: u32, end: u32) {
+        let boundary = |index, kind: &str| RawOp::SetBookmark {
+            index,
+            data: Any::Map(Arc::new(
+                [
+                    ("id".to_owned(), Any::Number(id as f64)),
+                    ("kind".to_owned(), Any::from(kind)),
+                ]
+                .into(),
+            )),
+        };
+        doc.apply_raw_ops(
+            story,
+            vec![boundary(start, "start"), boundary(end, "end")],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
+    }
+
+    fn comment(doc: &EditingDoc, story: &str, id: String, start: u32, end: u32) {
+        doc.apply_raw_ops(
+            story,
+            vec![RawOp::SetComment {
+                id,
+                ranges: vec![(start, end)],
+                author: "Ada".into(),
+                date: "2026-10-08T00:00:00Z".into(),
+                body: Any::Null,
+            }],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
+    }
+
+    /// The batch resolution answers exactly what resolving each anchor on
+    /// its own does, across two peers' inserts, deletes and undos over the
+    /// anchors of several stories. Undo tracking keeps deleted text, as in
+    /// an editing session, so anchors sit on deleted and redone items. (The
+    /// yrs test beside `get_offsets` is outside the workspace, so this is
+    /// the copy CI runs.)
+    #[test]
+    fn batch_anchor_resolution_matches_one_by_one() {
+        let a = EditingDoc::new(1);
+        let b = EditingDoc::new(2);
+        a.create_story("body", "The handbook body text.", "Normal", "left")
+            .unwrap();
+        a.create_story("fn:1", "A footnote.", "Normal", "left")
+            .unwrap();
+        let sync = |from: &EditingDoc, to: &EditingDoc| {
+            to.apply_update_v1(&from.encode_state_as_update_v1())
+                .unwrap();
+        };
+        sync(&a, &b);
+        let (undo_a, undo_b) = (crate::UndoSession::new(), crate::UndoSession::new());
+        undo_a.track(&a);
+        undo_b.track(&b);
+        let mut seed = 7_u64;
+        let mut next = |below: u32| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            u32::try_from(seed >> 33).unwrap() % below.max(1)
+        };
+        for round in 0..24 {
+            for story in ["body", "fn:1"] {
+                let len = a.story_len(story).unwrap();
+                // An `After` boundary needs content to its right.
+                let start = next(len);
+                let end = (start + 3).min(len);
+                bookmark(&a, story, round, start, end);
+                if start < end {
+                    comment(&a, story, format!("{story}-{round}"), start, end);
+                }
+                let len = b.story_len(story).unwrap();
+                if round % 3 == 2 && len > 4 {
+                    let index = next(len - 3);
+                    b.apply_raw_ops(
+                        story,
+                        vec![RawOp::Delete { index, len: 3 }],
+                        &EditCtx::local("", ""),
+                    )
+                    .unwrap();
+                } else {
+                    b.insert_text(
+                        &EditCtx::local("", ""),
+                        Position::new(story, next(len + 1)),
+                        "\u{1F600}x",
+                        FormatPolicy::Inherit,
+                    )
+                    .unwrap();
+                }
+                undo_b.add_undo_barrier();
+                if round % 5 == 4 {
+                    assert!(undo_b.undo());
+                }
+            }
+            sync(&b, &a);
+            sync(&a, &b);
+        }
+
+        // `b` keeps the text it deleted for undo; `a` collected it.
+        for doc in [&a, &b] {
+            let txn = doc.yrs_doc().transact();
+            let mut anchors = Vec::new();
+            for root in [ROOT, crate::COMMENTS] {
+                for (_, entry) in txn.get_map(root).unwrap().iter(&txn) {
+                    let Out::YMap(entry) = entry else { continue };
+                    let Some(Out::Any(Any::Array(encoded))) = entry.get(&txn, "anchors") else {
+                        continue;
+                    };
+                    for anchor in encoded.iter().map(|value| decode_anchor(value).unwrap()) {
+                        anchors.extend([anchor.start, anchor.end]);
+                    }
+                }
+            }
+            let resolve =
+                |offset: Option<yrs::Offset>| offset.map(|offset| (offset.index, offset.assoc));
+            let one_by_one: Vec<_> = anchors
+                .iter()
+                .map(|anchor| resolve(anchor.get_offset(&txn)))
+                .collect();
+            let batch: Vec<_> = StickyIndex::get_offsets(&txn, &anchors)
+                .into_iter()
+                .map(resolve)
+                .collect();
+            assert_eq!(batch, one_by_one);
+            assert!(anchors.len() > 150);
+            for assoc in [Assoc::After, Assoc::Before] {
+                assert!(anchors.iter().any(|anchor| anchor.assoc == assoc));
+            }
+        }
+    }
+
+    /// Reading a story's segments resolves all of its bookmark anchors in one
+    /// batch however many paragraphs carry them, and leaves other stories'
+    /// anchors alone; reading every story is one batch as well.
+    #[test]
+    fn a_story_read_resolves_its_bookmarks_in_one_batch() {
+        const PARAGRAPHS: u32 = 300;
+        let ctx = EditCtx::local("", "");
+        let doc = EditingDoc::new(9);
+        let text: String = (0..PARAGRAPHS)
+            .map(|index| format!("Paragraph {index:>3} here "))
+            .collect();
+        doc.create_story("body", &text, "Normal", "left").unwrap();
+        // Each paragraph is 19 units, so its break sits at 20k - 1.
+        for paragraph in 1..PARAGRAPHS {
+            doc.split_paragraph(&ctx, Position::new("body", paragraph * 20 - 1))
+                .unwrap();
+        }
+        for paragraph in 0..PARAGRAPHS {
+            let start = paragraph * 20;
+            bookmark(&doc, "body", paragraph as usize, start, start + 9);
+        }
+        doc.create_story("fn:1", "A footnote.", "Normal", "left")
+            .unwrap();
+        bookmark(&doc, "fn:1", 1000, 0, 1);
+        resolved_batches();
+
+        doc.story_segments("body").unwrap();
+        assert_eq!(resolved_batches(), [2 * PARAGRAPHS as usize]);
+        doc.all_story_segments();
+        assert_eq!(resolved_batches(), [2 * PARAGRAPHS as usize + 2]);
+        let txn = doc.yrs_doc().transact();
+        let markers = positions(&txn, "body");
+        assert_eq!(markers.len(), 2 * PARAGRAPHS as usize);
+        assert_eq!(markers.last().unwrap().0, (PARAGRAPHS - 1) * 20 + 9);
     }
 }

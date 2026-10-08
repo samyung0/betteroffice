@@ -2829,11 +2829,11 @@ impl EditSession {
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
     /// pilcrow. The FIRST half keeps the original paraId and the second is
-    /// re-minted. A split at the paragraph end leaves the empty second half
-    /// with only the inherited property subset and its list; a mid-paragraph
-    /// split keeps its properties. Paragraph borders are cleared either way. Suggesting
-    /// mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
-    /// `{"firstParaId","secondParaId","revisionId": string|null}`.
+    /// re-minted; both keep the paragraph's properties, as Word does.
+    /// Suggesting mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
+    /// `{"firstParaId","secondParaId","revisionId": string|null,"atEnd"}`,
+    /// `atEnd` when the split fell at the paragraph's end (comment
+    /// references aside), so the second half is the new empty paragraph.
     pub fn split_paragraph(
         &self,
         story: &str,
@@ -2847,12 +2847,13 @@ impl EditSession {
         let receipt = self
             .engine
             .doc()
-            .split_paragraph(&ctx, Position::new(story, at), None)
+            .split_paragraph(&ctx, Position::new(story, at))
             .map_err(js_err)?;
         Ok(json!({
             "firstParaId": receipt.first_para_id,
             "secondParaId": receipt.second_para_id,
             "revisionId": receipt.revision_ids.into_iter().next(),
+            "atEnd": receipt.at_end,
         })
         .to_string())
     }
@@ -3859,6 +3860,20 @@ impl EditSession {
     pub fn locate_paragraph(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
+    }
+
+    /// [`EditingDoc::rename_duplicate_para_ids`], for a client that loaded a
+    /// stored state: returns how many paragraph ids it renamed.
+    pub fn rename_duplicate_para_ids(&self) -> usize {
+        self.engine.doc().rename_duplicate_para_ids().len()
+    }
+
+    /// [`EditingDoc::paragraph_unit_text`].
+    pub fn paragraph_unit_text(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
+        self.engine
+            .doc()
+            .paragraph_unit_text(story, para_id)
+            .map_err(js_err)
     }
 
     pub fn list_comments(&self) -> Result<String, JsValue> {

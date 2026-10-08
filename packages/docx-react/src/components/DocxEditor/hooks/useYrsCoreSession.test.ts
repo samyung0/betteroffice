@@ -1,6 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Document } from '@betteroffice/docx/types/document';
-import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { createYrsSession, type YrsDocxHost, type YrsSession } from '@betteroffice/docx/yrs';
 import {
   dirtyProjectionStory,
   mergeDocxHostMetadata,
@@ -9,7 +12,7 @@ import {
 } from './useYrsCoreSession';
 
 function fakeSeedSession(): {
-  session: Pick<YrsSession, 'openDocx' | 'loadState'>;
+  session: Pick<YrsSession, 'openDocx' | 'loadState' | 'renameDuplicateParaIds'>;
   host: YrsDocxHost;
   opened: { bytes: Uint8Array; seedStories: boolean }[];
   loaded: Uint8Array[];
@@ -25,6 +28,11 @@ function fakeSeedSession(): {
       },
       loadState: (update) => {
         loaded.push(update);
+      },
+      // Each load is followed by the rename; the marker records it.
+      renameDuplicateParaIds: () => {
+        loaded.push(Uint8Array.of());
+        return 0;
       },
     },
     host,
@@ -46,7 +54,7 @@ describe('seedYrsSession', () => {
     });
 
     expect(seeded).toEqual([]);
-    expect(loaded).toEqual([initialUpdate]);
+    expect(loaded).toEqual([initialUpdate, Uint8Array.of()]);
     expect(host).toBeNull();
   });
 
@@ -78,7 +86,7 @@ describe('seedYrsSession', () => {
     });
 
     expect(opened).toEqual([{ bytes, seedStories: false }]);
-    expect(loaded).toEqual([initialUpdate]);
+    expect(loaded).toEqual([initialUpdate, Uint8Array.of()]);
     expect(host).toBe(expectedHost);
   });
 
@@ -95,6 +103,50 @@ describe('seedYrsSession', () => {
     expect(opened).toEqual([{ bytes, seedStories: true }]);
     expect(loaded).toEqual([]);
     expect(host).toBe(expectedHost);
+  });
+});
+
+describe('seedYrsSession over the edit engine', () => {
+  beforeAll(() =>
+    preloadEditWasm(
+      new Uint8Array(
+        readFileSync(resolve(import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'))
+      )
+    )
+  );
+
+  // Two peers split one paragraph mid-text and leave before exchanging, so
+  // the stored state still holds the duplicate id; a client loading it
+  // renames it, and typing by id reaches each paragraph.
+  test('renames the duplicate paragraph id of a stored state so every half takes typing', async () => {
+    const base = await createYrsSession({ clientId: 1 });
+    const { paraId } = base.createStory('body', 'Alpha beta');
+    const seed = base.encodeState();
+    const peers = await Promise.all(
+      ([[3001, 2], [3002, 7]] as const).map(async ([clientId, offset]) => {
+        const peer = await createYrsSession({ clientId });
+        peer.loadState(seed);
+        peer.splitParagraph({ story: 'body', paraId, offset });
+        return peer;
+      })
+    );
+    const relay = await createYrsSession({ clientId: 9 });
+    for (const state of [seed, ...peers.map((peer) => peer.encodeState())]) relay.loadState(state);
+    expect(relay.paragraphs('body').filter((p) => p.paraId === paraId)).toHaveLength(2);
+    const client = await createYrsSession({ clientId: 4001 });
+    try {
+      seedYrsSession(client, () => expect.unreachable(), {
+        bytes: null,
+        document: null,
+        initialUpdate: relay.encodeState(),
+      });
+      const ids = client.paragraphs('body').map((p) => p.paraId);
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const id of ids) client.insertText({ story: 'body', paraId: id, offset: 0 }, 'X');
+      expect(client.paragraphs('body').map((p) => p.text)).toEqual(['XAl', 'Xpha b', 'Xeta']);
+    } finally {
+      for (const session of [base, ...peers, relay, client]) session.destroy();
+    }
   });
 });
 

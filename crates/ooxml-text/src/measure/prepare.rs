@@ -535,10 +535,10 @@ fn prepare_field_run(
         .unwrap_or(&input.defaults.font_family);
     let chain = input.chain_for(family, run.bold, run.italic)?;
     validate_chain(store, &chain)?;
-    // Missing and empty field fallbacks measure as `"1"`.
     let fallback = match run.fallback.as_deref() {
         Some(t) if !t.is_empty() => t,
-        _ => "1",
+        _ if matches!(run.field_type.as_deref(), Some("PAGE" | "NUMPAGES")) => "1",
+        _ => "",
     };
     let width = measure_plain_text(
         store,

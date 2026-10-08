@@ -1658,8 +1658,9 @@ impl PartialEq for PageBreakBlock {
             pm_end: _,
             keeps_leading_spacing: _,
         } = other;
+        // A break's id is its story index, an absolute position like
+        // `pm_start`, so it is masked too.
         self.sdt_groups == other.sdt_groups
-            && self.id == other.id
             && self.keeps_leading_spacing == other.keeps_leading_spacing
     }
 }
@@ -1672,7 +1673,8 @@ impl PartialEq for ColumnBreakBlock {
             pm_start: _,
             pm_end: _,
         } = other;
-        self.sdt_groups == other.sdt_groups && self.id == other.id
+        // The id is the break's story index (see `PageBreakBlock`).
+        self.sdt_groups == other.sdt_groups
     }
 }
 
@@ -1998,11 +2000,9 @@ pub struct Input {
 // fragments and pages (output)
 // ---------------------------------------------------------------------------
 
-use crate::resolve_lines::ResolvedLine;
-
 /// One page's slice of a paragraph: the measured line window
-/// `[from_line, to_line)`, its own document range, and the run slices those
-/// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
+/// `[from_line, to_line)` and its own document range.
+/// `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
@@ -2021,8 +2021,6 @@ pub struct ParagraphFragment {
     pub carried_from_prev: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried_to_next: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
 /// One page's slice of a table: rows `[row_start, row_end)`, plus

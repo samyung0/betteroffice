@@ -869,7 +869,6 @@ mod tests {
             height: 20.0,
             carried_from_prev: None,
             carried_to_next: None,
-            resolved_lines: None,
         })
     }
 
