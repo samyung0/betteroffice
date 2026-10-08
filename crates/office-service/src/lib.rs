@@ -2,6 +2,10 @@
 //! `shared/office-checkpoint.ts` and `shared/office-rebase.ts` with the same
 //! inputs and outputs. Every call opens its own engine session on the calling
 //! thread; only [`XlsxReplicas`] keeps state between calls.
+//!
+//! Calls recurse over document trees: run them on a thread with at least
+//! 8 MiB of stack (the deepest golden and matrix call commits 0.43 MiB in a
+//! release build). A stack overflow aborts the process; it is not a panic.
 
 mod common;
 mod docx;

@@ -2,13 +2,18 @@
 //! stdout line (see `wire`). `office-service bench <request.json>...`: runs
 //! the requests in order in this process (a replica hit after its miss) and
 //! prints each one's process CPU time, wall time and memory high-water as a
-//! JSON line on stdout.
+//! JSON line on stdout. With `OFFICE_SERVICE_STACK_STATS` set, `serve` runs
+//! each request on a fresh thread and writes `stack <method> <bytes>` to
+//! stderr: the stack the call committed (Windows), to size the engine thread.
 
 use std::io::{BufRead, Write};
 use std::time::Instant;
 
 /// Engine calls recurse over document trees; give them the stack a deep
-/// document needs rather than the platform's main-thread default.
+/// document needs rather than the platform's main-thread default. The
+/// deepest recorded call commits 0.43 MiB in release (API.md, "Stack"); a
+/// debug build needs far more (it overflowed the 1 MiB main thread), and the
+/// reservation costs nothing until used.
 const STACK_BYTES: usize = 256 << 20;
 
 fn main() {
@@ -30,6 +35,7 @@ fn main() {
 }
 
 fn serve() {
+    let stats = std::env::var_os("OFFICE_SERVICE_STACK_STATS").is_some();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -37,12 +43,35 @@ fn serve() {
         if line.trim().is_empty() {
             continue;
         }
-        let answer = office_service::wire::call(line.as_bytes());
+        let answer = if stats {
+            stack_stats(line)
+        } else {
+            office_service::wire::call(line.as_bytes())
+        };
         if stdout.write_all(&answer).is_err() || stdout.write_all(b"\n").is_err() {
             break;
         }
         let _ = stdout.flush();
     }
+}
+
+/// One request on a fresh thread, reporting the stack it committed.
+fn stack_stats(line: String) -> Vec<u8> {
+    let method = serde_json::from_str::<serde_json::Value>(&line)
+        .ok()
+        .and_then(|request| request.get("method")?.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let (answer, used) = std::thread::Builder::new()
+        .stack_size(STACK_BYTES)
+        .spawn(move || {
+            let answer = office_service::wire::call(line.as_bytes());
+            (answer, usage::stack_committed())
+        })
+        .expect("call thread starts")
+        .join()
+        .unwrap_or_else(|_| std::process::exit(101));
+    eprintln!("stack {method} {}", used.map_or(-1, |used| used as i64));
+    answer
 }
 
 fn bench(paths: &[String]) {
@@ -117,6 +146,45 @@ mod usage {
             user: *mut FileTime,
         ) -> i32;
         fn K32GetProcessMemoryInfo(process: isize, counters: *mut MemoryCounters, cb: u32) -> i32;
+        fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
+        fn VirtualQuery(address: usize, info: *mut MemoryInfo, length: usize) -> usize;
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct MemoryInfo {
+        base: usize,
+        allocation_base: usize,
+        allocation_protect: u32,
+        partition: u16,
+        region: usize,
+        state: u32,
+        protect: u32,
+        kind: u32,
+    }
+
+    /// Bytes of this thread's stack committed so far, its high-water mark:
+    /// Windows commits stack pages as the stack grows and keeps them.
+    pub fn stack_committed() -> Option<usize> {
+        const MEM_COMMIT: u32 = 0x1000;
+        let (mut low, mut high) = (0usize, 0usize);
+        // SAFETY: the pointers are to live locals; VirtualQuery writes at most
+        // `size_of::<MemoryInfo>()` bytes into `info`.
+        unsafe {
+            GetCurrentThreadStackLimits(&mut low, &mut high);
+            let mut address = low;
+            while address < high {
+                let mut info = MemoryInfo::default();
+                if VirtualQuery(address, &mut info, std::mem::size_of::<MemoryInfo>()) == 0 {
+                    return None;
+                }
+                if info.state == MEM_COMMIT {
+                    return Some(high - address);
+                }
+                address = info.base + info.region;
+            }
+        }
+        None
     }
 
     fn ticks(time: &FileTime) -> f64 {
@@ -191,6 +259,11 @@ mod usage {
         let usage = rusage();
         let ms = |time: &TimeVal| time.sec as f64 * 1000.0 + time.usec as f64 / 1000.0;
         ms(&usage.user) + ms(&usage.system)
+    }
+
+    /// Not measured off Windows.
+    pub fn stack_committed() -> Option<usize> {
+        None
     }
 
     /// Peak resident set (current is not tracked), in bytes.
