@@ -1521,7 +1521,23 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
             });
         }
     }
-    None
+    // A position nothing paints, such as the mark of a paragraph whose text
+    // ends in a page break (kept on the break's page), sits after the text
+    // before it.
+    let (page_index, primitive) = dl
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| page.primitives.iter().map(move |p| (index, p)))
+        .filter(|(_, primitive)| text_doc_range(primitive).is_some_and(|(_, end)| end < pos))
+        .max_by_key(|(_, primitive)| text_doc_range(primitive).map(|(_, end)| end))?;
+    let hit = text_hit(primitive)?;
+    Some(CaretRect {
+        page_index,
+        x: x_at_position(&hit, pos),
+        y: hit.top,
+        height: hit.bottom - hit.top,
+    })
 }
 
 /// Highlight rectangles for a document range inside one page region — the

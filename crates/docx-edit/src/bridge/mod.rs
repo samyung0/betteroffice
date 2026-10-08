@@ -2745,6 +2745,17 @@ fn flush_paragraph_parts(
         }
         LayoutBlock::Paragraph(paragraph)
     };
+    // Page breaks ending the paragraph's text leave its mark on their page,
+    // as Word does without `splitPgBreakAndParaMark`: the last text part runs
+    // to the mark, and no empty part follows the breaks.
+    let mark_stays = raw_runs.last().is_some_and(|last| {
+        let mut after = drawings
+            .iter()
+            .filter(|drawing| drawing.pm_offset >= last.pm_end)
+            .peekable();
+        after.peek().is_some()
+            && after.all(|drawing| matches!(drawing.block, LayoutBlock::PageBreak(_)))
+    });
     let mut segment_start = 0_u32;
     let mut ends_in_break = false;
     let mut breaks = 0_usize;
@@ -2757,12 +2768,12 @@ fn flush_paragraph_parts(
                 run.pm_start -= segment_start;
                 run.pm_end -= segment_start;
             }
-            blocks.push(emit(
-                segment,
-                segment_start,
-                drawing.pm_offset - segment_start,
-                breaks,
-            ));
+            let end = if mark_stays && raw_runs.is_empty() {
+                paragraph_pm_units
+            } else {
+                drawing.pm_offset
+            };
+            blocks.push(emit(segment, segment_start, end - segment_start, breaks));
             breaks = 0;
         }
         ends_in_break = matches!(
@@ -2774,7 +2785,7 @@ fn flush_paragraph_parts(
         segment_start = drawing.pm_offset + 1;
     }
 
-    if !raw_runs.is_empty() || ends_in_break {
+    if !raw_runs.is_empty() || (ends_in_break && !mark_stays) {
         for run in &mut raw_runs {
             run.pm_start -= segment_start;
             run.pm_end -= segment_start;
