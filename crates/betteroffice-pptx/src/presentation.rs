@@ -89,9 +89,11 @@ impl Presentation {
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
         let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
+        let mut renderer = SlideRenderer::new();
+        renderer.register_embedded_fonts(session.package());
         Ok(Self {
             session,
-            renderer: SlideRenderer::new(),
+            renderer,
             #[cfg(feature = "raster")]
             caches: crate::render::RenderCaches::default(),
         })

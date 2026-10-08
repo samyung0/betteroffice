@@ -1,5 +1,6 @@
 import {
   initWasm,
+  installEmbeddedFonts,
   openPresentation,
   paintSlide,
   presentationImageBlob,
@@ -853,7 +854,7 @@ function PptxEditorContent({
     if (!file) return;
     setLoading(true);
     void Promise.all([initWasm(), installBrowserFonts(stableFonts)]).then(
-      ([, installed]) => {
+      async ([, installed]) => {
         browserFaces = installed;
         if (disposed) {
           removeBrowserFonts(browserFaces);
@@ -865,6 +866,13 @@ function PptxEditorContent({
             fonts: stableFonts,
             initialUpdate: collaborationInitialUpdate,
           });
+          // The deck's own faces, so the page paints what layout measured.
+          const embedded = await installEmbeddedFonts(handle);
+          if (disposed) {
+            removeBrowserFonts(embedded);
+            return;
+          }
+          browserFaces = [...browserFaces, ...embedded];
           handleRef.current = handle;
           firstPaintPendingRef.current = true;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {

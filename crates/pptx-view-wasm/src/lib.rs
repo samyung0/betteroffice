@@ -64,6 +64,31 @@ impl PptxViewRenderer {
             .map_err(js_error)
     }
 
+    /// Registers the deck's embedded faces, one per part, as
+    /// `[{"family" (its alias), "typeface", "bold", "italic", "fontId"}]`.
+    #[wasm_bindgen(js_name = registerEmbeddedFontsJson)]
+    pub fn register_embedded_fonts_json(
+        &mut self,
+        document: &PptxViewDocument,
+    ) -> Result<String, JsValue> {
+        let faces = self.renderer.register_embedded_fonts(&document.package);
+        serde_json::to_string(&faces).map_err(js_error)
+    }
+
+    /// Drops an embedded face the page could not load from layout.
+    #[wasm_bindgen(js_name = refuseEmbeddedFont)]
+    pub fn refuse_embedded_font(&mut self, font_id: u32) {
+        self.renderer.refuse_embedded_font(font_id);
+    }
+
+    #[wasm_bindgen(js_name = fontBytes)]
+    pub fn font_bytes(&self, font_id: u32) -> Result<Vec<u8>, JsValue> {
+        self.renderer
+            .font_bytes(font_id)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| js_error(format!("font {font_id} is not registered")))
+    }
+
     #[wasm_bindgen(js_name = layoutSlideJson)]
     pub fn layout_slide_json(
         &mut self,

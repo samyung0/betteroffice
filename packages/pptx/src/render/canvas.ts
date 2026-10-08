@@ -936,8 +936,9 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   return chunks;
 }
 
+/** Quoted, so a deck's name with digits, commas or quotes stays one family. */
 function quoteFamily(family: string): string {
-  return family.includes(' ') ? JSON.stringify(family) : family;
+  return JSON.stringify(family);
 }
 
 function paintPlaceholder(ctx: CanvasRenderingContext2D, placeholder: PlaceholderPrimitive): void {

@@ -28,6 +28,7 @@ import type {
   PresetShapeDraft,
   Profiled,
   ProfiledLayout,
+  PptxEmbeddedFontFace,
   PptxFontFace,
   PptxTextMatch,
   PptxTextSearchOptions,
@@ -79,6 +80,11 @@ export interface PresentationHandle extends CollaborationReplica {
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
+  /** The deck's embedded faces, for the page to paint with; decoded by this
+   *  call or the first layout, which then measures with them. */
+  embeddedFonts(): PptxEmbeddedFontFace[];
+  /** Drops an embedded face the page could not load from layout. */
+  refuseEmbeddedFont(fontId: number): void;
   /** With `caret`, that empty paragraph still shows its list marker, as while typing in it. */
   layoutSlide(
     slideIndex: number,
@@ -302,6 +308,17 @@ export function openPresentation(
   );
   const renderer = construct(() => new PptxRenderer());
   for (const face of options.fonts ?? []) registerFont(renderer, face);
+  // The deck's own faces, decoded on first use so a host that only saves
+  // never pays for them.
+  let embeddedFaces: EmbeddedFace[] | undefined;
+  const withEmbeddedFonts = (): PptxRenderer => {
+    if (!embeddedFaces) {
+      // Attempted once: a failure leaves the deck without embedded faces.
+      embeddedFaces = [];
+      embeddedFaces = jsonCall<EmbeddedFace[]>(() => renderer.registerEmbeddedFontsJson(doc));
+    }
+    return renderer;
+  };
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -416,10 +433,12 @@ export function openPresentation(
       return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
     },
     layoutProposalDiffSlide(id, slideIndex) {
-      return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));
+      return jsonWasmCall(() =>
+        withEmbeddedFonts().layoutProposalDiffSlideJson(doc, id, slideIndex)
+      );
     },
     layoutProposalSlide(id, slideIndex) {
-      return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));
+      return jsonWasmCall(() => withEmbeddedFonts().layoutProposalSlideJson(doc, id, slideIndex));
     },
     acceptProposal(id, options) {
       return jsonWasmCall(() => doc.acceptProposalJson(JSON.stringify({ id, force: options?.force ?? false })), true);
@@ -453,15 +472,32 @@ export function openPresentation(
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
     },
+    embeddedFonts(): PptxEmbeddedFontFace[] {
+      return wasmCall(() => {
+        withEmbeddedFonts();
+        return (embeddedFaces ?? []).map((face) => ({
+          ...face,
+          bytes: renderer.fontBytes(face.fontId),
+        }));
+      });
+    },
+    refuseEmbeddedFont(fontId: number): void {
+      wasmCall(() => renderer.refuseEmbeddedFont(fontId));
+    },
     layoutSlide(slideIndex, caret): SlideDisplayList {
       return jsonWasmCall(() =>
         caret
-          ? renderer.layoutSlideAtCaretJson(doc, slideIndex, caret.storyId, caret.paragraph)
-          : renderer.layoutSlideJson(doc, slideIndex)
+          ? withEmbeddedFonts().layoutSlideAtCaretJson(
+              doc,
+              slideIndex,
+              caret.storyId,
+              caret.paragraph
+            )
+          : withEmbeddedFonts().layoutSlideJson(doc, slideIndex)
       );
     },
     layoutSlideProfiled(slideIndex: number): ProfiledLayout {
-      return jsonWasmCall(() => renderer.layoutSlideProfiledJson(doc, slideIndex));
+      return jsonWasmCall(() => withEmbeddedFonts().layoutSlideProfiledJson(doc, slideIndex));
     },
     hitTest(x: number, y: number): HitTestResult | null {
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
@@ -810,6 +846,15 @@ export function openPresentation(
     },
   };
   return handle;
+}
+
+/** A part of the deck's `p:embeddedFontLst`, as the renderer registered it. */
+interface EmbeddedFace {
+  family: string;
+  typeface: string;
+  bold: boolean;
+  italic: boolean;
+  fontId: number;
 }
 
 function registerFont(renderer: PptxRenderer, face: PptxFontFace): number {

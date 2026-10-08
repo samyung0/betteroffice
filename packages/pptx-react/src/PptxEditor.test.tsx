@@ -478,6 +478,45 @@ describe('PptxEditor font stability', () => {
   );
 });
 
+describe('PptxEditor embedded fonts', () => {
+  it('adds the embedded faces of the deck to the page while it is open', async () => {
+    const fonts = new Set<{ family: string; descriptors: FontFaceDescriptors }>();
+    const globals = globalThis as Record<string, unknown>;
+    const savedFontFace = globals.FontFace;
+    globals.FontFace = class {
+      constructor(
+        readonly family: string,
+        readonly source: ArrayBuffer,
+        readonly descriptors: FontFaceDescriptors
+      ) {}
+      load() {
+        return Promise.resolve(this);
+      }
+    };
+    Object.defineProperty(document, 'fonts', { value: fonts, configurable: true });
+    try {
+      const deck = await readFile(resolve(root, 'crates/pptx-render/tests/fixtures/embedded-lato.pptx'));
+      const opened: PptxEditorApi[] = [];
+      const view = render(
+        <PptxEditor file={deck} fonts={[{ family: 'Arial', bytes: fontBytes }]} onReady={(api) => opened.push(api)} />
+      );
+      await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+      const families = [...fonts].map((face) => `${face.family} ${face.descriptors.weight}`);
+      expect(families.filter((family) => family.startsWith('bo-embedded-'))).toHaveLength(2);
+      expect(families.map((family) => family.replace(/^bo-embedded-\w+/, 'alias')).sort()).toEqual([
+        'Arial 400',
+        'alias 400',
+        'alias 700',
+      ]);
+      view.unmount();
+      expect(fonts.size).toBe(0);
+    } finally {
+      globals.FontFace = savedFontFace;
+      delete (document as unknown as Record<string, unknown>).fonts;
+    }
+  }, 60_000);
+});
+
 describe('PptxEditor host integration', () => {
   it('reports the first slide painted once, when its paint settles', async () => {
     const paints: Array<() => void> = [];

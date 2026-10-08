@@ -1496,6 +1496,33 @@ mod tests {
         }
     }
 
+    /// Security regression (xlsx-editor FIXES3, 00f1ccfe): finding the
+    /// formulas that read a cell scanned every read on its sheet, once per
+    /// recomputed cell, so an edit read by n formulas examined n x n reads
+    /// (200,000 readers took 270 s per edit). A lookup now examines the reads
+    /// filed near the cell.
+    #[test]
+    fn an_edit_read_by_many_formulas_examines_reads_near_each_cell() {
+        let (mut wb, s) = one_sheet();
+        let readers: u32 = 4_000;
+        put_num(&mut wb, s, "A1", 1.0);
+        // below A1's block of 64 rows, so each reader's own lookup is local
+        for row in 65..65 + readers {
+            put_formula(&mut wb, s, &format!("B{row}"), &format!("$A$1+{row}"));
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        put_num(&mut wb, s, "A1", 2.0);
+        let before = crate::graph::examined();
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        let examined = crate::graph::examined() - before;
+        assert!(r.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "B65"), num(67.0));
+        assert!(
+            examined <= 2 * u64::from(readers),
+            "{examined} reads examined"
+        );
+    }
+
     /// an array formula caught in a cycle has no rectangle to settle into, so
     /// it caches an empty string where an ordinary one settles at `0`.
     #[test]

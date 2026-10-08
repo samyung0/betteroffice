@@ -300,3 +300,74 @@ fn pictures_received_from_a_peer_render_before_save() {
     assert_eq!(rendered.skipped_images, 0);
     assert_ne!(rendered.bytes, before.bytes);
 }
+
+const LINE_SPACING: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/line-spacing.pptx");
+const LATO: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/Lato-regular.fntdata");
+
+/// `line-spacing.pptx` with shape 4's first run in Lato, which the deck
+/// embeds when `embed` is set.
+fn lato_deck(embed: bool) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(LINE_SPACING).unwrap();
+    let mut edits = vec![(
+        "ppt/slides/slide1.xml",
+        r#"<a:latin typeface="Arial"/></a:rPr><a:t>Exact 72 pt</a:t>"#,
+        r#"<a:latin typeface="Lato"/></a:rPr><a:t>Exact 72 pt</a:t>"#,
+    )];
+    if embed {
+        parts.push(("ppt/fonts/font1.fntdata".to_owned(), LATO.to_vec()));
+        edits.extend([
+            (
+                "ppt/presentation.xml",
+                "</p:presentation>",
+                r#"<p:embeddedFontLst><p:embeddedFont><p:font typeface="Lato"/><p:regular r:id="rIdFont1"/></p:embeddedFont></p:embeddedFontLst></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                "</Relationships>",
+                r#"<Relationship Id="rIdFont1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/font" Target="fonts/font1.fntdata"/></Relationships>"#,
+            ),
+        ]);
+    }
+    for (part, from, to) in edits {
+        let (_, bytes) = parts.iter_mut().find(|(path, _)| path == part).unwrap();
+        let xml = String::from_utf8(bytes.clone()).unwrap();
+        assert!(xml.contains(from), "{part}");
+        *bytes = xml.replacen(from, to, 1).into_bytes();
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn the_png_export_draws_with_the_embedded_face() {
+    let render = |embed| {
+        let mut presentation = Presentation::open(&lato_deck(embed)).unwrap();
+        presentation
+            .register_font("Arial", false, false, FONT)
+            .unwrap();
+        let slide = presentation.render_slide(0).unwrap();
+        let png = presentation
+            .render_png(0, &RenderOptions::default())
+            .unwrap();
+        (slide.display_list, png.bytes)
+    };
+    let (fallback_list, fallback_png) = render(false);
+    let (embedded_list, embedded_png) = render(true);
+    let first_run = |list: &pptx_render::SurfaceDisplayList| {
+        list.primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                pptx_render::Primitive::TextBox {
+                    object_id: 4,
+                    lines,
+                    ..
+                } => Some(lines[0].runs[0].clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let (embedded, fallback) = (first_run(&embedded_list), first_run(&fallback_list));
+    assert_eq!(embedded.text, fallback.text);
+    assert_ne!(embedded.width, fallback.width);
+    assert_ne!(embedded.glyphs, fallback.glyphs);
+    assert_ne!(embedded_png, fallback_png);
+}

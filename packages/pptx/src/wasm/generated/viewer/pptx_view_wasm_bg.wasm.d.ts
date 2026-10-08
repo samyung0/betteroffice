@@ -7,9 +7,12 @@ export const pptxviewdocument_mediaBytes: (a: number, b: number, c: number) => [
 export const pptxviewdocument_open: (a: number, b: number) => [number, number, number];
 export const pptxviewdocument_snapshotJson: (a: number) => [number, number, number, number];
 export const pptxviewdocument_version: () => [number, number];
+export const pptxviewrenderer_fontBytes: (a: number, b: number) => [number, number, number, number];
 export const pptxviewrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxviewrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxviewrenderer_new: () => number;
+export const pptxviewrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
+export const pptxviewrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
 export const pptxviewrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;

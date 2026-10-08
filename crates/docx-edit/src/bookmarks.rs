@@ -83,21 +83,22 @@ pub(crate) fn set(
     Ok(())
 }
 
-/// Re-anchors the bookmarks and comment ranges whose own text an Undo or Redo
-/// restored (`restored`, the step's deletions) onto that text (items of this
-/// client from clock `restored_from` on). It restores text as new items, which
-/// markers anchored to the old ones follow only in this session, through yrs's
-/// redone links: another replica and the save would place them elsewhere. A
-/// marker in text that stays deleted keeps its anchor, even beside text the
-/// step restored, so the Undo that restores its own text brings it back.
+/// Re-anchors the bookmarks and comment ranges whose own text this replica's
+/// Undo or Redo restored onto that text. It restores text as new items,
+/// which markers anchored to the old ones follow only on this replica,
+/// through yrs's redone links: another replica and the save would place them
+/// elsewhere. A marker in text that stays deleted, or was deleted again,
+/// keeps its anchor, even beside restored text, so the Undo that restores
+/// its own text brings it back. Runs after every Undo or Redo step and after
+/// a peer's update that writes markers, which may name text this replica
+/// restored earlier (a comment another peer removed and restored).
 ///
 /// A continued field's end is re-anchored too, so every peer and the save end
 /// the field where the peer that pressed Undo or Redo shows it (decided
 /// 2026-10-02). Its separate keeps its anchor: re-anchoring it made a rebase
 /// of Undo and Redo of a join that removed a nested continued field refuse
 /// (the matrix's `join nested continued field, undo, redo`).
-pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
-    let client = doc.client_id();
+pub(crate) fn rebind(doc: &yrs::Doc) {
     let mut txn = doc.transact_mut_with("system");
     let entries: Vec<_> = [ROOT, crate::COMMENTS]
         .into_iter()
@@ -126,15 +127,10 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
             let fresh = decode_anchor(encoded).ok().and_then(|anchor| {
                 let story = crate::story_ref(&txn, &anchor.story).ok()?;
                 let restore = |sticky: &yrs::StickyIndex| {
-                    if !sticky.id().is_some_and(|id| restored.contains(id)) {
-                        return None;
-                    }
+                    restored_copy(&txn, sticky.id()?)?;
                     let index = sticky.get_offset(&txn)?.index;
                     let fresh = story.sticky_index(&txn, index, sticky.assoc)?;
-                    let restored = fresh
-                        .id()
-                        .is_some_and(|id| id.client == client && id.clock >= restored_from);
-                    (fresh != *sticky && restored).then_some(fresh)
+                    (fresh != *sticky).then_some(fresh)
                 };
                 let (start, end) = (restore(&anchor.start), restore(&anchor.end));
                 (start.is_some() || end.is_some()).then(|| {
@@ -152,6 +148,56 @@ pub(crate) fn rebind(doc: &yrs::Doc, restored_from: u32, restored: &IdSet) {
             entry.insert(&mut txn, "anchors", Any::Array(Arc::from(rebound)));
         }
     }
+}
+
+/// The live copy this replica's Undo or Redo made of the item `id` names,
+/// following its redone links; `None` when there is none or it was deleted
+/// again.
+fn restored_copy<T: ReadTxn>(txn: &T, id: &yrs::ID) -> Option<yrs::block::ItemPtr> {
+    let mut item = txn.store().get_item(id)?;
+    let mut offset = id.clock - item.id().clock;
+    let mut redone = false;
+    while let Some(next) = item.redone() {
+        let next = yrs::ID::new(next.client, next.clock + offset);
+        item = txn.store().get_item(&next)?;
+        offset = next.clock - item.id().clock;
+        redone = true;
+    }
+    (redone && !item.is_deleted()).then_some(item)
+}
+
+/// Whether `inserted` (what a transaction inserted) writes a bookmark or a
+/// comment: an entry of either root, or a key of such an entry.
+pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &IdSet) -> bool {
+    use yrs::branch::{Branch, BranchPtr};
+    let roots: Vec<BranchPtr> = [ROOT, crate::COMMENTS]
+        .into_iter()
+        .filter_map(|name| txn.get_map(name))
+        .map(|root| BranchPtr::from(<yrs::MapRef as AsRef<Branch>>::as_ref(&root)))
+        .collect();
+    let in_roots = |branch: Option<BranchPtr>| branch.is_some_and(|branch| roots.contains(&branch));
+    inserted.iter().any(|(client, ranges)| {
+        ranges.iter().any(|range| {
+            let mut clock = range.start;
+            while clock < range.end {
+                let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
+                    return false;
+                };
+                clock = item.id().clock + item.len();
+                let parent = item.parent_branch();
+                if in_roots(parent)
+                    || in_roots(
+                        parent
+                            .and_then(|entry| entry.item())
+                            .and_then(|entry| entry.parent_branch()),
+                    )
+                {
+                    return true;
+                }
+            }
+            false
+        })
+    })
 }
 
 pub(crate) fn positions<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<(u32, Any)> {
@@ -655,5 +701,77 @@ mod tests {
         let markers = positions(&txn, "body");
         assert_eq!(markers.len(), 2 * PARAGRAPHS as usize);
         assert_eq!(markers.last().unwrap().0, (PARAGRAPHS - 1) * 20 + 9);
+    }
+
+    /// A peer sets a bookmark's start again on text another peer deleted and
+    /// restored with Undo: the restoring peer re-anchors it to its copy, so
+    /// every peer reads the bookmark at the same place.
+    #[test]
+    fn a_boundary_naming_text_an_undo_restored_resolves_alike_on_every_peer() {
+        let base = EditingDoc::new(1);
+        base.create_story(
+            "body",
+            "Hello brave new world, and then some more words to read.",
+            "Normal",
+            "left",
+        )
+        .unwrap();
+        bookmark(&base, "body", 7, 6, 21);
+        let state = base.encode_state_as_update_v1();
+        let peers: Vec<EditingDoc> = [701, 702, 703]
+            .into_iter()
+            .map(|client| {
+                let doc = EditingDoc::new(client);
+                doc.apply_update_v1(&state).unwrap();
+                doc
+            })
+            .collect();
+        let deleter = crate::UndoSession::new();
+        deleter.track(&peers[2]);
+        peers[2]
+            .delete_range(
+                &EditCtx::local("", ""),
+                crate::StoryRange::new("body", 0, 30),
+            )
+            .unwrap();
+        deleter.add_undo_barrier();
+        assert!(deleter.undo());
+        peers[1]
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::SetBookmark {
+                    index: 6,
+                    data: Any::Map(Arc::new(
+                        [
+                            ("id".to_owned(), Any::Number(7.0)),
+                            ("kind".to_owned(), Any::from("start")),
+                        ]
+                        .into(),
+                    )),
+                }],
+                &EditCtx::local("", ""),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            for from in &peers {
+                for to in &peers {
+                    if !std::ptr::eq(from, to) {
+                        let update = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+                        to.applying_peer_update(|| to.apply_update_v1(&update).unwrap());
+                    }
+                }
+            }
+        }
+        let read = |doc: &EditingDoc| {
+            let txn = doc.yrs_doc().transact();
+            positions(&txn, "body")
+                .into_iter()
+                .map(|(at, _)| at)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(read(&peers[0]), [6, 21]);
+        for peer in &peers[1..] {
+            assert_eq!(read(peer), read(&peers[0]));
+        }
     }
 }

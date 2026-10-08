@@ -90,6 +90,7 @@ export class PptxDocument {
 export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    fontBytes(font_id: number): Uint8Array;
     hitTestJson(x: number, y: number): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
@@ -105,6 +106,15 @@ export class PptxRenderer {
      */
     layoutSlideProfiledJson(document: PptxDocument, slide_index: number): string;
     constructor();
+    /**
+     * Drops an embedded face the page could not load from layout.
+     */
+    refuseEmbeddedFont(font_id: number): void;
+    /**
+     * Registers the deck's embedded faces, one per part, as
+     * `[{"family" (its alias), "typeface", "bold", "italic", "fontId"}]`.
+     */
+    registerEmbeddedFontsJson(document: PptxDocument): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
 }
 
@@ -124,6 +134,7 @@ export interface InitOutput {
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
+    readonly pptxrenderer_fontBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -131,6 +142,8 @@ export interface InitOutput {
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
+    readonly pptxrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
+    readonly pptxrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;

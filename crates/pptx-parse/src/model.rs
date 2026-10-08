@@ -114,6 +114,20 @@ pub struct Presentation {
     pub first_slide_num: i32,
     pub slides: Vec<SlideReference>,
     pub master_part_paths: Vec<String>,
+    /// `p:embeddedFontLst`: one entry per face whose part is referenced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedded_fonts: Vec<EmbeddedFont>,
+}
+
+/// One face of a `p:embeddedFont`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedFont {
+    /// `p:font/@typeface`.
+    pub typeface: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub part_path: String,
 }
 
 fn default_first_slide_num() -> i32 {

@@ -1046,7 +1046,9 @@ impl EditingDoc {
     /// Runs `apply` (a peer's update), then renames the paragraph ids that
     /// concurrent splits duplicated ([`Self::rename_duplicate_para_ids`]),
     /// looking only at the ids of paragraph marks the update inserted or
-    /// re-identified and only in their stories.
+    /// re-identified and only in their stories, and re-anchors the markers it
+    /// wrote that name text this replica's Undo restored
+    /// ([`crate::bookmarks::rebind`]).
     pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
         let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
         let subscription = {
@@ -1063,6 +1065,8 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
+        let markers =
+            crate::bookmarks::writes_markers(&yrs::Transact::transact(self.yrs_doc()), &inserted);
         let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
             let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
@@ -1085,16 +1089,20 @@ impl EditingDoc {
         if !touched.is_empty() {
             self.rename_duplicates(Some(&touched));
         }
+        if markers {
+            crate::bookmarks::rebind(self.yrs_doc());
+        }
         result
     }
 
     /// Renames paragraph ids that concurrent splits of one paragraph
-    /// duplicated within a story, the same way on every peer: source marks
-    /// rank first, in source order, then the rest by `(client, clock)`; the
-    /// first keeps the id and each other mark takes `{client}.{clock}` of its
-    /// own item. A system edit, outside
-    /// Undo. Returns the `(old, new)` pairs. Run over a loaded state, which
-    /// may have been stored before any peer renamed.
+    /// duplicated within a story, the same way on every peer. One mark keeps
+    /// the id: the one an earlier rename gave it (the id is `{client}.{clock}`
+    /// of its own item), else a source mark, earliest first, else the lowest
+    /// `(client, clock)`. Each other mark takes `{client}.{clock}` of its own
+    /// item. A system edit, outside Undo. Returns the `(old, new)` pairs. Run
+    /// over a loaded state, which may have been stored before any peer
+    /// renamed.
     pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
         self.rename_duplicates(None)
     }
@@ -1174,9 +1182,8 @@ impl EditingDoc {
         };
         let mut txn = yrs::Transact::transact_mut_with(self.yrs_doc(), "system");
         for mut marks in duplicates {
-            // A mark an earlier rename gave `{client}.{clock}` of its own item
-            // owns that id and keeps it: renaming it would write the same id
-            // again, and peers would echo that write forever.
+            // Renaming the owner would write its id again, and every peer
+            // would echo that write forever.
             let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             marks.sort_by_key(|(id, _)| {
                 (

@@ -10,6 +10,8 @@ const GRADIENT_OUTLINE_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/gradient-outline.pptx");
 const NUMBERED_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
+const EMBEDDED_FONTS_FIXTURE: &[u8] =
+    include_bytes!("../../pptx-render/tests/fixtures/embedded-lato.pptx");
 
 fn open_fixture() -> DeckSession {
     DeckSession::open(FIXTURE, 7).unwrap()
@@ -1035,4 +1037,39 @@ fn width_edits_preserve_authored_gradient_geometry() {
     assert_eq!(xml.matches("scaled=\"0\"").count(), 2);
     assert_eq!(xml.matches("<a:tileRect").count(), 2);
     assert_eq!(xml.matches("rotWithShape=\"0\"").count(), 2);
+}
+
+#[test]
+fn embedded_font_parts_and_their_list_survive_edits_untouched() {
+    let session = DeckSession::open(EMBEDDED_FONTS_FIXTURE, 7).unwrap();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    session
+        .insert_text(&context(), &story_id, 0, "Edited ", &TextStyle::default())
+        .unwrap();
+    session.insert_slide(&context(), 1, None).unwrap();
+
+    let saved = session.save().unwrap();
+    let (source, written) = (parts(EMBEDDED_FONTS_FIXTURE), parts(&saved));
+    for path in [
+        "ppt/fonts/Lato-regular.fntdata",
+        "ppt/fonts/Lato-bold.fntdata",
+    ] {
+        assert_eq!(written[path], source[path], "{path}");
+    }
+    let text = |path: &str| String::from_utf8(written[path].clone()).unwrap();
+    assert!(text("ppt/presentation.xml").contains(
+        r#"<p:embeddedFontLst><p:embeddedFont><p:font typeface="Lato"/><p:regular r:id="rId20"/><p:bold r:id="rId21"/></p:embeddedFont></p:embeddedFontLst>"#
+    ));
+    for target in ["fonts/Lato-regular.fntdata", "fonts/Lato-bold.fntdata"] {
+        assert!(text("ppt/_rels/presentation.xml.rels").contains(target));
+    }
+    assert!(text("[Content_Types].xml").contains(r#"Extension="fntdata""#));
+    assert_eq!(
+        DeckSession::open(&saved, 8)
+            .unwrap()
+            .package()
+            .presentation
+            .embedded_fonts,
+        session.package().presentation.embedded_fonts
+    );
 }

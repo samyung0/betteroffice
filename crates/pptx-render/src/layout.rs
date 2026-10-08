@@ -12,7 +12,8 @@ use ooxml_drawingml::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    break_opportunities, shape, single_line_box, uppercase_for_language,
+    break_opportunities, decode_embedded_font_within, shape, single_line_box,
+    uppercase_for_language,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -55,6 +56,11 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+/// What one deck's embedded fonts may cost: their parts, declared blocks,
+/// run-length expansion and decoded faces.
+pub const MAX_DECK_EMBEDDED_FONT_BYTES: usize = 64 * 1024 * 1024;
+/// Distinct embedded font parts one deck may register.
+pub const MAX_EMBEDDED_FACES: usize = 64;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
@@ -81,6 +87,8 @@ pub enum RenderError {
 #[derive(Clone)]
 struct FontFace {
     id: FontId,
+    /// The family display lists name: the registered name, or for an
+    /// embedded face its per-deck alias.
     family: String,
     requested_family: String,
     /// The named family's own advance widths, where this face stands in for a
@@ -90,9 +98,28 @@ struct FontFace {
     line: Option<&'static FamilyMetrics>,
 }
 
+/// A deck's embedded font part, as [`SlideRenderer::register_embedded_fonts`]
+/// registered it: once per part, under the alias display lists name it by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedFace {
+    /// The alias (`bo-embedded-<hash of the bytes>`) the page registers the
+    /// face under, so it styles nothing but this deck's text.
+    pub family: String,
+    /// `p:font/@typeface` of the first slot naming the part.
+    pub typeface: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub font_id: u32,
+}
+
+type FaceKey = (String, bool, bool);
+
 pub struct SlideRenderer {
     fonts: FontStore,
-    faces: HashMap<(String, bool, bool), FontFace>,
+    faces: HashMap<FaceKey, FontFace>,
+    /// The deck's embedded faces, ahead of `faces` for the same key.
+    embedded: HashMap<FaceKey, FontFace>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
@@ -112,6 +139,7 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            embedded: HashMap::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
@@ -131,43 +159,137 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
+        let family = family.trim();
+        if family.is_empty() {
+            return Err(RenderError::Font("font family is empty".to_owned()));
+        }
+        let id = self.store(bytes.to_vec())?;
+        let face = self.face(id, family, family, bold, italic);
+        self.faces
+            .insert((normalize_family(family), bold, italic), face.clone());
+        self.fallback.get_or_insert(face);
+        self.fallback_family
+            .get_or_insert_with(|| normalize_family(family));
+        Ok(id.to_u32())
+    }
+
+    /// Registers the faces the deck embeds (`p:embeddedFontLst`), ahead of a
+    /// host face under the same name and style. Each part is decoded once,
+    /// whatever number of slots name it, and the deck's budget
+    /// ([`MAX_DECK_EMBEDDED_FONT_BYTES`]) is charged for the part and its
+    /// declared blocks before decoding them, for what the run-length stage
+    /// expands as it grows, and for the font it keeps, whether the decode
+    /// succeeds or not. A part that is missing, cannot be decoded
+    /// or no longer fits is skipped, as is any past [`MAX_EMBEDDED_FACES`],
+    /// so their text keeps the host's face. Returns one entry per part
+    /// registered.
+    pub fn register_embedded_fonts(&mut self, package: &PptxPackage) -> Vec<EmbeddedFace> {
+        let mut budget = MAX_DECK_EMBEDDED_FONT_BYTES;
+        let mut parts: HashMap<&str, Option<(FontId, String)>> = HashMap::new();
+        let mut registered = Vec::new();
+        for font in &package.presentation.embedded_fonts {
+            let typeface = font.typeface.trim();
+            let entry = match parts.get(font.part_path.as_str()) {
+                Some(entry) => entry.clone(),
+                None => {
+                    let entry = (registered.len() < MAX_EMBEDDED_FACES)
+                        .then(|| self.decode_embedded(package, &font.part_path, &mut budget))
+                        .flatten();
+                    if let Some((id, alias)) = &entry {
+                        registered.push(EmbeddedFace {
+                            family: alias.clone(),
+                            typeface: typeface.to_owned(),
+                            bold: font.bold,
+                            italic: font.italic,
+                            font_id: id.to_u32(),
+                        });
+                    }
+                    parts.insert(&font.part_path, entry.clone());
+                    entry
+                }
+            };
+            let Some((id, alias)) = entry else {
+                continue;
+            };
+            let face = self.face(id, &alias, typeface, font.bold, font.italic);
+            self.embedded
+                .insert((normalize_family(typeface), font.bold, font.italic), face);
+        }
+        registered
+    }
+
+    /// Drops the embedded face `font_id` from layout, so its text falls back
+    /// with the page that could not load it.
+    pub fn refuse_embedded_font(&mut self, font_id: u32) {
+        self.embedded.retain(|_, face| face.id.to_u32() != font_id);
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+    }
+
+    fn decode_embedded(
+        &mut self,
+        package: &PptxPackage,
+        part_path: &str,
+        budget: &mut usize,
+    ) -> Option<(FontId, String)> {
+        let bytes = package.part_bytes(part_path)?;
+        let font = decode_embedded_font_within(bytes, part_path, budget).ok()?;
+        *budget = budget.checked_sub(font.len())?;
+        // The alias lives only in this session's display lists and page fonts
+        // and is never stored, so the hash need not be stable across builds.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&font, &mut hasher);
+        let alias = format!("bo-embedded-{:016x}", std::hash::Hasher::finish(&hasher));
+        Some((self.store(font).ok()?, alias))
+    }
+
+    fn store(&mut self, bytes: Vec<u8>) -> Result<FontId, RenderError> {
         if self.font_count >= MAX_FONTS {
             return Err(RenderError::ResourceLimit(format!(
                 "more than {MAX_FONTS} font faces"
             )));
         }
-        let family = family.trim();
-        if family.is_empty() {
-            return Err(RenderError::Font("font family is empty".to_owned()));
-        }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
-        let requested = normalize_family(family);
-        let metrics = family_metrics(&requested, bold, italic);
-        let face = FontFace {
-            id,
-            family: family.to_owned(),
-            requested_family: requested.clone(),
-            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
-            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
-        };
-        self.faces.insert((requested, bold, italic), face.clone());
-        self.fallback.get_or_insert(face);
-        self.fallback_family
-            .get_or_insert_with(|| normalize_family(family));
         self.font_count += 1;
         if let Ok(cache) = self.text_layouts.get_mut() {
             cache.clear();
         }
-        Ok(id.to_u32())
+        Ok(id)
+    }
+
+    /// The face `id` standing for `requested` in that style.
+    fn face(
+        &self,
+        id: FontId,
+        family: &str,
+        requested: &str,
+        bold: bool,
+        italic: bool,
+    ) -> FontFace {
+        let requested = normalize_family(requested);
+        let metrics = family_metrics(&requested, bold, italic);
+        FontFace {
+            id,
+            family: family.to_owned(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            requested_family: requested,
+        }
     }
 
     /// The store holding every registered face, so a raster backend can resolve
     /// the `font_id`s the display list references.
     pub fn fonts(&self) -> &FontStore {
         &self.fonts
+    }
+
+    /// The bytes of the registered face `font_id`.
+    pub fn font_bytes(&self, font_id: u32) -> Option<&[u8]> {
+        self.fonts.font_bytes(FontId::from_u32(font_id)).ok()
     }
 
     /// First registered face for placeholder labels.
@@ -414,7 +536,8 @@ impl SlideRenderer {
             (false, false),
         ];
         for (face_bold, face_italic) in styles {
-            if let Some(face) = self.faces.get(&(requested.clone(), face_bold, face_italic)) {
+            let key = (requested.clone(), face_bold, face_italic);
+            if let Some(face) = self.embedded.get(&key).or_else(|| self.faces.get(&key)) {
                 return Ok(if (face_bold, face_italic) == (bold, italic) {
                     face.clone()
                 } else {
@@ -422,17 +545,16 @@ impl SlideRenderer {
                 });
             }
         }
-        self.faces
-            .iter()
-            .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
-            .min_by_key(|((_, face_bold, face_italic), _)| {
-                (
-                    2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic),
-                    *face_bold,
-                    *face_italic,
-                )
+        // A family with only some styles (an embedded bold alone) still
+        // draws in its own face, as the browser picks it for the name.
+        nearest_face(&self.embedded, &requested, bold, italic)
+            .or_else(|| nearest_face(&self.faces, &requested, bold, italic))
+            .or_else(|| {
+                self.fallback_family
+                    .as_ref()
+                    .and_then(|name| nearest_face(&self.faces, name, bold, italic))
             })
-            .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
+            .map(|face| self.with_requested_metrics(face, &requested, bold, italic))
             .ok_or(RenderError::NoFont)
     }
 
@@ -451,6 +573,26 @@ impl SlideRenderer {
             ..face.clone()
         }
     }
+}
+
+/// The face of family `name` closest to the style asked for.
+fn nearest_face<'a>(
+    faces: &'a HashMap<FaceKey, FontFace>,
+    name: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<&'a FontFace> {
+    faces
+        .iter()
+        .filter(|((face_name, _, _), _)| face_name == name)
+        .min_by_key(|((_, face_bold, face_italic), _)| {
+            (
+                2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic),
+                *face_bold,
+                *face_italic,
+            )
+        })
+        .map(|(_, face)| face)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

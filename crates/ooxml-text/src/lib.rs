@@ -36,6 +36,8 @@
 //!   ships, so a substituted face measures as the one the document named.
 //! - [`symbol_font`] — what a Wingdings or Webdings character actually
 //!   addresses, and the nearest covered Unicode character to draw for it.
+//! - [`embedded_font`] — embedded font parts (Embedded OpenType with
+//!   MicroType Express, obfuscated `.odttf`) decoded to plain sfnt bytes.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -51,6 +53,7 @@
 pub mod auto_space;
 pub mod bidi;
 pub mod caps;
+pub mod embedded_font;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
@@ -67,6 +70,7 @@ pub use bidi::{
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
+pub use embedded_font::{EmbeddedFontError, decode_embedded_font, decode_embedded_font_within};
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{BreakOpportunity, break_opportunities};
 pub use measure::{
