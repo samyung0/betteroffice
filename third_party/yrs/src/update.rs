@@ -280,6 +280,12 @@ impl Update {
         &self.delete_set
     }
 
+    /// Patched for BetterOffice: the delete set, for a caller that narrows an
+    /// encoded state to the structs it sends (DOCX override copies).
+    pub fn delete_set_mut(&mut self) -> &mut IdSet {
+        &mut self.delete_set
+    }
+
     /// Patched for BetterOffice: every struct this update carries, as decoded
     /// and before integration, grouped by client in clock order (clients in no
     /// particular order). Read-only, for callers that check an update against a

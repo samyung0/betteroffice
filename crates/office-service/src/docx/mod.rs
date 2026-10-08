@@ -73,10 +73,34 @@ fn open_engine(
     Ok((engine, Some(envelope)))
 }
 
-/// `seedOffice` for DOCX.
+/// `seedOffice` for DOCX: the whole source, or in the override layout
+/// (`OFFICE_DOCX_LAYOUT=chunked`, spike) its meta root only.
 pub(crate) fn seed(base: &[u8]) -> Result<Vec<u8>> {
+    if chunked_layout() {
+        return Ok(docx_edit::overlay::meta_seed(
+            &docx_edit::overlay::fingerprint(base),
+        ));
+    }
     let (engine, _) = open_engine(base, true)?;
     Ok(engine.doc().encode_state_as_update_v1())
+}
+
+/// Whether new DOCX rooms start in the override layout (spike switch).
+pub(crate) fn chunked_layout() -> bool {
+    std::env::var("OFFICE_DOCX_LAYOUT").is_ok_and(|layout| layout == "chunked")
+}
+
+/// Whether `state` writes the override layout's meta root.
+fn chunked_state(state: &[u8]) -> bool {
+    use yrs::updates::decoder::Decode;
+    let Ok(update) = yrs::Update::decode_v1(state) else {
+        return false;
+    };
+    update.blocks().any(|block| {
+        matches!(block, yrs::UpdateBlock::Item(item)
+            if matches!(item.update_parent(), yrs::block::UpdateParent::Root(name)
+                if name.as_ref() == docx_edit::overlay::META))
+    })
 }
 
 /// The materialized source as decodeS9Envelope gives the TS its `Document`.
@@ -222,6 +246,31 @@ fn authored_text(value: &V) -> String {
 
 impl DocxSession {
     pub fn open(base: &[u8], state: Option<&[u8]>) -> Result<Self> {
+        if let Some(state) = state
+            && chunked_state(state)
+        {
+            let engine = EngineSession::new(env::next_client());
+            let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
+            engine.set_media(docx_edit::package_media(&envelope));
+            let document = decode_document(&envelope)?;
+            docx_edit::overlay::open_chunked(
+                engine.doc(),
+                envelope,
+                &docx_edit::overlay::fingerprint(base),
+            )
+            .map_err(Error::Engine)?;
+            engine
+                .doc()
+                .apply_shared_update(state)
+                .map_err(Error::engine)?;
+            return Ok(Self {
+                document: Some(document),
+                engine,
+                undo: UndoSession::new(),
+                base: base.to_vec(),
+                projected: None,
+            });
+        }
         let (engine, envelope) = open_engine(base, state.is_none())?;
         if let Some(state) = state {
             engine.doc().load_state_v1(state).map_err(Error::engine)?;

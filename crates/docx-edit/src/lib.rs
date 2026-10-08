@@ -68,6 +68,7 @@ mod deterministic;
 mod format;
 mod op;
 mod ops;
+pub mod overlay;
 mod presence;
 mod queries;
 mod raw;
@@ -312,6 +313,8 @@ pub struct EditingDoc {
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
+    /// The override layout this replica runs (`overlay::open_chunked`).
+    overlay: Mutex<Option<Arc<overlay::Overlay>>>,
     _update_sub: Subscription,
 }
 
@@ -326,6 +329,7 @@ impl EditingDoc {
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
         doc.get_or_insert_map(bookmarks::ROOT);
+        doc.get_or_insert_map(overlay::META);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
         // after_transaction: bumps on any store-changing commit without encoding an update.
@@ -344,6 +348,7 @@ impl EditingDoc {
             segment_indexes: Mutex::new(HashMap::new()),
             chunk_snapshots: Mutex::new(HashMap::new()),
             package: Mutex::new(None),
+            overlay: Mutex::new(None),
             _update_sub: update_sub,
         }
     }

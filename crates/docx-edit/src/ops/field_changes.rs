@@ -785,7 +785,6 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
 /// deleting part of a field's last link remove it only once each has the
 /// other's update. Each deleted range costs one step right from its last
 /// item; only a field found there reads its story.
-#[cfg(feature = "wasm")]
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
     use yrs::branch::BranchPtr;
     use yrs::types::TypeRef;

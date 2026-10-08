@@ -4268,19 +4268,225 @@ pub fn seed_parsed_docx(
     Ok(fonts)
 }
 
+/// What seeding a package writes, before it is written: each story's units
+/// with its comment coverage, then the comments' own fields.
+pub(crate) struct Lowering {
+    plans: Vec<StoryPlan>,
+    comment_ops: Vec<RawOp>,
+    referenced_fonts: BTreeSet<String>,
+    /// Display data URL to media part path, first part in package order.
+    media_parts: HashMap<String, String>,
+}
+
 /// Seeds under `document`'s own client, for a view that never stores its
 /// state; keeps update decoding out of the viewer build.
 pub fn seed_parsed_docx_in_place(
     document: &EditingDoc,
-    mut envelope: docx_parse::S9WireEnvelope,
+    envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
+    let Lowering {
+        plans,
+        comment_ops,
+        mut referenced_fonts,
+        media_parts,
+    } = lower(envelope)?;
+    let media_parts: HashMap<&str, &str> = media_parts
+        .iter()
+        .map(|(url, path)| (url.as_str(), path.as_str()))
+        .collect();
+    document
+        .create_empty_stories(
+            &plans
+                .iter()
+                .map(|plan| plan.story_id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut batches = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let (story_id, ops, fonts) = seed_plan(plan, &media_parts)?;
+        batches.push((story_id, ops));
+        referenced_fonts.extend(fonts);
+    }
+    batches.push(("body".to_owned(), comment_ops));
+    document
+        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .map_err(|error| error.to_string())?;
+    Ok(referenced_fonts.into_iter().collect())
+}
+
+/// The seed's writes for each story cut into chunks after every paragraph
+/// mark, table and block content control (units without formatting, so no
+/// format span crosses a cut), with each bookmark placed in the chunk whose
+/// unit its anchor names, and each comment's coverage and fields.
+pub(crate) fn chunk_source(lowering: Lowering) -> Result<crate::overlay::Source, String> {
+    use crate::overlay::{Source, SourceBookmark, SourceChunk, SourceComment, SourceStory};
+    let Lowering {
+        plans,
+        comment_ops,
+        mut referenced_fonts,
+        media_parts,
+    } = lowering;
+    let media: HashMap<&str, &str> = media_parts
+        .iter()
+        .map(|(url, path)| (url.as_str(), path.as_str()))
+        .collect();
+    let mut stories = Vec::with_capacity(plans.len());
+    let mut comments: Vec<SourceComment> = Vec::new();
+    let mut comment_at: HashMap<String, usize> = HashMap::new();
+    let mut comment = |id: &str, comments: &mut Vec<SourceComment>| -> usize {
+        *comment_at.entry(id.to_owned()).or_insert_with(|| {
+            comments.push(SourceComment {
+                id: id.to_owned(),
+                ranges: Vec::new(),
+                fields: None,
+            });
+            comments.len() - 1
+        })
+    };
+    for plan in plans {
+        let StoryPlan {
+            story_id,
+            mut units,
+            comment_coverage,
+        } = plan;
+        reference_media(&mut units, &media);
+        let bookmarks = take_bookmarks(&mut units)?;
+        let mut bounds = Vec::new();
+        let (mut unit_start, mut offset, mut offset_start) = (0, 0u32, 0u32);
+        for (index, unit) in units.iter().enumerate() {
+            offset += match &unit.content {
+                UnitContent::Text(text) => utf16_len(text),
+                UnitContent::Embed { .. } => 1,
+            };
+            if matches!(&unit.content, UnitContent::Embed { kind, .. }
+                if matches!(kind.as_str(), "pilcrow" | "table" | "blockSdt"))
+            {
+                bounds.push((unit_start, index + 1, offset_start, offset));
+                unit_start = index + 1;
+                offset_start = offset;
+            }
+        }
+        if unit_start < units.len() {
+            bounds.push((unit_start, units.len(), offset_start, offset));
+        }
+        let len = offset;
+        let mut chunks = Vec::with_capacity(bounds.len());
+        for &(from, to, start, end) in &bounds {
+            let mut ops = units_to_raw_ops(units[from..to].to_vec(), &mut referenced_fonts)?;
+            ops.remove(0);
+            chunks.push(SourceChunk {
+                start,
+                len: end - start,
+                ops,
+                bookmarks: Vec::new(),
+            });
+        }
+        for (key, data, index, assoc) in place_bookmarks(&story_id, bookmarks)? {
+            if chunks.is_empty() {
+                return Err(format!("bookmark {key} in story {story_id} without content"));
+            }
+            let unit = match assoc {
+                yrs::Assoc::After => index.min(len.saturating_sub(1)),
+                yrs::Assoc::Before => index.saturating_sub(1),
+            };
+            let at = chunks
+                .partition_point(|chunk| chunk.start <= unit)
+                .saturating_sub(1);
+            let chunk = &mut chunks[at];
+            chunk.bookmarks.push(SourceBookmark {
+                key,
+                data,
+                index: index - chunk.start,
+                assoc,
+            });
+        }
+        for (id, ranges) in comment_coverage {
+            let at = comment(&id, &mut comments);
+            comments[at].ranges.push((story_id.clone(), ranges));
+        }
+        stories.push(SourceStory {
+            id: story_id,
+            chunks,
+            len,
+        });
+    }
+    for op in comment_ops {
+        if let RawOp::PatchComment { id, fields } = op {
+            let at = comment(&id, &mut comments);
+            comments[at].fields = Some(fields);
+        }
+    }
+    Ok(Source {
+        stories,
+        comments,
+        referenced_fonts: referenced_fonts.into_iter().collect(),
+    })
+}
+
+/// Where each bookmark entry the seed sets ends up anchored: its key, data,
+/// story index and side, after `bookmarks::set` collapses a start and end at
+/// one index onto the unit before it.
+fn place_bookmarks(
+    story_id: &str,
+    ops: Vec<RawOp>,
+) -> Result<Vec<(String, Any, u32, yrs::Assoc)>, String> {
+    let mut placed: Vec<(String, Any, u32, yrs::Assoc)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for op in ops {
+        let RawOp::SetBookmark { index, data } = op else {
+            continue;
+        };
+        let Any::Map(metadata) = &data else {
+            return Err("bookmark metadata must be an object".into());
+        };
+        let id = match metadata.get("id") {
+            Some(Any::Number(id)) => id.to_string(),
+            Some(Any::String(id)) => id.to_string(),
+            _ => return Err("inline boundary needs an id".into()),
+        };
+        let Some(Any::String(kind)) = metadata.get("kind") else {
+            return Err("bookmark needs a boundary kind".into());
+        };
+        let mut assoc = match kind.as_ref() {
+            "start" => yrs::Assoc::After,
+            "end" | "fieldend" | "fieldseparate" => yrs::Assoc::Before,
+            _ => return Err("invalid bookmark boundary kind".into()),
+        };
+        let opposite = if kind.as_ref() == "start" {
+            "end"
+        } else {
+            "start"
+        };
+        if let Some(&other) = at.get(&format!("{story_id}:{id}:{opposite}"))
+            && placed[other].2 == index
+        {
+            assoc = yrs::Assoc::Before;
+            placed[other].3 = yrs::Assoc::Before;
+        }
+        let key = format!("{story_id}:{id}:{kind}");
+        let entry = (key.clone(), data.clone(), index, assoc);
+        match at.get(&key) {
+            Some(&existing) => placed[existing] = entry,
+            None => {
+                at.insert(key, placed.len());
+                placed.push(entry);
+            }
+        }
+    }
+    Ok(placed)
+}
+
+/// Lowers a parsed package into the stories and comments its seed writes.
+pub(crate) fn lower(mut envelope: docx_parse::S9WireEnvelope) -> Result<Lowering, String> {
     let media = std::mem::take(&mut envelope.document.package.media_entries);
     let mut media_parts = HashMap::new();
     for (_, file) in &media {
         media_parts
-            .entry(file.data_url.as_str())
-            .or_insert(file.path.as_str());
+            .entry(file.data_url.clone())
+            .or_insert(file.path.clone());
     }
+    drop(media);
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
@@ -4386,26 +4592,12 @@ pub fn seed_parsed_docx_in_place(
         })
         .collect::<Result<Vec<_>, String>>()?;
     drop(parsed);
-    document
-        .create_empty_stories(
-            &context
-                .plans
-                .iter()
-                .map(|plan| plan.story_id.clone())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?;
-    let mut batches = Vec::with_capacity(context.plans.len());
-    for plan in context.plans {
-        let (story_id, ops, fonts) = seed_plan(plan, &media_parts)?;
-        batches.push((story_id, ops));
-        referenced_fonts.extend(fonts);
-    }
-    batches.push(("body".to_owned(), comment_ops));
-    document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
-        .map_err(|error| error.to_string())?;
-    Ok(referenced_fonts.into_iter().collect())
+    Ok(Lowering {
+        plans: context.plans,
+        comment_ops,
+        referenced_fonts,
+        media_parts,
+    })
 }
 
 /// The raw ops that seed `blocks` (paragraphs the editor wrote) into an empty

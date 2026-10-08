@@ -564,6 +564,14 @@ impl<'doc> TransactionMut<'doc> {
         &self.delete_set
     }
 
+    /// Patched for BetterOffice: the formatting items this transaction's
+    /// cleanup deleted. A transaction applying a remote update runs the cleanup
+    /// inside itself (Yjs runs it in a separate local transaction), so a peer
+    /// that sends only its own transactions must send these on its own.
+    pub fn cleanups(&self) -> &IdSet {
+        &self.cleanups
+    }
+
     /// Returns origin of the transaction if any was defined. Read-write transactions can get an
     /// origin assigned via [Transact::try_transact_mut_with]/[Transact::transact_mut_with] methods.
     pub fn origin(&self) -> Option<&Origin> {
