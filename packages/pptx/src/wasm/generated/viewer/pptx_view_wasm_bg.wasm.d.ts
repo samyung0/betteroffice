@@ -14,6 +14,7 @@ export const pptxviewrenderer_new: () => number;
 export const pptxviewrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
 export const pptxviewrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
 export const pptxviewrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+export const betteroffice_memory_grows: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

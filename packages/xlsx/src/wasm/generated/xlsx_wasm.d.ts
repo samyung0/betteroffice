@@ -216,6 +216,7 @@ export interface InitOutput {
     readonly xlsxdocument_version: () => [number, number];
     readonly xlsxeffectsreader_new: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxeffectsreader_pendingEffectsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly betteroffice_memory_grows: () => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

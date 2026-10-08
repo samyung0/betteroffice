@@ -6,6 +6,7 @@ export const WORKSPACE_MANIFEST = 'Cargo.toml';
 export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
+  { name: 'betteroffice-wasm-alloc', dependency: 'wasm-alloc' },
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },

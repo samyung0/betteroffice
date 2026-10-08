@@ -1,6 +1,10 @@
 //! the single wasm-bindgen boundary: coarse json-string calls over the pure
 //! `Session` methods in `core.rs`.
 
+// Linear memory grows in large steps (crates/wasm-alloc).
+#[cfg(target_arch = "wasm32")]
+use wasm_alloc as _;
+
 mod core;
 
 use std::collections::VecDeque;

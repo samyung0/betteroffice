@@ -47,6 +47,7 @@ export interface InitOutput {
     readonly pptxviewrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
     readonly pptxviewrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxviewrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly betteroffice_memory_grows: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

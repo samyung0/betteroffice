@@ -113,6 +113,9 @@ pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureM
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+// Linear memory grows in large steps (crates/wasm-alloc).
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+use wasm_alloc as _;
 
 const STORIES: &str = "stories";
 const COMMENTS: &str = "comments";

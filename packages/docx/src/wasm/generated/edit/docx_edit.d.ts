@@ -1217,6 +1217,7 @@ export interface InitOutput {
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
     readonly editsession_update_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly betteroffice_memory_grows: () => number;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

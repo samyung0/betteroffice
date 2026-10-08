@@ -1,5 +1,9 @@
 //! PPTX display-list wasm boundary.
 
+// Linear memory grows in large steps (crates/wasm-alloc).
+#[cfg(target_arch = "wasm32")]
+use wasm_alloc as _;
+
 use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;

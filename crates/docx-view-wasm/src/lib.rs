@@ -1,3 +1,7 @@
+// Linear memory grows in large steps (crates/wasm-alloc).
+#[cfg(target_arch = "wasm32")]
+use wasm_alloc as _;
+
 use docx_edit::{EngineSession, package_media, parse_docx_for_edit, seed_parsed_docx_in_place};
 use docx_parse::S9PackageWire;
 use docx_parse::section::SectionProperties;

@@ -30,6 +30,7 @@ export interface InitOutput {
     readonly xlsxviewdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxviewdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxviewdocument_version: () => [number, number];
+    readonly betteroffice_memory_grows: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
