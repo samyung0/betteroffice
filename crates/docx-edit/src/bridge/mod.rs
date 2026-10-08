@@ -4463,28 +4463,35 @@ mod tests {
         RESOLVED_COMMENT_STORIES.with(|stories| stories.take())
     }
 
-    /// A lowering resolves comment anchors only for the stories it visits:
-    /// lowering a header beside a long commented body never walks the body.
+    /// A lowering resolves comment anchors once per story it visits:
+    /// lowering a header beside a commented body never walks the body, and
+    /// lowering a body with a comment on every paragraph walks it once.
     #[test]
-    fn a_lowering_resolves_only_the_comment_anchors_of_stories_it_visits() {
+    fn a_lowering_resolves_comment_anchors_once_per_story_it_visits() {
+        const PARAGRAPHS: u32 = 300;
         let ctx = EditCtx::local("", "");
         let doc = EditingDoc::new(9);
-        doc.create_story("body", &"Body text. ".repeat(500), "Normal", "left")
-            .unwrap();
-        doc.create_story("hf:1", "Header", "Normal", "left")
-            .unwrap();
-        doc.apply_raw_ops(
-            "body",
-            vec![RawOp::SetComment {
-                id: "1".into(),
-                ranges: vec![(5, 9)],
+        let text: String = (0..PARAGRAPHS)
+            .map(|index| format!("Paragraph {index:>3} here "))
+            .collect();
+        doc.create_story("body", &text, "Normal", "left").unwrap();
+        // Each paragraph is 19 units, so its break sits at 20k - 1.
+        for paragraph in 1..PARAGRAPHS {
+            doc.split_paragraph(&ctx, Position::new("body", paragraph * 20 - 1), None)
+                .unwrap();
+        }
+        let comments = (0..PARAGRAPHS)
+            .map(|paragraph| RawOp::SetComment {
+                id: paragraph.to_string(),
+                ranges: vec![(paragraph * 20, paragraph * 20 + 9)],
                 author: "Ada".into(),
                 date: "2026-10-08T00:00:00Z".into(),
                 body: Any::Null,
-            }],
-            &ctx,
-        )
-        .unwrap();
+            })
+            .collect();
+        doc.apply_raw_ops("body", comments, &ctx).unwrap();
+        doc.create_story("hf:1", "Header", "Normal", "left")
+            .unwrap();
         let env = RenderEnv::default();
         resolved_comment_stories();
 
@@ -4492,7 +4499,8 @@ mod tests {
         assert_eq!(resolved_comment_stories(), ["hf:1"]);
         let body = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
         assert_eq!(resolved_comment_stories(), ["body"]);
-        assert!(format!("{body:?}").contains("comment_ids: Some([1.0])"));
+        let last = format!("comment_ids: Some([{}.0])", PARAGRAPHS - 1);
+        assert!(format!("{body:?}").contains(&last));
     }
 
     /// Plain inserts at random places in indexed paragraphs of real
