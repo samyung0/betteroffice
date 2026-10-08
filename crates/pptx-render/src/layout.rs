@@ -12,7 +12,7 @@ use ooxml_drawingml::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    break_opportunities, shape, single_line_box, uppercase_for_language,
+    break_opportunities, decode_embedded_font, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -55,6 +55,8 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+/// Decoded bytes all of one deck's embedded faces may take.
+pub const MAX_DECK_EMBEDDED_FONT_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
@@ -88,6 +90,18 @@ struct FontFace {
     widths: Option<&'static FamilyMetrics>,
     /// The same family's `hhea` metrics, which decide where the line box sits.
     line: Option<&'static FamilyMetrics>,
+    /// From the deck's `p:embeddedFontLst`.
+    embedded: bool,
+}
+
+/// A face [`SlideRenderer::register_embedded_fonts`] registered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedFace {
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub font_id: u32,
 }
 
 pub struct SlideRenderer {
@@ -131,6 +145,50 @@ impl SlideRenderer {
                 "font exceeds {MAX_FONT_BYTES} bytes"
             )));
         }
+        let id = self.register_face(family, bold, italic, bytes.to_vec(), false)?;
+        Ok(id.to_u32())
+    }
+
+    /// Registers the faces the deck embeds (`p:embeddedFontLst`), which take
+    /// the place of a host face under the same name and style whichever is
+    /// registered first. A part that is missing, cannot be decoded or does
+    /// not fit [`MAX_DECK_EMBEDDED_FONT_BYTES`] is skipped, so its text keeps the
+    /// host's face. Returns the faces registered.
+    pub fn register_embedded_fonts(&mut self, package: &PptxPackage) -> Vec<EmbeddedFace> {
+        let mut budget = MAX_DECK_EMBEDDED_FONT_BYTES;
+        let mut registered = Vec::new();
+        for font in &package.presentation.embedded_fonts {
+            let Some(bytes) = package
+                .part_bytes(&font.part_path)
+                .and_then(|bytes| decode_embedded_font(bytes, &font.part_path).ok())
+                .filter(|bytes| bytes.len() <= budget)
+            else {
+                continue;
+            };
+            let size = bytes.len();
+            let Ok(id) = self.register_face(&font.typeface, font.bold, font.italic, bytes, true)
+            else {
+                continue;
+            };
+            budget -= size;
+            registered.push(EmbeddedFace {
+                family: font.typeface.trim().to_owned(),
+                bold: font.bold,
+                italic: font.italic,
+                font_id: id.to_u32(),
+            });
+        }
+        registered
+    }
+
+    fn register_face(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: Vec<u8>,
+        embedded: bool,
+    ) -> Result<FontId, RenderError> {
         if self.font_count >= MAX_FONTS {
             return Err(RenderError::ResourceLimit(format!(
                 "more than {MAX_FONTS} font faces"
@@ -142,7 +200,7 @@ impl SlideRenderer {
         }
         let id = self
             .fonts
-            .register(bytes.to_vec())
+            .register(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
         let requested = normalize_family(family);
         let metrics = family_metrics(&requested, bold, italic);
@@ -152,16 +210,22 @@ impl SlideRenderer {
             requested_family: requested.clone(),
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            embedded,
         };
-        self.faces.insert((requested, bold, italic), face.clone());
-        self.fallback.get_or_insert(face);
-        self.fallback_family
-            .get_or_insert_with(|| normalize_family(family));
+        let key = (requested, bold, italic);
+        if embedded || !self.faces.get(&key).is_some_and(|face| face.embedded) {
+            self.faces.insert(key, face.clone());
+        }
+        if !embedded {
+            self.fallback.get_or_insert(face);
+            self.fallback_family
+                .get_or_insert_with(|| normalize_family(family));
+        }
         self.font_count += 1;
         if let Ok(cache) = self.text_layouts.get_mut() {
             cache.clear();
         }
-        Ok(id.to_u32())
+        Ok(id)
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -422,16 +486,22 @@ impl SlideRenderer {
                 });
             }
         }
-        self.faces
-            .iter()
-            .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
-            .min_by_key(|((_, face_bold, face_italic), _)| {
-                (
-                    2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic),
-                    *face_bold,
-                    *face_italic,
-                )
-            })
+        // A family with only some styles (an embedded bold alone) still
+        // draws in its own face, as the browser picks it for the name.
+        let nearest = |name: &String| {
+            self.faces
+                .iter()
+                .filter(|((face_name, _, _), _)| face_name == name)
+                .min_by_key(|((_, face_bold, face_italic), _)| {
+                    (
+                        2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic),
+                        *face_bold,
+                        *face_italic,
+                    )
+                })
+        };
+        nearest(&requested)
+            .or_else(|| self.fallback_family.as_ref().and_then(nearest))
             .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
             .ok_or(RenderError::NoFont)
     }

@@ -444,7 +444,49 @@ fn parse_presentation(
         first_slide_num,
         slides,
         master_part_paths,
+        embedded_fonts: embedded_fonts(root, relationships),
     })
+}
+
+fn embedded_fonts(root: &XmlElement, relationships: &[Relationship]) -> Vec<EmbeddedFont> {
+    let mut fonts = Vec::new();
+    for font in root
+        .child("embeddedFontLst")
+        .into_iter()
+        .flat_map(|list| list.children_named("embeddedFont"))
+    {
+        let Some(typeface) = font
+            .child("font")
+            .and_then(|face| face.attribute("typeface"))
+            .filter(|typeface| !typeface.trim().is_empty())
+        else {
+            continue;
+        };
+        for (slot, bold, italic) in [
+            ("regular", false, false),
+            ("bold", true, false),
+            ("italic", false, true),
+            ("boldItalic", true, true),
+        ] {
+            let Some(part_path) = font
+                .child(slot)
+                .and_then(|face| {
+                    face.attribute("r:id")
+                        .or_else(|| face.attribute_local("id"))
+                })
+                .and_then(|id| relationship_target(relationships, id))
+            else {
+                continue;
+            };
+            fonts.push(EmbeddedFont {
+                typeface: typeface.to_owned(),
+                bold,
+                italic,
+                part_path,
+            });
+        }
+    }
+    fonts
 }
 
 /// The parts a chart may be referenced from, plus the theme cascade that
