@@ -220,3 +220,49 @@ fn random_schedules_leave_no_item_without_its_parent() {
         }
     }
 }
+
+/// A user changes a paragraph's alignment, presses Undo and types on, which
+/// clears the redo stack and un-keeps the paragraph mark's map though Undo
+/// still keeps its old alignment value. A peer merges the paragraph into the
+/// next, removing that mark: garbage collection must take the kept value
+/// with the mark instead of leaving it pointing into the mark's freed map.
+#[test]
+fn a_merged_paragraph_takes_the_values_undo_kept_on_its_mark() {
+    let seed = EditingDoc::new(500);
+    seed.seed_story("body", &[paragraph("alpha"), paragraph("beta")])
+        .unwrap();
+    let state = seed.encode_state_as_update_v1();
+    let peer = |client| {
+        let doc = EditingDoc::new(client);
+        doc.apply_update_v1(&state).unwrap();
+        let mut undo = doc.undo_manager();
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        Peer { doc, undo }
+    };
+    let (mut left, right) = (peer(601), peer(602));
+    let first = left.doc.paragraphs("body").unwrap()[0].para_id.clone();
+
+    left.doc
+        .set_paragraph_attr(&first, "alignment", Any::from("center"))
+        .unwrap();
+    left.undo.add_undo_barrier();
+    assert!(left.undo.undo());
+    left.doc
+        .insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Inherit)
+        .unwrap();
+    left.undo.add_undo_barrier();
+    right
+        .doc
+        .merge_paragraphs(&ctx(), &first, MergeDirection::Forward)
+        .unwrap();
+    sync(&right, &left);
+    assert_eq!(orphans(left.doc.yrs_doc()), []);
+
+    while left.undo.undo() {}
+    sync(&left, &right);
+    sync(&right, &left);
+    assert_eq!(
+        left.doc.paragraphs("body").unwrap(),
+        right.doc.paragraphs("body").unwrap()
+    );
+}
