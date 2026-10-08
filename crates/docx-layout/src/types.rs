@@ -2001,8 +2001,8 @@ pub struct Input {
 // ---------------------------------------------------------------------------
 
 /// One page's slice of a paragraph: the measured line window
-/// `[from_line, to_line)`, its own document range, and the run slices those
-/// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
+/// `[from_line, to_line)` and its own document range.
+/// `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
