@@ -286,8 +286,10 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   let inUnmatchedField = false;
   // Whether text comes before this point in its paragraph.
   let textBefore = false;
-  // A selected chart after text owes the newline of its own line to the text after it.
+  // A selected chart after text owes the newline of its own line to the text
+  // after it, unless a break since the last text gave that line already.
   let chartLine = false;
+  let breakSinceText = false;
   for (const segment of segments) {
     if (offset >= end) break;
     const segmentStart = offset;
@@ -300,6 +302,8 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
     const lineContent = segment.kind !== 'pilcrow' && !BLOCKS.has(embedKind) && embedKind !== 'chart';
     textBefore = segment.kind !== 'pilcrow' && (textBefore || lineContent);
     if (segment.kind === 'pilcrow' || breakAfterText) chartLine = false;
+    if (segment.kind === 'pilcrow' || lineContent) breakSinceText = false;
+    if (breakAfterText) breakSinceText = true;
     if (segment.kind === 'pilcrow') inUnmatchedField = false;
     if (segment.kind === 'embed' && segment.embedKind === 'field' && segment.payload.continuationId != null) {
       const until = fieldEnds.get(segment.payload.continuationId);
@@ -307,7 +311,7 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
       else fieldUntil = Math.max(fieldUntil, until);
     }
     if (offset <= start) continue;
-    if (chartAfterText) chartLine = true;
+    if (chartAfterText && !breakSinceText) chartLine = true;
     if (chartLine && lineContent) {
       text += '\n';
       chartLine = false;

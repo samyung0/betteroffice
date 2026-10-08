@@ -449,6 +449,8 @@ describe('text layer over a laid-out document', () => {
     ['an inline chart', `${t('Aa')}${chart}${t('Bb')}`, 'Aa\nBb'],
     ['two inline charts', `${t('Aa')}${chart}${chart}${t('Bb')}`, 'Aa\nBb'],
     ['a chart then a page break', `${t('Aa')}${chart}${pb}${t('Bb')}`, 'Aa\nBb'],
+    ['a page break then a chart', `${t('Aa')}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
+    ['a chart, a page break, a chart', `${t('Aa')}${chart}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
     ['a chart opening the paragraph', `${chart}${t('Bb')}`, 'Bb'],
     ['a chart ending the paragraph', `${t('Aa')}${chart}`, 'Aa'],
     ['a break opening the paragraph', `${pb}${t('Bb')}`, 'Bb'],
