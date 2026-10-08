@@ -993,7 +993,9 @@ test.each(["body", "cell", "header"] as MatrixWhere[])(
           // Edits made before the capture, then typing elsewhere: the breaks read alike, so the rebase lands.
           if (order.id.endsWith("edit<cap<tail")) expect(`${order.id}: ${row.cls}`).toMatch(/: exact/);
         }
-  }
+  },
+  // Many matrix rows per case: about 5 s alone, past bun's 5 s default under load.
+  60_000
 );
 
 // Round 2 review B, L: the coverage refusal fires only when an edit after the capture touches the comment's range or
