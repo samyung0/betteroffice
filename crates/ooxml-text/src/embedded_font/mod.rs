@@ -9,6 +9,8 @@
 //! programs included, comes back as the font had it.
 
 mod ctf;
+#[cfg(test)]
+mod hostile;
 mod lzcomp;
 
 /// Largest font one embedded part may decode to.
@@ -50,14 +52,29 @@ impl std::error::Error for EmbeddedFontError {}
 
 /// Decodes the bytes of the embedded font part `part_name` into an sfnt.
 pub fn decode_embedded_font(bytes: &[u8], part_name: &str) -> Result<Vec<u8>, EmbeddedFontError> {
+    let mut unlimited = usize::MAX;
+    decode_embedded_font_within(bytes, part_name, &mut unlimited)
+}
+
+/// [`decode_embedded_font`], charging `budget` for the work before doing it:
+/// the part's size, then each MicroType Express block's declared length. The
+/// charges stand whether the part then decodes or not, so a caller decoding
+/// many parts bounds the work they take; a part that would overdraw the
+/// budget is refused as [`EmbeddedFontError::TooLarge`].
+pub fn decode_embedded_font_within(
+    bytes: &[u8],
+    part_name: &str,
+    budget: &mut usize,
+) -> Result<Vec<u8>, EmbeddedFontError> {
     if bytes.len() > MAX_EMBEDDED_FONT_BYTES {
         return Err(EmbeddedFontError::TooLarge);
     }
+    charge(budget, bytes.len())?;
     if is_sfnt(bytes) {
         return Ok(bytes.to_vec());
     }
     if is_eot(bytes) {
-        return decode_eot(bytes);
+        return decode_eot(bytes, budget);
     }
     let key = obfuscation_key(part_name).ok_or(EmbeddedFontError::Unrecognized)?;
     let mut clear = bytes.to_vec();
@@ -67,10 +84,17 @@ pub fn decode_embedded_font(bytes: &[u8], part_name: &str) -> Result<Vec<u8>, Em
     if is_sfnt(&clear) {
         Ok(clear)
     } else if is_eot(&clear) {
-        decode_eot(&clear)
+        decode_eot(&clear, budget)
     } else {
         Err(EmbeddedFontError::Unrecognized)
     }
+}
+
+fn charge(budget: &mut usize, amount: usize) -> Result<(), EmbeddedFontError> {
+    *budget = budget
+        .checked_sub(amount)
+        .ok_or(EmbeddedFontError::TooLarge)?;
+    Ok(())
 }
 
 fn is_sfnt(bytes: &[u8]) -> bool {
@@ -81,7 +105,7 @@ fn is_eot(bytes: &[u8]) -> bool {
     bytes.len() >= EOT_MIN_HEADER && u16::from_le_bytes([bytes[34], bytes[35]]) == EOT_MAGIC
 }
 
-fn decode_eot(bytes: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
+fn decode_eot(bytes: &[u8], budget: &mut usize) -> Result<Vec<u8>, EmbeddedFontError> {
     let read = |offset: usize| {
         u32::from_le_bytes([
             bytes[offset],
@@ -113,7 +137,7 @@ fn decode_eot(bytes: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
         }
     }
     let font = if flags & EOT_COMPRESSED != 0 {
-        decode_mtx(&data)?
+        decode_mtx(&data, budget)?
     } else {
         data
     };
@@ -124,8 +148,10 @@ fn decode_eot(bytes: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
 }
 
 /// MicroType Express: three LZCOMP blocks holding the font in Compact Table
-/// Format, its glyphs' pushed values and their remaining instructions.
-fn decode_mtx(data: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
+/// Format, its glyphs' pushed values and their remaining instructions. The
+/// blocks and the rebuilt `glyf` share [`MAX_EMBEDDED_FONT_BYTES`]; the font
+/// assembled from them has the same limit of its own.
+fn decode_mtx(data: &[u8], budget: &mut usize) -> Result<Vec<u8>, EmbeddedFontError> {
     if data.len() < 10 {
         return Err(EmbeddedFontError::Truncated);
     }
@@ -142,16 +168,17 @@ fn decode_mtx(data: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
     if !(10 <= second && second <= third && third <= data.len()) {
         return Err(EmbeddedFontError::Malformed("MTX block offsets"));
     }
-    let mut budget = MAX_EMBEDDED_FONT_BYTES;
+    let mut face = MAX_EMBEDDED_FONT_BYTES;
     let mut unpack = |block: &[u8]| {
-        let bytes = lzcomp::unpack(block, version, budget)?;
-        budget -= bytes.len();
+        charge(budget, lzcomp::declared_length(block, version)?)?;
+        let bytes = lzcomp::unpack(block, version, face)?;
+        face -= bytes.len();
         Ok::<_, EmbeddedFontError>(bytes)
     };
     let rest = unpack(&data[10..second])?;
     let push = unpack(&data[second..third])?;
     let code = unpack(&data[third..])?;
-    ctf::to_sfnt(&rest, &push, &code)
+    ctf::to_sfnt(&rest, &push, &code, face)
 }
 
 /// The XOR key a GUID file name (`{0123…}.odttf`) stands for: its 16 bytes
@@ -203,6 +230,11 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, EmbeddedFontError> {
         let bytes = self.bytes(2)?;
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn u32(&mut self) -> Result<u32, EmbeddedFontError> {
+        let bytes = self.bytes(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     fn i16(&mut self) -> Result<i16, EmbeddedFontError> {

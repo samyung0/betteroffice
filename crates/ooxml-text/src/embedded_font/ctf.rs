@@ -2,6 +2,8 @@
 //! glyphs with their programs rejoined from the push and code blocks, `loca`
 //! rebuilt, `cvt ` from its deltas; `hdmx` and `VDMX` dropped.
 
+use std::borrow::Cow;
+
 use super::{EmbeddedFontError, MAX_EMBEDDED_FONT_BYTES, Reader};
 
 const MAX_TABLES: usize = 256;
@@ -15,26 +17,40 @@ const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
 const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
 const WE_HAVE_INSTRUCTIONS: u16 = 0x0100;
 
-pub(super) fn to_sfnt(rest: &[u8], push: &[u8], code: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
+/// `limit` bounds the rebuilt `glyf`; the assembled font is bounded by
+/// [`MAX_EMBEDDED_FONT_BYTES`]. Tables the font keeps as they are are borrowed
+/// from `rest` until assembly, so each is copied once.
+pub(super) fn to_sfnt(
+    rest: &[u8],
+    push: &[u8],
+    code: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>, EmbeddedFontError> {
     let mut directory = Reader::new(rest);
     let version = directory.bytes(4)?;
     let count = usize::from(directory.u16()?);
-    if count > MAX_TABLES {
+    if count == 0 || count > MAX_TABLES {
         return Err(EmbeddedFontError::Malformed("CTF table count"));
     }
     directory.bytes(6)?;
-    let mut tables = Vec::with_capacity(count);
+    let mut tables: Vec<([u8; 4], &[u8])> = Vec::with_capacity(count);
+    let mut total = 0_usize;
     for _ in 0..count {
         let tag: [u8; 4] = directory.bytes(4)?.try_into().expect("four bytes");
         directory.bytes(4)?;
-        let offset = directory.bytes(4)?;
-        let length = directory.bytes(4)?;
-        let offset = u32::from_be_bytes(offset.try_into().expect("four bytes")) as usize;
-        let length = u32::from_be_bytes(length.try_into().expect("four bytes")) as usize;
+        let offset = directory.u32()? as usize;
+        let length = directory.u32()? as usize;
         let data = offset
             .checked_add(length)
             .and_then(|end| rest.get(offset..end))
             .ok_or(EmbeddedFontError::Truncated)?;
+        if tables.iter().any(|(listed, _)| *listed == tag) {
+            return Err(EmbeddedFontError::Malformed("CTF table listed twice"));
+        }
+        total = total
+            .checked_add(length.next_multiple_of(4))
+            .filter(|total| *total <= MAX_EMBEDDED_FONT_BYTES)
+            .ok_or(EmbeddedFontError::TooLarge)?;
         tables.push((tag, data));
     }
     let table = |tag: &[u8; 4]| {
@@ -44,47 +60,44 @@ pub(super) fn to_sfnt(rest: &[u8], push: &[u8], code: &[u8]) -> Result<Vec<u8>, 
             .map(|(_, data)| *data)
     };
 
-    let mut out: Vec<([u8; 4], Vec<u8>)> = Vec::with_capacity(count);
-    let glyphs = match table(b"glyf") {
+    let mut glyphs = match table(b"glyf") {
         Some(glyf) => {
             let maxp = table(b"maxp").ok_or(EmbeddedFontError::Malformed("CTF without maxp"))?;
             let glyph_count = Reader::new(maxp.get(4..).unwrap_or_default()).u16()?;
-            Some(decode_glyphs(glyf, push, code, glyph_count)?)
+            Some(decode_glyphs(glyf, push, code, glyph_count, limit)?)
         }
         None => None,
     };
+    let mut out: Vec<([u8; 4], Cow<'_, [u8]>)> = Vec::with_capacity(count + 1);
     for (tag, data) in &tables {
-        let data = match (tag, &glyphs) {
-            (b"hdmx" | b"VDMX", _) => continue,
-            (b"glyf", Some(glyphs)) => glyphs.glyf.clone(),
-            (b"loca", Some(glyphs)) => glyphs.loca.clone(),
-            (b"loca", None) => continue,
-            (b"cvt ", _) => decode_cvt(data)?,
+        let data = match (tag, glyphs.as_mut()) {
+            (b"hdmx" | b"VDMX", _) | (b"loca", None) => continue,
+            (b"glyf", Some(glyphs)) => Cow::Owned(std::mem::take(&mut glyphs.glyf)),
+            (b"loca", Some(glyphs)) => Cow::Owned(std::mem::take(&mut glyphs.loca)),
+            (b"cvt ", _) => Cow::Owned(decode_cvt(data)?),
             (b"head", Some(_)) => {
                 let mut head = data.to_vec();
                 // Long `loca` offsets.
                 head.get_mut(50..52)
                     .ok_or(EmbeddedFontError::Truncated)?
                     .copy_from_slice(&1_u16.to_be_bytes());
-                head
+                Cow::Owned(head)
             }
             (b"maxp", Some(glyphs)) if data.len() >= 32 => {
                 let mut maxp = data.to_vec();
                 let declared = u16::from_be_bytes([maxp[26], maxp[27]]);
                 let largest = declared.max(glyphs.max_instructions);
                 maxp[26..28].copy_from_slice(&largest.to_be_bytes());
-                maxp
+                Cow::Owned(maxp)
             }
-            _ => data.to_vec(),
+            _ => Cow::Borrowed(*data),
         };
         out.push((*tag, data));
     }
-    if glyphs.is_some() && !out.iter().any(|(tag, _)| tag == b"loca") {
-        let loca = glyphs
-            .as_ref()
-            .map(|glyphs| glyphs.loca.clone())
-            .unwrap_or_default();
-        out.push((*b"loca", loca));
+    if let Some(glyphs) = glyphs
+        && table(b"loca").is_none()
+    {
+        out.push((*b"loca", Cow::Owned(glyphs.loca)));
     }
     assemble(version, out)
 }
@@ -100,11 +113,12 @@ fn decode_glyphs(
     push: &[u8],
     code: &[u8],
     count: u16,
+    limit: usize,
 ) -> Result<Glyphs, EmbeddedFontError> {
     let mut input = Reader::new(glyf);
     let mut push = Reader::new(push);
     let mut code = Reader::new(code);
-    let mut output = Vec::with_capacity(glyf.len() * 2);
+    let mut output = Vec::with_capacity(glyf.len().saturating_mul(2).min(limit));
     let mut loca = Vec::with_capacity((usize::from(count) + 1) * 4);
     let mut max_instructions = 0_u16;
     for _ in 0..count {
@@ -112,7 +126,7 @@ fn decode_glyphs(
         let instructions = decode_glyph(&mut input, &mut push, &mut code, &mut output)?;
         max_instructions = max_instructions.max(instructions);
         output.resize(output.len().next_multiple_of(4), 0);
-        if output.len() > MAX_EMBEDDED_FONT_BYTES {
+        if output.len() > limit {
             return Err(EmbeddedFontError::TooLarge);
         }
     }
@@ -196,11 +210,15 @@ fn decode_glyph(
     let points = end as usize + 1;
     let flags = input.bytes(points)?;
     let mut coordinates = Vec::with_capacity(points);
-    let (mut x, mut y) = (0_i32, 0_i32);
+    let (mut x, mut y) = (0_i16, 0_i16);
+    // TrueType coordinates are 16-bit.
+    let moved = |from: i16, by: i32| {
+        i16::try_from(i32::from(from) + by)
+            .map_err(|_| EmbeddedFontError::Malformed("CTF coordinate out of range"))
+    };
     for flag in flags {
         let (dx, dy) = triplet(flag & 0x7F, input)?;
-        x += dx;
-        y += dy;
+        (x, y) = (moved(x, dx)?, moved(y, dy)?);
         coordinates.push((x, y, flag & 0x80 == 0));
     }
     let program = program(input, push, code)?;
@@ -215,7 +233,7 @@ fn decode_glyph(
                 (y_min, y_max) = (y_min.min(y), y_max.max(y));
             }
             for value in [x_min, y_min, x_max, y_max] {
-                output.extend((value as i16).to_be_bytes());
+                output.extend(value.to_be_bytes());
             }
         }
     }
@@ -224,7 +242,7 @@ fn decode_glyph(
     }
     output.extend((program.len() as u16).to_be_bytes());
     output.extend(&program);
-    write_points(&coordinates, output);
+    write_points(&coordinates, output)?;
     Ok(program.len() as u16)
 }
 
@@ -348,7 +366,10 @@ fn program(
 }
 
 /// Simple-glyph flags and coordinates, short forms where they fit.
-fn write_points(points: &[(i32, i32, bool)], output: &mut Vec<u8>) {
+fn write_points(
+    points: &[(i16, i16, bool)],
+    output: &mut Vec<u8>,
+) -> Result<(), EmbeddedFontError> {
     const ON_CURVE: u8 = 0x01;
     const X_SHORT: u8 = 0x02;
     const Y_SHORT: u8 = 0x04;
@@ -357,20 +378,24 @@ fn write_points(points: &[(i32, i32, bool)], output: &mut Vec<u8>) {
     let mut flags = Vec::with_capacity(points.len());
     let mut xs = Vec::with_capacity(points.len() * 2);
     let mut ys = Vec::with_capacity(points.len() * 2);
-    let mut previous = (0, 0);
+    let mut previous = (0_i16, 0_i16);
     for &(x, y, on_curve) in points {
         let mut flag = if on_curve { ON_CURVE } else { 0 };
-        for (delta, short, same, bytes) in [
-            (x - previous.0, X_SHORT, X_SAME_OR_POSITIVE, &mut xs),
-            (y - previous.1, Y_SHORT, Y_SAME_OR_POSITIVE, &mut ys),
+        for (to, from, short, same, bytes) in [
+            (x, previous.0, X_SHORT, X_SAME_OR_POSITIVE, &mut xs),
+            (y, previous.1, Y_SHORT, Y_SAME_OR_POSITIVE, &mut ys),
         ] {
+            let delta = i32::from(to) - i32::from(from);
             if delta == 0 {
                 flag |= same;
             } else if delta.abs() < 256 {
                 flag |= short | if delta > 0 { same } else { 0 };
                 bytes.push(delta.unsigned_abs() as u8);
             } else {
-                bytes.extend((delta as i16).to_be_bytes());
+                let delta = i16::try_from(delta).map_err(|_| {
+                    EmbeddedFontError::Malformed("CTF coordinate step out of range")
+                })?;
+                bytes.extend(delta.to_be_bytes());
             }
         }
         flags.push(flag);
@@ -379,6 +404,7 @@ fn write_points(points: &[(i32, i32, bool)], output: &mut Vec<u8>) {
     output.extend(flags);
     output.extend(xs);
     output.extend(ys);
+    Ok(())
 }
 
 /// `cvt `: an entry count, then each value as a delta from the previous one.
@@ -403,10 +429,13 @@ fn decode_cvt(data: &[u8]) -> Result<Vec<u8>, EmbeddedFontError> {
 
 fn assemble(
     version: &[u8],
-    mut tables: Vec<([u8; 4], Vec<u8>)>,
+    mut tables: Vec<([u8; 4], Cow<'_, [u8]>)>,
 ) -> Result<Vec<u8>, EmbeddedFontError> {
     tables.sort_by_key(|(tag, _)| *tag);
-    let count = tables.len() as u16;
+    let count = u16::try_from(tables.len())
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or(EmbeddedFontError::Malformed("CTF table count"))?;
     let mut power = 1_u16;
     let mut selector = 0_u16;
     while power * 2 <= count {
@@ -415,14 +444,13 @@ fn assemble(
     }
     let range = power * 16;
     let header = 12 + 16 * tables.len();
-    let total = header
-        + tables
-            .iter()
-            .map(|(_, data)| data.len().next_multiple_of(4))
-            .sum::<usize>();
-    if total > MAX_EMBEDDED_FONT_BYTES {
-        return Err(EmbeddedFontError::TooLarge);
-    }
+    let total = tables
+        .iter()
+        .try_fold(header, |total, (_, data)| {
+            total.checked_add(data.len().next_multiple_of(4))
+        })
+        .filter(|total| *total <= MAX_EMBEDDED_FONT_BYTES)
+        .ok_or(EmbeddedFontError::TooLarge)?;
     let mut font = Vec::with_capacity(total);
     font.extend(version);
     for value in [count, range, selector, count * 16 - range] {
@@ -431,28 +459,24 @@ fn assemble(
     let mut offset = header;
     let mut head_offset = None;
     for (tag, data) in &tables {
+        let mut sum = checksum(data);
         if tag == b"head" && data.len() >= 12 {
             head_offset = Some(offset);
-        }
-        let mut sum_data = data.clone();
-        if tag == b"head" && sum_data.len() >= 12 {
-            sum_data[8..12].fill(0);
+            // Summed with checkSumAdjustment as zero.
+            sum = sum.wrapping_sub(u32::from_be_bytes([data[8], data[9], data[10], data[11]]));
         }
         font.extend(tag);
-        font.extend(checksum(&sum_data).to_be_bytes());
+        font.extend(sum.to_be_bytes());
         font.extend((offset as u32).to_be_bytes());
         font.extend((data.len() as u32).to_be_bytes());
         offset += data.len().next_multiple_of(4);
     }
-    for (tag, data) in &tables {
-        let start = font.len();
-        font.extend(data);
-        if tag == b"head" && data.len() >= 12 {
-            font[start + 8..start + 12].fill(0);
-        }
+    for (_, data) in &tables {
+        font.extend(data.iter());
         font.resize(font.len().next_multiple_of(4), 0);
     }
     if let Some(offset) = head_offset {
+        font[offset + 8..offset + 12].fill(0);
         let adjustment = 0xB1B0_AFBA_u32.wrapping_sub(checksum(&font));
         font[offset + 8..offset + 12].copy_from_slice(&adjustment.to_be_bytes());
     }

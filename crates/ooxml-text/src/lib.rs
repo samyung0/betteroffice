@@ -70,7 +70,7 @@ pub use bidi::{
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-pub use embedded_font::{EmbeddedFontError, decode_embedded_font};
+pub use embedded_font::{EmbeddedFontError, decode_embedded_font, decode_embedded_font_within};
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{BreakOpportunity, break_opportunities};
 pub use measure::{

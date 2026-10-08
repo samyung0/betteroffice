@@ -9,6 +9,15 @@ const PRELOAD: usize = 2 * 32 * 96 + 4 * 256;
 const MAX_2BYTE_DISTANCE: usize = 512;
 const ROOT: usize = 1;
 
+/// The output length a block declares, before its run-length stage.
+pub(super) fn declared_length(data: &[u8], version: u8) -> Result<usize, EmbeddedFontError> {
+    let mut bits = Bits::new(data);
+    if version != 1 {
+        bits.bit()?;
+    }
+    Ok(bits.value(24)? as usize)
+}
+
 /// Unpacks one block of at most `limit` bytes.
 pub(super) fn unpack(data: &[u8], version: u8, limit: usize) -> Result<Vec<u8>, EmbeddedFontError> {
     let mut bits = Bits::new(data);
@@ -157,7 +166,10 @@ impl Output {
     fn finish(self, mut history: Vec<u8>) -> Vec<u8> {
         match self.run_length {
             Some(run) => run.bytes,
-            None => history.split_off(PRELOAD),
+            None => {
+                history.drain(..PRELOAD);
+                history
+            }
         }
     }
 }
@@ -311,11 +323,102 @@ impl Tree {
     }
 }
 
+/// The encoder half of LZCOMP, for building test streams.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(super) mod encoder {
+    use super::{ROOT, Tree};
 
-    /// The encoder half of [`Tree`], for building test streams.
+    pub(in super::super) struct Encoder {
+        bits: Vec<bool>,
+        symbols: Tree,
+        distances: Tree,
+        lengths: Tree,
+        ranges: usize,
+    }
+
+    impl Encoder {
+        /// A version-3 block declaring `declared` bytes, flagged for the
+        /// run-length stage when `run_length` is set.
+        pub(in super::super) fn new(declared: usize, run_length: bool) -> Self {
+            let mut bits = vec![run_length];
+            bits.extend((0..24).rev().map(|shift| declared >> shift & 1 == 1));
+            let mut ranges = 1;
+            while (1_usize << (3 * ranges)) < declared {
+                ranges += 1;
+            }
+            Self {
+                bits,
+                symbols: Tree::new(256 + 8 * ranges + 3),
+                distances: Tree::new(8),
+                lengths: Tree::new(8),
+                ranges,
+            }
+        }
+
+        pub(in super::super) fn literals(mut self, bytes: &[u8]) -> Self {
+            for byte in bytes {
+                write(&mut self.symbols, usize::from(*byte), &mut self.bits);
+            }
+            self
+        }
+
+        /// `length` bytes from `distance` back.
+        pub(in super::super) fn copy(mut self, distance: usize, length: usize) -> Self {
+            let mut value = if distance >= 512 { length - 1 } else { length } - 2;
+            let mut groups = Vec::new();
+            loop {
+                groups.push(value & 3);
+                value >>= 2;
+                if value == 0 {
+                    break;
+                }
+            }
+            groups.reverse();
+            let last = groups.len() - 1;
+            let groups: Vec<usize> = groups
+                .iter()
+                .enumerate()
+                .map(|(index, group)| if index < last { group | 4 } else { *group })
+                .collect();
+            let mut value = distance - 1;
+            let mut digits = Vec::new();
+            loop {
+                digits.push(value & 7);
+                value >>= 3;
+                if value == 0 {
+                    break;
+                }
+            }
+            digits.reverse();
+            assert!(digits.len() <= self.ranges);
+            let symbol = 256 + 8 * (digits.len() - 1) + groups[0];
+            write(&mut self.symbols, symbol, &mut self.bits);
+            for group in &groups[1..] {
+                write(&mut self.lengths, *group, &mut self.bits);
+            }
+            for digit in digits {
+                write(&mut self.distances, digit, &mut self.bits);
+            }
+            self
+        }
+
+        pub(in super::super) fn finish(self) -> Vec<u8> {
+            self.bits
+                .chunks(8)
+                .map(|chunk| {
+                    chunk.iter().enumerate().fold(0, |byte, (index, bit)| {
+                        byte | (u8::from(*bit) << (7 - index))
+                    })
+                })
+                .collect()
+        }
+    }
+
+    /// A literal block of `bytes`, without the run-length stage.
+    pub(in super::super) fn literal_block(bytes: &[u8]) -> Vec<u8> {
+        Encoder::new(bytes.len(), false).literals(bytes).finish()
+    }
+
     fn write(tree: &mut Tree, symbol: usize, out: &mut Vec<bool>) {
         let mut index = tree.leaf[symbol];
         let leaf = index;
@@ -328,45 +431,66 @@ mod tests {
         out.extend(path.iter().rev());
         tree.update(leaf);
     }
+}
 
-    fn pack(bits: &[bool]) -> Vec<u8> {
-        bits.chunks(8)
-            .map(|chunk| {
-                chunk.iter().enumerate().fold(0, |byte, (index, bit)| {
-                    byte | (u8::from(*bit) << (7 - index))
-                })
-            })
-            .collect()
-    }
-
-    /// A version-3 stream of literals without run-length coding.
-    fn literal_stream(text: &[u8]) -> Vec<u8> {
-        let mut bits = vec![false];
-        bits.extend((0..24).rev().map(|shift| text.len() >> shift & 1 == 1));
-        let mut ranges = 1;
-        while (1_usize << (3 * ranges)) < text.len() {
-            ranges += 1;
-        }
-        let mut symbols = Tree::new(256 + 8 * ranges + 3);
-        for byte in text {
-            write(&mut symbols, usize::from(*byte), &mut bits);
-        }
-        pack(&bits)
-    }
+#[cfg(test)]
+mod tests {
+    use super::encoder::{Encoder, literal_block};
+    use super::*;
 
     #[test]
     fn literals_round_trip_through_the_adaptive_tree() {
         let text = b"MicroType Express keeps adapting its codes as symbols repeat";
-        assert_eq!(unpack(&literal_stream(text), 3, 1024).unwrap(), text);
+        assert_eq!(unpack(&literal_block(text), 3, 1024).unwrap(), text);
         assert_eq!(
-            unpack(&literal_stream(text), 3, text.len() - 1),
+            unpack(&literal_block(text), 3, text.len() - 1),
             Err(EmbeddedFontError::TooLarge)
         );
+        assert_eq!(declared_length(&literal_block(text), 3), Ok(text.len()));
+    }
+
+    #[test]
+    fn copies_reach_back_into_the_output_and_the_preload() {
+        // A copy names its length and how far back its last byte is; from
+        // 512 back it is one byte longer than its symbols say.
+        let block = Encoder::new(4 + 2 + 2 + 600 + 3, false)
+            .copy(4, 4)
+            .literals(b"ab")
+            .copy(1, 2)
+            .copy(1, 600)
+            .copy(600, 3)
+            .finish();
+        let mut expected = preload();
+        for (back, length) in [(4, 4), (0, 0), (1, 2), (1, 600), (600, 3)] {
+            if length == 0 {
+                expected.extend(b"ab");
+                continue;
+            }
+            let start = expected.len() - back - length + 1;
+            for offset in 0..length {
+                expected.push(expected[start + offset]);
+            }
+        }
+        assert_eq!(unpack(&block, 3, 4096).unwrap(), expected[PRELOAD..]);
+        assert_eq!(&expected[PRELOAD + 4..PRELOAD + 8], b"abab");
+    }
+
+    #[test]
+    fn the_run_length_stage_expands_runs_and_escaped_escapes() {
+        // Escape 0xEE; "a", a literal 0xEE (escape, 0), five 'z' (escape, 5,
+        // 'z'), "b".
+        let coded = [0xEE, b'a', 0xEE, 0, 0xEE, 5, b'z', b'b'];
+        let block = Encoder::new(coded.len(), true).literals(&coded).finish();
+        assert_eq!(
+            unpack(&block, 3, 64).unwrap(),
+            [b'a', 0xEE, b'z', b'z', b'z', b'z', b'z', b'b']
+        );
+        assert_eq!(unpack(&block, 3, 7), Err(EmbeddedFontError::TooLarge));
     }
 
     #[test]
     fn a_stream_ending_early_is_truncated() {
-        let stream = literal_stream(b"truncated stream");
+        let stream = literal_block(b"truncated stream");
         assert_eq!(
             unpack(&stream[..stream.len() - 3], 3, 1024),
             Err(EmbeddedFontError::Truncated)
