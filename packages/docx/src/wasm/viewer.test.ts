@@ -147,4 +147,59 @@ describe('DOCX viewer wasm', () => {
       configureDefaultFonts({});
     }
   });
+
+  // An empty REF shows nothing, so "B" follows "A"; an empty PAGE field
+  // keeps a digit's width, as each page fills it in.
+  test('a field that shows nothing takes no width', async () => {
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const field = (instr: string) =>
+      `<w:p><w:r><w:t>A</w:t></w:r><w:fldSimple w:instr="${instr}"/><w:r><w:t>B</w:t></w:r></w:p>`;
+    const bytes = rezipContainer(
+      Object.fromEntries(
+        Object.entries({
+          '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+          '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+          'word/document.xml': `<w:document ${W}><w:body>${field(' REF x ')}${field(' PAGE ')}<w:sectPr/></w:body></w:document>`,
+        }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])
+      )
+    );
+    const font = await readFile(
+      resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')
+    );
+    const load = () =>
+      Promise.resolve(
+        font.buffer.slice(font.byteOffset, font.byteOffset + font.byteLength)
+      );
+    configureDefaultFonts({
+      fonts: {
+        createFontProvider: () => ({
+          resolve: () => load,
+          resolveLastResort: () => load,
+        }),
+      },
+    });
+    try {
+      const viewer = await openDocumentViewer(bytes);
+      try {
+        const texts = viewer
+          .displayList()
+          .pages[0]!.primitives.flatMap((primitive) =>
+            primitive.kind === 'text' ? [primitive] : []
+          );
+        const gap = (line: number) => {
+          const [a, b] = ['A', 'B'].map(
+            (text) => texts.filter((primitive) => primitive.text === text)[line]!
+          );
+          return b!.x - (a!.x + a!.width);
+        };
+        expect(gap(0)).toBeCloseTo(0, 3);
+        expect(gap(1)).toBeGreaterThan(5);
+      } finally {
+        viewer.dispose();
+      }
+    } finally {
+      configureDefaultFonts({});
+    }
+  });
 });

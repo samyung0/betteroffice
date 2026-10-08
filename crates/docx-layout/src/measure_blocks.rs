@@ -982,11 +982,11 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
             Run::Image(image) => line_width += synthetic_inline_image_width(image),
             Run::Field(field) => {
                 font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
-                let fallback = field
-                    .fallback
-                    .as_deref()
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or("1");
+                let fallback = match field.fallback.as_deref() {
+                    Some(text) if !text.is_empty() => text,
+                    _ if matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") => "1",
+                    _ => "",
+                };
                 line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
             }
             // an authored break is exact, so it splits the fallback rows even

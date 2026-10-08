@@ -258,9 +258,13 @@ pub struct RunIn {
     /// `Some(false)` disables grid snapping for lines containing this run.
     #[serde(default)]
     pub snap_to_grid: Option<bool>,
-    /// Cached field display text; missing or empty values measure as `"1"`.
+    /// Cached field display text; missing or empty values measure as nothing,
+    /// or as `"1"` for a `PAGE` or `NUMPAGES` field, whose text each page resolves.
     #[serde(default)]
     pub fallback: Option<String>,
+    /// Field runs: the field type (`PAGE`, `NUMPAGES`, ...).
+    #[serde(default)]
+    pub field_type: Option<String>,
     /// Declared image width in pixels; missing values are zero.
     #[serde(default)]
     pub width: Option<f32>,
