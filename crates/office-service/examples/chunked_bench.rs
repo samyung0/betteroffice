@@ -21,7 +21,8 @@ static LIVE: AtomicIsize = AtomicIsize::new(0);
 static PEAK: AtomicIsize = AtomicIsize::new(0);
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: AllocLayout) -> *mut u8 {
-        let live = LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed) + layout.size() as isize;
+        let live =
+            LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed) + layout.size() as isize;
         PEAK.fetch_max(live, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
@@ -82,7 +83,8 @@ fn load(layers: &[&[u8]]) -> Doc {
 }
 
 fn state(doc: &Doc) -> Vec<u8> {
-    doc.transact().encode_state_as_update_v1(&StateVector::default())
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
 }
 
 struct Peer {
@@ -141,15 +143,25 @@ fn run(peer: &Peer, scenario: &str) -> Vec<Vec<u8>> {
     let middle = paragraphs[paragraphs.len() / 2];
     match scenario {
         "one-edit" => {
-            doc.insert_text(&ctx(), Position::new("body", middle.1), " edited", FormatPolicy::Inherit)
-                .unwrap();
+            doc.insert_text(
+                &ctx(),
+                Position::new("body", middle.1),
+                " edited",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
         }
         "ten-edits" => {
             for index in 0..10 {
                 let (_, paragraphs) = self::paragraphs(doc);
                 let (_, mark) = paragraphs[(index * 2 + 1) * paragraphs.len() / 20];
-                doc.insert_text(&ctx(), Position::new("body", mark), " edited", FormatPolicy::Inherit)
-                    .unwrap();
+                doc.insert_text(
+                    &ctx(),
+                    Position::new("body", mark),
+                    " edited",
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
             }
         }
         "typing-200" => {
@@ -225,7 +237,11 @@ fn main() {
                     let entries = peer.doc.overlay().map(|overlay| {
                         (
                             overlay.stories.len(),
-                            overlay.stories.iter().map(|story| story.chunk_writers.len()).sum::<usize>(),
+                            overlay
+                                .stories
+                                .iter()
+                                .map(|story| story.chunk_writers.len())
+                                .sum::<usize>(),
                             overlay.comment_writers.len(),
                         )
                     });
@@ -248,11 +264,15 @@ fn main() {
                             .chain(messages[..messages.len() - 1].iter().map(Vec::as_slice))
                             .collect();
                         std::fs::write(format!("{stem}.state.bin"), &room).unwrap();
-                        std::fs::write(format!("{stem}.before.bin"), state(&load(&before))).unwrap();
-                        std::fs::write(format!("{stem}.last.bin"), messages.last().unwrap()).unwrap();
+                        std::fs::write(format!("{stem}.before.bin"), state(&load(&before)))
+                            .unwrap();
+                        std::fs::write(format!("{stem}.last.bin"), messages.last().unwrap())
+                            .unwrap();
                     }
                     let seed_sv = load(&[seed]).transact().state_vector();
-                    let change = load(&[&room]).transact().encode_state_as_update_v1(&seed_sv);
+                    let change = load(&[&room])
+                        .transact()
+                        .encode_state_as_update_v1(&seed_sv);
                     let state_vector = load(&[&room]).transact().state_vector().len();
                     let (_, room_heap, _) = heap(|| load(&[seed, &change]));
                     let room_load_ms = best(3, || load(&[seed, &change]));
@@ -291,8 +311,12 @@ fn main() {
                                 let doc = EditingDoc::new(9);
                                 let envelope = docx_edit::parse_docx_for_edit(&base).unwrap();
                                 if chunked {
-                                    overlay::open_chunked(&doc, envelope, &overlay::fingerprint(&base))
-                                        .unwrap();
+                                    overlay::open_chunked(
+                                        &doc,
+                                        envelope,
+                                        &overlay::fingerprint(&base),
+                                    )
+                                    .unwrap();
                                     doc.apply_shared_update(&room).unwrap();
                                 } else {
                                     drop(envelope);
@@ -337,15 +361,21 @@ fn main() {
                             ms(|| doc.apply_peer_update_v1(&keystroke).unwrap()).1
                         });
                         drop(engine);
-                        let indexed = office_service::baseline(&base, checkpoint(&sha, seed)).unwrap();
+                        let indexed =
+                            office_service::baseline(&base, checkpoint(&sha, seed)).unwrap();
                         let (_, effects_ms) = ms(|| {
-                            office_service::save_effects(&base, &indexed, checkpoint(&sha, &room)).unwrap()
+                            office_service::save_effects(&base, &indexed, checkpoint(&sha, &room))
+                                .unwrap()
                         });
                         let (_, export_ms) = ms(|| {
-                            office_service::export(&base, checkpoint(&sha, &room), determinism).unwrap()
+                            office_service::export(&base, checkpoint(&sha, &room), determinism)
+                                .unwrap()
                         });
                         let object = line.as_object_mut().unwrap();
-                        object.insert("engineOpenFirstMs".into(), engine_open_first_ms(&base, chunked).into());
+                        object.insert(
+                            "engineOpenFirstMs".into(),
+                            engine_open_first_ms(&base, chunked).into(),
+                        );
                         object.insert(
                             "parseMs".into(),
                             best(2, || docx_edit::parse_docx_for_edit(&base).unwrap()).into(),

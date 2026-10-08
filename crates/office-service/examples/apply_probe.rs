@@ -52,7 +52,12 @@ fn main() {
         let ctx = EditCtx::local("Bench", "2026-10-08T00:00:00Z");
         for index in 0..100 {
             typist
-                .insert_text(&ctx, Position::new("body", at + index), "x", FormatPolicy::Inherit)
+                .insert_text(
+                    &ctx,
+                    Position::new("body", at + index),
+                    "x",
+                    FormatPolicy::Inherit,
+                )
                 .unwrap();
         }
         let messages = sent.borrow().clone();
@@ -97,7 +102,10 @@ fn main() {
         });
         let pending = {
             let txn = receiver.yrs_doc().transact();
-            (txn.store().pending_update().is_some(), txn.store().pending_ds().is_some())
+            (
+                txn.store().pending_update().is_some(),
+                txn.store().pending_ds().is_some(),
+            )
         };
         println!(
             "{}",

@@ -105,7 +105,10 @@ fn cached_materialization(base: &[u8]) -> Result<Option<std::sync::Arc<Vec<u8>>>
         return Ok(Some(Arc::clone(hit)));
     }
     let materialization = Arc::new(materialized(base, &[])?);
-    cache.lock().unwrap().insert(key, Arc::clone(&materialization));
+    cache
+        .lock()
+        .unwrap()
+        .insert(key, Arc::clone(&materialization));
     Ok(Some(materialization))
 }
 
@@ -123,8 +126,12 @@ pub(crate) fn seed_of_layout(base: &[u8], chunked: bool) -> Vec<u8> {
 pub(crate) fn materialized(base: &[u8], state: &[u8]) -> Result<Vec<u8>> {
     let engine = EngineSession::new(env::next_client());
     let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
-    docx_edit::overlay::open_chunked(engine.doc(), envelope, &docx_edit::overlay::fingerprint(base))
-        .map_err(Error::Engine)?;
+    docx_edit::overlay::open_chunked(
+        engine.doc(),
+        envelope,
+        &docx_edit::overlay::fingerprint(base),
+    )
+    .map_err(Error::Engine)?;
     if !state.is_empty() {
         engine
             .doc()
@@ -142,15 +149,22 @@ pub(crate) fn shared_state(base: &[u8], materialized: &[u8], full: &[u8]) -> Res
     use yrs::{ReadTxn, Transact};
     let engine = EngineSession::new(env::next_client());
     let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
-    docx_edit::overlay::open_chunked(engine.doc(), envelope, &docx_edit::overlay::fingerprint(base))
-        .map_err(Error::Engine)?;
+    docx_edit::overlay::open_chunked(
+        engine.doc(),
+        envelope,
+        &docx_edit::overlay::fingerprint(base),
+    )
+    .map_err(Error::Engine)?;
     let before = engine.doc().yrs_doc().transact().state_vector();
     engine.doc().apply_update_v1(full).map_err(Error::engine)?;
-    let overlay = engine.doc().overlay().expect("opened in the override layout");
+    let overlay = engine
+        .doc()
+        .overlay()
+        .expect("opened in the override layout");
     let txn = engine.doc().yrs_doc().transact();
     // The edits, with only the deletions the materialization does not make.
-    let mut edits = yrs::Update::decode_v1(&txn.encode_state_as_update_v1(&before))
-        .map_err(Error::engine)?;
+    let mut edits =
+        yrs::Update::decode_v1(&txn.encode_state_as_update_v1(&before)).map_err(Error::engine)?;
     let own = yrs::Update::decode_v1(materialized).map_err(Error::engine)?;
     edits.delete_set_mut().diff_with(own.delete_set());
     let edits = yrs::updates::encoder::Encode::encode_v1(&edits);

@@ -286,7 +286,7 @@ impl Overlay {
             let mut copies = Update::decode_v1(&copies).map_err(|error| error.to_string())?;
             let keep = IdSet::from_iter(needed.iter().map(|writer| {
                 let client = ClientID::new(*writer);
-                (client, [0..local.get(&client)])
+                (client, std::iter::once(0..local.get(&client)))
             }));
             copies.delete_set_mut().intersect_with(&keep);
             updates.push(copies);
@@ -463,7 +463,11 @@ fn apply_merged(doc: &Doc, updates: Vec<Vec<u8>>) -> Result<(), String> {
 
 /// Every copy of the source, as the room would hold them all: the meta seed,
 /// the stories and their chunks, then the comments.
-pub(crate) fn materialize(doc: &EditingDoc, overlay: &Overlay, source: &Source) -> Result<(), String> {
+pub(crate) fn materialize(
+    doc: &EditingDoc,
+    overlay: &Overlay,
+    source: &Source,
+) -> Result<(), String> {
     let mut updates = vec![meta_seed(&overlay.fingerprint)];
     let mut story_copies = Vec::with_capacity(source.stories.len());
     for (story, entry) in source.stories.iter().zip(&overlay.stories) {
@@ -593,7 +597,9 @@ fn json(value: &Any) -> serde_json::Value {
     match value {
         Any::Null | Any::Undefined => Value::Null,
         Any::Bool(value) => Value::Bool(*value),
-        Any::Number(value) => serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number),
+        Any::Number(value) => {
+            serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number)
+        }
         Any::BigInt(value) => Value::from(*value),
         Any::String(value) => Value::String(value.to_string()),
         Any::Buffer(value) => Value::from(value.to_vec()),
@@ -727,7 +733,8 @@ fn segments_of_text<T: ReadTxn>(txn: &T, story: &yrs::TextRef) -> Vec<crate::Sto
 fn merged(segments: Vec<crate::StorySegment>) -> Vec<crate::StorySegment> {
     let mut out: Vec<crate::StorySegment> = Vec::with_capacity(segments.len());
     for segment in segments {
-        if let (crate::SegmentContent::Text(text), Some(previous)) = (&segment.content, out.last_mut())
+        if let (crate::SegmentContent::Text(text), Some(previous)) =
+            (&segment.content, out.last_mut())
             && let crate::SegmentContent::Text(before) = &mut previous.content
             && previous.attributes == segment.attributes
         {
@@ -739,7 +746,10 @@ fn merged(segments: Vec<crate::StorySegment>) -> Vec<crate::StorySegment> {
     out
 }
 
-fn split_text(segment: &crate::StorySegment, at: u32) -> (crate::StorySegment, crate::StorySegment) {
+fn split_text(
+    segment: &crate::StorySegment,
+    at: u32,
+) -> (crate::StorySegment, crate::StorySegment) {
     let crate::SegmentContent::Text(text) = &segment.content else {
         unreachable!("only text spans more than one unit");
     };
@@ -778,7 +788,13 @@ impl LogicalBase {
             let mut segments = Vec::with_capacity(story.chunks.len());
             for (index, writer) in entry.chunk_writers.iter().enumerate() {
                 let doc = scratch(1);
-                apply_merged(&doc, vec![finished.clone(), chunk_update(story, &live, index, *writer)?])?;
+                apply_merged(
+                    &doc,
+                    vec![
+                        finished.clone(),
+                        chunk_update(story, &live, index, *writer)?,
+                    ],
+                )?;
                 let txn = doc.transact();
                 let text = crate::story_ref(&txn, &story.id).map_err(|error| error.to_string())?;
                 segments.push(segments_of_text(&txn, &text));
@@ -799,7 +815,9 @@ impl LogicalBase {
             .iter()
             .filter(|story| {
                 sv.get(&ClientID::new(story.writer)) == 0
-                    || stories.as_ref().is_some_and(|map| map.get(room, &story.id).is_some())
+                    || stories
+                        .as_ref()
+                        .is_some_and(|map| map.get(room, &story.id).is_some())
             })
             .map(|story| story.id.clone())
             .collect();
@@ -810,9 +828,17 @@ impl LogicalBase {
     }
 
     /// `story_id`'s segments (without projected bookmarks) from `room`.
-    pub fn story_segments<T: ReadTxn>(&self, room: &T, story_id: &str) -> Option<Vec<crate::StorySegment>> {
+    pub fn story_segments<T: ReadTxn>(
+        &self,
+        room: &T,
+        story_id: &str,
+    ) -> Option<Vec<crate::StorySegment>> {
         let sv = room.state_vector();
-        let position = self.overlay.stories.iter().position(|story| story.id == story_id);
+        let position = self
+            .overlay
+            .stories
+            .iter()
+            .position(|story| story.id == story_id);
         let text = crate::story_ref(room, story_id).ok();
         let Some(position) = position else {
             return text.map(|text| merged(segments_of_text(room, &text)));
@@ -828,7 +854,8 @@ impl LogicalBase {
         // format edit across chunks writes markers only at its ends.
         let anchors = entry.chunk_writers.len() + 1;
         let mut boundaries = vec![0u32; anchors];
-        let mut active: Vec<std::collections::BTreeMap<String, Any>> = vec![Default::default(); anchors];
+        let mut active: Vec<std::collections::BTreeMap<String, Any>> =
+            vec![Default::default(); anchors];
         let mut current_attrs = std::collections::BTreeMap::new();
         let mut offset = 0u32;
         let mut item = <yrs::TextRef as AsRef<yrs::branch::Branch>>::as_ref(&text).start();
@@ -864,7 +891,11 @@ impl LogicalBase {
                     gap += 1;
                 }
                 let len = segment_len(&segment);
-                let limit = if gap < anchors { boundaries[gap] } else { u32::MAX };
+                let limit = if gap < anchors {
+                    boundaries[gap]
+                } else {
+                    u32::MAX
+                };
                 if at + len <= limit {
                     at += len;
                     gaps[gap].push(segment);
@@ -882,7 +913,10 @@ impl LogicalBase {
             if copied(*writer) {
                 out.append(&mut gaps[index + 1]);
             } else {
-                debug_assert!(gaps[index + 1].is_empty(), "content in an uncopied chunk's gap");
+                debug_assert!(
+                    gaps[index + 1].is_empty(),
+                    "content in an uncopied chunk's gap"
+                );
                 out.extend(self.chunks[position][index].iter().map(|segment| {
                     let mut segment = segment.clone();
                     for (key, value) in &active[index] {
@@ -958,7 +992,10 @@ pub fn room_segments_dump(base: &LogicalBase, room: &Doc) -> String {
     let stories: Vec<_> = base
         .story_ids(&txn)
         .into_iter()
-        .filter_map(|id| base.story_segments(&txn, &id).map(|segments| (id, segments)))
+        .filter_map(|id| {
+            base.story_segments(&txn, &id)
+                .map(|segments| (id, segments))
+        })
         .collect();
     segments_dump(&stories)
 }

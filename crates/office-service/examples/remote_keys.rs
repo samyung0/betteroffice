@@ -57,7 +57,12 @@ fn main() {
             for index in 0..200 {
                 let started = Instant::now();
                 typist
-                    .insert_text(&ctx, Position::new("body", at + index), "x", FormatPolicy::Inherit)
+                    .insert_text(
+                        &ctx,
+                        Position::new("body", at + index),
+                        "x",
+                        FormatPolicy::Inherit,
+                    )
                     .unwrap();
                 local_times.push(started.elapsed().as_secs_f64() * 1000.0);
             }

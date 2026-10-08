@@ -325,7 +325,8 @@ impl EditingDoc {
         options.offset_kind = OffsetKind::Utf16;
         // Spike switch: yrs's formatting cleanup after a remote update deletes
         // format items locally, in an order that follows client ids.
-        options.cleanup_formatting = !std::env::var("DOCX_EDIT_FORMAT_CLEANUP").is_ok_and(|v| v == "0");
+        options.cleanup_formatting =
+            !std::env::var("DOCX_EDIT_FORMAT_CLEANUP").is_ok_and(|v| v == "0");
         let doc = Doc::with_options(options);
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.

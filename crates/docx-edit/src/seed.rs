@@ -4384,7 +4384,9 @@ pub(crate) fn chunk_source(lowering: Lowering) -> Result<crate::overlay::Source,
         }
         for (key, data, index, assoc) in place_bookmarks(&story_id, bookmarks)? {
             if chunks.is_empty() {
-                return Err(format!("bookmark {key} in story {story_id} without content"));
+                return Err(format!(
+                    "bookmark {key} in story {story_id} without content"
+                ));
             }
             let unit = match assoc {
                 yrs::Assoc::After => index.min(len.saturating_sub(1)),

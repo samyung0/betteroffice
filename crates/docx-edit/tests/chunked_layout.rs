@@ -109,6 +109,11 @@ fn chunked_view_reads_as_the_seed() {
             failures.push(format!("{name}: {}", first_difference(&left, &right)));
         }
     }
-    assert!(failures.is_empty(), "{} of {count} differ:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {count} differ:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     eprintln!("{count} fixtures read the same");
 }

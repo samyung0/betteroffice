@@ -65,4 +65,3 @@ pub fn xml_fixtures() -> Vec<(String, Vec<u8>)> {
         ),
     ]
 }
-

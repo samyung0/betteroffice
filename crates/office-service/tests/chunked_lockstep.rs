@@ -139,11 +139,21 @@ impl World {
                     .map(|(peer, message)| {
                         let update = yrs::Update::decode_v1(message).unwrap();
                         let text = format!("{update:?}");
-                        format!("peer {peer}, {} B: {}", message.len(), &text[..text.len().min(1200)])
+                        format!(
+                            "peer {peer}, {} B: {}",
+                            message.len(),
+                            &text[..text.len().min(1200)]
+                        )
                     })
                     .collect();
-                panic!("sync_all does not settle (chunked {}): {}", self.chunked, tail.join("
-"));
+                panic!(
+                    "sync_all does not settle (chunked {}): {}",
+                    self.chunked,
+                    tail.join(
+                        "
+"
+                    )
+                );
             }
             let before = self.log.len();
             for from in 0..self.peers.len() {
@@ -357,7 +367,11 @@ fn choose(rng: &mut Rng, doc: &EditingDoc, focus: Option<&str>, marker: String) 
                 story,
                 from,
                 to,
-                vec![format!("{marker}a"), format!("{marker}b"), format!("{marker}c")],
+                vec![
+                    format!("{marker}a"),
+                    format!("{marker}b"),
+                    format!("{marker}c"),
+                ],
             )
         }
         18 => {
@@ -700,14 +714,15 @@ fn same_but_para_ids(left: &[u8], right: &[u8]) -> bool {
         out.push_str(rest);
         out
     };
-    let (Ok(left), Ok(right)) = (
-        ooxml_opc::unzip_parts(left),
-        ooxml_opc::unzip_parts(right),
-    ) else {
+    let (Ok(left), Ok(right)) = (ooxml_opc::unzip_parts(left), ooxml_opc::unzip_parts(right))
+    else {
         return false;
     };
     left.len() == right.len()
-        && left.iter().zip(&right).all(|((a, x), (b, y))| a == b && (x == y || mask(x) == mask(y)))
+        && left
+            .iter()
+            .zip(&right)
+            .all(|((a, x), (b, y))| a == b && (x == y || mask(x) == mask(y)))
 }
 
 /// Renamed paragraph ids (`{client}.{clock}`) kept to their client, as in
@@ -737,7 +752,8 @@ fn renamed_ids_hidden(text: &str) -> String {
 fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
     use yrs::Map;
     let txn = doc.yrs_doc().transact();
-    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story)) else {
+    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story))
+    else {
         return String::new();
     };
     let mut items = Vec::new();
@@ -753,12 +769,19 @@ fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
             }
             yrs::block::ItemContent::Format(key, value) => format!("fmt {key}={value}"),
             yrs::block::ItemContent::Type(_) => {
-                let map = yrs::MapRef::from(yrs::branch::BranchPtr::from(match current.content() {
-                    yrs::block::ItemContent::Type(branch) => branch.as_ref(),
-                    _ => unreachable!(),
-                }));
-                let kind = map.get(&txn, "_kind").map(|value| value.to_string(&txn)).unwrap_or_default();
-                let id = map.get(&txn, "paraId").map(|value| value.to_string(&txn)).unwrap_or_default();
+                let map =
+                    yrs::MapRef::from(yrs::branch::BranchPtr::from(match current.content() {
+                        yrs::block::ItemContent::Type(branch) => branch.as_ref(),
+                        _ => unreachable!(),
+                    }));
+                let kind = map
+                    .get(&txn, "_kind")
+                    .map(|value| value.to_string(&txn))
+                    .unwrap_or_default();
+                let id = map
+                    .get(&txn, "paraId")
+                    .map(|value| value.to_string(&txn))
+                    .unwrap_or_default();
                 if id == para_id {
                     target = Some(items.len());
                 }
@@ -768,7 +791,11 @@ fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
             other => format!("{other:?}").chars().take(40).collect(),
         };
         let id = current.id();
-        let client = if id.client.get() >= overlay::RESERVED_CLIENTS { "W".to_owned() } else { id.client.get().to_string() };
+        let client = if id.client.get() >= overlay::RESERVED_CLIENTS {
+            "W".to_owned()
+        } else {
+            id.client.get().to_string()
+        };
         items.push(format!(
             "{}{client}:{} {summary}",
             if current.is_deleted() { "x " } else { "  " },
@@ -777,9 +804,20 @@ fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
         item = current.right();
     }
     let at = target.unwrap_or(0);
-    let after: usize = std::env::var("CHUNKED_WINDOW_AFTER").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
-    items[at.saturating_sub(std::env::var("CHUNKED_WINDOW_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(14))..(at + after).min(items.len())].join("
-")
+    let after: usize = std::env::var("CHUNKED_WINDOW_AFTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    items[at.saturating_sub(
+        std::env::var("CHUNKED_WINDOW_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14),
+    )..(at + after).min(items.len())]
+        .join(
+            "
+",
+        )
 }
 
 /// A story's live items (content and format markers, no ids, no deleted
@@ -787,7 +825,8 @@ fn item_window(doc: &EditingDoc, story: &str, para_id: &str) -> String {
 fn live_structure(doc: &EditingDoc, story: &str) -> Vec<String> {
     use yrs::Map;
     let txn = doc.yrs_doc().transact();
-    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story)) else {
+    let Some(yrs::Out::YText(text)) = txn.get_map("stories").and_then(|map| map.get(&txn, story))
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -796,7 +835,9 @@ fn live_structure(doc: &EditingDoc, story: &str) -> Vec<String> {
         if !current.is_deleted() {
             out.push(match current.content() {
                 yrs::block::ItemContent::String(text) => format!("{:?}", text.as_str()),
-                yrs::block::ItemContent::Format(key, value) => format!("fmt {key}={}", canon(value)),
+                yrs::block::ItemContent::Format(key, value) => {
+                    format!("fmt {key}={}", canon(value))
+                }
                 yrs::block::ItemContent::Type(_) => "embed".to_owned(),
                 other => format!("{other:?}").chars().take(30).collect(),
             });
@@ -806,11 +847,17 @@ fn live_structure(doc: &EditingDoc, story: &str) -> Vec<String> {
     fn canon(value: &Any) -> String {
         match value {
             Any::Map(map) => {
-                let mut entries: Vec<_> = map.iter().map(|(key, value)| format!("{key}:{}", canon(value))).collect();
+                let mut entries: Vec<_> = map
+                    .iter()
+                    .map(|(key, value)| format!("{key}:{}", canon(value)))
+                    .collect();
                 entries.sort();
                 format!("{{{}}}", entries.join(","))
             }
-            Any::Array(values) => format!("[{}]", values.iter().map(canon).collect::<Vec<_>>().join(",")),
+            Any::Array(values) => format!(
+                "[{}]",
+                values.iter().map(canon).collect::<Vec<_>>().join(",")
+            ),
             other => other.to_string(),
         }
     }
@@ -889,7 +936,10 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     // CHUNKED_CONTROL=1 runs today's layout in both worlds (a control).
     let control = std::env::var("CHUNKED_CONTROL").is_ok_and(|value| value == "1");
-    let mut worlds = [World::new(base, peers, false), World::new(base, peers, !control)];
+    let mut worlds = [
+        World::new(base, peers, false),
+        World::new(base, peers, !control),
+    ];
     let mut stats = Stats::default();
     let focus = layout(&worlds[0].peers[0].doc, "body")
         .1
@@ -900,7 +950,9 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
         for step in 0..ops {
             for peer in 0..peers {
                 let marker = format!("<{peer}.{round}.{step}>");
-                let focused = (round == 0 && step == 0).then_some(focus.as_deref()).flatten();
+                let focused = (round == 0 && step == 0)
+                    .then_some(focus.as_deref())
+                    .flatten();
                 let op = choose(&mut rng, &worlds[0].peers[peer].doc, focused, marker);
                 let seeded = attempt(&worlds[0].peers[peer], &op);
                 let chunked = attempt(&worlds[1].peers[peer], &op);
@@ -926,10 +978,16 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                     std::env::var("CHUNKED_WINDOW"),
                 ) && step_id == format!("r{round}s{step}p{peer}")
                 {
-                    eprintln!("after r{round}s{step}p{peer} seeded:
-{}", item_window(&worlds[0].peers[peer].doc, "body", &marker));
-                    eprintln!("after r{round}s{step}p{peer} chunked:
-{}", item_window(&worlds[1].peers[peer].doc, "body", &marker));
+                    eprintln!(
+                        "after r{round}s{step}p{peer} seeded:
+{}",
+                        item_window(&worlds[0].peers[peer].doc, "body", &marker)
+                    );
+                    eprintln!(
+                        "after r{round}s{step}p{peer} chunked:
+{}",
+                        item_window(&worlds[1].peers[peer].doc, "body", &marker)
+                    );
                 }
                 if std::env::var("CHUNKED_STRUCTURE").is_ok() {
                     let (a, b) = (
@@ -937,7 +995,11 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                         live_structure(&worlds[1].peers[peer].doc, "body"),
                     );
                     if a != b {
-                        let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                        let at = a
+                            .iter()
+                            .zip(&b)
+                            .position(|(x, y)| x != y)
+                            .unwrap_or(a.len().min(b.len()));
                         eprintln!(
                             "structure differs after r{round}s{step}p{peer} {op:?} at {at}:
   seeded:  {:?}
@@ -956,7 +1018,10 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                     "{}",
                     context(
                         round,
-                        &format!("peer {peer} after {op:?}: {}", first_difference(&left, &right))
+                        &format!(
+                            "peer {peer} after {op:?}: {}",
+                            first_difference(&left, &right)
+                        )
                     )
                 );
             }
@@ -966,19 +1031,29 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             .filter(|(from, to)| from != to)
             .collect();
         for (from, to) in pairs {
-            let watch = std::env::var("CHUNKED_WINDOW_SYNC").ok() == Some(format!("r{round} {from}->{to}"));
+            let watch =
+                std::env::var("CHUNKED_WINDOW_SYNC").ok() == Some(format!("r{round} {from}->{to}"));
             if watch && let Ok(marker) = std::env::var("CHUNKED_WINDOW") {
-                eprintln!("before seeded:
-{}", item_window(&worlds[0].peers[to].doc, "body", &marker));
-                eprintln!("before chunked:
-{}", item_window(&worlds[1].peers[to].doc, "body", &marker));
+                eprintln!(
+                    "before seeded:
+{}",
+                    item_window(&worlds[0].peers[to].doc, "body", &marker)
+                );
+                eprintln!(
+                    "before chunked:
+{}",
+                    item_window(&worlds[1].peers[to].doc, "body", &marker)
+                );
             }
             for world in worlds.iter_mut() {
                 let chunked = world.chunked;
                 world.sync(from, to).unwrap_or_else(|error| {
                     panic!(
                         "{}",
-                        context(round, &format!("chunked {chunked} sync {from}->{to}: {error}"))
+                        context(
+                            round,
+                            &format!("chunked {chunked} sync {from}->{to}: {error}")
+                        )
                     )
                 });
             }
@@ -986,10 +1061,16 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                 eprintln!("r{round} sync {from}->{to}");
             }
             if watch && let Ok(marker) = std::env::var("CHUNKED_WINDOW") {
-                eprintln!("after seeded:
-{}", item_window(&worlds[0].peers[to].doc, "body", &marker));
-                eprintln!("after chunked:
-{}", item_window(&worlds[1].peers[to].doc, "body", &marker));
+                eprintln!(
+                    "after seeded:
+{}",
+                    item_window(&worlds[0].peers[to].doc, "body", &marker)
+                );
+                eprintln!(
+                    "after chunked:
+{}",
+                    item_window(&worlds[1].peers[to].doc, "body", &marker)
+                );
             }
             if std::env::var("CHUNKED_STRUCTURE").is_ok() {
                 let (a, b) = (
@@ -997,7 +1078,11 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
                     live_structure(&worlds[1].peers[to].doc, "body"),
                 );
                 if a != b {
-                    let at = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+                    let at = a
+                        .iter()
+                        .zip(&b)
+                        .position(|(x, y)| x != y)
+                        .unwrap_or(a.len().min(b.len()));
                     eprintln!(
                         "structure differs after r{round} sync {from}->{to} at {at}:
   seeded:  {:?}
@@ -1013,10 +1098,16 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             );
             if left != right {
                 if let Ok(para) = std::env::var("CHUNKED_WINDOW") {
-                    eprintln!("seeded:
-{}", item_window(&worlds[0].peers[to].doc, "body", &para));
-                    eprintln!("chunked:
-{}", item_window(&worlds[1].peers[to].doc, "body", &para));
+                    eprintln!(
+                        "seeded:
+{}",
+                        item_window(&worlds[0].peers[to].doc, "body", &para)
+                    );
+                    eprintln!(
+                        "chunked:
+{}",
+                        item_window(&worlds[1].peers[to].doc, "body", &para)
+                    );
                 }
                 panic!(
                     "{}",
@@ -1028,7 +1119,12 @@ fn lockstep(name: &str, base: &[u8], seed: u64, peers: usize, rounds: usize, ops
             }
         }
     }
-    finish(&format!("{name} seed {seed}"), base, &mut worlds, &mut stats);
+    finish(
+        &format!("{name} seed {seed}"),
+        base,
+        &mut worlds,
+        &mut stats,
+    );
     stats
 }
 
@@ -1077,10 +1173,7 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         return;
     }
     phase("dumped");
-    let (left, right) = (
-        dump(&worlds[0].peers[0].doc),
-        dump(&worlds[1].peers[0].doc),
-    );
+    let (left, right) = (dump(&worlds[0].peers[0].doc), dump(&worlds[1].peers[0].doc));
     assert!(
         left == right,
         "{label}: converged worlds differ: {}",
@@ -1097,8 +1190,12 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         quoted_renamed_ids_hidden(&blocks(&worlds[1].peers[0].doc).unwrap_or_else(|error| error)),
     );
     if left_blocks != right_blocks {
-        let split = |text: &str| text.replace("},{", "},
-{");
+        let split = |text: &str| {
+            text.replace(
+                "},{", "},
+{",
+            )
+        };
         panic!(
             "{label}: layout blocks differ: {}",
             first_difference(&split(&left_blocks), &split(&right_blocks))
@@ -1180,7 +1277,8 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
         })
         .collect();
     if baselines[0] != baselines[1] {
-        let text = |baseline: &Result<String, String>| baseline.clone().unwrap_or_else(|error| error);
+        let text =
+            |baseline: &Result<String, String>| baseline.clone().unwrap_or_else(|error| error);
         panic!(
             "{label}: baselines differ: {}",
             first_difference(&text(&baselines[0]), &text(&baselines[1]))
@@ -1314,7 +1412,10 @@ fn compare(worlds: &[World; 2], peer: usize, what: &str) {
 /// Runs scripted steps in both layouts, comparing reads after each, then
 /// [`finish`]. Every scripted op must apply.
 fn script(name: &str, base: &[u8], peers: usize, steps: Vec<Step>) -> [World; 2] {
-    let mut worlds = [World::new(base, peers, false), World::new(base, peers, true)];
+    let mut worlds = [
+        World::new(base, peers, false),
+        World::new(base, peers, true),
+    ];
     for (index, step) in steps.into_iter().enumerate() {
         match step {
             Step::Do(peer, op) => {
@@ -1331,7 +1432,11 @@ fn script(name: &str, base: &[u8], peers: usize, steps: Vec<Step>) -> [World; 2]
                 for world in worlds.iter_mut() {
                     world.sync(from, to).unwrap();
                 }
-                compare(&worlds, to, &format!("{name} step {index} sync {from}->{to}"));
+                compare(
+                    &worlds,
+                    to,
+                    &format!("{name} step {index} sync {from}->{to}"),
+                );
             }
         }
     }
@@ -1401,7 +1506,11 @@ fn concurrent_first_edits_of_one_chunk_converge_on_one_copy() {
     );
     let room = worlds[1].room(&base);
     let overlay = worlds[1].peers[0].doc.overlay().unwrap();
-    let body = overlay.stories.iter().find(|story| story.id == "body").unwrap();
+    let body = overlay
+        .stories
+        .iter()
+        .find(|story| story.id == "body")
+        .unwrap();
     assert_eq!(
         copies_in(&room),
         BTreeSet::from([body.writer, body.chunk_writers[1]]),
@@ -1549,7 +1658,10 @@ fn a_comment_over_source_text_copies_no_chunk() {
         "comment across chunks",
         &base,
         2,
-        vec![Step::Do(0, Op::Comment("body".into(), from + 2, to)), Step::Sync(0, 1)],
+        vec![
+            Step::Do(0, Op::Comment("body".into(), from + 2, to)),
+            Step::Sync(0, 1),
+        ],
     );
     assert!(
         copies_in(&worlds[1].room(&base)).is_empty(),
@@ -1665,7 +1777,10 @@ fn rebase_on_materialized_chunked_states_lands_as_today() {
         Op::Split("body".into(), mark),
         Op::Comment("body".into(), start, later),
     ];
-    let latest_ops = [insert("body", later + 1, "<late>"), Op::Bold("body".into(), start, start + 4)];
+    let latest_ops = [
+        insert("body", later + 1, "<late>"),
+        Op::Bold("body".into(), start, start + 4),
+    ];
     let peers = [open_peer(&base, 701, false), open_peer(&base, 701, true)];
     for op in &captured_ops {
         for peer in &peers {
@@ -1688,19 +1803,28 @@ fn rebase_on_materialized_chunked_states_lands_as_today() {
         );
         yrs::updates::encoder::Encode::encode_v1(&yrs::Update::merge_updates(updates))
     };
-    let captured: Vec<Vec<u8>> = peers.iter().enumerate().map(|(world, peer)| room_of(world, peer)).collect();
+    let captured: Vec<Vec<u8>> = peers
+        .iter()
+        .enumerate()
+        .map(|(world, peer)| room_of(world, peer))
+        .collect();
     for op in &latest_ops {
         for peer in &peers {
             run(peer, op).unwrap();
         }
     }
-    let latest: Vec<Vec<u8>> = peers.iter().enumerate().map(|(world, peer)| room_of(world, peer)).collect();
+    let latest: Vec<Vec<u8>> = peers
+        .iter()
+        .enumerate()
+        .map(|(world, peer)| room_of(world, peer))
+        .collect();
     let sha = office_service::sha256_hex(&base);
     let determinism = Determinism {
         seed: "0000000000000000000000000000000000000000000000000000000000000000",
         now: "2026-10-08T00:00:00.000Z",
     };
-    let exported = office_service::export(&base, checkpoint(&sha, &captured[0]), determinism).unwrap();
+    let exported =
+        office_service::export(&base, checkpoint(&sha, &captured[0]), determinism).unwrap();
     let export_sha = office_service::sha256_hex(&exported);
     let rebased: Vec<_> = (0..2)
         .map(|world| {
@@ -1717,12 +1841,20 @@ fn rebase_on_materialized_chunked_states_lands_as_today() {
         .iter()
         .map(|result| {
             result.as_ref().map(|rebased| {
-                office_service::export(&exported, checkpoint(&export_sha, &rebased.state), determinism)
-                    .unwrap()
+                office_service::export(
+                    &exported,
+                    checkpoint(&export_sha, &rebased.state),
+                    determinism,
+                )
+                .unwrap()
             })
         })
         .collect();
-    assert!(rebased[0].is_ok(), "today's rebase: {:?}", rebased[0].as_ref().err());
+    assert!(
+        rebased[0].is_ok(),
+        "today's rebase: {:?}",
+        rebased[0].as_ref().err()
+    );
     assert!(
         landed[0] == landed[1],
         "rebased exports differ: chunked {:?}",

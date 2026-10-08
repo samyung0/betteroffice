@@ -28,7 +28,10 @@ fn main() {
     let (a, b) = (load(&args[1]), load(&args[2]));
     let reference = args.get(3).map(|path| load(path));
     let (da, db) = (deleted(&a), deleted(&b));
-    for (label, only, doc) in [("only in a", da.diff(&db), &a), ("only in b", db.diff(&da), &b)] {
+    for (label, only, doc) in [
+        ("only in a", da.diff(&db), &a),
+        ("only in b", db.diff(&da), &b),
+    ] {
         println!("{label}:");
         let txn = doc.transact();
         for (client, ranges) in only.iter() {
@@ -41,7 +44,11 @@ fn main() {
                 let content = item
                     .map(|item| format!("{:?}", item.content()))
                     .unwrap_or_else(|| "?".into());
-                println!("  {client:?} {:?} {}", range, &content[..content.len().min(160)]);
+                println!(
+                    "  {client:?} {:?} {}",
+                    range,
+                    &content[..content.len().min(160)]
+                );
             }
         }
     }

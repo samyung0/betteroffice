@@ -32,8 +32,10 @@ fn main() {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let seeded_room = std::fs::read(format!("{states}/{name}.seeded.one-edit.state.bin")).unwrap();
-        let chunked_room = std::fs::read(format!("{states}/{name}.chunked.one-edit.state.bin")).unwrap();
+        let seeded_room =
+            std::fs::read(format!("{states}/{name}.seeded.one-edit.state.bin")).unwrap();
+        let chunked_room =
+            std::fs::read(format!("{states}/{name}.chunked.one-edit.state.bin")).unwrap();
         let materialization = {
             let doc = EditingDoc::new(9);
             let envelope = docx_edit::parse_docx_for_edit(&base).unwrap();
@@ -71,8 +73,14 @@ fn main() {
                 // save and per publication.
                 let sha = office_service::sha256_hex(&base);
                 let (room, seed) = match mode {
-                    "today" => (&seeded_room, office_service::seed(office_service::Format::Docx, &base).unwrap()),
-                    _ => (&chunked_room, overlay::meta_seed(&overlay::fingerprint(&base))),
+                    "today" => (
+                        &seeded_room,
+                        office_service::seed(office_service::Format::Docx, &base).unwrap(),
+                    ),
+                    _ => (
+                        &chunked_room,
+                        overlay::meta_seed(&overlay::fingerprint(&base)),
+                    ),
                 };
                 // SAFETY of the switch: set before the calls of this mode only.
                 unsafe {

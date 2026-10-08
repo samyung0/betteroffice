@@ -1163,7 +1163,10 @@ impl EditingDoc {
         let overlay = self.overlay();
         let rank = |id: &yrs::ID| -> (u8, u64, u64, u64) {
             let client = id.client.get();
-            match overlay.as_ref().and_then(|overlay| overlay.chunk_of(client)) {
+            match overlay
+                .as_ref()
+                .and_then(|overlay| overlay.chunk_of(client))
+            {
                 Some((story, chunk)) => (0, story as u64, chunk as u64, u64::from(id.clock)),
                 None if client == crate::seed::SEED_CLIENT_ID => (0, 0, 0, u64::from(id.clock)),
                 None => (1, client, u64::from(id.clock), 0),
@@ -1176,7 +1179,10 @@ impl EditingDoc {
             // again, and peers would echo that write forever.
             let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             marks.sort_by_key(|(id, _)| {
-                (format!("{}.{}", id.client, id.clock) != duplicated, rank(id))
+                (
+                    format!("{}.{}", id.client, id.clock) != duplicated,
+                    rank(id),
+                )
             });
             let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             for (id, map) in &marks[1..] {
