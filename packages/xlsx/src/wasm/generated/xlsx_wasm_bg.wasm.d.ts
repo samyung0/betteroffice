@@ -54,6 +54,7 @@ export const xlsxdocument_undoJson: (a: number) => [number, number, number, numb
 export const xlsxdocument_version: () => [number, number];
 export const xlsxeffectsreader_new: (a: number, b: number, c: number) => [number, number, number];
 export const xlsxeffectsreader_pendingEffectsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const betteroffice_memory_grows: () => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

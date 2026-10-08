@@ -28,6 +28,7 @@ export const vertical_move_by_handle: (a: number, b: number, c: number, d: numbe
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
+export const betteroffice_memory_grows: () => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

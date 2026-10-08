@@ -1,3 +1,7 @@
+// Linear memory grows in large steps (crates/wasm-alloc).
+#[cfg(target_arch = "wasm32")]
+use wasm_alloc as _;
+
 use pptx_edit::{DeckSnapshot, baseline_snapshot};
 use wasm_bindgen::prelude::*;
 

@@ -197,6 +197,7 @@ export interface InitOutput {
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
+    readonly betteroffice_memory_grows: () => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

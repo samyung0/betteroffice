@@ -88,6 +88,7 @@ export const pptxdocument_undoCaptureMode: (a: number) => [number, number];
 export const pptxdocument_undoJson: (a: number) => [number, number, number, number];
 export const pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
 export const pptxdocument_version: () => [number, number];
+export const betteroffice_memory_grows: () => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

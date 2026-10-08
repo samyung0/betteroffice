@@ -93,6 +93,7 @@ dependencies = [
  "betteroffice-docx-parse",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
+ "betteroffice-wasm-alloc",
  "js-sys",
  "ryu-js",
  "serde",
@@ -448,6 +449,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-wasm-alloc"
+version = "0.2.0"
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.2.0"
 dependencies = [
@@ -728,6 +733,7 @@ version = "0.0.0"
 dependencies = [
  "betteroffice-docx-edit",
  "betteroffice-docx-parse",
+ "betteroffice-wasm-alloc",
  "serde_json",
  "wasm-bindgen",
 ]
@@ -1384,6 +1390,7 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
+ "betteroffice-wasm-alloc",
  "serde_json",
  "wasm-bindgen",
 ]
@@ -1396,6 +1403,7 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
+ "betteroffice-wasm-alloc",
  "serde_json",
  "wasm-bindgen",
 ]
@@ -2301,6 +2309,7 @@ version = "0.0.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "betteroffice-wasm-alloc",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "betteroffice-xlsx-render",
@@ -2314,6 +2323,7 @@ name = "xlsx-wasm"
 version = "0.0.0"
 dependencies = [
  "betteroffice-opc",
+ "betteroffice-wasm-alloc",
  "betteroffice-xlsx",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
