@@ -1,5 +1,6 @@
 //! Security regressions for the patched yrs's integration of an update:
-//! the struct picker, the work budget and the block list's push.
+//! the struct picker, the work budget, the block list's push, and a
+//! transaction a panic unwinds through.
 //! `third_party/yrs` sits outside the cargo workspace, so its own unit tests
 //! never run in CI; these do.
 
@@ -170,4 +171,29 @@ fn a_struct_placed_twice_keeps_the_first() {
         .get_item(&ID::new(ClientID::new(77), 0))
         .expect("the struct");
     assert_eq!(item.origin().copied(), Some(ID::new(ClientID::new(1), 1)));
+}
+
+/// Security regression (rust-core round 2): a panic inside an open
+/// transaction must not commit it while unwinding. The commit would run the
+/// update observers and could panic again, and a second panic while
+/// unwinding aborts the process (every room in the server). Here an observer
+/// panics on commit: the panic stays the first one, caught, and the document
+/// is dropped.
+#[test]
+fn a_panic_inside_a_transaction_does_not_commit_it_while_unwinding() {
+    let doc = Doc::with_client_id(1);
+    let text = doc.get_or_insert_text("t");
+    let _observer = doc.observe_update_v1(|_, _| panic!("an observer on commit"));
+    let inner = doc.clone();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let mut txn = inner.transact_mut();
+        text.insert(&mut txn, 0, "abc");
+        panic!("inside the transaction");
+    }));
+    let message = caught
+        .expect_err("the first panic is caught")
+        .downcast::<&str>()
+        .map(|message| *message);
+    assert_eq!(message.ok(), Some("inside the transaction"));
+    drop(doc);
 }
