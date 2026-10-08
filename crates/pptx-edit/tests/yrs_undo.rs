@@ -6,9 +6,7 @@ use std::sync::Arc;
 use yrs::types::ToJson;
 use yrs::undo::{Options, UndoManager};
 use yrs::updates::decoder::Decode;
-use yrs::{
-    Any, ClientID, Doc, ID, Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, Update,
-};
+use yrs::{Any, ClientID, Doc, ID, Map, MapPrelim, MapRef, ReadTxn, Transact, Update};
 
 /// Every peer takes what it lacks from every other, untracked.
 fn exchange(docs: &[&Doc]) {
@@ -47,7 +45,7 @@ fn object(entries: &[(&str, f64)]) -> Any {
     ))
 }
 
-fn nested(map: &MapRef, txn: &TransactionMut, key: &str) -> MapRef {
+fn nested<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> MapRef {
     map.get(txn, key).unwrap().cast::<MapRef>().unwrap()
 }
 
@@ -172,4 +170,47 @@ fn clearing_one_stack_keeps_the_other() {
     assert!(undo.can_undo() && !undo.can_redo());
     undo.undo_blocking();
     assert_eq!(json(&doc, &map), object(&[("a", 1.0)]));
+}
+
+/// `Item::redo` keeps the restored value's parents, as Yjs's `keepItem`
+/// does: after clearing the redo stack un-kept map "p", Undo restores "k"
+/// into it and keeps "p" again, so a peer's removal of "p" does not collect
+/// it or the restored value (Yjs 13.6.31 the same:
+/// `yrs-gc/probes/yjs_redo_keeps_parent.cjs`).
+#[test]
+fn redo_keeps_the_restored_values_parent() {
+    let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(2));
+    let (m1, m2) = (d1.get_or_insert_map("m"), d2.get_or_insert_map("m"));
+    m1.insert(
+        &mut d1.transact_mut(),
+        "p",
+        MapPrelim::from([("k", 0), ("j", 0)]),
+    );
+    exchange(&[&d1, &d2]);
+    let mut undo = manager(&d2, &m2);
+    {
+        let mut txn = d2.transact_mut();
+        nested(&m2, &txn, "p").remove(&mut txn, "k"); // step 1: a pure deletion
+    }
+    {
+        let mut txn = d2.transact_mut();
+        nested(&m2, &txn, "p").insert(&mut txn, "j", 1); // step 2
+    }
+    undo.undo_blocking(); // takes back step 2
+    undo.clear_redo(); // un-keeps "p"
+    undo.undo_blocking(); // takes back step 1: restores "k" as a copy
+    let restored = {
+        let txn = d2.transact();
+        let p = nested(&m2, &txn, "p");
+        let (_, item) = p
+            .as_ref()
+            .map_items()
+            .find(|(key, _)| &***key == "k")
+            .unwrap();
+        *item.id()
+    };
+
+    m1.remove(&mut d1.transact_mut(), "p");
+    exchange(&[&d1, &d2]);
+    assert!(d2.transact().store().get_item(&restored).is_some());
 }

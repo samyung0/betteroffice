@@ -637,8 +637,11 @@ impl ItemPtr {
             item.content.clone(),
         )?;
         item.redone = Some(*redone_item.id());
-        redone_item.info.set_keep();
-        txn.integrate_item(redone_item, 0)
+        // Patched for BetterOffice: keep the copy and its parents, as Yjs's
+        // `keepItem(redoneItem, true)` does.
+        let redone = txn.integrate_item(redone_item, 0)?;
+        redone.keep(true);
+        Some(redone)
     }
 
     pub(crate) fn keep(&self, keep: bool) {
