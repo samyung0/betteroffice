@@ -566,6 +566,7 @@ impl ItemPtr {
             // Patched for BetterOffice, as Yjs 13.6.31 (#757): a left reached
             // through redone copies in another parent would make peers place the
             // value under that parent; take the key's current value instead.
+            // Yjs's own regression test is ported in pptx-edit's yrs_undo.
             if left
                 .as_deref()
                 .is_some_and(|left| left.parent.as_branch().and_then(|b| b.item) != parent_block)

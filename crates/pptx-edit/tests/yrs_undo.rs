@@ -242,3 +242,64 @@ fn undo_does_not_restore_past_a_removed_winner() {
     assert_eq!(json(&d1, &m1), object(&[]));
     assert_eq!(json(&d2, &m2), object(&[]));
 }
+
+/// `Item::redo`'s cross-parent check, ported from Yjs's regression test for
+/// yjs#757 (`testUndoSetAttributeAndDeleteSyncsAttributes`, PR #775): one
+/// step changes an embedded XmlText's attribute and deletes the embed. Undo
+/// restores the embed as a copy and its attributes into the copy; the
+/// restored attribute must take its origin in the copy, not in the deleted
+/// original, or a remote peer places it under the original and loses it.
+#[test]
+fn undo_of_an_attribute_change_and_delete_syncs_the_attributes() {
+    use yrs::types::text::{Diff, YChange};
+    use yrs::{GetString, Out, Text, Xml, XmlTextPrelim, XmlTextRef};
+    let doc = Doc::with_client_id(1);
+    let root = doc.get_or_insert_text("sharedRoot");
+    let button: XmlTextRef = {
+        let mut txn = doc.transact_mut();
+        let button = root.insert_embed(&mut txn, 0, XmlTextPrelim::new("Click me"));
+        button.insert_attribute(&mut txn, "type", "button");
+        button.insert_attribute(&mut txn, "test", true);
+        button
+    };
+    let mut undo = UndoManager::<()>::with_options(Options {
+        capture_timeout_millis: 0,
+        ..Options::default()
+    });
+    undo.expand_scope(&doc, &root);
+    {
+        let mut txn = doc.transact_mut();
+        button.insert_attribute(&mut txn, "type", "paragraph");
+        root.remove_range(&mut txn, 0, 1);
+    }
+    assert!(undo.undo_blocking());
+
+    let embedded = |doc: &Doc| -> (Option<Out>, Option<Out>, String) {
+        let root = doc.get_or_insert_text("sharedRoot");
+        let txn = doc.transact();
+        let delta: Vec<Diff<YChange>> = root.diff(&txn, YChange::identity);
+        let Out::YXmlText(button) = &delta[0].insert else {
+            panic!("expected an embedded XmlText, got {:?}", delta[0].insert)
+        };
+        (
+            button.get_attribute(&txn, "type"),
+            button.get_attribute(&txn, "test"),
+            button.get_string(&txn),
+        )
+    };
+    let expected = (
+        Some(Out::Any(Any::from("button"))),
+        Some(Out::Any(Any::Bool(true))),
+        "Click me".to_owned(),
+    );
+    assert_eq!(embedded(&doc), expected);
+    let remote = Doc::with_client_id(2);
+    let state = doc
+        .transact()
+        .encode_state_as_update_v2(&yrs::StateVector::default());
+    remote
+        .transact_mut()
+        .apply_update(Update::decode_v2(&state).unwrap())
+        .unwrap();
+    assert_eq!(embedded(&remote), expected);
+}
