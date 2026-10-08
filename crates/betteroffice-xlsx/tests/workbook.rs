@@ -1401,18 +1401,18 @@ fn display_lists_on_the_memoized_geometry_match_a_fresh_workbook() {
         width: 900.0,
         height: 600.0,
     };
-    let options = CalculationOptions::default();
-    let steps: Vec<Box<dyn Fn(&mut Workbook)>> = vec![
+    const OPTIONS: CalculationOptions = CalculationOptions { now_serial: None };
+    let steps: [fn(&mut Workbook); 6] = [
         // values and a new cell past the used range keep the memo.
-        Box::new(|wb| {
-            wb.edit_cell(SheetId(0), cell("A1"), "7", options).unwrap();
-        }),
-        Box::new(|wb| {
-            wb.edit_cell(SheetId(0), cell("K30"), "past the edge", options)
+        |wb| {
+            wb.edit_cell(SheetId(0), cell("A1"), "7", OPTIONS).unwrap();
+        },
+        |wb| {
+            wb.edit_cell(SheetId(0), cell("K30"), "past the edge", OPTIONS)
                 .unwrap();
-        }),
+        },
         // a taller font, a row height and a row insert move the geometry.
-        Box::new(|wb| {
+        |wb| {
             wb.apply_ops(
                 vec![Op::PatchRangeStyle {
                     sheet: SheetId(0),
@@ -1422,35 +1422,35 @@ fn display_lists_on_the_memoized_geometry_match_a_fresh_workbook() {
                         ..StylePatch::default()
                     },
                 }],
-                options,
+                OPTIONS,
             )
             .unwrap();
-        }),
-        Box::new(|wb| {
+        },
+        |wb| {
             wb.apply_ops(
                 vec![Op::SetRowHeight {
                     sheet: SheetId(0),
                     row: 1,
                     height: Some(40.0),
                 }],
-                options,
+                OPTIONS,
             )
             .unwrap();
-        }),
-        Box::new(|wb| {
+        },
+        |wb| {
             wb.apply_ops(
                 vec![Op::InsertRows {
                     sheet: SheetId(0),
                     at: 0,
                     count: 2,
                 }],
-                options,
+                OPTIONS,
             )
             .unwrap();
-        }),
-        Box::new(|wb| {
-            wb.undo(options).unwrap();
-        }),
+        },
+        |wb| {
+            wb.undo(OPTIONS).unwrap();
+        },
     ];
     for (index, step) in steps.iter().enumerate() {
         step(&mut workbook);
