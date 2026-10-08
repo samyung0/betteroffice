@@ -301,7 +301,7 @@ impl Store {
     /// was representing.
     pub(crate) fn materialize(&mut self, mut slice: ItemSlice) -> ItemPtr {
         let id = slice.id().clone();
-        let blocks = self.blocks.get_client_mut(&id.client).unwrap();
+        let (blocks, work) = self.blocks.client_and_work(&id.client).unwrap();
         let mut links = None;
         let item = slice.ptr.deref();
         if item.info.is_linked() {
@@ -321,7 +321,7 @@ impl Store {
                         .or_default();
                     dest.extend(source);
                 }
-                blocks.insert(i + 1, Block::Item(new));
+                blocks.insert(i + 1, Block::Item(new), work);
                 i += 1;
                 //todo: txn merge blocks insert?
                 index = Some(i);
@@ -347,7 +347,7 @@ impl Store {
                     .or_default();
                 dest.extend(source);
             }
-            blocks.insert(i + 1, Block::Item(new));
+            blocks.insert(i + 1, Block::Item(new), work);
             //todo: txn merge blocks insert?
         }
 

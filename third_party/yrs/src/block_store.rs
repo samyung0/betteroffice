@@ -18,6 +18,42 @@ pub(crate) struct ClientBlockList {
     inner: Vec<UnsafeCell<Block>>,
 }
 
+/// Patched for BetterOffice: the integration work a transaction counts once
+/// [crate::TransactionMut::limit_work] sets a budget (see there for the units).
+#[derive(Default)]
+pub(crate) struct Work {
+    pub(crate) steps: u64,
+    pub(crate) budget: Option<u64>,
+}
+
+/// Blocks a split or a merge moves in a client's list per step, and blocks
+/// the struct picker scans on its stack or a pending merge reads per step:
+/// a step is about the time one item of a conflict scan takes (85 ns in
+/// release), moving a block about 0.7 ns, scanning one about 1.6 ns.
+pub(crate) const MOVED_PER_STEP: u64 = 128;
+pub(crate) const SCANNED_PER_STEP: u64 = 64;
+
+impl Work {
+    pub(crate) fn add(&mut self, steps: u64) {
+        self.steps = self.steps.saturating_add(steps);
+    }
+
+    /// One step for a split or merge, plus one per [MOVED_PER_STEP] blocks
+    /// it moves.
+    pub(crate) fn moved(&mut self, blocks: usize) {
+        self.add(1 + blocks as u64 / MOVED_PER_STEP);
+    }
+
+    /// One step for a scan of blocks, plus one per [SCANNED_PER_STEP].
+    pub(crate) fn scanned(&mut self, blocks: usize) {
+        self.add(1 + blocks as u64 / SCANNED_PER_STEP);
+    }
+
+    pub(crate) fn over(&self) -> bool {
+        self.budget.is_some_and(|budget| self.steps > budget)
+    }
+}
+
 struct SquashBlockRange {
     range: Range<usize>,
     gc_block: bool,
@@ -83,7 +119,9 @@ impl ClientBlockList {
         self.get(idx)
     }
 
-    pub(crate) fn insert(&mut self, index: usize, cell: Block) {
+    /// Inserts `cell` at `index`, counting the blocks it moves.
+    pub(crate) fn insert(&mut self, index: usize, cell: Block, work: &mut Work) {
+        work.moved(self.inner.len() - index);
         self.inner.insert(index, UnsafeCell::new(cell));
     }
 
@@ -124,7 +162,11 @@ impl ClientBlockList {
     /// # Panics
     /// * Panics if `indices_range.start()` is greater than `indices_range.end()`.
     ///
-    pub(crate) fn squash_left_range_compaction(&mut self, indices_range: RangeInclusive<usize>) {
+    pub(crate) fn squash_left_range_compaction(
+        &mut self,
+        indices_range: RangeInclusive<usize>,
+        work: &mut Work,
+    ) {
         assert!(indices_range.start() <= indices_range.end());
         let mut squash_intervals: Vec<SquashBlockRange> = Vec::new();
 
@@ -208,6 +250,7 @@ impl ClientBlockList {
             }
 
             // Finally, remove the BlockCells in bulk.
+            work.moved(self.inner.len() - end_idx - 1);
             self.inner.drain(start_idx..=end_idx);
         }
     }
@@ -217,7 +260,7 @@ impl ClientBlockList {
     /// squashed into its left neighbor. In such case a squash result will be returned in order to
     /// later on rewire left/right neighbor changes that may have occurred as a result of squashing
     /// and block removal.
-    pub(crate) fn squash_left(&mut self, pos: usize) -> usize {
+    pub(crate) fn squash_left(&mut self, pos: usize, work: &mut Work) -> usize {
         let mut right = unsafe { &mut *self.inner[pos].get() };
         let mut i = pos;
         while i > 0 {
@@ -247,6 +290,7 @@ impl ClientBlockList {
 
         let merged = pos - i;
         if merged > 0 {
+            work.moved(self.inner.len() - pos - 1);
             self.inner.drain(i + 1..=pos);
         }
         merged
@@ -279,6 +323,8 @@ impl<'a> Iterator for ClientBlockListIter<'a> {
 pub(crate) struct BlockStore {
     clients: HashMap<ClientID, ClientBlockList, BuildHasherDefault<ClientHasher>>,
     pub(crate) skips: IdSet,
+    /// Patched for BetterOffice: see [Work].
+    pub(crate) work: Work,
 }
 
 pub(crate) type Iter<'a> = std::collections::hash_map::Iter<'a, ClientID, ClientBlockList>;
@@ -317,14 +363,15 @@ impl BlockStore {
                         let diff_start = clock_start - skip.clock_start();
                         let diff_end = skip.next_clock() - block.next_clock();
                         if diff_start > 0 {
-                            list.insert(index, Block::Skip(BlockRange::new(skip.id(), diff_start)));
+                            let skip = Block::Skip(BlockRange::new(skip.id(), diff_start));
+                            list.insert(index, skip, &mut self.work);
                             index += 1;
                         }
                         if diff_end > 0 {
                             let mut id = block.id();
                             id.clock += block.len();
                             let skip = Block::Skip(BlockRange::new(id, diff_end));
-                            list.inner.insert(index + 1, UnsafeCell::new(skip));
+                            list.insert(index + 1, skip, &mut self.work);
                         }
                         self.skips.remove_range(&block.range());
                         list.inner[index] = UnsafeCell::new(block);
@@ -408,6 +455,14 @@ impl BlockStore {
         self.clients.get_mut(client_id)
     }
 
+    /// Patched for BetterOffice: a client's block list and the work counter.
+    pub(crate) fn client_and_work(
+        &mut self,
+        client_id: &ClientID,
+    ) -> Option<(&mut ClientBlockList, &mut Work)> {
+        Some((self.clients.get_mut(client_id)?, &mut self.work))
+    }
+
     /// Returns immutable reference to a block, given its pointer. Returns `None` if not such
     /// block could be found.
     pub(crate) fn get_block(&self, id: &ID) -> Option<BlockRef<'_>> {
@@ -461,6 +516,16 @@ impl BlockStore {
             .or_insert_with(ClientBlockList::default)
     }
 
+    /// Patched for BetterOffice: [Self::get_client_blocks_mut] and the work
+    /// counter.
+    pub(crate) fn client_blocks_and_work(
+        &mut self,
+        client: ClientID,
+    ) -> (&mut ClientBlockList, &mut Work) {
+        let blocks = self.clients.entry(client).or_default();
+        (blocks, &mut self.work)
+    }
+
     /// Given block pointer, tries to split it, returning a true, if block was split in result of
     /// calling this action, and false otherwise.
     pub fn split_block(
@@ -474,7 +539,7 @@ impl BlockStore {
         let index = blocks.find_index(id.clock)?;
         let mut right = block.splice(offset, encoding)?;
         let right_ptr = ItemPtr::from(&mut right);
-        blocks.insert(index + 1, right.into());
+        blocks.insert(index + 1, right.into(), &mut self.work);
 
         Some(right_ptr)
     }

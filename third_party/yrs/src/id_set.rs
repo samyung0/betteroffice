@@ -468,8 +468,12 @@ impl DeleteSet for IdSet {
     fn try_squash_with(&mut self, store: &mut Store) {
         // try to merge deleted / gc'd items
         for (&client, range) in self.0.iter() {
-            let blocks = store.blocks.get_client_blocks_mut(client);
+            let (blocks, work) = store.blocks.client_blocks_and_work(client);
             for (r, _) in range.iter().rev() {
+                // Patched for BetterOffice: past the work budget, merge no more.
+                if work.over() {
+                    break;
+                }
                 // start with merging the item next to the last deleted item
                 let mut si =
                     (blocks.len() - 1).min(1 + blocks.find_index(r.end - 1).unwrap_or_default());
@@ -485,7 +489,7 @@ impl DeleteSet for IdSet {
                 }
 
                 if valid_range.start != usize::MAX && valid_range.end != usize::MIN {
-                    blocks.squash_left_range_compaction(valid_range.start..=valid_range.end);
+                    blocks.squash_left_range_compaction(valid_range.start..=valid_range.end, work);
                 }
             }
         }

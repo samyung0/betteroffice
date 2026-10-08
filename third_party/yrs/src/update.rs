@@ -363,6 +363,10 @@ impl Update {
             let mut next = picker.next();
             let mut state = HashMap::new();
             while let Some(mut stack_head) = next {
+                // Patched for BetterOffice: past the work budget, integrate no more.
+                if txn.store.blocks.work.over() {
+                    return Err(UpdateError::WorkBudgetExceeded(txn.store.blocks.work.steps));
+                }
                 if !stack_head.is_skip() {
                     let id = stack_head.id();
                     let len = stack_head.len();
@@ -374,6 +378,8 @@ impl Update {
                     if let Some(missing) =
                         Self::missing_dependency(&mut stack_head, &mut txn.store)?
                     {
+                        // Patched for BetterOffice: switch scans the stack of the picker.
+                        txn.store.blocks.work.scanned(picker.stack.len());
                         next =
                             picker.switch(stack_head, &missing, |c| txn.store.blocks.get_state(c));
                         continue;
@@ -1836,13 +1842,121 @@ mod inspection_test {
             .stack_size(2 << 20)
             .spawn(move || {
                 let mut txn = doc.transact_mut();
-                txn.apply_update(Update::decode_v1(&bytes).unwrap()).unwrap();
+                txn.apply_update(Update::decode_v1(&bytes).unwrap())
+                    .unwrap();
                 text.len(&txn)
             })
             .unwrap()
             .join()
             .unwrap();
         assert_eq!(len, 1 + clients as u32);
+    }
+
+    /// A text of `n` characters each typed at its start, all deleted, and an
+    /// update of `n` one-character items with only a right origin, each a
+    /// tombstone from the last back: yrs scans from the start of the text to
+    /// each right origin, n(n-1)/2 items in all, and splits nothing.
+    fn fanned(n: u32) -> (Doc, Vec<u8>) {
+        use crate::encoding::write::Write;
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("t");
+        for _ in 0..n {
+            text.insert(&mut doc.transact_mut(), 0, "t");
+        }
+        text.remove_range(&mut doc.transact_mut(), 0, n);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.write_var(1u32);
+        bytes.write_var(n);
+        bytes.write_var(1_000u64);
+        bytes.write_var(0u32);
+        // The last typed is the first in the text.
+        for clock in 0..n {
+            bytes.write_u8(0x40 | 4); // a right origin, a string
+            bytes.write_var(1u64);
+            bytes.write_var(clock);
+            bytes.write_string("x");
+        }
+        bytes.write_var(0u32);
+        (doc, bytes)
+    }
+
+    // Patched for BetterOffice: limit_work counts each item a conflict scan passes.
+    #[test]
+    fn counts_each_item_a_conflict_scan_passes() {
+        let (doc, bytes) = fanned(100);
+        let mut txn = doc.transact_mut();
+        txn.limit_work(u64::MAX);
+        txn.apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+        txn.commit();
+        assert_eq!(txn.work(), 100 * 99 / 2);
+    }
+
+    // Patched for BetterOffice: past the budget, apply stops before the next
+    // struct (the scan that passed it stops where it is) and fails.
+    #[test]
+    fn stops_once_the_work_passes_the_budget() {
+        let (doc, bytes) = fanned(3_000); // 4,498,500 steps in full
+        let mut txn = doc.transact_mut();
+        txn.limit_work(10_000);
+        let applied = txn.apply_update(Update::decode_v1(&bytes).unwrap());
+        assert!(matches!(
+            applied,
+            Err(crate::error::UpdateError::WorkBudgetExceeded(10_001))
+        ));
+        txn.commit();
+        assert_eq!(txn.work(), 10_001);
+    }
+
+    // Patched for BetterOffice: a split counts the blocks it moves in its
+    // client's list, one step per 128 and one for the split.
+    #[test]
+    fn counts_the_blocks_a_split_moves() {
+        use crate::encoding::write::Write;
+        let doc = Doc::with_client_id(5);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "abc");
+        for _ in 0..300 {
+            text.insert(&mut doc.transact_mut(), 0, "p");
+        }
+        // Between "a" and "bc": the "abc" block splits, and the 300 blocks
+        // after it in client 5's list move.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.write_var(1u32);
+        bytes.write_var(1u32);
+        bytes.write_var(77u64);
+        bytes.write_var(0u32);
+        bytes.write_u8(0x80 | 0x40 | 4);
+        bytes.write_var(5u64);
+        bytes.write_var(0u32);
+        bytes.write_var(5u64);
+        bytes.write_var(1u32);
+        bytes.write_string("x");
+        bytes.write_var(0u32);
+        let mut txn = doc.transact_mut();
+        txn.limit_work(u64::MAX);
+        txn.apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+        txn.commit();
+        assert_eq!(txn.work(), 1 + 300 / 128);
+    }
+
+    // Patched for BetterOffice: a budget ends with its transaction.
+    #[test]
+    fn a_work_budget_ends_with_its_transaction() {
+        let (doc, bytes) = fanned(100);
+        {
+            let mut txn = doc.transact_mut();
+            txn.limit_work(10);
+        }
+        let mut txn = doc.transact_mut();
+        txn.apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+        assert_eq!(text_len(&txn), 100);
+    }
+
+    fn text_len(txn: &crate::TransactionMut) -> u32 {
+        txn.get_text("t").unwrap().len(txn)
     }
 
     // Patched for BetterOffice: a garbage-collected run reads as Gc or deleted content.

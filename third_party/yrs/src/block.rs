@@ -1014,6 +1014,7 @@ impl Item {
             let mut o = parent.map.get(sub).copied();
             while let Some(item) = o {
                 if let Some(left) = item.left {
+                    blocks.work.add(1);
                     o = Some(left);
                     continue;
                 }
@@ -1033,6 +1034,12 @@ impl Item {
         // Note that conflicting_items is a subset of items_before_origin
         while let Some(item) = o {
             if self.right == Some(item) {
+                break;
+            }
+            // Patched for BetterOffice: a step per item scanned; past the work
+            // budget the scan stops where it is (the document is discarded).
+            blocks.work.add(1);
+            if blocks.work.over() {
                 break;
             }
             items_before_origin.insert(item);
@@ -1131,6 +1138,7 @@ impl<'doc> TransactionMut<'doc> {
                 let mut r = parent.map.get(parent_sub).copied();
                 while let Some(right) = r {
                     if right.left.is_some() {
+                        store.blocks.work.add(1);
                         r = right.left;
                     } else {
                         break;
