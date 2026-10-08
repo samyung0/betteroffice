@@ -308,8 +308,12 @@ mod tests {
             }
         }
 
+        /// Security regression (office-native REVIEW1 D3): the estimate a
+        /// replica is admitted by is the measured native heap, 22 bytes per
+        /// unzipped byte (Epo 65a9ae87); at 16 the budget let the engine
+        /// process keep about 1.4 times the memory it was given.
         fn bytes(&self) -> u64 {
-            crate::common::unzipped_bytes(self.base).expect("a package") * HEAP_PER_UNZIPPED_BYTE
+            crate::common::unzipped_bytes(self.base).expect("a package") * 22
         }
     }
 
