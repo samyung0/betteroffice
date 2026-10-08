@@ -437,3 +437,39 @@ describe('Canvas text-run slot clipping', () => {
     expect(paints[0].right).toBeGreaterThan(run.width);
   });
 });
+
+describe('Canvas glyph-run fallback', () => {
+  it('paints a joined run cluster by cluster at the shaped glyph x', async () => {
+    // 'W' then 'e' + U+0301 in one two-glyph cluster at UTF-8 byte 1
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'We\u0301',
+      glyphs: [
+        { id: 1, x: 10, y: 20, cluster: 0, advance: 14 },
+        { id: 2, x: 30, y: 20, cluster: 1, advance: 9 },
+        { id: 3, x: 31, y: 20, cluster: 1, advance: 0 },
+      ],
+      docStart: 1,
+      docEnd: 4,
+    };
+    const ink = new Map([
+      ['W', { width: 14, ascent: 12, descent: 3 }],
+      ['e\u0301', { width: 9, ascent: 12, descent: 3 }],
+      ['We\u0301', { width: 22, ascent: 12, descent: 3 }],
+    ]);
+
+    const joined = recordingContext(ink);
+    await drawPrimitive(joined.ctx, { ...run, clusterRuns: true });
+    expect(joined.paints.map((paint) => [paint.left, paint.right])).toEqual([
+      [10, 24],
+      [30, 39],
+    ]);
+
+    const single = recordingContext(ink);
+    await drawPrimitive(single.ctx, run);
+    expect(single.paints.map((paint) => [paint.left, paint.right])).toEqual([[10, 32]]);
+  });
+});

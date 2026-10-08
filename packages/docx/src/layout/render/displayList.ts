@@ -471,7 +471,8 @@ export interface GlyphRunPrimitive extends DocAttrs {
    * Joined from the one-cluster runs an authoritatively measured line paints:
    * each glyph cluster (a UTF-8 byte offset into `text`) was a run of its own
    * covering its text's UTF-16 length of the document, with logical orders
-   * counting up from this run's. The mirror splits it back per cluster.
+   * counting up from this run's. The mirror and the canvas fallback paint
+   * split it back per cluster.
    */
   clusterRuns?: boolean;
   /** Shaped tab/TOC leader metadata. Undefined = ordinary glyph run. */
