@@ -216,8 +216,18 @@ impl Store {
 
     pub(crate) fn write_blocks_from<E: Encoder>(&self, sv: &StateVector, encoder: &mut E) {
         let local_sv = self.blocks.get_state_vector();
-        let mut diff = Self::diff_state_vectors(&local_sv, sv);
+        let diff = Self::diff_state_vectors(&local_sv, sv);
+        self.write_blocks_since(diff, encoder);
+    }
 
+    /// The blocks of each `(client, clock)` from that clock on. A transaction's
+    /// update passes the clients it inserted into, so encoding it costs
+    /// O(changed clients) rather than O(clients).
+    pub(crate) fn write_blocks_since<E: Encoder>(
+        &self,
+        mut diff: Vec<(ClientID, u32)>,
+        encoder: &mut E,
+    ) {
         // Write items with higher client ids first
         // This heavily improves the conflict algorithm.
         diff.sort_by(|a, b| b.0.cmp(&a.0));
@@ -617,7 +627,8 @@ pub struct StoreEvents {
 impl StoreEvents {
     pub fn emit_update_v1(&mut self, txn: &TransactionMut) {
         if self.update_v1_events.has_subscribers() {
-            if !txn.delete_set.is_empty() || txn.after_state() != txn.before_state() {
+            // O(changed clients): comparing state vectors costs O(clients).
+            if !txn.delete_set.is_empty() || !txn.insert_set.is_empty() {
                 let update = UpdateEvent::new_v1(txn);
                 self.update_v1_events
                     .trigger(|callback| callback(txn, &update));
@@ -627,7 +638,7 @@ impl StoreEvents {
 
     pub fn emit_update_v2(&mut self, txn: &TransactionMut) {
         if self.update_v2_events.has_subscribers() {
-            if !txn.delete_set.is_empty() || txn.after_state() != txn.before_state() {
+            if !txn.delete_set.is_empty() || !txn.insert_set.is_empty() {
                 let update = UpdateEvent::new_v2(txn);
                 self.update_v2_events.trigger(|fun| fun(txn, &update));
             }
