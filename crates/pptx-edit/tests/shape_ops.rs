@@ -485,3 +485,69 @@ fn layered_presets_can_be_inserted() {
         );
     }
 }
+
+/// A seeded shape whose position or size has no value in the live document
+/// (two peers moved it and one undid) reads the uploaded file's value, so
+/// the deck opens with the shape where it started, a peer takes the update
+/// and editing goes on from there; a group's child is found by its path.
+#[test]
+fn a_missing_position_or_size_reads_the_source_file() {
+    use yrs::{Map, MapRef, ReadTxn, Transact};
+    let session = DeckSession::open(FIXTURE, 701).unwrap();
+    let peer = DeckSession::open(FIXTURE, 702).unwrap();
+    let source = session.snapshot().unwrap();
+    let (slide, shape) = source
+        .slides
+        .iter()
+        .find_map(|slide| {
+            let group = slide
+                .shapes
+                .iter()
+                .find(|shape| !shape.children.is_empty())?;
+            Some((slide, group))
+        })
+        .unwrap();
+    let child = &shape.children[0];
+    {
+        let mut txn = session.yrs_doc().transact_mut();
+        let shapes = txn.get_map("pptx:shapes").unwrap();
+        let entry = |id: &str| shapes.get(&txn, id).unwrap().cast::<MapRef>().unwrap();
+        let (group_map, child_map) = (entry(&shape.id), entry(&child.id));
+        group_map.remove(&mut txn, "x");
+        group_map.remove(&mut txn, "height");
+        child_map.remove(&mut txn, "y");
+    }
+    assert_eq!(session.snapshot().unwrap(), source);
+    let update = session
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update).unwrap();
+    assert_eq!(peer.snapshot().unwrap(), source);
+
+    let receipt = session
+        .move_shape(&EditCtx::local("test"), &slide.id, &shape.id, 5, 7)
+        .unwrap();
+    let rect = |shape: &ShapeSnapshot| ShapeRect {
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+    };
+    assert_eq!(receipt.before, rect(shape));
+    let moved = session.snapshot().unwrap();
+    let moved = moved
+        .slides
+        .iter()
+        .flat_map(|s| &s.shapes)
+        .find(|s| s.id == shape.id)
+        .unwrap();
+    assert_eq!(
+        rect(moved),
+        ShapeRect {
+            x: 5,
+            y: 7,
+            ..rect(shape)
+        }
+    );
+    assert_eq!(moved.children[0].y, child.y);
+}

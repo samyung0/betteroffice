@@ -262,6 +262,7 @@ fn scoped_capture<T: ReadTxn>(
                 txn,
                 shape_id,
                 &mut HashSet::new(),
+                package,
                 Some(&theme),
             )?;
             let text = shape_text(&shape);

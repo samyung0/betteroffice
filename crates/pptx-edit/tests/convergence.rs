@@ -575,3 +575,42 @@ fn a_slide_deleted_while_a_peer_moves_it_stays_deleted() {
     let reopened = DeckSession::open_from_update_with_source(&stored, FIXTURE, 903).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), merged);
 }
+
+/// Schedule 159 of the GC scan, shrunk: two peers move one shape at once and
+/// the peer whose move won (the higher client id) presses Undo. Its Undo
+/// dropped the shape's position, and each peer refused the other's update.
+#[test]
+fn undo_of_a_concurrent_move_keeps_the_shape_placed() {
+    let left = DeckSession::open(FIXTURE, 901).unwrap();
+    let right = DeckSession::open(FIXTURE, 902).unwrap();
+    let context = EditCtx::local("test");
+    let deck = left.snapshot().unwrap();
+    let (slide, shape) = (&deck.slides[1].id, &deck.slides[1].shapes[0]);
+    let sync = |from: &DeckSession, to: &DeckSession| {
+        let diff = from.encode_diff_v1(&to.encode_state_vector_v1()).unwrap();
+        to.apply_update_v1(&diff).unwrap();
+    };
+    let at = |session: &DeckSession| {
+        let deck = session.snapshot().unwrap();
+        let moved = deck.slides.iter().flat_map(|s| &s.shapes);
+        let moved = moved.into_iter().find(|s| s.id == shape.id).unwrap();
+        (moved.x, moved.y)
+    };
+
+    left.move_shape(&context, slide, &shape.id, 10, 20).unwrap();
+    sync(&left, &right);
+    left.move_shape(&context, slide, &shape.id, 100, 200)
+        .unwrap();
+    right
+        .move_shape(&context, slide, &shape.id, 300, 400)
+        .unwrap();
+    sync(&left, &right);
+    sync(&right, &left);
+    assert_eq!((at(&left), at(&right)), ((300, 400), (300, 400)));
+
+    assert!(right.undo());
+    sync(&right, &left);
+    sync(&left, &right);
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    assert_eq!(at(&right), (shape.x, shape.y));
+}

@@ -820,7 +820,7 @@ impl DeckSession {
         let mut txn = self.transact_for(context);
         require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
-        let before = shape_rect(&shape, &txn)?;
+        let before = shape_rect(&shape, &txn, shape_id, &self.package)?;
         shape.insert(&mut txn, "x", x as f64);
         shape.insert(&mut txn, "y", y as f64);
         Ok(TransformReceipt {
@@ -933,7 +933,7 @@ impl DeckSession {
         let mut txn = self.transact_for(context);
         require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
-        let before = shape_rect(&shape, &txn)?;
+        let before = shape_rect(&shape, &txn, shape_id, &self.package)?;
         shape.insert(&mut txn, "width", width as f64);
         shape.insert(&mut txn, "height", height as f64);
         Ok(TransformReceipt {
@@ -959,7 +959,7 @@ impl DeckSession {
         let mut txn = self.transact_for(context);
         require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
-        let before = shape_rect(&shape, &txn)?;
+        let before = shape_rect(&shape, &txn, shape_id, &self.package)?;
         shape.insert(&mut txn, "x", rect.x as f64);
         shape.insert(&mut txn, "y", rect.y as f64);
         shape.insert(&mut txn, "width", rect.width as f64);
@@ -1138,6 +1138,7 @@ fn snapshot_slide<T: ReadTxn>(
             txn,
             &shape_id,
             &mut HashSet::new(),
+            package,
             Some(&theme),
         )?);
     }
@@ -1215,6 +1216,7 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
     txn: &T,
     shape_id: &str,
     visiting: &mut HashSet<String>,
+    package: &PptxPackage,
     theme: Option<&Theme>,
 ) -> EditResult<ShapeSnapshot> {
     if visiting.len() >= MAX_SHAPE_DEPTH {
@@ -1242,10 +1244,11 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
     let mut children = Vec::new();
     for child_id in map_string_array(&shape, txn, "children")? {
         children.push(snapshot_shape(
-            shapes, stories, txn, &child_id, visiting, theme,
+            shapes, stories, txn, &child_id, visiting, package, theme,
         )?);
     }
     visiting.remove(shape_id);
+    let rect = shape_rect(&shape, txn, shape_id, package)?;
     let fill: Option<ShapeFill> = optional_json(&shape, txn, "fillJson")?;
     let outline: Option<ShapeOutline> = optional_json(&shape, txn, "outlineJson")?;
     let resolved_fill_color = fill
@@ -1260,10 +1263,10 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         source_id: required_u32(&shape, txn, "sourceId")?,
         kind: parse_shape_kind(&required_string(&shape, txn, "kind")?)?,
         name: required_string(&shape, txn, "name")?,
-        x: required_i64(&shape, txn, "x")?,
-        y: required_i64(&shape, txn, "y")?,
-        width: required_i64(&shape, txn, "width")?,
-        height: required_i64(&shape, txn, "height")?,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
         rotation_deg: map_number(&shape, txn, "rotationDeg").unwrap_or_default(),
         flip_h: map_bool(&shape, txn, "flipH").unwrap_or_default(),
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
@@ -1665,13 +1668,56 @@ fn string_array(values: &[String]) -> Any {
     ))
 }
 
-fn shape_rect<T: ReadTxn>(shape: &MapRef, txn: &T) -> EditResult<ShapeRect> {
+/// A shape's position and size. A key left without a value (two peers moved
+/// the shape and one undid) reads the uploaded file's value, so the shape
+/// stays where it started; a shape added in the session has none to read.
+fn shape_rect<T: ReadTxn>(
+    shape: &MapRef,
+    txn: &T,
+    shape_id: &str,
+    package: &PptxPackage,
+) -> EditResult<ShapeRect> {
+    let read = |key: &str, source: fn(&ShapeRect) -> i64| match map_number(shape, txn, key) {
+        None => match source_rect(package, shape_id) {
+            Some(rect) => baseline_integer(key, source(&rect)),
+            None => required_i64(shape, txn, key),
+        },
+        Some(_) => required_i64(shape, txn, key),
+    };
     Ok(ShapeRect {
-        x: required_i64(shape, txn, "x")?,
-        y: required_i64(shape, txn, "y")?,
-        width: required_i64(shape, txn, "width")?,
-        height: required_i64(shape, txn, "height")?,
+        x: read("x", |rect| rect.x)?,
+        y: read("y", |rect| rect.y)?,
+        width: read("width", |rect| rect.width)?,
+        height: read("height", |rect| rect.height)?,
     })
+}
+
+/// The uploaded file's position and size of a seeded shape, found by the id
+/// `seed_doc` gave it.
+fn source_rect(package: &PptxPackage, shape_id: &str) -> Option<ShapeRect> {
+    package
+        .slides
+        .iter()
+        .enumerate()
+        .find_map(|(index, slide)| {
+            let slide_id = seeded_slide_id(index, package.presentation.slides.get(index)?.id);
+            let path = shape_id.strip_prefix(&slide_id)?.strip_prefix(":shape:")?;
+            let mut steps = path.split('.').map(str::parse::<usize>);
+            let mut node = slide.shapes.get(steps.next()?.ok()?)?;
+            for step in steps {
+                node = match node {
+                    ShapeNode::Group(group) => group.children.get(step.ok()?)?,
+                    _ => return None,
+                };
+            }
+            let transform = &shape_base(node).transform;
+            Some(ShapeRect {
+                x: transform.x,
+                y: transform.y,
+                width: transform.width,
+                height: transform.height,
+            })
+        })
 }
 
 fn required_u32<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<u32> {
