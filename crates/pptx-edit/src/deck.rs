@@ -376,11 +376,12 @@ impl DeckSession {
         }
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
-        let order = compact_slide_order(&mut txn)?;
-        let length = order.len(&txn);
+        let order = required_order(&txn)?;
+        let length = live_slide_entries(&order, &txn)?.len() as u32;
         if index > length {
             return Err(EditError::OutOfBounds { index, length });
         }
+        let position = slide_insert_position(&order, &txn, index)?;
         let slides = required_map(&txn, SLIDES)?;
         let slide = slides.insert(&mut txn, slide_id.as_str(), MapPrelim::default());
         slide.insert(&mut txn, "id", slide_id.as_str());
@@ -389,7 +390,7 @@ impl DeckSession {
             slide.insert(&mut txn, "layoutPartPath", layout_part_path);
         }
         slide.insert(&mut txn, "shapes", ArrayPrelim::default());
-        order.insert(&mut txn, index, slide_id.as_str());
+        order.insert(&mut txn, position, slide_id.as_str());
         Ok(SlideReceipt {
             slide_id,
             from_index: None,
@@ -410,9 +411,12 @@ impl DeckSession {
 
     pub fn delete_slide(&self, context: &EditCtx, slide_id: &str) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
-        let order = compact_slide_order(&mut txn)?;
-        let index = array_index(&order, &txn, slide_id)
-            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        let order = required_order(&txn)?;
+        let index = live_slide_entries(&order, &txn)?
+            .iter()
+            .position(|(_, id)| id == slide_id)
+            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?
+            as u32;
         let slides = required_map(&txn, SLIDES)?;
         let slide = slide_ref(&txn, slide_id)?;
         let shape_order = slide_shape_order(&slide, &txn)?;
@@ -430,7 +434,7 @@ impl DeckSession {
         for id in comment_ids {
             comments.remove(&mut txn, &id);
         }
-        order.remove(&mut txn, index);
+        remove_slide_entries(&mut txn, &order, slide_id);
         slides.remove(&mut txn, slide_id);
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
@@ -446,19 +450,23 @@ impl DeckSession {
         to_index: u32,
     ) -> EditResult<SlideReceipt> {
         let mut txn = self.transact_for(context);
-        let order = compact_slide_order(&mut txn)?;
-        let length = order.len(&txn);
+        let order = required_order(&txn)?;
+        let live = live_slide_entries(&order, &txn)?;
+        let length = live.len() as u32;
         if to_index >= length {
             return Err(EditError::OutOfBounds {
                 index: to_index,
                 length,
             });
         }
-        let from_index = array_index(&order, &txn, slide_id)
-            .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        let from_index =
+            live.iter()
+                .position(|(_, id)| id == slide_id)
+                .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))? as u32;
         if from_index != to_index {
-            order.remove(&mut txn, from_index);
-            order.insert(&mut txn, to_index, slide_id);
+            remove_slide_entries(&mut txn, &order, slide_id);
+            let position = slide_insert_position(&order, &txn, to_index)?;
+            order.insert(&mut txn, position, slide_id);
         }
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
@@ -1089,35 +1097,50 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
-/// The slide order for a writer, with ids whose slide record is gone and
-/// repeated ids removed in the writer's transaction, as `reorder_shape`
-/// compacts a shape list: its positions are then the indices readers show.
-fn compact_slide_order(txn: &mut TransactionMut<'_>) -> EditResult<ArrayRef> {
-    let order = required_order(txn)?;
+/// The order entries readers show, with their array positions: the first
+/// entry of each id that has a slide record. Writers never delete another
+/// slide's entries (a stale or repeated one may be the entry a concurrent
+/// Undo restores, or the only one a peer keeps), so they map a shown index
+/// to an array position through this view instead.
+fn live_slide_entries<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditResult<Vec<(u32, String)>> {
     let slides = required_map(txn, SLIDES)?;
     let mut seen = HashSet::new();
-    let stale: Vec<u32> = string_array_ref(&order, txn)
-        .iter()
+    Ok(order
+        .iter(txn)
         .enumerate()
-        .filter_map(|(index, id)| {
-            (!slides.contains_key(txn, id) || !seen.insert(id.clone())).then_some(index as u32)
-        })
+        .filter_map(|(position, value)| Some((position as u32, out_string(&value)?)))
+        .filter(|(_, id)| slides.contains_key(txn, id) && seen.insert(id.clone()))
+        .collect())
+}
+
+/// Removes every order entry of one slide, stale and repeated ones included.
+fn remove_slide_entries(txn: &mut TransactionMut<'_>, order: &ArrayRef, slide_id: &str) {
+    let positions: Vec<u32> = order
+        .iter(txn)
+        .enumerate()
+        .filter(|(_, value)| out_string(value).as_deref() == Some(slide_id))
+        .map(|(position, _)| position as u32)
         .collect();
-    for index in stale.into_iter().rev() {
-        order.remove(txn, index);
+    for position in positions.into_iter().rev() {
+        order.remove(txn, position);
     }
-    Ok(order)
+}
+
+/// The array position at which an entry shows at `index` of the live order.
+fn slide_insert_position<T: ReadTxn>(order: &ArrayRef, txn: &T, index: u32) -> EditResult<u32> {
+    let live = live_slide_entries(order, txn)?;
+    Ok(live
+        .get(index as usize)
+        .map_or_else(|| order.len(txn), |(position, _)| *position))
 }
 
 /// Slide ids in deck order, first occurrence of each. An id whose slide
 /// record a concurrent delete removed is skipped, as `live_shape_order` skips
 /// removed shapes: the delete wins over a peer's move.
 pub(crate) fn live_slide_order<T: ReadTxn>(txn: &T) -> EditResult<Vec<String>> {
-    let slides = required_map(txn, SLIDES)?;
-    let mut seen = HashSet::new();
-    Ok(string_array_ref(&required_order(txn)?, txn)
+    Ok(live_slide_entries(&required_order(txn)?, txn)?
         .into_iter()
-        .filter(|id| slides.contains_key(txn, id) && seen.insert(id.clone()))
+        .map(|(_, id)| id)
         .collect())
 }
 
