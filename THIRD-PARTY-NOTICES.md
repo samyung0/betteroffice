@@ -106,6 +106,15 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   live item right of a (deleted) item, so the DOCX editor finds the field a
   peer's delete ends at without computing a position (its unit test lives in
   `crates/docx-edit`, which CI runs);
+- `Item::gc` (`src/block.rs`) and `GCCollector::collect_marked` (`src/gc.rs`)
+  collect a collected type's children even when Undo keeps them, as Yjs does
+  (upstream PR #682), so none is left pointing into the type's freed branch,
+  and `UndoManager::try_process` (`src/undo.rs`) skips an inserted item whose
+  redone copy was collected instead of dropping the whole step, with unit
+  tests and tests in `crates/pptx-edit`;
+- `Update::decode` (`src/update.rs`) refuses an update in which a client's
+  section starts inside or before an earlier one for that client, which yrs
+  placed twice (its test lives in `crates/pptx-edit`);
 - a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for
