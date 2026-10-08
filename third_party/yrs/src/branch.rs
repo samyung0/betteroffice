@@ -299,6 +299,13 @@ impl Branch {
         self.item
     }
 
+    /// Patched for BetterOffice: the item holding a map key's current value,
+    /// live or deleted (its `left` items are the key's earlier values), for
+    /// read-only guards over a map entry.
+    pub fn entry_item(&self, key: &str) -> Option<ItemPtr> {
+        self.map.get(key).copied()
+    }
+
     /// Patched for BetterOffice: the current item of each map key (also a
     /// deleted one), for read-only structure walks.
     pub fn map_items(&self) -> impl Iterator<Item = (&Arc<str>, ItemPtr)> {
