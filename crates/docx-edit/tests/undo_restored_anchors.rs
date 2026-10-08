@@ -85,7 +85,12 @@ fn a_comment_restored_with_old_anchors_resolves_alike_on_every_peer() {
     )
     .unwrap();
     let comment = base
-        .add_comment(&[StoryRange::new("body", 6, 21)], "Ada", DATE, comment_body())
+        .add_comment(
+            &[StoryRange::new("body", 6, 21)],
+            "Ada",
+            DATE,
+            comment_body(),
+        )
         .unwrap();
     let peers = peers_of(&base);
     let deleter = UndoSession::new();
