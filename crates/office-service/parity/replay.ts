@@ -2,14 +2,22 @@
 // the answers with the TS results.
 //   bun crates/office-service/parity/replay.ts <recording dir> <office-service binary> [--report <file>] [--only <method>]
 // Seeds and other bytes must be identical; JSON results equal ignoring key
-// order; exports that differ as zips are compared part by part; rebased
-// states that differ as bytes are compared as decoded Yjs content, then as
-// the documents they read as.
+// order; exports that differ as zips are compared part by part. Rebased and
+// edited states that differ as bytes are `structure-equal` when every unit
+// has the same id, content, origins, parent and key (map values with sorted
+// keys) and the same units are deleted, else `document-equal` when they read
+// as the same document (texts with attributes, maps, arrays, positions).
+// Rebase effects may lack the TS's moves of entries an edit only shifted
+// (`unshifted`, Epo 2026-10-07); every other effect must be equal.
+// Replica budgets and sizes are in each runtime's estimate: the native one
+// counts 22 bytes per unzipped byte where the TS counts 16, so recorded
+// budgets and `replicaBytes` are scaled by 22/16.
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as Y from "yjs";
 import { unzipContainer } from "../../../packages/docx/src/wasm/opc";
+import { documentContent, structure } from "./tiers";
 
 const [dir, binary] = process.argv.slice(2);
 const option = (name: string) => {
@@ -87,84 +95,19 @@ function partDifference(expected: Uint8Array, actual: Uint8Array): string | unde
     .join("\n  ");
 }
 
-/** A state's decoded Yjs content with ids, for states encoded differently. */
-function yjsContent(state: Uint8Array): string {
-  const { structs, ds } = Y.decodeUpdate(state);
-  const items = structs.map((struct) => {
-    const item = struct as Y.Item;
-    return {
-      id: [struct.id.client, struct.id.clock],
-      length: struct.length,
-      kind: struct.constructor.name,
-      origin: item.origin ? [item.origin.client, item.origin.clock] : null,
-      rightOrigin: item.rightOrigin ? [item.rightOrigin.client, item.rightOrigin.clock] : null,
-      parent:
-        typeof item.parent === "string" ? item.parent : item.parent ? JSON.stringify(item.parent) : null,
-      parentSub: item.parentSub ?? null,
-      content: item.content ? JSON.stringify(item.content.getContent?.() ?? null) : null,
-    };
-  });
-  // Split runs at every unit so differently merged encodings compare equal.
-  const units: string[] = [];
-  for (const item of items) {
-    for (let offset = 0; offset < item.length; offset++)
-      units.push(JSON.stringify([item.id[0], item.id[1] + offset, item.kind]));
-  }
-  units.sort();
-  const deleted: string[] = [];
-  ds.clients.forEach((ranges, client) => {
-    for (const range of ranges) for (let at = 0; at < range.len; at++) deleted.push(`${client}:${range.clock + at}`);
-  });
-  deleted.sort();
-  const doc = new Y.Doc();
-  Y.applyUpdate(doc, state);
-  const roots: Record<string, unknown> = {};
-  for (const [name, type] of doc.share) roots[name] = type.toJSON();
-  return JSON.stringify({ units, deleted, roots: normal(roots as Json) });
-}
-
 /**
- * What a state reads as: every text's delta with attributes, every map's
- * entries, with relative positions resolved to indexes. Equal documents can
- * still differ in which redundant format items are deleted: yrs's cleanup
- * after a transaction compares attribute values deeply, Yjs by identity.
+ * Whether native rebase effects are the TS ones without some moves: every
+ * native effect is a TS effect and every TS effect missing natively is a move.
  */
-function documentContent(state: Uint8Array): string {
-  const doc = new Y.Doc();
-  Y.applyUpdate(doc, state);
-  const value = (item: unknown): unknown => {
-    if (item instanceof Y.Text) {
-      // Adjacent runs with equal attributes read as one run.
-      const runs: Array<[unknown, unknown]> = [];
-      for (const op of item.toDelta() as Array<{ insert: unknown; attributes?: unknown }>) {
-        const attributes = value(op.attributes ?? null);
-        const last = runs.at(-1);
-        if (typeof op.insert === "string" && last && typeof last[0] === "string" && JSON.stringify(last[1]) === JSON.stringify(attributes))
-          last[0] += op.insert;
-        else runs.push([value(op.insert), attributes]);
-      }
-      return runs;
-    }
-    if (item instanceof Y.Map) return Object.fromEntries([...item.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
-    if (item instanceof Y.Array) return item.toArray().map(value);
-    if (item instanceof Uint8Array) {
-      try {
-        const position = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(item), doc);
-        return position ? `@${position.index}:${position.assoc}` : "@unresolved";
-      } catch {
-        return `bytes:${sha(item)}`;
-      }
-    }
-    if (Array.isArray(item)) return item.map(value);
-    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : 1)).map(([key, entry]) => [key, value(entry)]));
-    return item;
-  };
-  const roots: Record<string, unknown> = {};
-  for (const name of [...doc.share.keys()].sort()) {
-    const map = doc.getMap(name);
-    roots[name] = map.size ? value(map) : null;
-  }
-  return JSON.stringify(roots);
+function unshifted(expected: Json, actual: Json): boolean {
+  if (!Array.isArray(expected) || !Array.isArray(actual)) return false;
+  const key = (effect: Json) => JSON.stringify(normal(effect));
+  const native = new Set(actual.map(key));
+  const ts = new Set(expected.map(key));
+  return (
+    [...native].every((effect) => ts.has(effect)) &&
+    expected.every((effect) => native.has(key(effect)) || (effect as Record<string, Json>).operation === "move")
+  );
 }
 
 interface Recorded {
@@ -176,6 +119,9 @@ interface Recorded {
   value?: Json;
   error?: string;
 }
+
+/** Replica memory estimates per unzipped byte (`HEAP_PER_UNZIPPED_BYTE`). */
+const [TS_ESTIMATE, NATIVE_ESTIMATE] = [16, 22];
 
 const counts = new Map<string, Map<string, number>>();
 const report: string[] = [];
@@ -194,7 +140,7 @@ function compare(call: Recorded, answer: { value?: Json; error?: string; kind?: 
   let actual = answer.value ?? null;
   if (call.method === "officeReplicaStats" && expected && typeof expected === "object" && !Array.isArray(expected)) {
     const { wasmBytes: _wasm, ...rest } = expected;
-    expected = rest;
+    expected = { ...rest, replicaBytes: ((rest.replicaBytes as number) * NATIVE_ESTIMATE) / TS_ESTIMATE };
   }
   if (call.method === "runtimeManifest") return ["skipped"];
   if (JSON.stringify(normal(expected)) === JSON.stringify(normal(actual))) return ["equal"];
@@ -206,11 +152,17 @@ function compare(call: Recorded, answer: { value?: Json; error?: string; kind?: 
     const [e, a] = [expected as Record<string, Json>, actual as Record<string, Json>];
     const { state: es, ...erest } = e;
     const { state: as, ...arest } = a;
-    if (JSON.stringify(normal(erest)) !== JSON.stringify(normal(arest)))
-      return ["differ", `TS ${JSON.stringify(normal(erest)).slice(0, 2000)}\n  native ${JSON.stringify(normal(arest)).slice(0, 2000)}`];
-    if (yjsContent(bytesOf(es)) === yjsContent(bytesOf(as))) return ["content-equal"];
-    return documentContent(bytesOf(es)) === documentContent(bytesOf(as))
-      ? ["document-equal"]
+    let prefix = "";
+    if (JSON.stringify(normal(erest)) !== JSON.stringify(normal(arest))) {
+      if (call.method !== "rebaseOffice" || !unshifted(erest.effects ?? null, arest.effects ?? null))
+        return ["differ", `TS ${JSON.stringify(normal(erest)).slice(0, 2000)}\n  native ${JSON.stringify(normal(arest)).slice(0, 2000)}`];
+      prefix = "unshifted ";
+    }
+    const [x, y] = [bytesOf(es), bytesOf(as)];
+    if (sha(x) === sha(y)) return [`${prefix}equal`];
+    if (structure(x) === structure(y)) return [`${prefix}structure-equal`];
+    return documentContent(x) === documentContent(y)
+      ? [`${prefix}document-equal`]
       : ["differ", "the states hold different documents"];
   }
   return ["differ", `TS ${JSON.stringify(normal(expected)).slice(0, 3000)}\n  native ${JSON.stringify(normal(actual)).slice(0, 3000)}`];
@@ -247,9 +199,13 @@ for (const file of files) {
     if (only && call.method !== only && !["configureOfficeReplicas", "dropOfficeReplica"].includes(call.method)) continue;
     const format = formatOf(call);
     if (formats && format && !formats.includes(format)) continue;
+    const args =
+      call.method === "configureOfficeReplicas" && typeof call.args[0] === "number"
+        ? [Math.ceil((call.args[0] * NATIVE_ESTIMATE) / TS_ESTIMATE)]
+        : call.args;
     const request = {
       method: call.method,
-      args: call.args.map(toWire),
+      args: args.map(toWire),
       clients: call.clients,
       nowMs: call.nowMs,
       perfMs: call.perfMs,
