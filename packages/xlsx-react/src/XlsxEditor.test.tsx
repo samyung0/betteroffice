@@ -43,7 +43,11 @@ const { act, cleanup, configure, fireEvent, render, waitFor } = await import(
   '@testing-library/react'
 );
 // the workbook opens in its own worker: Bun starts it and its WASM per editor.
-configure({ asyncUtilTimeout: 10_000 });
+// a timed-out wait reports its message, not the whole happy-dom tree.
+configure({
+  asyncUtilTimeout: 10_000,
+  getElementError: (message) => new Error(message ?? 'element not found'),
+});
 setDefaultTimeout(30_000);
 
 function stubContext(): CanvasRenderingContext2D {
@@ -440,7 +444,7 @@ describe('XlsxEditor grid pointer handling', () => {
     view.type('Edited item');
     await view.click({ row: 3, col: 1 });
 
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect(view.nameBox().value).toBe('B4');
     expect((await view.input(2, 0))).toBe('Edited item');
   });
@@ -465,7 +469,7 @@ describe('XlsxEditor grid pointer handling', () => {
 
     await view.click({ row: 6, col: 0 });
 
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect(view.nameBox().value).toBe('A7');
     expect((await view.input(2, 3))).toBe('=B3+C3');
 
@@ -508,7 +512,7 @@ describe('XlsxEditor grid pointer handling', () => {
     view.type('Edited item');
     await view.click(LINK_CELL);
 
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect(view.nameBox().value).toBe('E6');
     expect(opened).toEqual([]);
 
@@ -575,7 +579,7 @@ describe('XlsxEditor keyboard', () => {
     expect(box.top).toBeGreaterThanOrEqual(0);
     expect(box.right).toBeLessThanOrEqual(VIEWPORT.width);
     expect(box.bottom).toBeLessThanOrEqual(VIEWPORT.height);
-    expect(document.activeElement).toBe(input);
+    expect(document.activeElement === input).toBe(true);
 
     await press(input!, 'Enter');
     expect((await view.input(33, 16))).toBe('7');
@@ -632,7 +636,7 @@ describe('XlsxEditor keyboard', () => {
     const view = await mountEditor(wide);
     await view.click({ row: 3, col: 1 });
     await press(view.surface, 'a', { ctrlKey: true });
-    expect(view.selectionBox()).not.toBeNull();
+    expect(view.selectionBox() !== null).toBe(true);
     expect(view.surface.scrollLeft).toBe(0);
     expect(view.surface.scrollTop).toBe(0);
   });
@@ -645,13 +649,13 @@ describe('XlsxEditor keyboard', () => {
     await scrollTo(view, 1500, 600);
 
     // still mounted and focused, out of sight.
-    expect(view.editor()).toBe(input);
-    expect(document.activeElement).toBe(input);
+    expect(view.editor() === input).toBe(true);
+    expect(document.activeElement === input).toBe(true);
     expect(input.style.opacity).toBe('0');
 
     await press(input, '5');
     fireEvent.change(input, { target: { value: '75' } });
-    expect(view.editor()).toBe(input);
+    expect(view.editor() === input).toBe(true);
     expect(input.style.opacity).toBe('');
     const box = editorBox(input);
     expect(box.left).toBeCloseTo(0, 1);
@@ -669,8 +673,8 @@ describe('XlsxEditor keyboard', () => {
 
     fireEvent.compositionStart(input);
     await press(input, 'Process', { isComposing: true, keyCode: 229 });
-    expect(view.editor()).toBe(input);
-    expect(document.activeElement).toBe(input);
+    expect(view.editor() === input).toBe(true);
+    expect(document.activeElement === input).toBe(true);
     expect(input.style.opacity).toBe('');
     fireEvent.change(input, { target: { value: '日本' } });
     fireEvent.compositionEnd(input, { data: '日本' });
@@ -687,7 +691,7 @@ describe('XlsxEditor keyboard', () => {
 
     await press(view.surface, '7');
     const input = view.editor()!;
-    expect(document.activeElement).toBe(input);
+    expect(document.activeElement === input).toBe(true);
     await press(input, '8');
     fireEvent.change(input, { target: { value: '78' } });
     await press(input, 'Enter');
@@ -704,7 +708,7 @@ describe('XlsxEditor keyboard', () => {
     await press(input, 'c', { metaKey: true });
     expect([view.surface.scrollLeft, view.surface.scrollTop]).toEqual([1500, 600]);
     expect(input.style.opacity).toBe('0');
-    expect(document.activeElement).toBe(input);
+    expect(document.activeElement === input).toBe(true);
   });
 
   it('draws an Enter that commits and scrolls in at most two frames, the last one live', async () => {
@@ -727,7 +731,7 @@ describe('XlsxEditor keyboard', () => {
     // the commit's frame, then the scrolled window's.
     expect(counts.paints).toBeLessThanOrEqual(2);
     expect(view.shown().y).toBe(view.surface.scrollTop);
-    expect(view.selectionBox()).not.toBeNull();
+    expect(view.selectionBox() !== null).toBe(true);
   });
 
   it('judges a key against the live view, not a frame its scroll has not repainted', async () => {
@@ -809,7 +813,7 @@ describe('XlsxEditor keyboard', () => {
     await act(async () => {
       fireEvent.blur(view.editor()!, { relatedTarget: null });
     });
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect((await view.input(3, 1))).toBe('7');
     // the grid takes the keys once focus has settled, a frame later.
     await act(async () => {
@@ -919,10 +923,10 @@ describe('XlsxEditor keyboard', () => {
 
     const formula = view.formulaInput();
     act(() => formula.focus());
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect((await view.input(3, 1))).toBe('7');
     await scrollTo(view, 0, 0);
-    expect(document.activeElement).toBe(formula);
+    expect(document.activeElement === formula).toBe(true);
     expect(input.isConnected).toBe(false);
   });
 });
@@ -938,12 +942,12 @@ describe('XlsxEditor chart objects', () => {
     // the press must not reach the cells under the chart at all: the grid
     // selection stays exactly where it was, not merely hidden.
     expect(view.nameBox().value).toBe('A1');
-    expect(view.selectionBox()).toBeNull();
+    expect(view.selectionBox() === null).toBe(true);
     fireEvent.mouseUp(window, chartCenter(chart));
 
     fireEvent.mouseDown(view.surface, { clientX: 2, clientY: 2 });
-    await waitFor(() => expect(view.outline()).toBeNull());
-    expect(view.selectionBox()).not.toBeNull();
+    await waitFor(() => expect(view.outline() === null).toBe(true));
+    expect(view.selectionBox() !== null).toBe(true);
     expect(view.nameBox().value).toBe('A1');
   });
 
@@ -962,7 +966,7 @@ describe('XlsxEditor chart objects', () => {
       fireEvent.keyDown(view.surface, { key: 'ArrowRight', shiftKey: true });
     });
     await waitFor(() => expect(view.canUndo()).toBe(true), { timeout: 2000 });
-    expect(view.error()).toBeNull();
+    expect(view.error() === null).toBe(true);
     await waitFor(() => expect(view.outlineAt().x).toBe(Math.round(chart!.rect.x + 10)));
   });
 
@@ -981,8 +985,8 @@ describe('XlsxEditor chart objects', () => {
       });
     }
 
-    expect(view.editor()).toBeNull();
-    expect(view.outline()).not.toBeNull();
+    expect(view.editor() === null).toBe(true);
+    expect(view.outline() !== null).toBe(true);
     expect(view.formula()).toBe(before);
     expect(view.canUndo()).toBe(false);
   });
@@ -997,7 +1001,7 @@ describe('XlsxEditor chart objects', () => {
 
     const outline = await waitFor(() => view.outline()!);
     expect(outline.getAttribute('data-chart-id')).toBe(chart.id);
-    expect(view.editor()).toBeNull();
+    expect(view.editor() === null).toBe(true);
     expect((await view.input(1, 1))).toBe('Edited item');
     fireEvent.mouseUp(window, chartCenter(chart));
   });
@@ -1045,7 +1049,7 @@ describe('XlsxEditor chart objects', () => {
     fireEvent.mouseDown(view.editor()!, chartCenter(chart));
 
     expect(view.editor()?.value).toBe('Edited item');
-    expect(view.outline()).toBeNull();
+    expect(view.outline() === null).toBe(true);
   });
 
   it('drags a selected chart and repins it through the engine', async () => {
@@ -1114,7 +1118,7 @@ describe('XlsxEditor chart objects', () => {
     await waitFor(() => expect(view.nameBox().value).toBe('A1'));
     await settle();
 
-    expect(view.error()).toBeNull();
+    expect(view.error() === null).toBe(true);
     expect(view.canUndo()).toBe(false);
     const still = ((await view.workbook().displayList({ x: 0, y: 0, ...VIEWPORT })).charts ?? []).find(
       (candidate) => candidate.id === chart.id
@@ -1177,7 +1181,7 @@ describe('XlsxEditor chart objects', () => {
     });
     fireEvent.keyDown(view.surface, { key: 'Escape' });
 
-    await waitFor(() => expect(view.outline()).toBeNull());
+    await waitFor(() => expect(view.outline() === null).toBe(true));
     await settle();
     expect(view.canUndo()).toBe(false);
   });
@@ -1195,7 +1199,7 @@ describe('XlsxEditor chart objects', () => {
       buttons: 1,
     });
     fireEvent.keyDown(view.surface, { key: 'Escape' });
-    await waitFor(() => expect(view.outline()).toBeNull());
+    await waitFor(() => expect(view.outline() === null).toBe(true));
 
     await act(async () => {
       fireEvent.mouseUp(window, { clientX: start.clientX + 40, clientY: start.clientY + 24 });
@@ -1302,7 +1306,7 @@ describe('XlsxEditor chart objects', () => {
     expect(view.outlineAt().x).toBe(chartRounded(pinned!).x);
     // the engine refuses to repin an absolute anchor, so a nudge that reached
     // it would surface as an error overlay rather than doing nothing.
-    expect(view.error()).toBeNull();
+    expect(view.error() === null).toBe(true);
     expect(view.canUndo()).toBe(false);
 
     fireEvent.mouseMove(view.surface, start);
@@ -1345,8 +1349,8 @@ describe('XlsxEditor chart objects', () => {
     });
 
     // no invisible selection left swallowing the keyboard.
-    await waitFor(() => expect(view.outline()).toBeNull());
-    await waitFor(() => expect(view.selectionBox()).not.toBeNull());
+    await waitFor(() => expect(view.outline() === null).toBe(true));
+    await waitFor(() => expect(view.selectionBox() !== null).toBe(true));
   });
 });
 
@@ -1605,7 +1609,7 @@ describe('XlsxEditor host integration', () => {
     ]);
     const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
     expect([formula.disabled, formula.readOnly]).toEqual([false, true]);
-    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(view.queryByTestId('xlsx-cell-editor') === null).toBe(true);
     expect((await api!.handle.cell(0, target.row, target.col)).input).toBe(before);
     expect(changes).toBe(0);
 
