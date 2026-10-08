@@ -957,6 +957,12 @@ describe('Enter at the end of a paragraph', () => {
     sync(left, right);
     expect(await savedDocumentXml(right, base)).toBe(await savedDocumentXml(left, base));
     expect(right.paragraphs('body').map(({ text }) => text)).toEqual(['Source', '', '']);
+    // The new mark went after the source one, so the change stays on the text.
+    expect(right.paragraphs('body').map(({ properties }) => properties.alignment === 'right')).toEqual([
+      true,
+      false,
+      false,
+    ]);
     left.destroy();
     right.destroy();
   });

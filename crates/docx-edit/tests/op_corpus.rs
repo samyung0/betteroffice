@@ -1910,6 +1910,57 @@ fn apply_paragraph_style_replaces_style_numbering_and_keeps_direct_numbering() {
     assert_eq!(paragraphs[1].properties.get("numPr"), Some(&numbering(7.0)));
 }
 
+/// Enter at a paragraph's end puts the new mark after the source one, so a
+/// peer's concurrent alignment change stays on the text, and two peers'
+/// Enters at that end give each new paragraph an id of its own.
+#[test]
+fn enter_at_the_end_leaves_the_text_its_mark_for_peers() {
+    let base = EditingDoc::new(1);
+    let original = base.create_story("body", "abc", "Normal", "left").unwrap();
+    let update = base.encode_state_as_update_v1();
+    let peers: Vec<_> = (2..5)
+        .map(|client| {
+            let doc = EditingDoc::new(client);
+            doc.apply_update_v1(&update).unwrap();
+            doc
+        })
+        .collect();
+    for peer in &peers[..2] {
+        let split = peer
+            .split_paragraph(&ctx(), Position::new("body", 3))
+            .unwrap();
+        assert!(split.at_end);
+        assert_eq!(split.first_para_id, original);
+    }
+    peers[2]
+        .set_paragraph_attr(&original, "alignment", Any::from("right"))
+        .unwrap();
+    let updates: Vec<_> = peers
+        .iter()
+        .map(|peer| peer.encode_state_as_update_v1())
+        .collect();
+    for peer in &peers {
+        for update in &updates {
+            peer.apply_update_v1(update).unwrap();
+        }
+    }
+    let paragraphs = peers[0].paragraphs("body").unwrap();
+    assert_eq!(
+        paragraphs
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>(),
+        ["abc", "", ""]
+    );
+    let ids: std::collections::HashSet<_> = paragraphs.iter().map(|p| &p.para_id).collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(paragraphs[0].para_id, original);
+    let alignment = |index: usize| paragraphs[index].properties.get("alignment").cloned();
+    assert_eq!(alignment(0), Some(Any::from("right")));
+    assert_eq!(alignment(1), Some(Any::from("left")));
+    assert_eq!(alignment(2), Some(Any::from("left")));
+}
+
 #[test]
 fn dedupe_para_ids_first_occurrence_keeps_its_id() {
     // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.

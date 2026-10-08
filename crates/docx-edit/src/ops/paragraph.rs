@@ -345,14 +345,15 @@ impl EditingDoc {
     /// Both halves keep the paragraph's properties, borders included, as Word
     /// copies the paragraph mark. The new pilcrow terminates the FIRST half
     /// and takes the ORIGINAL paraId; the original pilcrow is re-minted with a
-    /// fresh paraId and ends the second half. A section the paragraph ends
-    /// stays with the original mark, which still ends it: the new mark never
-    /// takes `sectPr` or `sectionBreakType`. Where the original mark keeps its
-    /// own paragraph (a split mid-paragraph or before a block), the new mark
-    /// leaves out its tracked insertion or deletion, and its copy of a tracked
-    /// property change takes new revision ids. At the paragraph end, so the
-    /// second half is empty, the mark revision and the source runs go with
-    /// the text's paragraph instead, and the empty one's property change takes
+    /// fresh paraId and ends the second half. At the paragraph end the new
+    /// pilcrow goes after the original one instead and takes the fresh paraId,
+    /// so the text keeps its mark, unless that mark ends a section. A section
+    /// the paragraph ends stays with the original mark, which still ends it:
+    /// the new mark never takes `sectPr` or `sectionBreakType`. The new mark
+    /// leaves out the source mark's tracked insertion or deletion, and its
+    /// copy of a tracked property change takes new revision ids; at the end of
+    /// a section's last paragraph the mark revision and the source runs go
+    /// with the text's paragraph, and the empty one's property change takes
     /// the new ids. Comment references show nothing, so Enter before ones that
     /// end the paragraph splits after them: it is Enter at the end, and they
     /// stay with the text. Suggesting mode stamps the inserted pilcrow `ins`
@@ -417,18 +418,29 @@ impl EditingDoc {
         });
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
+        // At the end the new mark goes after the source one, which keeps the
+        // text and its id, so a peer's concurrent change to the source mark
+        // stays on the text. A section's last paragraph keeps inserting before
+        // it, so the section still ends after the new paragraph, and so does
+        // suggesting mode, whose Backspace retracts the mark it deletes.
+        let after = second_half_empty
+            && !before_block
+            && !ctx.is_suggesting()
+            && !props
+                .iter()
+                .any(|(key, _)| SECTION_KEYS.contains(&key.as_str()));
 
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
         let new_pilcrow = story.insert_embed_with_attributes(
             &mut txn,
-            at.index,
+            if after { orig_index + 1 } else { at.index },
             MapPrelim::default(),
             insertion_attrs(ins, None),
         );
         new_pilcrow.insert(&mut txn, KIND_KEY, crate::PILCROW_KIND);
-        let new_para_id = if before_block {
+        let new_para_id = if before_block || after {
             &second_para_id
         } else {
             &first_para_id
@@ -438,10 +450,11 @@ impl EditingDoc {
         // one, as in Word: the source mark's own insertion or deletion stays
         // on it, and the new mark's copy of a tracked property change is a
         // change of its own.
-        let source_keeps = before_block || !second_half_empty;
+        let source_keeps = before_block || after || !second_half_empty;
         for (key, value) in &props {
             if SECTION_KEYS.contains(&key.as_str())
                 || (source_keeps && (key == PPR_INS || key == PPR_DEL))
+                || (after && key == ORIGINAL_RUN_BOUNDARIES)
             {
                 continue;
             }
@@ -467,13 +480,21 @@ impl EditingDoc {
                 at_end: false,
             });
         }
+        if after {
+            return Ok(SplitReceipt {
+                first_para_id,
+                second_para_id,
+                revision_ids: revision_id.into_iter().collect(),
+                at_end: true,
+            });
+        }
 
         // The original pilcrow now terminates the second half: re-mint its identity.
         orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
-            // The new paragraph is a copy: the mark revision went to the text's
-            // mark with the run cache, and its property change becomes one of
-            // its own.
+            // The section's new last paragraph is a copy: the mark revision went
+            // to the text's mark with the run cache, and its property change
+            // becomes one of its own.
             for key in [PPR_INS, PPR_DEL, ORIGINAL_RUN_BOUNDARIES] {
                 orig_map.remove(&mut txn, key);
             }
