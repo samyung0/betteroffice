@@ -269,7 +269,11 @@ impl StickyIndex {
                         }
                         starts
                     });
-                    index += starts.get(right.ptr.id()).copied().unwrap_or(0);
+                    // A map entry is not in its branch's sequence.
+                    let Some(start) = starts.get(right.ptr.id()) else {
+                        return sticky.get_offset(txn);
+                    };
+                    index += start;
                 }
                 Some(Offset::new(branch, index, sticky.assoc))
             })
@@ -719,6 +723,7 @@ mod test {
         let doc = Doc::with_client_id(1);
         let txt = doc.get_or_insert_text("test");
         let other = doc.get_or_insert_text("other");
+        let map = doc.get_or_insert_map("map");
         let mut txn = doc.transact_mut();
         for (step, word) in ["alpha ", "beta ", "gamma ", "delta ", "eps "]
             .iter()
@@ -737,6 +742,15 @@ mod test {
         indexes.extend(other.sticky_index(&mut txn, 1, Assoc::After));
         txt.remove_range(&mut txn, 4, 6);
         txt.insert(&mut txn, 2, "ZZ");
+        // A map entry's item is not in the map's sequence.
+        use crate::Map;
+        map.insert(&mut txn, "key", "old");
+        let client = doc.client_id();
+        let entry = crate::ID::new(client, txn.store().blocks.get_clock(&client));
+        map.insert(&mut txn, "key", "new");
+        for assoc in [Assoc::After, Assoc::Before] {
+            indexes.push(StickyIndex::new(IndexScope::Relative(entry), assoc));
+        }
         let single: Vec<_> = indexes
             .iter()
             .map(|sticky| {
