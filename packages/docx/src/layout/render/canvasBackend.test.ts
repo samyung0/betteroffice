@@ -19,6 +19,7 @@ import type {
   TextRunPrimitive,
 } from './displayList';
 import type { GlyphCache } from './glyphCache';
+import { clusterPieces } from './clusterRuns';
 
 interface Bounds {
   left: number;
@@ -464,6 +465,44 @@ describe('Canvas glyph-run clusters', () => {
     await drawPrimitive(ctx, run, { glyphCache });
 
     expect(paints.map((paint) => paint.left)).toEqual([100, 118, 136]);
+  });
+
+  it('paints a joined run exactly like its cluster pieces, outlined or not', async () => {
+    // UTF-8 clusters: 'W' 0, 'e' + U+0301 1 (two glyphs), ' ' 4, 'x' 5
+    const joined: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text: 'We\u0301 x',
+      glyphs: [
+        { id: 1, x: 10, y: 20, cluster: 0, advance: 14 },
+        { id: 2, x: 24, y: 20, cluster: 1, advance: 9 },
+        { id: 3, x: 25, y: 20, cluster: 1, advance: 0 },
+        { id: 4, x: 33, y: 20, cluster: 4, advance: 5 },
+        { id: 5, x: 38, y: 20, cluster: 5, advance: 8 },
+      ],
+      docStart: 1,
+      docEnd: 6,
+      logicalOrder: 3,
+      clusterRuns: true,
+    };
+    const pieces = clusterPieces(joined);
+    expect(pieces.map((piece) => piece.text)).toEqual(['W', 'e\u0301', ' ', 'x']);
+    const ink = new Map(pieces.map((piece) => [piece.text, { width: 8, ascent: 12, descent: 3 }]));
+    const glyphPath = { width: 2048, height: 2048 } as unknown as Path2D;
+    const glyphCache = {
+      get: () => ({ path: glyphPath, upem: 2048 }),
+    } as unknown as GlyphCache;
+
+    for (const options of [{ glyphCache }, undefined]) {
+      const whole = recordingContext(ink);
+      await drawPrimitive(whole.ctx, joined, options);
+      const split = recordingContext(ink);
+      for (const piece of pieces) await drawPrimitive(split.ctx, piece, options);
+      expect(whole.paints.length).toBeGreaterThanOrEqual(pieces.length);
+      expect(whole.paints).toEqual(split.paints);
+    }
   });
 
   it('paints a joined run cluster by cluster at the shaped glyph x', async () => {
