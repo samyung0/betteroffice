@@ -395,8 +395,11 @@ where
     fn clear_internal(&mut self, clear_undo: bool, clear_redo: bool) {
         let inner = Arc::get_mut(&mut self.state).unwrap();
 
-        let undo_cleared = Self::clear_stack(&inner.scope, &inner.docs, &mut inner.undo_stack);
-        let redo_cleared = Self::clear_stack(&inner.scope, &inner.docs, &mut inner.redo_stack);
+        // Patched for BetterOffice: clear only the stacks asked for, as Yjs does.
+        let undo_cleared =
+            clear_undo && Self::clear_stack(&inner.scope, &inner.docs, &mut inner.undo_stack);
+        let redo_cleared =
+            clear_redo && Self::clear_stack(&inner.scope, &inner.docs, &mut inner.redo_stack);
 
         if undo_cleared || redo_cleared {
             let e = StackClearedEvent::new(undo_cleared, redo_cleared);

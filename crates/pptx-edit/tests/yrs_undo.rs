@@ -149,3 +149,27 @@ fn undo_of_a_concurrent_map_set_restores_the_replaced_value() {
     assert_eq!(json(&d1, &m1), object(&[("x", 3.0)]));
     assert_eq!(json(&d2, &m2), object(&[("x", 3.0)]));
 }
+
+/// `UndoManager::clear_undo` and `clear_redo` clear only their own stack.
+#[test]
+fn clearing_one_stack_keeps_the_other() {
+    let doc = Doc::with_client_id(1);
+    let map = doc.get_or_insert_map("m");
+    let mut undo = manager(&doc, &map);
+    map.insert(&mut doc.transact_mut(), "a", 1);
+    map.insert(&mut doc.transact_mut(), "b", 1);
+    undo.undo_blocking();
+    assert!(undo.can_undo() && undo.can_redo());
+
+    undo.clear_undo();
+    assert!(!undo.can_undo() && undo.can_redo());
+    undo.redo_blocking();
+    assert_eq!(json(&doc, &map), object(&[("a", 1.0), ("b", 1.0)]));
+
+    map.insert(&mut doc.transact_mut(), "c", 1);
+    undo.undo_blocking();
+    undo.clear_redo();
+    assert!(undo.can_undo() && !undo.can_redo());
+    undo.undo_blocking();
+    assert_eq!(json(&doc, &map), object(&[("a", 1.0)]));
+}
