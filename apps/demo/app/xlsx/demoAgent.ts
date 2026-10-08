@@ -1,4 +1,4 @@
-import type { CellEdit, ProposalEdit, WorkbookHandle } from "@betteroffice/xlsx";
+import type { CellEdit, ProposalEdit, WorkbookProxy } from "@betteroffice/xlsx";
 
 const SCAN_ROWS = 200;
 const SCAN_COLS = 26;
@@ -119,11 +119,13 @@ function genericTotals(rows: CellEdit[][], sheet: number): ProposalEdit[] {
 }
 
 /** Build the demo's tracked totals proposal. */
-export function buildTotalsEdits(handle: WorkbookHandle): ProposalEdit[] {
-  const sheet = handle.sheetInfo().activeSheet;
+export async function buildTotalsEdits(
+  handle: Pick<WorkbookProxy, "sheetInfo" | "rangeCells">,
+): Promise<ProposalEdit[]> {
+  const sheet = (await handle.sheetInfo()).activeSheet;
   let rows: CellEdit[][];
   try {
-    rows = handle.rangeCells(sheet, `A1:${columnLetter(SCAN_COLS - 1)}${SCAN_ROWS}`);
+    rows = await handle.rangeCells(sheet, `A1:${columnLetter(SCAN_COLS - 1)}${SCAN_ROWS}`);
   } catch {
     return [];
   }

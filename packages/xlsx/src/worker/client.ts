@@ -198,8 +198,11 @@ export async function openWorkbookWorker(
       return inFlight;
     },
     frame: (view) => send<WorkbookFrame>({ type: 'frame', view }),
-    onSheet: (sheetId, method, ...args) =>
-      call(method, args, sheetId) as ReturnType<WorkbookProxy['onSheet']>,
+    onSheet: <K extends WorkbookMethod>(
+      sheetId: string,
+      method: K,
+      ...args: Parameters<WorkbookHandle[K]>
+    ) => call(method, args, sheetId) as Promise<ReturnType<WorkbookHandle[K]>>,
     toggle: (sheetId, range, property) =>
       send<EditResult>({ type: 'toggle', sheetId, range, property }, [], true),
     onUpdate(listener) {

@@ -152,9 +152,19 @@ function withSheet(op: Record<string, unknown>, sheet: number): Record<string, u
   return typeof op.sheet === 'number' ? { ...op, sheet } : op;
 }
 
-function frame(open: WorkbookHandle, view: WorkbookView): WorkbookFrame {
+function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
   const sheetInfo = open.sheetInfo();
   const sheet = sheetInfo.activeSheet;
+  const view = requested.initialScroll
+    ? {
+        ...requested,
+        viewport: {
+          ...requested.viewport,
+          x: sheetInfo.initialScrollX,
+          y: sheetInfo.initialScrollY,
+        },
+      }
+    : requested;
   const displayList = open.displayList(view.viewport);
   const grid = displayList.grid;
   const selection = view.selection;
@@ -237,7 +247,7 @@ function tracks(start: number, indices: number[] | undefined, count: number): nu
 function runs(indices: number[]): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   for (const index of indices) {
-    const last = out.at(-1);
+    const last = out[out.length - 1];
     if (last && index === last[1] + 1) last[1] = index;
     else out.push([index, index]);
   }

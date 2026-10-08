@@ -75,6 +75,8 @@ export interface WorkbookView {
   /** Echoed back; the worker draws in sheet pixels. */
   zoom: number;
   selection: Selection | null;
+  /** Draw the active sheet at its saved scroll; the frame's viewport says where. */
+  initialScroll?: boolean;
 }
 
 /**

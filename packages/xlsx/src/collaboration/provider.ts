@@ -68,6 +68,26 @@ function normalizeError(
   return new CollaborationError(code, `${context}: ${errorMessage(cause)}`, cause);
 }
 
+/**
+ * `next` with what `read` returns: at once, or once a replica in a worker
+ * answers. A throw or a rejection goes to `fail`.
+ */
+function whenRead<T>(
+  read: () => T | Promise<T>,
+  next: (value: T) => void,
+  fail: (cause: unknown) => void
+): void {
+  let value: T | Promise<T>;
+  try {
+    value = read();
+  } catch (cause) {
+    fail(cause);
+    return;
+  }
+  if (value instanceof Promise) value.then(next, fail);
+  else next(value);
+}
+
 function requireBytes(value: unknown, operation: string): Uint8Array {
   if (!(value instanceof Uint8Array)) {
     throw new TypeError(`${operation} must return a Uint8Array`);
@@ -493,18 +513,29 @@ export class CollaborationProvider {
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
-
-    let stateVector: Uint8Array;
-    try {
-      stateVector = requireBytes(this.replica.encodeStateVector(), 'encodeStateVector');
-    } catch (cause) {
+    const fail = (cause: unknown) =>
       this.failConnection(
         token,
         normalizeError('replica', 'Failed to encode replica state vector', cause)
       );
-      return;
-    }
+    whenRead(
+      () => this.replica.encodeStateVector(),
+      (value) => {
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        let stateVector: Uint8Array;
+        try {
+          stateVector = requireBytes(value, 'encodeStateVector');
+        } catch (cause) {
+          fail(cause);
+          return;
+        }
+        this.sendHandshake(token, stateVector);
+      },
+      fail
+    );
+  }
 
+  private sendHandshake(token: number, stateVector: Uint8Array): void {
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {
@@ -613,30 +644,45 @@ export class CollaborationProvider {
   }
 
   private respondToSyncStep1(token: number, remoteStateVector: Uint8Array): void {
-    let update: Uint8Array;
-    try {
-      update = requireBytes(
+    const fail = (cause: unknown) =>
+      this.failConnection(token, normalizeError('replica', 'Failed to encode replica update', cause));
+    whenRead(
+      () =>
         this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
-        'encodeStateAsUpdate'
-      );
-    } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('replica', 'Failed to encode replica update', cause)
-      );
-      return;
-    }
-
-    try {
-      this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
-    } catch (cause) {
-      this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep2', cause));
-    }
+      (value) => {
+        if (!this.isCurrent(token) || !this.isOpen) return;
+        let update: Uint8Array;
+        try {
+          update = requireBytes(value, 'encodeStateAsUpdate');
+        } catch (cause) {
+          fail(cause);
+          return;
+        }
+        try {
+          this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
+        } catch (cause) {
+          this.failConnection(
+            token,
+            normalizeError('protocol', 'Failed to encode SyncStep2', cause)
+          );
+        }
+      },
+      fail
+    );
   }
 
   private applyRemoteUpdate(token: number, update: Uint8Array): boolean {
     try {
-      this.replica.applyUpdate(withoutDocumentFingerprint(update).slice());
+      const applied = this.replica.applyUpdate(withoutDocumentFingerprint(update).slice());
+      // a replica in a worker refuses later; the connection fails then.
+      if (applied instanceof Promise)
+        applied.catch((cause: unknown) => {
+          if (this.isCurrent(token))
+            this.failConnection(
+              token,
+              normalizeError('replica', 'Failed to apply remote update', cause)
+            );
+        });
       return true;
     } catch (cause) {
       this.failConnection(

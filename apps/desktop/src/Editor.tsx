@@ -185,7 +185,7 @@ export default function Editor({
             file.format === "docx"
               ? await docx.current?.save()
               : file.format === "xlsx"
-              ? xlsx.current?.handle.save()
+              ? await xlsx.current?.save()
               : pptx.current?.save();
           if (!bytes)
             throw new Error(
