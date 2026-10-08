@@ -33,8 +33,9 @@
 //! page content height, and the mapping from yrs ids to the numeric ids the
 //! layout contract uses — arrive in [`RenderEnv`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use docx_layout::types::{
@@ -198,7 +199,7 @@ fn lower_top_story(
     }
 
     let txn = doc.yrs_doc().transact();
-    let comments = resolve_comment_intervals(&txn, env)?;
+    let comments = CommentIndex::decode(&txn, env)?;
     let mut active_stories = BTreeSet::new();
     let mut list_state = ListState::default();
     lower_story(
@@ -261,12 +262,8 @@ pub fn relower_text_insert(
     }
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, story_id)?;
-    let comment_index = resolve_comment_intervals(&txn, env)?;
-    let comments = match comment_index.get(story_id) {
-        Some(Ok(intervals)) => intervals.as_slice(),
-        Some(Err(reason)) => return Err(EditError::InvalidComment((*reason).into()).into()),
-        None => &[],
-    };
+    let comments = CommentIndex::decode(&txn, env)?.intervals(&txn, story_id)?;
+    let comments = &comments[..];
     let mut story_index = 0_u32;
     let mut runs = Vec::new();
     let mut pm_units = 0_u32;
@@ -560,11 +557,8 @@ fn lower_story<T: ReadTxn>(
 
     let result = (|| {
         let story = story_ref(txn, story_id)?;
-        let comments = match comment_index.get(story_id) {
-            Some(Ok(intervals)) => intervals.as_slice(),
-            Some(Err(reason)) => return Err(EditError::InvalidComment((*reason).into()).into()),
-            None => &[],
-        };
+        let comments = comment_index.intervals(txn, story_id)?;
+        let comments = &comments[..];
         let bookmarks = std::cell::OnceCell::<Vec<u32>>::new();
         let mut blocks = Vec::new();
         let mut paragraph_runs = Vec::new();
@@ -2475,64 +2469,90 @@ struct DrawingMarker {
     anchored: bool,
 }
 
-/// Each story's comment intervals in story order, or why an anchor of that
-/// story no longer resolves (an error only when that story is lowered, because
-/// the run cuts derived from its intervals would misplace the comment). Every
-/// anchor of the document resolves in one walk per story.
-type CommentIndex = std::collections::HashMap<String, Result<Vec<CommentInterval>, &'static str>>;
+/// Every comment anchor of the document decoded once per lowering and
+/// grouped by story. A story's intervals resolve (one walk of that story) the
+/// first time the lowering visits it, so lowering a note or a header never
+/// walks a commented body.
+struct CommentIndex {
+    anchors: HashMap<String, Vec<(f64, yrs::StickyIndex, yrs::StickyIndex)>>,
+    resolved: std::cell::RefCell<HashMap<String, Rc<[CommentInterval]>>>,
+}
 
-fn resolve_comment_intervals<T: ReadTxn>(
-    txn: &T,
-    env: &RenderEnv,
-) -> Result<CommentIndex, BridgeError> {
-    let comments = txn
-        .get_map(COMMENTS)
-        .expect("comments root is declared by EditingDoc::new");
-    let mut owners = Vec::new();
-    let mut edges = Vec::new();
-    for (comment_id, value) in comments.iter(txn) {
-        let Out::YMap(comment) = value else {
-            continue;
-        };
-        let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
-            return Err(EditError::InvalidComment("anchors must be an array".into()).into());
-        };
-        for encoded in anchors.iter() {
-            let anchor = decode_anchor(encoded)?;
-            owners.push((anchor.story, numeric_id(comment_id, env)));
-            edges.push(anchor.start);
-            edges.push(anchor.end);
+impl CommentIndex {
+    fn decode<T: ReadTxn>(txn: &T, env: &RenderEnv) -> Result<Self, BridgeError> {
+        let comments = txn
+            .get_map(COMMENTS)
+            .expect("comments root is declared by EditingDoc::new");
+        let mut anchors: HashMap<String, Vec<_>> = HashMap::new();
+        for (comment_id, value) in comments.iter(txn) {
+            let Out::YMap(comment) = value else {
+                continue;
+            };
+            let Some(Out::Any(Any::Array(encoded))) = comment.get(txn, "anchors") else {
+                return Err(EditError::InvalidComment("anchors must be an array".into()).into());
+            };
+            for encoded in encoded.iter() {
+                let anchor = decode_anchor(encoded)?;
+                anchors.entry(anchor.story).or_default().push((
+                    numeric_id(comment_id, env),
+                    anchor.start,
+                    anchor.end,
+                ));
+            }
         }
+        Ok(Self {
+            anchors,
+            resolved: Default::default(),
+        })
     }
-    let offsets = yrs::StickyIndex::get_offsets(txn, &edges);
-    let mut index = CommentIndex::new();
-    for ((story, id), [start, end]) in owners.into_iter().zip(offsets.as_chunks::<2>().0) {
-        let entry = index.entry(story).or_insert_with(|| Ok(Vec::new()));
-        let Ok(intervals) = entry else {
-            continue;
-        };
-        match (start, end) {
-            (None, _) => *entry = Err("start anchor no longer resolves"),
-            (_, None) => *entry = Err("end anchor no longer resolves"),
-            (Some(start), Some(end)) if start.index < end.index => {
+
+    /// `story`'s intervals in story order. An anchor that no longer resolves
+    /// is an error, because the run cuts derived from these intervals would
+    /// silently misplace the comment.
+    fn intervals<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story: &str,
+    ) -> Result<Rc<[CommentInterval]>, BridgeError> {
+        if let Some(intervals) = self.resolved.borrow().get(story) {
+            return Ok(Rc::clone(intervals));
+        }
+        #[cfg(test)]
+        tests::RESOLVED_COMMENT_STORIES.with(|stories| stories.borrow_mut().push(story.to_owned()));
+        let anchors = self.anchors.get(story).map_or(&[][..], Vec::as_slice);
+        let edges: Vec<_> = anchors
+            .iter()
+            .flat_map(|(_, start, end)| [start.clone(), end.clone()])
+            .collect();
+        let offsets = yrs::StickyIndex::get_offsets(txn, &edges);
+        let mut intervals = Vec::new();
+        for ((id, _, _), [start, end]) in anchors.iter().zip(offsets.as_chunks::<2>().0) {
+            let start = start.as_ref().ok_or_else(|| {
+                EditError::InvalidComment("start anchor no longer resolves".into())
+            })?;
+            let end = end
+                .as_ref()
+                .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
+            if start.index < end.index {
                 intervals.push(CommentInterval {
                     start: start.index,
                     end: end.index,
-                    id,
+                    id: *id,
                 });
             }
-            _ => {}
         }
-    }
-    for intervals in index.values_mut().filter_map(|entry| entry.as_mut().ok()) {
         intervals.sort_by(|a, b| {
             a.start
                 .cmp(&b.start)
                 .then(a.end.cmp(&b.end))
                 .then(a.id.total_cmp(&b.id))
         });
+        let intervals: Rc<[CommentInterval]> = intervals.into();
+        self.resolved
+            .borrow_mut()
+            .insert(story.to_owned(), Rc::clone(&intervals));
+        Ok(intervals)
     }
-    Ok(index)
 }
 
 /// Splits one formatted text chunk into runs. Cuts land at every comment
@@ -4432,6 +4452,48 @@ mod tests {
 
     use super::*;
     use crate::{EditCtx, FormatPolicy, Position, RawOp, SimpleFormat, StoryRange};
+
+    thread_local! {
+        /// Stories whose comment anchors a lowering resolved, in order.
+        pub(super) static RESOLVED_COMMENT_STORIES: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn resolved_comment_stories() -> Vec<String> {
+        RESOLVED_COMMENT_STORIES.with(|stories| stories.take())
+    }
+
+    /// A lowering resolves comment anchors only for the stories it visits:
+    /// lowering a header beside a long commented body never walks the body.
+    #[test]
+    fn a_lowering_resolves_only_the_comment_anchors_of_stories_it_visits() {
+        let ctx = EditCtx::local("", "");
+        let doc = EditingDoc::new(9);
+        doc.create_story("body", &"Body text. ".repeat(500), "Normal", "left")
+            .unwrap();
+        doc.create_story("hf:1", "Header", "Normal", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::SetComment {
+                id: "1".into(),
+                ranges: vec![(5, 9)],
+                author: "Ada".into(),
+                date: "2026-10-08T00:00:00Z".into(),
+                body: Any::Null,
+            }],
+            &ctx,
+        )
+        .unwrap();
+        let env = RenderEnv::default();
+        resolved_comment_stories();
+
+        yrs_doc_to_layout_blocks(&doc, "hf:1", &env).unwrap();
+        assert_eq!(resolved_comment_stories(), ["hf:1"]);
+        let body = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+        assert_eq!(resolved_comment_stories(), ["body"]);
+        assert!(format!("{body:?}").contains("comment_ids: Some([1.0])"));
+    }
 
     /// Plain inserts at random places in indexed paragraphs of real
     /// documents: re-lowering the paragraph alone gives exactly what lowering
