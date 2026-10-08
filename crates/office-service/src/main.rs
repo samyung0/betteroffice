@@ -11,7 +11,7 @@ use std::time::Instant;
 
 /// Engine calls recurse over document trees; give them the stack a deep
 /// document needs rather than the platform's main-thread default. The
-/// deepest recorded call commits 0.43 MiB in release (API.md, "Stack"); a
+/// deepest recorded call commits 0.45 MiB in release (API.md, "Stack"); a
 /// debug build needs far more (it overflowed the 1 MiB main thread), and the
 /// reservation costs nothing until used.
 const STACK_BYTES: usize = 256 << 20;
