@@ -52,8 +52,9 @@ fn lato_blocks() -> [Vec<u8>; 3] {
         usize::from(data[at]) << 16 | usize::from(data[at + 1]) << 8 | usize::from(data[at + 2])
     };
     let (second, third) = (u24(4), u24(7));
-    [&data[10..second], &data[second..third], &data[third..]]
-        .map(|block| lzcomp::unpack(block, data[0], MAX_EMBEDDED_FONT_BYTES).unwrap())
+    [&data[10..second], &data[second..third], &data[third..]].map(|block| {
+        lzcomp::unpack(block, data[0], MAX_EMBEDDED_FONT_BYTES, &mut { usize::MAX }).unwrap()
+    })
 }
 
 /// A CTF directory over `entries` (tag, offset, length).

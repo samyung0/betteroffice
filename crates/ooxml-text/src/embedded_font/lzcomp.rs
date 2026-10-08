@@ -1,7 +1,7 @@
 //! LZCOMP, the LZ77 variant with adaptive Huffman codes that MicroType
 //! Express compresses each block with (W3C MTX submission, appendix C).
 
-use super::EmbeddedFontError;
+use super::{EmbeddedFontError, charge};
 
 /// Bytes the history starts with so early copies have something to reach.
 const PRELOAD: usize = 2 * 32 * 96 + 4 * 256;
@@ -18,8 +18,14 @@ pub(super) fn declared_length(data: &[u8], version: u8) -> Result<usize, Embedde
     Ok(bits.value(24)? as usize)
 }
 
-/// Unpacks one block of at most `limit` bytes.
-pub(super) fn unpack(data: &[u8], version: u8, limit: usize) -> Result<Vec<u8>, EmbeddedFontError> {
+/// Unpacks one block of at most `limit` bytes, charging `budget` for each run
+/// the run-length stage expands as it is produced.
+pub(super) fn unpack(
+    data: &[u8],
+    version: u8,
+    limit: usize,
+    budget: &mut usize,
+) -> Result<Vec<u8>, EmbeddedFontError> {
     let mut bits = Bits::new(data);
     let run_length = version != 1 && bits.bit()?;
     let mut distances = Tree::new(8);
@@ -42,10 +48,10 @@ pub(super) fn unpack(data: &[u8], version: u8, limit: usize) -> Result<Vec<u8>, 
     while history.len() < end {
         let symbol = symbols.read(&mut bits)?;
         if symbol < 256 {
-            output.push(&mut history, symbol as u8)?;
+            output.push(&mut history, symbol as u8, budget)?;
         } else if (dup2..dup2 + 3).contains(&symbol) {
             let value = history[history.len() - 2 * (symbol - dup2 + 1)];
-            output.push(&mut history, value)?;
+            output.push(&mut history, value, budget)?;
         } else {
             let code = symbol - 256;
             let distance_symbols = code / 8 + 1;
@@ -65,7 +71,7 @@ pub(super) fn unpack(data: &[u8], version: u8, limit: usize) -> Result<Vec<u8>, 
             let start = position + 1 - distance - length;
             for offset in 0..length {
                 let value = history[start + offset];
-                output.push(&mut history, value)?;
+                output.push(&mut history, value, budget)?;
             }
         }
     }
@@ -134,7 +140,12 @@ impl Output {
         }
     }
 
-    fn push(&mut self, history: &mut Vec<u8>, value: u8) -> Result<(), EmbeddedFontError> {
+    fn push(
+        &mut self,
+        history: &mut Vec<u8>,
+        value: u8,
+        budget: &mut usize,
+    ) -> Result<(), EmbeddedFontError> {
         history.push(value);
         let Some(run) = &mut self.run_length else {
             return Ok(());
@@ -152,6 +163,9 @@ impl Output {
             }
             RunState::Escaped => run.state = RunState::Repeat(value),
             RunState::Repeat(count) => {
+                // The block's declared length paid for the three coded bytes,
+                // not for what they expand to.
+                charge(budget, usize::from(count))?;
                 run.bytes
                     .extend(std::iter::repeat_n(value, usize::from(count)));
                 run.state = RunState::Normal;
@@ -441,9 +455,12 @@ mod tests {
     #[test]
     fn literals_round_trip_through_the_adaptive_tree() {
         let text = b"MicroType Express keeps adapting its codes as symbols repeat";
-        assert_eq!(unpack(&literal_block(text), 3, 1024).unwrap(), text);
         assert_eq!(
-            unpack(&literal_block(text), 3, text.len() - 1),
+            unpack(&literal_block(text), 3, 1024, &mut { usize::MAX }).unwrap(),
+            text
+        );
+        assert_eq!(
+            unpack(&literal_block(text), 3, text.len() - 1, &mut { usize::MAX }),
             Err(EmbeddedFontError::TooLarge)
         );
         assert_eq!(declared_length(&literal_block(text), 3), Ok(text.len()));
@@ -471,7 +488,10 @@ mod tests {
                 expected.push(expected[start + offset]);
             }
         }
-        assert_eq!(unpack(&block, 3, 4096).unwrap(), expected[PRELOAD..]);
+        assert_eq!(
+            unpack(&block, 3, 4096, &mut { usize::MAX }).unwrap(),
+            expected[PRELOAD..]
+        );
         assert_eq!(&expected[PRELOAD + 4..PRELOAD + 8], b"abab");
     }
 
@@ -481,18 +501,29 @@ mod tests {
         // 'z'), "b".
         let coded = [0xEE, b'a', 0xEE, 0, 0xEE, 5, b'z', b'b'];
         let block = Encoder::new(coded.len(), true).literals(&coded).finish();
+        let mut budget = 100;
         assert_eq!(
-            unpack(&block, 3, 64).unwrap(),
+            unpack(&block, 3, 64, &mut budget).unwrap(),
             [b'a', 0xEE, b'z', b'z', b'z', b'z', b'z', b'b']
         );
-        assert_eq!(unpack(&block, 3, 7), Err(EmbeddedFontError::TooLarge));
+        // The repeat's five bytes are charged as they are produced.
+        assert_eq!(budget, 95);
+        assert_eq!(
+            unpack(&block, 3, 7, &mut { usize::MAX }),
+            Err(EmbeddedFontError::TooLarge)
+        );
+        let mut short = 4;
+        assert_eq!(
+            unpack(&block, 3, 64, &mut short),
+            Err(EmbeddedFontError::TooLarge)
+        );
     }
 
     #[test]
     fn a_stream_ending_early_is_truncated() {
         let stream = literal_block(b"truncated stream");
         assert_eq!(
-            unpack(&stream[..stream.len() - 3], 3, 1024),
+            unpack(&stream[..stream.len() - 3], 3, 1024, &mut { usize::MAX }),
             Err(EmbeddedFontError::Truncated)
         );
     }

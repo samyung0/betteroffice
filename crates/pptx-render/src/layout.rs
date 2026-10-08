@@ -56,8 +56,8 @@ const BACKGROUND_FILL_BASE: u32 = 1_001;
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
-/// What one deck's embedded fonts may cost: their parts, declared blocks and
-/// decoded faces.
+/// What one deck's embedded fonts may cost: their parts, declared blocks,
+/// run-length expansion and decoded faces.
 pub const MAX_DECK_EMBEDDED_FONT_BYTES: usize = 64 * 1024 * 1024;
 /// Distinct embedded font parts one deck may register.
 pub const MAX_EMBEDDED_FACES: usize = 64;
@@ -176,9 +176,10 @@ impl SlideRenderer {
     /// Registers the faces the deck embeds (`p:embeddedFontLst`), ahead of a
     /// host face under the same name and style. Each part is decoded once,
     /// whatever number of slots name it, and the deck's budget
-    /// ([`MAX_DECK_EMBEDDED_FONT_BYTES`]) is charged for the work before it is
-    /// done (the part, its declared blocks) and for the font it keeps, whether
-    /// the decode succeeds or not. A part that is missing, cannot be decoded
+    /// ([`MAX_DECK_EMBEDDED_FONT_BYTES`]) is charged for the part and its
+    /// declared blocks before decoding them, for what the run-length stage
+    /// expands as it grows, and for the font it keeps, whether the decode
+    /// succeeds or not. A part that is missing, cannot be decoded
     /// or no longer fits is skipped, as is any past [`MAX_EMBEDDED_FACES`],
     /// so their text keeps the host's face. Returns one entry per part
     /// registered.
@@ -235,6 +236,8 @@ impl SlideRenderer {
         let bytes = package.part_bytes(part_path)?;
         let font = decode_embedded_font_within(bytes, part_path, budget).ok()?;
         *budget = budget.checked_sub(font.len())?;
+        // The alias lives only in this session's display lists and page fonts
+        // and is never stored, so the hash need not be stable across builds.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&font, &mut hasher);
         let alias = format!("bo-embedded-{:016x}", std::hash::Hasher::finish(&hasher));

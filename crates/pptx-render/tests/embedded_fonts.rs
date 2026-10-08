@@ -322,6 +322,7 @@ fn a_face_the_page_refuses_leaves_layout_too() {
 }
 
 const EXPAND: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/hostile-expand.fntdata");
+const RLE: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/hostile-rle.fntdata");
 
 #[test]
 fn a_part_named_by_many_slots_is_decoded_once() {
@@ -351,6 +352,12 @@ fn failing_parts_spend_the_deck_budget_before_their_work() {
     // unpacks, so the 64 MiB budget stops the decoding after three.
     let started = std::time::Instant::now();
     let laid = lay_out(&many(1_000, true, EXPAND));
+    assert!(laid.faces.is_empty());
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    // 1,000 distinct 145-byte parts whose run-length stage expands past the
+    // per-face limit: the expansion is charged as it grows.
+    let started = std::time::Instant::now();
+    let laid = lay_out(&many(1_000, true, RLE));
     assert!(laid.faces.is_empty());
     assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
     // Distinct good parts register up to the face cap.

@@ -56,11 +56,12 @@ pub fn decode_embedded_font(bytes: &[u8], part_name: &str) -> Result<Vec<u8>, Em
     decode_embedded_font_within(bytes, part_name, &mut unlimited)
 }
 
-/// [`decode_embedded_font`], charging `budget` for the work before doing it:
-/// the part's size, then each MicroType Express block's declared length. The
-/// charges stand whether the part then decodes or not, so a caller decoding
-/// many parts bounds the work they take; a part that would overdraw the
-/// budget is refused as [`EmbeddedFontError::TooLarge`].
+/// [`decode_embedded_font`], charging `budget` for the work: the part's size
+/// and each MicroType Express block's declared length before decoding them,
+/// and each run the run-length stage expands as it is produced. The charges
+/// stand whether the part then decodes or not, so a caller decoding many
+/// parts bounds the work they take; a part that would overdraw the budget is
+/// refused as [`EmbeddedFontError::TooLarge`].
 pub fn decode_embedded_font_within(
     bytes: &[u8],
     part_name: &str,
@@ -171,7 +172,7 @@ fn decode_mtx(data: &[u8], budget: &mut usize) -> Result<Vec<u8>, EmbeddedFontEr
     let mut face = MAX_EMBEDDED_FONT_BYTES;
     let mut unpack = |block: &[u8]| {
         charge(budget, lzcomp::declared_length(block, version)?)?;
-        let bytes = lzcomp::unpack(block, version, face)?;
+        let bytes = lzcomp::unpack(block, version, face, budget)?;
         face -= bytes.len();
         Ok::<_, EmbeddedFontError>(bytes)
     };

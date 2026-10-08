@@ -1,5 +1,5 @@
 use ooxml_text::embedded_font::MAX_EMBEDDED_FONT_BYTES;
-use ooxml_text::{EmbeddedFontError, FontStore, decode_embedded_font};
+use ooxml_text::{EmbeddedFontError, FontStore, decode_embedded_font, decode_embedded_font_within};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::pen::ControlBoundsPen;
 use skrifa::outline::{DrawSettings, Engine, HintingInstance, HintingOptions, Target};
@@ -136,4 +136,22 @@ fn damaged_parts_fail_without_panicking() {
             assert!(font.len() <= MAX_EMBEDDED_FONT_BYTES);
         }
     }
+}
+
+#[test]
+fn run_length_output_is_charged_as_it_grows() {
+    // 145 bytes declaring 393,001 that the run-length stage expands to
+    // 33,405,000, past the per-face limit (review 2's N1).
+    let part = include_bytes!("fonts/hostile-rle.fntdata");
+    let mut budget = 64 * 1024 * 1024;
+    let mut expanded = 0;
+    for _ in 0..170 {
+        let before = budget;
+        assert!(decode_embedded_font_within(part, PART, &mut budget).is_err());
+        if before - budget > 1024 * 1024 {
+            expanded += 1;
+        }
+    }
+    // Two parts' expansion spends a deck's budget; the rest stop before work.
+    assert_eq!(expanded, 2);
 }
