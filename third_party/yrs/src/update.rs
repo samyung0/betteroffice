@@ -926,17 +926,20 @@ impl<'a> BlockPicker<'a> {
         }
     }
 
+    // Patched for BetterOffice: a loop, not a call per client whose queue is
+    // empty (a chain of 20,000 clients overflowed a 2 MiB stack).
     fn next(&mut self) -> Option<Block> {
-        match self.stack.pop() {
-            None => match &mut self.latest {
-                Some((_, latest)) if !latest.is_empty() => latest.pop_front(),
-                _ => {
-                    let next = self.clients.pop()?;
-                    self.latest = self.store.clients.remove_entry(&next);
-                    self.next()
+        if let Some(block) = self.stack.pop() {
+            return Some(block);
+        }
+        loop {
+            if let Some((_, latest)) = &mut self.latest {
+                if let Some(block) = latest.pop_front() {
+                    return Some(block);
                 }
-            },
-            block => block,
+            }
+            let next = self.clients.pop()?;
+            self.latest = self.store.clients.remove_entry(&next);
         }
     }
 
@@ -1801,6 +1804,45 @@ mod inspection_test {
         doc.transact_mut().apply_update(update).unwrap();
         assert_eq!(text.get_string(&doc.transact()), "abc");
         assert_eq!(doc.transact().state_vector(), before);
+    }
+
+    // Patched for BetterOffice: 20,000 clients with one struct each, each
+    // struct's origin the one of the client before, integrate on a 2 MiB stack
+    // (a tokio worker's): the picker no longer recurses once per drained client.
+    #[test]
+    fn integrates_a_long_chain_of_clients_on_a_small_stack() {
+        use crate::encoding::write::Write;
+        let doc = Doc::with_client_id(1);
+        let text = doc.get_or_insert_text("t");
+        text.insert(&mut doc.transact_mut(), 0, "h");
+        let clients = 20_000u64;
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.write_var(clients);
+        for k in 0..clients {
+            bytes.write_var(1u32);
+            bytes.write_var(1_000 + k);
+            bytes.write_var(0u32);
+            bytes.write_u8(0x80 | 4); // an origin, a string
+            if k == 0 {
+                bytes.write_var(1u64);
+            } else {
+                bytes.write_var(1_000 + k - 1);
+            }
+            bytes.write_var(0u32);
+            bytes.write_string("x");
+        }
+        bytes.write_var(0u32);
+        let len = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let mut txn = doc.transact_mut();
+                txn.apply_update(Update::decode_v1(&bytes).unwrap()).unwrap();
+                text.len(&txn)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(len, 1 + clients as u32);
     }
 
     // Patched for BetterOffice: a garbage-collected run reads as Gc or deleted content.
