@@ -20,7 +20,7 @@
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use yrs::types::Attrs;
@@ -1039,28 +1039,6 @@ impl EditingDoc {
             }
             Ok(delta)
         })
-    }
-
-    /// Restores paraId uniqueness after a merge of divergent replicas: every
-    /// duplicate is re-minted, with the first occurrence in document order
-    /// keeping its id. Runs under a system origin so the pass never enters
-    /// undo history. Returns the `(old, new)` pairs.
-    pub fn dedupe_para_ids(&self, now_iso: &str) -> OpResult<Vec<(ParagraphId, ParagraphId)>> {
-        let ctx = EditCtx::system(now_iso);
-        let mut renames = Vec::new();
-        let mut txn = self.transact_for(&ctx);
-        let targets = all_targets(&txn);
-        let mut seen: HashSet<String> = HashSet::new();
-        for target in targets {
-            let id = target.bounds.para_id.clone();
-            if seen.insert(id.clone()) {
-                continue;
-            }
-            let minted = self.next_id();
-            target.map.insert(&mut txn, PARA_ID, minted.as_str());
-            renames.push((id, minted));
-        }
-        Ok(renames)
     }
 }
 

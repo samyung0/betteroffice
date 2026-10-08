@@ -1961,48 +1961,6 @@ fn enter_at_the_end_leaves_the_text_its_mark_for_peers() {
     assert_eq!(alignment(2), Some(Any::from("left")));
 }
 
-#[test]
-fn dedupe_para_ids_first_occurrence_keeps_its_id() {
-    // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.
-    let base = EditingDoc::new(1);
-    let original = base
-        .create_story("body", "abcdef", "Normal", "left")
-        .unwrap();
-    let update = base.encode_state_as_update_v1();
-    let a = EditingDoc::new(2);
-    let b = EditingDoc::new(3);
-    a.apply_update_v1(&update).unwrap();
-    b.apply_update_v1(&update).unwrap();
-    a.split_paragraph(&ctx(), Position::new("body", 2)).unwrap();
-    b.split_paragraph(&ctx(), Position::new("body", 4)).unwrap();
-    let from_a = a.encode_state_as_update_v1();
-    let from_b = b.encode_state_as_update_v1();
-    a.apply_update_v1(&from_b).unwrap();
-    b.apply_update_v1(&from_a).unwrap();
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(
-        ids.iter().filter(|id| **id == original).count(),
-        2,
-        "concurrent splits duplicate the original id"
-    );
-    let renames = a.dedupe_para_ids(DATE).unwrap();
-    assert_eq!(renames.len(), 1);
-    assert_eq!(renames[0].0, original);
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(ids.iter().filter(|id| **id == original).count(), 1);
-    assert_eq!(ids[0], original, "FIRST occurrence keeps the id");
-}
-
 // ---------------------------------------------------------------------------
 // Undo
 // ---------------------------------------------------------------------------
