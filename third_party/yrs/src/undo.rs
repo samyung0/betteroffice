@@ -2299,6 +2299,39 @@ mod test {
     }
 
     #[test]
+    fn undo_of_a_concurrent_map_set_restores_the_replaced_value() {
+        // Patched for BetterOffice: d2's set of "x" wins over d1's concurrent one.
+        // Undo on d2 restores the value its set replaced; Yjs leaves the key
+        // without a value. A live value from another client is still kept.
+        let d1 = Doc::with_client_id(1);
+        let d2 = Doc::with_client_id(2);
+        let m1 = d1.get_or_insert_map("m");
+        let m2 = d2.get_or_insert_map("m");
+        m1.insert(&mut d1.transact_mut(), "x", 0);
+        exchange_updates(&[&d1, &d2]);
+        let mut mgr = UndoManager::new();
+        mgr.expand_scope(&d2, &m2);
+        m1.insert(&mut d1.transact_mut(), "x", 1);
+        m2.insert(&mut d2.transact_mut(), "x", 2);
+        exchange_updates(&[&d1, &d2]);
+        assert_eq!(m2.to_json(&d2.transact()), any!({"x": 2}));
+
+        mgr.undo_blocking();
+        exchange_updates(&[&d1, &d2]);
+        assert_eq!(m1.to_json(&d1.transact()), any!({"x": 0}));
+        assert_eq!(m2.to_json(&d2.transact()), any!({"x": 0}));
+
+        mgr.redo_blocking();
+        exchange_updates(&[&d1, &d2]);
+        m1.insert(&mut d1.transact_mut(), "x", 3);
+        exchange_updates(&[&d1, &d2]);
+        mgr.undo_blocking();
+        exchange_updates(&[&d1, &d2]);
+        assert_eq!(m1.to_json(&d1.transact()), any!({"x": 3}));
+        assert_eq!(m2.to_json(&d2.transact()), any!({"x": 3}));
+    }
+
+    #[test]
     fn multi_doc_after_destroy() {
         let mut um = UndoManager::with_options({
             let mut o = Options::default();

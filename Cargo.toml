@@ -58,6 +58,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # `GCCollector::collect_marked`; upstream PR #682 for #667/#676), so none is
 # left pointing into the type's freed branch, and Undo passes an inserted item
 # whose redone copy was collected (`UndoManager::try_process`), as Yjs does;
+# Undo of a map value set concurrently with another client's restores the
+# value it replaced unless another client's value is live (`Item::redo`;
+# Yjs leaves the key without a value);
 # `Update::decode` refuses a client's section that starts inside or before an
 # earlier one for that client, which yrs placed twice, freeing the first copy
 # (tested in pptx-edit's yrs_memory). Carry the patch until upstream has the

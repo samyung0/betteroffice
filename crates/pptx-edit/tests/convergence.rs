@@ -579,6 +579,8 @@ fn a_slide_deleted_while_a_peer_moves_it_stays_deleted() {
 /// Schedule 159 of the GC scan, shrunk: two peers move one shape at once and
 /// the peer whose move won (the higher client id) presses Undo. Its Undo
 /// dropped the shape's position, and each peer refused the other's update.
+/// Undo now puts the shape back where that peer's move started, in the
+/// document itself, and Redo moves it again.
 #[test]
 fn undo_of_a_concurrent_move_keeps_the_shape_placed() {
     let left = DeckSession::open(FIXTURE, 901).unwrap();
@@ -612,5 +614,21 @@ fn undo_of_a_concurrent_move_keeps_the_shape_placed() {
     sync(&right, &left);
     sync(&left, &right);
     assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
-    assert_eq!(at(&right), (shape.x, shape.y));
+    assert_eq!(at(&right), (10, 20));
+    let stored = |session: &DeckSession, key: &str| {
+        use yrs::{Map, MapRef, ReadTxn, Transact};
+        let txn = session.yrs_doc().transact();
+        let shapes = txn.get_map("pptx:shapes").unwrap();
+        let entry = shapes
+            .get(&txn, &shape.id)
+            .unwrap()
+            .cast::<MapRef>()
+            .unwrap();
+        entry.get(&txn, key).is_some()
+    };
+    assert!(stored(&left, "x") && stored(&left, "y"));
+
+    assert!(right.redo());
+    sync(&right, &left);
+    assert_eq!((at(&left), at(&right)), ((300, 400), (300, 400)));
 }

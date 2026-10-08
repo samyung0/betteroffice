@@ -112,6 +112,11 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   and `UndoManager::try_process` (`src/undo.rs`) skips an inserted item whose
   redone copy was collected instead of dropping the whole step, with unit
   tests and tests in `crates/pptx-edit`;
+- `Item::redo` (`src/block.rs`) lets Undo restore a map value past another
+  client's value that a later one overwrote, so Undo of a value set
+  concurrently with another client's no longer leaves the key without a
+  value; a live value from another client still blocks it, as in Yjs (unit
+  test in `src/undo.rs`, and in `crates/pptx-edit`);
 - `Update::decode` (`src/update.rs`) refuses an update in which a client's
   section starts inside or before an earlier one for that client, which yrs
   placed twice (its test lives in `crates/pptx-edit`);
