@@ -20,9 +20,11 @@
 //! Spacing, indent and tab values are authored OOXML units — twips and
 //! line-spacing units — never pixels.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use yrs::block::{ItemContent, ItemPtr};
+use yrs::branch::BranchPtr;
 use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
@@ -1042,8 +1044,9 @@ impl EditingDoc {
     }
 
     /// Runs `apply` (a peer's update), then renames the paragraph ids that
-    /// concurrent splits duplicated when it brought an embed, such as a
-    /// paragraph mark ([`Self::rename_duplicate_para_ids`]).
+    /// concurrent splits duplicated ([`Self::rename_duplicate_para_ids`]),
+    /// looking only at the ids of paragraph marks the update inserted or
+    /// re-identified and only in their stories.
     pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
         let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
         let subscription = {
@@ -1060,63 +1063,95 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
-        let embeds = {
+        let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
-            inserted.iter().any(|(client, ranges)| {
-                ranges.iter().any(|range| {
+            let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
+            for (client, ranges) in inserted.iter() {
+                for range in ranges.iter() {
                     let mut clock = range.start;
                     while clock < range.end {
                         let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
-                            return false;
+                            break;
                         };
-                        if matches!(item.content(), yrs::block::ItemContent::Type(_)) {
-                            return true;
-                        }
                         clock = item.id().clock + item.len();
+                        if let Some((story, para_id)) = inserted_para_id(&txn, item) {
+                            touched.entry(story).or_default().insert(para_id);
+                        }
                     }
-                    false
-                })
-            })
+                }
+            }
+            touched
         };
-        if embeds {
-            self.rename_duplicate_para_ids();
+        if !touched.is_empty() {
+            self.rename_duplicates(Some(&touched));
         }
         result
     }
 
     /// Renames paragraph ids that concurrent splits of one paragraph
-    /// duplicated, the same way on every peer: the mark whose yrs item has the
-    /// lowest `(client, clock)` keeps the id and each other mark takes
-    /// `{client}.{clock}` of its own item. A system edit, outside Undo.
-    /// Returns the `(old, new)` pairs.
+    /// duplicated within a story, the same way on every peer: the mark whose
+    /// yrs item has the lowest `(client, clock)` keeps the id and each other
+    /// mark takes `{client}.{clock}` of its own item. A system edit, outside
+    /// Undo. Returns the `(old, new)` pairs. Run over a loaded state, which
+    /// may have been stored before any peer renamed.
     pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
-        let mut marks: BTreeMap<String, Vec<(yrs::ID, MapRef)>> = BTreeMap::new();
+        self.rename_duplicates(None)
+    }
+
+    /// [`Self::rename_duplicate_para_ids`] over every story, or only over the
+    /// given ids of the given stories.
+    fn rename_duplicates(
+        &self,
+        only: Option<&HashMap<BranchPtr, HashSet<String>>>,
+    ) -> Vec<(ParagraphId, ParagraphId)> {
+        let mut duplicates: Vec<Vec<(yrs::ID, MapRef)>> = Vec::new();
         {
             let txn = yrs::Transact::transact(self.yrs_doc());
-            let Some(stories) = txn.get_map(crate::STORIES) else {
-                return Vec::new();
+            let stories: Vec<BranchPtr> = match only {
+                Some(only) => only.keys().copied().collect(),
+                None => {
+                    let Some(stories) = txn.get_map(crate::STORIES) else {
+                        return Vec::new();
+                    };
+                    stories
+                        .iter(&txn)
+                        .filter_map(|(_, story)| match story {
+                            Out::YText(story) => {
+                                Some(BranchPtr::from(
+                                    <TextRef as AsRef<yrs::branch::Branch>>::as_ref(&story),
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                }
             };
-            for (_, story) in stories.iter(&txn) {
-                let Out::YText(story) = story else {
-                    continue;
-                };
-                for (_, map) in crate::pilcrows(&story, &txn) {
-                    let yrs::branch::BranchID::Nested(id) =
-                        <MapRef as AsRef<yrs::branch::Branch>>::as_ref(&map).id()
-                    else {
+            for story in stories {
+                let wanted = only.and_then(|only| only.get(&story));
+                let mut marks: HashMap<String, Vec<(yrs::ID, MapRef)>> = HashMap::new();
+                let mut next = story.start();
+                while let Some(item) = next {
+                    next = item.right();
+                    if item.is_deleted() {
+                        continue;
+                    }
+                    let ItemContent::Type(branch) = item.content() else {
                         continue;
                     };
-                    if let Some(para_id) = map_string(&map, &txn, PARA_ID) {
-                        marks.entry(para_id).or_default().push((id, map));
+                    let map = MapRef::from(BranchPtr::from(branch));
+                    let Some(para_id) = map_string(&map, &txn, PARA_ID) else {
+                        continue;
+                    };
+                    if wanted.is_none_or(|wanted| wanted.contains(&para_id))
+                        && crate::is_pilcrow(&map, &txn)
+                    {
+                        marks.entry(para_id).or_default().push((*item.id(), map));
                     }
                 }
+                duplicates.extend(marks.into_values().filter(|marks| marks.len() > 1));
             }
         }
         let mut renames = Vec::new();
-        let duplicates: Vec<_> = marks
-            .into_values()
-            .filter(|marks| marks.len() > 1)
-            .collect();
         if duplicates.is_empty() {
             return renames;
         }
@@ -1132,6 +1167,30 @@ impl EditingDoc {
         }
         renames
     }
+}
+
+/// The story and paragraph id an inserted item gives a paragraph mark: the
+/// mark itself, or a `paraId` written onto one (a merge's survivor).
+fn inserted_para_id<T: ReadTxn>(txn: &T, item: ItemPtr) -> Option<(BranchPtr, String)> {
+    if item.is_deleted() {
+        return None;
+    }
+    let mark = match item.content() {
+        ItemContent::Type(_) if item.parent_sub().is_none() => item,
+        ItemContent::Any(_) if item.parent_sub().is_some_and(|key| &**key == PARA_ID) => {
+            item.parent_branch()?.item()?
+        }
+        _ => return None,
+    };
+    let ItemContent::Type(branch) = mark.content() else {
+        return None;
+    };
+    let story = mark.parent_branch()?;
+    let map = MapRef::from(BranchPtr::from(branch));
+    (crate::is_pilcrow(&map, txn) && story.item()?.parent_sub().is_some())
+        .then(|| map_string(&map, txn, PARA_ID))
+        .flatten()
+        .map(|para_id| (story, para_id))
 }
 
 fn paragraph_revision_id<T: ReadTxn>(
