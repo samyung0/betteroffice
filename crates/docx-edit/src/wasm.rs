@@ -1863,6 +1863,13 @@ impl EditSession {
         crate::overlay::meta_seed(&crate::overlay::fingerprint(bytes))
     }
 
+    /// Spike probe: grows the module's memory by `bytes` in one step and
+    /// hands it back to the allocator, so the open that follows does not grow
+    /// it a few pages at a time.
+    pub fn reserve_memory(bytes: usize) {
+        drop(std::hint::black_box(Vec::<u8>::with_capacity(bytes)));
+    }
+
     /// The media [`EditSession::open_docx`] attached, as JSON
     /// `{partPath: displayDataUrl}`, for a replica that renders without the
     /// source (the resident worker).
