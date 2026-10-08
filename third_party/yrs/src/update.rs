@@ -862,6 +862,7 @@ impl Decode for Update {
         let mut clients = HashMap::with_hasher(BuildHasherDefault::default());
 
         let mut blocks = BlockSet { clients };
+        let mut overlapping = None;
         for _ in 0..clients_len {
             let blocks_len = decoder.read_var::<u32>()? as usize;
 
@@ -871,6 +872,12 @@ impl Decode for Update {
                 .clients
                 .entry(client)
                 .or_insert_with(|| VecDeque::new());
+            // Patched for BetterOffice: a later section for a client may not start
+            // inside or before an earlier one. Integration would place a struct
+            // twice and free the first copy while its neighbours still link it.
+            if blocks.back().is_some_and(|last| clock < last.next_clock()) {
+                overlapping.get_or_insert(client);
+            }
 
             for _ in 0..blocks_len {
                 let id = ID::new(client, clock);
@@ -884,6 +891,11 @@ impl Decode for Update {
         }
         // read delete set
         let delete_set = IdSet::decode(decoder)?;
+        if let Some(client) = overlapping {
+            return Err(Error::Custom(format!(
+                "structs of client {client} overlap or go back in clock order"
+            )));
+        }
         Ok(Update { blocks, delete_set })
     }
 }

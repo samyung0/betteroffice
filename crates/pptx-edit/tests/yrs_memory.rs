@@ -7,6 +7,7 @@ use pptx_edit::{DeckSession, EditCtx, ShapeDraft, ShapeRect, TextStyle, UndoCapt
 use yrs::block::ItemContent;
 use yrs::branch::Branch;
 use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
 use yrs::{Doc, ID, Out, ReadTxn, Transact, Update};
 
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
@@ -272,4 +273,37 @@ fn random_schedules_leave_no_item_without_its_parent() {
             "schedule {schedule}: room"
         );
     }
+}
+
+/// A peer update naming one client's structs twice from the same clock (a
+/// second section for the client over the first) is refused. yrs placed the
+/// struct twice and freed the first copy while the text still linked it.
+#[test]
+fn an_update_repeating_a_clients_structs_is_refused() {
+    let left = DeckSession::open(DEMO, 901).unwrap();
+    let right = DeckSession::open(DEMO, 902).unwrap();
+    let deck = left.snapshot().unwrap();
+    let story = &deck.slides[0]
+        .shapes
+        .iter()
+        .find_map(|shape| shape.text_stories.first())
+        .unwrap()
+        .id;
+    left.insert_text(&ctx(), story, 0, "abc", &TextStyle::default())
+        .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    // One client's section, then the delete set.
+    let delete_set = Update::decode_v1(&update).unwrap().delete_set().encode_v1();
+    assert_eq!(update[0], 1);
+    let section = &update[1..update.len() - delete_set.len()];
+    let repeated = [&[2], section, section, &delete_set].concat();
+
+    let before = right.encode_state_as_update_v1();
+    assert!(Update::decode_v1(&repeated).is_err());
+    assert!(right.apply_update_v1(&repeated).is_err());
+    assert_eq!(right.encode_state_as_update_v1(), before);
+    right.apply_update_v1(&update).unwrap();
+    assert_eq!(right.snapshot().unwrap(), left.snapshot().unwrap());
 }

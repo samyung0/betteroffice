@@ -57,7 +57,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # type's children even when Undo keeps them (`Item::gc`,
 # `GCCollector::collect_marked`; upstream PR #682 for #667/#676), so none is
 # left pointing into the type's freed branch, and Undo passes an inserted item
-# whose redone copy was collected (`UndoManager::try_process`), as Yjs does
+# whose redone copy was collected (`UndoManager::try_process`), as Yjs does;
+# `Update::decode` refuses a client's section that starts inside or before an
+# earlier one for that client, which yrs placed twice, freeing the first copy
 # (tested in pptx-edit's yrs_memory). Carry the patch until upstream has the
 # fixes and an equivalent lookup, or the re-read no longer needs it;
 # re-apply the methods on each yrs upgrade.
