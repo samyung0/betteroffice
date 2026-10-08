@@ -169,6 +169,7 @@ dependencies = [
  "betteroffice-docx-parse",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
  "betteroffice-xlsx",
  "icu_calendar",
  "icu_datetime",
