@@ -1072,6 +1072,12 @@ impl Drop for UnitBreaks {
     }
 }
 
+/// Unit breaks this thread holds (tests: none outlives a call).
+#[cfg(test)]
+pub(crate) fn unit_breaks_held() -> usize {
+    UNIT_BREAKS.with(|breaks| breaks.borrow().len())
+}
+
 pub(crate) fn raw_content_for_item(item: &V) -> Result<Option<V>> {
     let attributes = item.get("attributes");
     if is_kind(item, "text") {

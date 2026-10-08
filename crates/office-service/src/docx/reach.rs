@@ -331,6 +331,29 @@ mod tests {
             .expect("sets the value");
     }
 
+    /// Security regression (office-native REVIEW1 N4): the unit breaks a
+    /// projection records stayed in the engine thread's map after the walk
+    /// projected a block control's story, or after a projection failed, so a
+    /// long-lived engine process grew with every call.
+    #[test]
+    fn no_unit_break_outlives_a_call() {
+        let mut session = open(STORIES);
+        // A page break inside the rich text control's paragraph is a unit
+        // break of that story, which the walk projects.
+        session
+            .engine
+            .doc()
+            .insert_embed(
+                &EditCtx::local(String::new(), String::new()),
+                Position::new("body:sdt1", 4),
+                "pageBreak",
+                Vec::new(),
+            )
+            .expect("inserts");
+        session.entries().expect("entries");
+        assert_eq!(super::super::item::unit_breaks_held(), 0);
+    }
+
     #[test]
     fn the_walk_reaches_what_the_projection_reaches() {
         for (name, base) in FIXTURES {
