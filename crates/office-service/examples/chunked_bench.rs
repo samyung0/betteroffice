@@ -200,6 +200,17 @@ fn main() {
             now: "2026-10-08T00:00:00.000Z",
         };
         let seeded_seed = office_service::seed(Format::Docx, &base).unwrap();
+        // The override layout's local materialization, for the WASM parity check.
+        if let Ok(dir) = std::env::var("BENCH_DUMP_DIR") {
+            let doc = EditingDoc::new(9);
+            let envelope = docx_edit::parse_docx_for_edit(&base).unwrap();
+            overlay::open_chunked(&doc, envelope, &overlay::fingerprint(&base)).unwrap();
+            std::fs::write(
+                format!("{dir}/{name}.materialized.bin"),
+                doc.encode_state_as_update_v1(),
+            )
+            .unwrap();
+        }
         let meta_seed = overlay::meta_seed(&overlay::fingerprint(&base));
         for scenario in &scenarios {
             for run_index in 0..runs {

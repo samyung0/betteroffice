@@ -784,6 +784,38 @@ fn live_structure(doc: &EditingDoc, story: &str) -> Vec<String> {
     joined
 }
 
+/// Quoted renamed paragraph ids (`"{client}.{clock}"`) kept to their
+/// client, as in [`dump`].
+fn quoted_renamed_ids_hidden(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('"') {
+        out.push_str(&rest[..=at]);
+        rest = &rest[at + 1..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        let value = &rest[..end];
+        match value.split_once('.') {
+            Some((client, clock))
+                if !client.is_empty()
+                    && !clock.is_empty()
+                    && client.bytes().all(|byte| byte.is_ascii_digit())
+                    && clock.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                out.push_str(client);
+                out.push_str(".*");
+            }
+            _ => out.push_str(value),
+        }
+        rest = &rest[end..];
+        if let Some(stripped) = rest.strip_prefix('"') {
+            out.push('"');
+            rest = stripped;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn first_difference(left: &str, right: &str) -> String {
     for (index, (a, b)) in left.lines().zip(right.lines()).enumerate() {
         if a != b {
@@ -1009,10 +1041,18 @@ fn finish(label: &str, base: &[u8], worlds: &mut [World; 2], stats: &mut Stats) 
             .map(|blocks| serde_json::to_string(&blocks).unwrap())
             .map_err(|error| format!("{error:?}"))
     };
-    assert!(
-        blocks(&worlds[0].peers[0].doc) == blocks(&worlds[1].peers[0].doc),
-        "{label}: layout blocks differ"
+    let (left_blocks, right_blocks) = (
+        quoted_renamed_ids_hidden(&blocks(&worlds[0].peers[0].doc).unwrap_or_else(|error| error)),
+        quoted_renamed_ids_hidden(&blocks(&worlds[1].peers[0].doc).unwrap_or_else(|error| error)),
     );
+    if left_blocks != right_blocks {
+        let split = |text: &str| text.replace("},{", "},
+{");
+        panic!(
+            "{label}: layout blocks differ: {}",
+            first_difference(&split(&left_blocks), &split(&right_blocks))
+        );
+    }
     let rooms = [worlds[0].room(base), worlds[1].room(base)];
     if !worlds[1].chunked {
         return;

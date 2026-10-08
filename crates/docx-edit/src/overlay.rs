@@ -124,6 +124,9 @@ pub struct Overlay {
     pub comment_writers: Vec<(String, u64)>,
     roles: HashMap<u64, Role>,
     shared: Mutex<HashSet<u64>>,
+    /// Each story's copy as first written (entry and one deleted anchor run):
+    /// a materialized session splits the run at every chunk.
+    story_copies: Mutex<Vec<Vec<u8>>>,
 }
 
 impl Overlay {
@@ -172,6 +175,7 @@ impl Overlay {
             comment_writers,
             roles,
             shared: Mutex::new(HashSet::new()),
+            story_copies: Mutex::new(Vec::new()),
         })
     }
 
@@ -253,21 +257,42 @@ impl Overlay {
             }
             shared.extend(needed.iter().copied());
         }
-        let local = txn.state_vector();
-        let mut sv = StateVector::default();
-        for (client, clock) in local.iter() {
-            if !needed.contains(&client.get()) {
-                sv.set_max(*client, *clock);
-            }
+        // Stories go as first written; chunks and comments as this session
+        // holds them, so a deleted copy travels without its content.
+        let mut parts = Vec::new();
+        {
+            let story_copies = self.story_copies.lock().unwrap();
+            needed.retain(|writer| match self.roles.get(writer) {
+                Some(Role::Story(story)) if *story < story_copies.len() => {
+                    parts.push(story_copies[*story].clone());
+                    false
+                }
+                _ => true,
+            });
         }
-        let copies = deterministic::encode_state_as_update_v1(txn, &sv);
-        let mut copies = Update::decode_v1(&copies).map_err(|error| error.to_string())?;
-        let keep = IdSet::from_iter(needed.iter().map(|writer| {
-            let client = ClientID::new(*writer);
-            (client, [0..local.get(&client)])
-        }));
-        copies.delete_set_mut().intersect_with(&keep);
-        Ok(Update::merge_updates([copies, decoded]).encode_v1())
+        let mut updates = parts
+            .iter()
+            .map(|bytes| Update::decode_v1(bytes).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !needed.is_empty() {
+            let local = txn.state_vector();
+            let mut sv = StateVector::default();
+            for (client, clock) in local.iter() {
+                if !needed.contains(&client.get()) {
+                    sv.set_max(*client, *clock);
+                }
+            }
+            let copies = deterministic::encode_state_as_update_v1(txn, &sv);
+            let mut copies = Update::decode_v1(&copies).map_err(|error| error.to_string())?;
+            let keep = IdSet::from_iter(needed.iter().map(|writer| {
+                let client = ClientID::new(*writer);
+                (client, [0..local.get(&client)])
+            }));
+            copies.delete_set_mut().intersect_with(&keep);
+            updates.push(copies);
+        }
+        updates.push(decoded);
+        Ok(Update::merge_updates(updates).encode_v1())
     }
 }
 
@@ -440,14 +465,18 @@ fn apply_merged(doc: &Doc, updates: Vec<Vec<u8>>) -> Result<(), String> {
 /// the stories and their chunks, then the comments.
 pub(crate) fn materialize(doc: &EditingDoc, overlay: &Overlay, source: &Source) -> Result<(), String> {
     let mut updates = vec![meta_seed(&overlay.fingerprint)];
+    let mut story_copies = Vec::with_capacity(source.stories.len());
     for (story, entry) in source.stories.iter().zip(&overlay.stories) {
-        updates.push(story_update(story, entry.writer, false));
+        let copy = story_update(story, entry.writer, false);
+        story_copies.push(copy.clone());
+        updates.push(copy);
         let live = story_update(story, entry.writer, true);
         for (index, writer) in entry.chunk_writers.iter().enumerate() {
             updates.push(chunk_update(story, &live, index, *writer)?);
         }
     }
     apply_merged(doc.yrs_doc(), updates)?;
+    *overlay.story_copies.lock().unwrap() = story_copies;
     let comments = {
         let txn = doc.yrs_doc().transact();
         source
