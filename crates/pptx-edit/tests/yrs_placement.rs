@@ -142,8 +142,12 @@ fn integration_work_is_counted_and_stops_past_the_budget() {
 /// Security regression (notes round 8): an update listing client 77 twice,
 /// each section a struct at clock 0, made yrs place the second over the
 /// first in the client's block list, freeing the first while the text still
-/// linked it (a use after free). The block list keeps the first. (Decoding
-/// refuses the shape once capy/yrs-gc-fix lands; Capy refuses it at admit.)
+/// linked it (a use after free). The block list keeps the first.
+///
+/// Only an update placing a struct twice reaches that push (integration trims
+/// what the store holds), and capy/yrs-gc-fix refuses it at decode. Once that
+/// lands, the test asserts that refusal instead, so neither guard can go
+/// unnoticed: reverting the decode check reaches the push guard again.
 #[test]
 fn a_struct_placed_twice_keeps_the_first() {
     let doc = Doc::with_client_id(1);
@@ -161,8 +165,17 @@ fn a_struct_placed_twice_keeps_the_first() {
         bytes.write_string("x");
     }
     bytes.write_var(0u32);
-    let Ok(update) = Update::decode_v1(&bytes) else {
-        return;
+    let update = match Update::decode_v1(&bytes) {
+        Ok(update) => update,
+        Err(refused) => {
+            assert!(
+                refused
+                    .to_string()
+                    .contains("overlap or go back in clock order"),
+                "{refused}"
+            );
+            return;
+        }
     };
     let mut txn = doc.transact_mut();
     txn.apply_update(update).unwrap();
