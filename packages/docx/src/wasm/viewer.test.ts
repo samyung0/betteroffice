@@ -7,6 +7,7 @@ import { configureDefaultFonts, initWasm, openDocumentViewer } from '../viewer';
 import { createYrsSession } from '../yrs';
 import { preloadEditWasm } from './edit';
 import { preloadOpcWasm, rezipContainer } from './opc';
+import { DocxViewDocument } from './generated/viewer/docx_view_wasm.js';
 import { openViewDocument } from './viewer';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -53,6 +54,25 @@ function sectionedPackage(): Uint8Array {
   );
 }
 
+/** `count` pages, each a paragraph ending in a page break. */
+function pagedPackage(count: number): Uint8Array {
+  const W =
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const R =
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const page = (index: number) =>
+    `<w:p><w:r><w:t>Page ${index}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+  return rezipContainer(
+    Object.fromEntries(
+      Object.entries({
+        '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+        '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+        'word/document.xml': `<w:document ${W}><w:body>${Array.from({ length: count }, (_, index) => page(index + 1)).join('')}<w:sectPr/></w:body></w:document>`,
+      }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])
+    )
+  );
+}
+
 /** Laid-out text lines across all pages. */
 function lineCount(displayList: DisplayList): number {
   const lines = new Set<string>();
@@ -86,6 +106,30 @@ describe('DOCX viewer wasm', () => {
       expect('encodeStateAsUpdate' in viewer).toBe(false);
     } finally {
       viewer.dispose();
+    }
+  });
+
+  test('builds the display list at most eight pages at a time', async () => {
+    const ranges: [number, number][] = [];
+    const build = DocxViewDocument.prototype.displayPagesJson;
+    DocxViewDocument.prototype.displayPagesJson = function (start, end) {
+      ranges.push([start, end]);
+      return build.call(this, start, end);
+    };
+    try {
+      const viewer = await openDocumentViewer(pagedPackage(20));
+      const { pages } = viewer.displayList();
+      viewer.dispose();
+      expect(pages).toHaveLength(20);
+      expect(pages.map((page) => page.pageIndex)).toEqual(pages.map((_, index) => index));
+      expect(ranges).toEqual(
+        Array.from({ length: Math.ceil(pages.length / 8) }, (_, batch) => [
+          batch * 8,
+          Math.min(pages.length, batch * 8 + 8),
+        ])
+      );
+    } finally {
+      DocxViewDocument.prototype.displayPagesJson = build;
     }
   });
 

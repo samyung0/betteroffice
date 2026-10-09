@@ -1351,6 +1351,21 @@ impl EngineSession {
         )
     }
 
+    /// The region pass with no reply, for a read-only view that then builds
+    /// its display list with [`Self::display_pages_json`]. Returns the page
+    /// count.
+    pub fn layout_document_with_regions(&self, input_json: &str) -> Result<usize, String> {
+        self.layout_document_with_regions_value(input_json)?;
+        Ok(self
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .expect("layout retained after successful pagination")
+            .pages
+            .len())
+    }
+
     /// Full region pass whose reply omits the measured arena — tens of MB of
     /// shaping data a worker-rendered host never reads. Fetch the retained
     /// inputs on demand via [`Self::retained_kernel_inputs_json`].
@@ -2514,7 +2529,7 @@ impl EngineSession {
     /// `extras` with the retained region pass's headers/footers in place of
     /// its own, re-serialized: a host frame and the next key then hash the
     /// same bytes, so the key keeps the incremental display path.
-    fn region_display_extras(&self, extras: &str) -> Result<String, String> {
+    pub fn region_display_extras(&self, extras: &str) -> Result<String, String> {
         let mut value: serde_json::Value = serde_json::from_str(extras)
             .map_err(|error| format!("parse display extras: {error}"))?;
         let fields = value
@@ -2623,6 +2638,30 @@ impl EngineSession {
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
         Ok(display_json)
+    }
+
+    /// Display list JSON of `pages` alone, built from the retained pagination
+    /// state with `extras` (after a region pass, [`Self::region_display_extras`]).
+    pub fn display_pages_json(
+        &self,
+        extras: &str,
+        pages: std::ops::Range<usize>,
+    ) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let list = docx_layout::build_resident_display_pages_observed(
+            pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?,
+            pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?,
+            extras,
+            pages,
+            &mut || {},
+        )?;
+        serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))
     }
 
     /// Build the retained display list and return a binary FrameDelta v1.

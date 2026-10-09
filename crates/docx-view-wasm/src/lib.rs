@@ -11,12 +11,14 @@ use wasm_bindgen::prelude::*;
 const DEFAULT_PAGE_GAP: f64 = 24.0;
 
 /// Opens in steps so the host registers the fonts the layout needs first:
-/// `open`, `layoutRequestJson`, `fontRequirementsJson`, then `layout`.
+/// `open`, `layoutRequestJson`, `fontRequirementsJson`, `layout`, then
+/// `displayPagesJson` a batch of pages at a time.
 #[wasm_bindgen]
 pub struct DocxViewDocument {
-    engine: Option<EngineSession>,
+    engine: EngineSession,
     request: String,
-    display_list: Option<String>,
+    /// What the display list is built with once laid out.
+    extras: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -28,9 +30,9 @@ impl DocxViewDocument {
         engine.set_media(package_media(&envelope));
         seed_parsed_docx_in_place(engine.doc(), envelope).map_err(js_error)?;
         Ok(Self {
-            engine: Some(engine),
+            engine,
             request,
-            display_list: None,
+            extras: None,
         })
     }
 
@@ -44,36 +46,31 @@ impl DocxViewDocument {
     #[wasm_bindgen(js_name = fontRequirementsJson)]
     pub fn font_requirements_json(&self, request: &str) -> Result<String, JsValue> {
         self.engine
-            .as_ref()
-            .ok_or_else(|| js_error("DOCX view is already laid out"))?
             .layout_font_requirements_json(request)
             .map_err(js_error)
     }
 
-    /// Lays out `request` (with its `measurement`) and keeps only the display
-    /// list, so view mode holds no second document graph.
-    pub fn layout(&mut self, request: &str) -> Result<(), JsValue> {
-        let engine = self
+    /// Lays out `request` (with its `measurement`) and returns the page count.
+    pub fn layout(&mut self, request: &str) -> Result<u32, JsValue> {
+        let pages = self
             .engine
-            .take()
-            .ok_or_else(|| js_error("DOCX view is already laid out"))?;
-        let layout = engine
-            .layout_document_with_regions_json(request)
+            .layout_document_with_regions(request)
             .map_err(js_error)?;
-        self.display_list = Some(engine.build_display_list_json(&layout).map_err(js_error)?);
-        Ok(())
+        self.extras = Some(self.engine.region_display_extras("{}").map_err(js_error)?);
+        u32::try_from(pages).map_err(js_error)
     }
 
-    #[wasm_bindgen(js_name = displayListJson)]
-    pub fn display_list_json(&self, page_gap: Option<f64>) -> Result<String, JsValue> {
-        if page_gap.is_some_and(|gap| (gap - DEFAULT_PAGE_GAP).abs() > f64::EPSILON) {
-            return Err(JsValue::from_str(
-                "DOCX view page gap is fixed when the document opens",
-            ));
-        }
-        self.display_list
-            .clone()
-            .ok_or_else(|| js_error("DOCX view is not laid out"))
+    /// `{ pages }` display list JSON of pages `start..end`, built from the
+    /// engine's typed state; the host frees the document after the last one.
+    #[wasm_bindgen(js_name = displayPagesJson)]
+    pub fn display_pages_json(&self, start: u32, end: u32) -> Result<String, JsValue> {
+        let extras = self
+            .extras
+            .as_deref()
+            .ok_or_else(|| js_error("DOCX view is not laid out"))?;
+        self.engine
+            .display_pages_json(extras, start as usize..end as usize)
+            .map_err(js_error)
     }
 
     pub fn version() -> String {
@@ -228,6 +225,124 @@ mod tests {
         document
             .font_requirements_json(&document.layout_request_json())
             .unwrap();
-        document.layout(&document.layout_request_json()).unwrap();
+        let pages = document.layout(&document.layout_request_json()).unwrap();
+        assert!(pages > 0);
+        document.display_pages_json(0, pages).unwrap();
+    }
+
+    /// The viewer's list as the host joins it, from batches of `batch` pages.
+    fn paged_display_list(document: &mut DocxViewDocument, request: &str, batch: u32) -> String {
+        let pages = document.layout(request).unwrap();
+        let joined = (0..pages)
+            .step_by(batch as usize)
+            .map(|start| {
+                let json = document
+                    .display_pages_json(start, (start + batch).min(pages))
+                    .unwrap();
+                json.strip_prefix(r#"{"pages":["#)
+                    .and_then(|pages| pages.strip_suffix("]}"))
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"pages":[{joined}]}}"#)
+    }
+
+    /// Equal apart from numbers at most 4 ULP apart.
+    fn ulp_equal(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => {
+                let (x, y) = (x.as_f64().unwrap(), y.as_f64().unwrap());
+                x == y || (x.to_bits() as i64 - y.to_bits() as i64).abs() <= 4
+            }
+            (Value::Array(x), Value::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(x, y)| ulp_equal(x, y))
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(key, value)| y.get(key).is_some_and(|other| ulp_equal(value, other)))
+            }
+            _ => a == b,
+        }
+    }
+
+    /// The paged build writes the list the whole-layout JSON round trip
+    /// (`layout_document_with_regions_json` then `build_display_list_json`)
+    /// wrote. The round trip parses floats without `float_roundtrip`, so in
+    /// two fixtures a few numbers it read back sit up to 4 ULP from the
+    /// engine's own values, which the paged build keeps (and the editor
+    /// paints); every other fixture is byte-identical.
+    #[test]
+    fn paged_display_list_matches_the_json_round_trip() {
+        let fixtures: [(&str, &[u8], bool); 8] = [
+            (
+                "footnote-anchor",
+                include_bytes!("../../docx-edit/tests/fixtures/footnote-anchor.docx"),
+                false,
+            ),
+            (
+                "stories",
+                include_bytes!("../../office-service/tests/fixtures/stories.docx"),
+                false,
+            ),
+            (
+                "probe-linked-header",
+                include_bytes!(
+                    "../../../packages/docx-react/src/components/DocxEditor/hooks/__fixtures__/probe-linked-header.docx"
+                ),
+                false,
+            ),
+            (
+                "feature-rich",
+                include_bytes!("../../../poc/fixtures/feature-rich.docx"),
+                false,
+            ),
+            (
+                "exchange-plan",
+                include_bytes!("../../../poc/fixtures/exchange-plan.docx"),
+                false,
+            ),
+            (
+                "book-30p",
+                include_bytes!("../../../poc/fixtures/book-30p.docx"),
+                false,
+            ),
+            (
+                "opaque-objects",
+                include_bytes!("../../../poc/fixtures/opaque-objects.docx"),
+                true,
+            ),
+            (
+                "wordprocessingml-comprehensive",
+                include_bytes!("../../../poc/fixtures/wordprocessingml-comprehensive.docx"),
+                true,
+            ),
+        ];
+        for (name, bytes, ulp_only) in fixtures {
+            let mut document = DocxViewDocument::open(bytes).unwrap();
+            let request = document.layout_request_json();
+            let paged = paged_display_list(&mut document, &request, 3);
+
+            let envelope = parse_docx_for_edit(bytes).unwrap();
+            let engine = EngineSession::new(1);
+            engine.set_media(package_media(&envelope));
+            seed_parsed_docx_in_place(engine.doc(), envelope).unwrap();
+            let layout = engine.layout_document_with_regions_json(&request).unwrap();
+            let round_trip = engine.build_display_list_json(&layout).unwrap();
+
+            if ulp_only {
+                assert!(
+                    ulp_equal(
+                        &serde_json::from_str(&paged).unwrap(),
+                        &serde_json::from_str(&round_trip).unwrap()
+                    ),
+                    "{name}"
+                );
+            } else {
+                assert!(paged == round_trip, "{name}");
+            }
+        }
     }
 }

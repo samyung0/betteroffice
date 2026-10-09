@@ -34,6 +34,9 @@ export function initWasm(
   return initialization;
 }
 
+/** Pages per `displayPagesJson` call: the list is never built in one piece. */
+const PAGE_BATCH = 8;
+
 /**
  * Measures with the faces `configureDefaultFonts` provides; without them text
  * gets synthetic metrics and paragraphs do not wrap.
@@ -42,11 +45,15 @@ export async function openDocumentViewer(bytes: Uint8Array): Promise<DocxViewerH
   await initWasm();
   const module = await loadModule();
   const document = module.openViewDocument(bytes);
+  let pageGap: number;
+  let list: DisplayList | null;
   try {
     const requestJson = document.layoutRequestJson();
     const request = JSON.parse(requestJson) as {
+      options: { pageGap: number };
       regions: { settings?: { compatibilityFlags?: CompatibilityFlags } };
     };
+    pageGap = request.options.pageGap;
     const requirements = JSON.parse(
       document.fontRequirementsJson(requestJson)
     ) as ResidentFontRequirement[];
@@ -55,21 +62,33 @@ export async function openDocumentViewer(bytes: Uint8Array): Promise<DocxViewerH
     source.setCompat(request.regions.settings?.compatibilityFlags);
     const measurement = source.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error('DOCX viewer fonts did not load');
-    document.layout(JSON.stringify({ ...request, measurement }));
+    const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
+    const displayList = JSON.parse(
+      document.displayPagesJson(0, Math.min(PAGE_BATCH, pageCount))
+    ) as DisplayList;
+    for (let start = PAGE_BATCH; start < pageCount; start += PAGE_BATCH) {
+      const batch = JSON.parse(
+        document.displayPagesJson(start, Math.min(start + PAGE_BATCH, pageCount))
+      ) as DisplayList;
+      displayList.pages.push(...batch.pages);
+    }
+    list = displayList;
   } catch (error) {
     document.free();
     throw error;
   }
-  let disposed = false;
+  // Every page is built: the engine goes now, not on dispose.
+  document.free();
   return {
-    displayList(pageGap) {
-      if (disposed) throw new Error('DOCX viewer handle is disposed');
-      return JSON.parse(document.displayListJson(pageGap)) as DisplayList;
+    displayList(gap) {
+      if (!list) throw new Error('DOCX viewer handle is disposed');
+      if (gap !== undefined && gap !== pageGap) {
+        throw new Error('DOCX view page gap is fixed when the document opens');
+      }
+      return list;
     },
     dispose() {
-      if (disposed) return;
-      disposed = true;
-      document.free();
+      list = null;
     },
   };
 }
