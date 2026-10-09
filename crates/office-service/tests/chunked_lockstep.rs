@@ -2627,3 +2627,39 @@ fn d3_bold_against_a_concurrent_delete() {
     object.insert("timeline".into(), timeline.into());
     d3_write(line);
 }
+
+/// D3 follow-up: only the select-all delete, a concurrent insert and the
+/// delete's Undo, three peers, today's layout. Writes the room's read and
+/// the seed's read for comparison (`D3_DUMP`); `D3_FILES`, `D3_INSERT=0`
+/// drops the concurrent insert.
+#[test]
+#[ignore = "D3 follow-up: D3_FILES, D3_DUMP"]
+fn d3_select_all_then_undo() {
+    let files = std::env::var("D3_FILES").expect("D3_FILES");
+    let dump_to = std::env::var("D3_DUMP").expect("D3_DUMP");
+    for path in files.split(';') {
+        let base = std::fs::read(path).unwrap();
+        let mut world = World::new(&base, 3, false);
+        let reference = renamed_ids_hidden(&dump(&world.peers[0].doc));
+        d3_op(&mut world, 2, Op::SelectAll("body".into()));
+        if !std::env::var("D3_INSERT").is_ok_and(|value| value == "0") {
+            let (_, mark) = d3_para(&world.peers[0], 2);
+            d3_op(&mut world, 0, Op::Insert("body".into(), mark, "late".into()));
+        }
+        for (from, to) in [(2, 0), (0, 2), (2, 1), (0, 1)] {
+            world.sync(from, to).unwrap();
+        }
+        d3_op(&mut world, 2, Op::Undo);
+        world.sync_all();
+        let reads: Vec<String> = world
+            .peers
+            .iter()
+            .map(|peer| renamed_ids_hidden(&dump(&peer.doc)))
+            .collect();
+        let name = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+        std::fs::write(format!("{dump_to}.{name}.reference.txt"), &reference).unwrap();
+        for (index, read) in reads.iter().enumerate() {
+            std::fs::write(format!("{dump_to}.{name}.peer{index}.txt"), read).unwrap();
+        }
+    }
+}
