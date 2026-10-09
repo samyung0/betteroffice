@@ -323,6 +323,10 @@ impl EditingDoc {
     pub fn new(client_id: u64) -> Self {
         let mut options = Options::with_client_id(ClientID::new(client_id));
         options.offset_kind = OffsetKind::Utf16;
+        // No formatting cleanup after a remote update (Epo 2026-10-08, D3): it
+        // deleted redundant format items on this replica only, so replicas
+        // diverged; the items stay and every replica holds the same ones.
+        options.cleanup_formatting = false;
         let doc = Doc::with_options(options);
         // Root shared types are schema declarations; their contents are still changed only in the
         // explicit transactions below.

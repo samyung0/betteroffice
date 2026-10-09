@@ -69,10 +69,12 @@ pub(crate) const PPTX_LINEAGE: Lineage = Lineage {
 pub(crate) const POSITIONS_KEY: &str = "anchors";
 pub(crate) const POSITION_ROOTS: [&str; 2] = ["comments", "bookmarks"];
 
-/// A document read as Yjs reads one: UTF-16 positions.
+/// A document read as Yjs reads one: UTF-16 positions, and no formatting
+/// cleanup after a remote update, as the editor sessions (Epo 2026-10-08).
 pub(crate) fn new_doc(client: Option<u64>) -> Doc {
     let mut options = Options {
         offset_kind: OffsetKind::Utf16,
+        cleanup_formatting: false,
         ..Options::default()
     };
     if let Some(client) = client {
