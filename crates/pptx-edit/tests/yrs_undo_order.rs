@@ -12,8 +12,8 @@ use yrs::block::ClientID;
 use yrs::undo::Options;
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Origin, Out, ReadTxn,
-    StateVector, Transact, UndoManager, Update,
+    Any, Array, ArrayPrelim, ArrayRef, Doc, GetString, Map, MapPrelim, MapRef, Origin, Out,
+    ReadTxn, StateVector, Text, TextPrelim, TextRef, Transact, UndoManager, Update,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
@@ -129,6 +129,50 @@ fn undo_after_restoring_a_text_box_removes_only_its_own_typing() {
         }
         assert_eq!(text(), "");
     }
+}
+
+#[test]
+fn undo_after_restoring_a_peers_text_keeps_the_peers_text() {
+    // The user writes "X" and then "Hello" in a text; a peer adds " world";
+    // the user deletes the text and presses Undo twice. The restored copies
+    // of "Hello" and " world" merge (the user's client restores both), and
+    // the second Undo must take back "Hello" only (Yjs 13.6.31 deletes both).
+    let user = Doc::with_client_id(101);
+    let peer = Doc::with_client_id(202);
+    let root = user.get_or_insert_map("stories");
+    let mut undo = manager(&user, &root, 101);
+    {
+        let mut txn = user.transact_mut_with(101u64);
+        let text = root.insert(&mut txn, "s", TextPrelim::new(""));
+        text.insert(&mut txn, 0, "X");
+    }
+    let story = |doc: &Doc| -> TextRef {
+        let root = doc.get_or_insert_map("stories");
+        let txn = doc.transact();
+        root.get(&txn, "s").unwrap().cast::<TextRef>().unwrap()
+    };
+    let typed = story(&user);
+    typed.insert(&mut user.transact_mut_with(101u64), 1, "Hello");
+    let update = user
+        .transact()
+        .encode_state_as_update_v1(&peer.transact().state_vector());
+    peer.transact_mut()
+        .apply_update(Update::decode_v1(&update).unwrap())
+        .unwrap();
+    let theirs = story(&peer);
+    theirs.insert(&mut peer.transact_mut(), 6, " world");
+    let update = peer
+        .transact()
+        .encode_state_as_update_v1(&user.transact().state_vector());
+    user.transact_mut_with("remote")
+        .apply_update(Update::decode_v1(&update).unwrap())
+        .unwrap();
+    root.remove(&mut user.transact_mut_with(101u64), "s");
+    assert!(undo.undo_blocking());
+    let restored = story(&user);
+    assert_eq!(restored.get_string(&user.transact()), "XHello world");
+    assert!(undo.undo_blocking());
+    assert_eq!(restored.get_string(&user.transact()), "X world");
 }
 
 struct Rng(u64);

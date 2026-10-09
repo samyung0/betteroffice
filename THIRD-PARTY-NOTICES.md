@@ -107,6 +107,9 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   copies get the same clocks every time and a later Undo no longer deletes a
   neighbouring copy that merged with its own (tests in
   `crates/pptx-edit/tests/yrs_undo_order.rs`, which CI runs);
+- the same function deletes no more units of a redone copy than its step
+  inserted (as y-crdt PR #674), so Undo no longer takes a peer's restored
+  text along with the copy it merged into;
 - `Store::next_live_item` (`src/store.rs`), a read-only lookup of the first
   live item right of a (deleted) item, so the DOCX editor finds the field a
   peer's delete ends at without computing a position (its unit test lives in

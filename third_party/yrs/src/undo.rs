@@ -684,10 +684,14 @@ where
                     // Patched for BetterOffice: a redone copy garbage collection took
                     // with its parent is skipped, as Yjs's `followRedone` reaches a GC
                     // struct; the rest of the step is still undone.
-                    let slice = match txn.store_mut().follow_redone(item.id()) {
+                    let mut slice = match txn.store_mut().follow_redone(item.id()) {
                         Some(slice) => slice,
                         None => continue,
                     };
+                    // Patched for BetterOffice: no more units than this step
+                    // inserted. A redone copy can merge with the copy redone
+                    // after it, and the slice runs to the end of the block.
+                    slice.end = slice.end.min(slice.start + item.len() - 1);
                     item = txn.store.materialize(slice);
                 }
 
