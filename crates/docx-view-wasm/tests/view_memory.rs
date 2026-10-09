@@ -197,3 +197,87 @@ fn the_region_pass_copies_the_arena_only_for_notes() {
     assert!(note_shown);
     assert!(noted_lines < plain_lines, "{noted_lines} < {plain_lines}");
 }
+
+/// Pages per `displayPagesJson` call, as `packages/docx/src/viewer.ts` asks.
+const PAGE_BATCH: u32 = 8;
+
+struct Display {
+    pages: u32,
+    batch_peak: usize,
+    primitives: usize,
+    text_primitives: usize,
+    glyph_runs: usize,
+    glyph_run_chars: usize,
+}
+
+/// `bytes` laid out and built a batch at a time, counting what each batch
+/// allocated and what it holds.
+fn display(bytes: &[u8], font: u32) -> Display {
+    let (mut document, request) = open(bytes, font);
+    let pages = document.layout(&request).unwrap();
+    let laid_out = LIVE.load(Relaxed);
+    let mut display = Display {
+        pages,
+        batch_peak: 0,
+        primitives: 0,
+        text_primitives: 0,
+        glyph_runs: 0,
+        glyph_run_chars: 0,
+    };
+    for start in (0..pages).step_by(PAGE_BATCH as usize) {
+        let (json, peak) = peak_during(|| {
+            document
+                .display_pages_json(start, (start + PAGE_BATCH).min(pages))
+                .unwrap()
+        });
+        display.batch_peak = display.batch_peak.max(peak);
+        let batch: Value = serde_json::from_str(&json).unwrap();
+        for primitive in batch["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|page| page["primitives"].as_array().unwrap())
+        {
+            display.primitives += 1;
+            match primitive["kind"].as_str().unwrap() {
+                "text" => display.text_primitives += 1,
+                "glyphRun" => {
+                    display.glyph_runs += 1;
+                    display.glyph_run_chars += primitive["text"].as_str().unwrap().chars().count();
+                }
+                _ => {}
+            }
+        }
+    }
+    // A batch leaves nothing behind in the document.
+    assert!(LIVE.load(Relaxed) <= laid_out + 64 * 1024);
+    display
+}
+
+/// Measured text is joined glyph runs, not a primitive per character, and a
+/// batch costs the same whatever the document's length: the display list is
+/// never built in one piece.
+#[test]
+fn the_display_list_is_one_batch_of_joined_glyph_runs() {
+    let _counting = COUNTING.lock().unwrap();
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let small = display(&ladder(80, false), font);
+    let large = display(&ladder(240, false), font);
+    eprintln!(
+        "pages {} / {}; batch peak {} / {} bytes; {} primitives ({} text, {} glyph runs of {} chars)",
+        small.pages,
+        large.pages,
+        small.batch_peak,
+        large.batch_peak,
+        large.primitives,
+        large.text_primitives,
+        large.glyph_runs,
+        large.glyph_run_chars,
+    );
+    assert!(small.pages >= PAGE_BATCH && large.pages >= 3 * small.pages - 1);
+    assert_eq!(large.text_primitives, 0);
+    assert!(large.glyph_run_chars >= 20 * large.glyph_runs);
+    assert!(large.primitives <= 100 * large.pages as usize);
+    assert!(large.batch_peak * 4 <= small.batch_peak * 5);
+}
