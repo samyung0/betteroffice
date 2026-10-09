@@ -51,12 +51,25 @@ impl DocxViewDocument {
     }
 
     /// Lays out `request` (with its `measurement`) and returns the page count.
+    /// The measurement's font chains go to the display list too, so measured
+    /// text becomes joined glyph runs as in the editor.
     pub fn layout(&mut self, request: &str) -> Result<u32, JsValue> {
+        let extras = match serde_json::from_str::<Value>(request)
+            .map_err(js_error)?
+            .pointer("/measurement/fontChains")
+        {
+            Some(chains) => json!({ "fontChains": chains }),
+            None => json!({}),
+        };
         let pages = self
             .engine
             .layout_document_with_regions(request)
             .map_err(js_error)?;
-        self.extras = Some(self.engine.region_display_extras("{}").map_err(js_error)?);
+        self.extras = Some(
+            self.engine
+                .region_display_extras(&extras.to_string())
+                .map_err(js_error)?,
+        );
         u32::try_from(pages).map_err(js_error)
     }
 
@@ -344,5 +357,64 @@ mod tests {
                 assert!(paged == round_trip, "{name}");
             }
         }
+    }
+
+    /// With real fonts the viewer writes the list the editor's resident
+    /// engine keeps: measured text as joined glyph runs.
+    #[test]
+    fn measured_text_becomes_the_editors_glyph_runs() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(FONT).unwrap();
+        let bytes = include_bytes!("../../../poc/fixtures/feature-rich.docx");
+        let mut document = DocxViewDocument::open(bytes).unwrap();
+        let mut request: Value = serde_json::from_str(&document.layout_request_json()).unwrap();
+        let requirements: Vec<Value> = serde_json::from_str(
+            &document
+                .font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains = requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": { "fontSize": 11, "fontFamily": "Calibri" },
+            "authoritativeShaping": true,
+        });
+        let request = request.to_string();
+        let viewer = paged_display_list(&mut document, &request, 3);
+
+        let envelope = parse_docx_for_edit(bytes).unwrap();
+        let engine = EngineSession::new(1);
+        engine.set_media(package_media(&envelope));
+        seed_parsed_docx_in_place(engine.doc(), envelope).unwrap();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine
+            .build_display_list_frame(&json!({ "fontChains": chains }).to_string(), 0)
+            .unwrap();
+        let editor = engine
+            .with_display_list(|list| serde_json::to_string(list).unwrap())
+            .unwrap();
+
+        assert!(viewer == editor);
+        let list: Value = serde_json::from_str(&viewer).unwrap();
+        let runs = list["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|page| page["primitives"].as_array().unwrap())
+            .filter(|primitive| primitive["kind"] == "glyphRun")
+            .map(|run| run["text"].as_str().unwrap().chars().count())
+            .collect::<Vec<_>>();
+        assert!(runs.iter().any(|&chars| chars > 1));
     }
 }

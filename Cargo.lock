@@ -732,6 +732,7 @@ name = "docx-view-wasm"
 version = "0.0.0"
 dependencies = [
  "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-wasm-alloc",
  "serde_json",

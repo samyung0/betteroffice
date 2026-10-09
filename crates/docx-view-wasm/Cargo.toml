@@ -20,3 +20,6 @@ wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-alloc.workspace = true
+
+[dev-dependencies]
+docx-layout.workspace = true

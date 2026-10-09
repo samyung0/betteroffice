@@ -21,6 +21,8 @@ export class DocxViewDocument {
     fontRequirementsJson(request: string): string;
     /**
      * Lays out `request` (with its `measurement`) and returns the page count.
+     * The measurement's font chains go to the display list too, so measured
+     * text becomes joined glyph runs as in the editor.
      */
     layout(request: string): number;
     /**

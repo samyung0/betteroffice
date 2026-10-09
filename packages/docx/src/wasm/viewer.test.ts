@@ -78,7 +78,7 @@ function lineCount(displayList: DisplayList): number {
   const lines = new Set<string>();
   displayList.pages.forEach((page, index) => {
     for (const primitive of page.primitives)
-      if (primitive.kind === 'text')
+      if (primitive.kind === 'text' || primitive.kind === 'glyphRun')
         lines.add(`${index}:${primitive.blockKey}:${primitive.lineIndex}`);
   });
   return lines.size;
@@ -226,16 +226,21 @@ describe('DOCX viewer wasm', () => {
     try {
       const viewer = await openDocumentViewer(bytes);
       try {
-        const texts = viewer
+        const glyphs = viewer
           .displayList()
           .pages[0]!.primitives.flatMap((primitive) =>
-            primitive.kind === 'text' ? [primitive] : []
+            primitive.kind === 'glyphRun'
+              ? primitive.glyphs.map((glyph) => ({
+                  ...glyph,
+                  text: primitive.text[glyph.cluster],
+                }))
+              : []
           );
         const gap = (line: number) => {
           const [a, b] = ['A', 'B'].map(
-            (text) => texts.filter((primitive) => primitive.text === text)[line]!
+            (text) => glyphs.filter((glyph) => glyph.text === text)[line]!
           );
-          return b!.x - (a!.x + a!.width);
+          return b!.x - (a!.x + a!.advance!);
         };
         expect(gap(0)).toBeCloseTo(0, 3);
         expect(gap(1)).toBeGreaterThan(5);
