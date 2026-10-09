@@ -74,7 +74,11 @@ export async function openDocumentViewer(bytes: Uint8Array): Promise<DocxViewerH
     }
     list = displayList;
   } catch (error) {
-    document.free();
+    // A trap (out of memory) leaves the document borrowed, so free() throws
+    // too; the trap's error is the one to report.
+    try {
+      document.free();
+    } catch {}
     throw error;
   }
   // Every page is built: the engine goes now, not on dispose.
