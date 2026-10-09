@@ -175,6 +175,24 @@ describe('workbook worker', () => {
     expect(frame.cells['400:399']).toBeUndefined();
   }, 30_000); // 4,500 track sizes and a 185,000-cell window: slow on a loaded runner.
 
+  it("reads the selection's formatting again after a change, local or a peer's", async () => {
+    const peer = local(50);
+    const peerUpdates: Uint8Array[] = [];
+    peer.onUpdate((update) => peerUpdates.push(update));
+    const proxy = await worker(51, peer.encodeStateAsUpdate());
+    const sheet = (await proxy.sheetInfo()).sheetIds[0];
+    const selection = { anchor: { row: 0, col: 0 }, focus: { row: 1, col: 1 } };
+    const view = { ...VIEW, selection };
+    expect((await proxy.frame(view)).formatting.bold).toBeFalsy();
+    await proxy.toggle(sheet, 'A1:B2', 'bold');
+    expect((await proxy.frame(view)).formatting.bold).toBe(true);
+
+    peer.applyUpdate(await proxy.encodeStateAsUpdate(peer.encodeStateVector()));
+    peer.patchRangeStyle(0, 'A1:B2', { bold: false });
+    await proxy.applyUpdate(peerUpdates[peerUpdates.length - 1]);
+    expect((await proxy.frame(view)).formatting.bold).toBeFalsy();
+  });
+
   it('fails every request once disposed', async () => {
     const proxy = await worker(48);
     proxy.dispose();

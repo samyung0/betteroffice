@@ -99,7 +99,7 @@ export interface WorkbookFrame {
   /** The selection's focus cell, drawn or not. */
   focus: CellEdit | null;
   formatting: SelectionFormatting;
-  /** Merged ranges inside the selection and inside the drawn window. */
+  /** Merged ranges inside the selection and inside the drawn window, at most 1,024 each. */
   selectionMerged: MergedRange[];
   visibleMerged: MergedRange[];
   history: HistoryState;
