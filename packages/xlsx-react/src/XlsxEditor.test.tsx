@@ -1703,6 +1703,25 @@ describe('XlsxEditor host integration', () => {
     }
   });
 
+  it('repaints a change the host makes through its handle, and edits from it', async () => {
+    const view = await mountEditor();
+    const target = { row: 2, col: 0 };
+    await view.click(target);
+    const before = view.formula();
+    await act(async () => {
+      await view.workbook().editCell(0, target.row, target.col, 'From the host');
+    });
+    await view.idle();
+    expect(before).not.toBe('From the host');
+    expect(view.formula()).toBe('From the host');
+    // F2 opens on the host's value, so Enter does not write the old one back.
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'F2' });
+    });
+    await view.idle();
+    expect(view.editor()!.value).toBe('From the host');
+  });
+
   it('does not finish an asynchronous paste after entering viewing mode', async () => {
     const file = plain.bytes.slice();
     let api: XlsxEditorApi | undefined;
