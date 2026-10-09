@@ -721,6 +721,7 @@ function XlsxEditorContent({
       return undefined;
     const cell = shownHere.cells[`${row}:${col}`];
     if (cell) return cell.input;
+    if (cellRect(shownHere.displayList.grid, row, col)) return '';
     const focus = shownHere.view.selection?.focus;
     return focus && focus.row === row && focus.col === col ? shownHere.focus?.input : undefined;
   };

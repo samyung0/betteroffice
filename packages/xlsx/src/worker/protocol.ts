@@ -91,7 +91,10 @@ export interface WorkbookFrame {
   view: WorkbookView;
   sheetInfo: SheetInfo;
   displayList: DisplayList;
-  /** The editable text of every cell in the drawn window, by `row:col`. */
+  /**
+   * The editable text of every non-empty cell in the drawn window, by
+   * `row:col`; a drawn cell left out is empty.
+   */
   cells: Record<string, CellEdit>;
   /** The selection's focus cell, drawn or not. */
   focus: CellEdit | null;

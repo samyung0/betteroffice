@@ -148,6 +148,33 @@ describe('workbook worker', () => {
     expect((error as StaleProposalError).cells).toEqual(['B3']);
   });
 
+  it('reads a drawn window past the engine range cap, as the display list draws it', async () => {
+    // narrow tracks at the 50% zoom floor: more cells than one range read may
+    // copy (100,000), fewer than a display list may draw (250,000).
+    const proxy = await worker(49);
+    const sheet = (await proxy.sheetInfo()).sheetIds[0];
+    const widths = Array.from({ length: 3000 }, (_, col) => ({ col, width: 0.4 }));
+    const heights = Array.from({ length: 1500 }, (_, row) => ({ row, height: 3 }));
+    await proxy.onSheet(sheet, 'applyOps', [
+      ...widths.map((op) => ({ type: 'setColWidth', sheet: 0, ...op })),
+      ...heights.map((op) => ({ type: 'setRowHeight', sheet: 0, ...op })),
+    ]);
+    await proxy.onSheet(sheet, 'editCell', 0, 400, 400, 'far corner');
+    const frame = await proxy.frame({
+      viewport: { x: 0, y: 0, width: 3200, height: 1800 },
+      zoom: 0.5,
+      selection: null,
+    });
+    const grid = frame.displayList.grid!;
+    const drawn = (grid.rowOffsets.length - 1) * (grid.colOffsets.length - 1);
+    expect(drawn).toBeGreaterThan(100_000);
+    expect(drawn).toBeLessThanOrEqual(250_000);
+    // the first and the last row block, and no empty cell between them.
+    expect(frame.cells['2:0']).toEqual(await proxy.cell(0, 2, 0));
+    expect(frame.cells['400:400'].input).toBe('far corner');
+    expect(frame.cells['400:399']).toBeUndefined();
+  }, 30_000); // 4,500 track sizes and a 185,000-cell window: slow on a loaded runner.
+
   it('fails every request once disposed', async () => {
     const proxy = await worker(48);
     proxy.dispose();
