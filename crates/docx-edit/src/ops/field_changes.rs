@@ -779,51 +779,83 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
     }
 }
 
-/// Runs `apply` (applying a peer's update), then re-reads what each
-/// projecting field a deleted range now ends at shows ([`refresh_shown`]),
-/// in a system transaction peers receive and Undo skips: two peers each
-/// deleting part of a field's last link remove it only once each has the
-/// other's update. Each deleted range costs one step right from its last
-/// item; only a field found there reads its story.
-#[cfg(feature = "wasm")]
+/// Runs `apply` (a peer's update, or an Undo or Redo step), then re-reads
+/// what each projecting field a deleted or inserted range now ends at shows
+/// ([`refresh_shown`]), in a system transaction peers receive and Undo skips:
+/// two peers each deleting part of a field's last link remove it only once
+/// each has the other's update, and an Undo that brings the link back
+/// restores what the field shows (Epo 2026-10-10). Each deleted range costs
+/// one step right from its last item, each inserted item one step right
+/// from it; only a field found there reads its story.
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
     use yrs::branch::BranchPtr;
     use yrs::types::TypeRef;
     use yrs::{ID, IdSet, MapRef, Nested, Transact};
-    let deleted = Arc::new(std::sync::Mutex::new(IdSet::new()));
+    let touched = Arc::new(std::sync::Mutex::new((IdSet::new(), IdSet::new())));
     let subscription = {
-        let deleted = Arc::clone(&deleted);
+        let touched = Arc::clone(&touched);
         doc.observe_after_transaction(move |txn| {
-            deleted.lock().unwrap().merge_with(txn.delete_set().clone());
+            let (deleted, inserted) = &mut *touched.lock().unwrap();
+            deleted.merge_with(txn.delete_set().clone());
+            inserted.merge_with(txn.insert_set().clone());
         })
         .ok()
     };
     let result = apply();
     drop(subscription);
-    let deleted = std::mem::take(&mut *deleted.lock().unwrap());
+    let (deleted, inserted) = std::mem::take(&mut *touched.lock().unwrap());
     let mut owners: Vec<(BranchPtr, i64)> = Vec::new();
     {
         let txn = doc.transact();
-        for (client, ranges) in deleted.iter() {
+        let mut probes: Vec<(ID, bool)> = deleted
+            .iter()
+            .flat_map(|(client, ranges)| {
+                ranges
+                    .iter()
+                    .map(|range| (ID::new(*client, range.end - 1), false))
+            })
+            .collect();
+        // Every inserted item: a restored copy and a peer's system write can
+        // share one range of clocks.
+        for (client, ranges) in inserted.iter() {
             for range in ranges.iter() {
-                let Some((next, story)) = txn
-                    .store()
-                    .next_live_item(&ID::new(*client, range.end - 1))
-                    .filter(|(_, story)| matches!(story.type_ref(), TypeRef::Text))
-                else {
-                    continue;
-                };
-                let id = Nested::<MapRef>::new(next).get(&txn).and_then(|map| {
-                    match map.get(&txn, "resultProjection") {
-                        Some(Out::Any(projection)) => any_value(&projection)["id"].as_i64(),
-                        _ => None,
-                    }
-                });
-                if let Some(id) = id
-                    && !owners.contains(&(story, id))
-                {
-                    owners.push((story, id));
+                let mut clock = range.start;
+                while clock < range.end {
+                    let Some(item) = txn.store().get_item(&ID::new(*client, clock)) else {
+                        break;
+                    };
+                    probes.push((*item.id(), true));
+                    clock = item.id().clock + item.len();
                 }
+            }
+        }
+        for (end, restores) in probes {
+            let Some((next, story)) = txn
+                .store()
+                .next_live_item(&end)
+                .filter(|(_, story)| matches!(story.type_ref(), TypeRef::Text))
+            else {
+                continue;
+            };
+            let Some(map) = Nested::<MapRef>::new(next).get(&txn) else {
+                continue;
+            };
+            // Content put back changes what a field shows only from its whole
+            // result (none of its projected children left) to its own runs, a
+            // part of it; a field showing nothing stays so, which keeps typing
+            // at the end of a cross-reference's link from reading its story.
+            if restores && map_string(&map, &txn, "displayText").is_none_or(|text| text.is_empty())
+            {
+                continue;
+            }
+            let id = match map.get(&txn, "resultProjection") {
+                Some(Out::Any(projection)) => any_value(&projection)["id"].as_i64(),
+                _ => None,
+            };
+            if let Some(id) = id
+                && !owners.contains(&(story, id))
+            {
+                owners.push((story, id));
             }
         }
     }
@@ -2141,6 +2173,60 @@ mod tests {
             assert!(parent == yrs::branch::BranchPtr::from(branch));
         }
         assert!(txn.store().next_live_item(&ID::new(client, 3)).is_none());
+    }
+
+    /// A peer typing at the end of a cross-reference's link, the projected
+    /// child right before its field, makes the peers that receive it re-read
+    /// nothing: the field shows nothing, and content put back cannot change
+    /// that. A peer deleting the link makes them re-read the field. Counted
+    /// in the system transactions a re-read opens.
+    #[test]
+    fn a_peer_typing_at_a_cross_references_end_re_reads_no_field() {
+        use crate::{EditCtx, EditingDoc, FormatPolicy, Position, StoryRange};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t>a</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="target"><w:r><w:t>AA</w:t></w:r></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+        let base = EditingDoc::new(7);
+        crate::seed::seed_from_docx(&base, &bytes).unwrap();
+        let state = base.encode_state_as_update_v1();
+        let (receiver, typist) = (EditingDoc::new(701), EditingDoc::new(702));
+        for doc in [&receiver, &typist] {
+            doc.apply_update_v1(&state).unwrap();
+        }
+        let rereads = Arc::new(AtomicUsize::new(0));
+        let _counting = {
+            let rereads = Arc::clone(&rereads);
+            receiver
+                .yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    if txn.origin() == Some(&yrs::Origin::from("system")) {
+                        rereads.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .unwrap()
+        };
+        let ctx = EditCtx::local("Ada", "2026-10-10T00:00:00Z");
+        let deliver = |edit: &dyn Fn(&EditingDoc)| {
+            let before = typist.encode_state_vector_v1();
+            edit(&typist);
+            let update = typist.encode_diff_v1(&before).unwrap();
+            rereads.store(0, Ordering::Relaxed);
+            refreshing_fields(receiver.yrs_doc(), || {
+                receiver.apply_update_v1(&update).unwrap()
+            });
+            rereads.load(Ordering::Relaxed)
+        };
+        // "a", the link's "AA" at 1..3, then the field.
+        let typed = deliver(&|doc| {
+            doc.insert_text(&ctx, Position::new("body", 3), "X", FormatPolicy::Inherit)
+                .unwrap();
+        });
+        assert_eq!(typed, 0, "typing at the link's end re-read the field");
+        let deleted = deliver(&|doc| {
+            doc.delete_range(&ctx, StoryRange::new("body", 1, 4))
+                .unwrap();
+        });
+        assert_eq!(deleted, 1, "deleting the link re-read no field");
     }
 
     #[test]

@@ -3017,6 +3017,42 @@ test.each(["body", "cell", "header"] as const)("%s | two peers each deleting hal
   for (const session of [whole, A, B, reopened]) session.destroy();
 });
 
+// Epo 2026-10-10: with the formatting cleanup off, an Undo that brings that link back makes the field show again what
+// it shows with the link, on both peers, so the editors read what the save writes: with one Undo, what the other
+// peer's half delete alone shows; with both, the untouched field.
+test.each((["body", "cell", "header"] as const).flatMap((where) => (["one peer", "both peers"] as const).map((who) => [where, who] as const)))(
+  "%s | two peers each deleting half a field's last link, then %s undoing, show the field with its link",
+  async (where, who) => {
+    const [story] = STORY[where];
+    const bytes = matrixDocx(where, nestedBeforeLink);
+    const drop = (session: YrsSession, from: number, to: number) =>
+      session.deleteRange({ story, start: { paraId: "44444444", offset: from }, end: { paraId: "44444444", offset: to } });
+    const expected = await open(bytes);
+    if (who === "one peer") drop(expected, 2, 3);
+    const A = await open(bytes);
+    const B = await open(bytes, A.encodeState());
+    drop(A, 1, 2);
+    drop(B, 2, 3);
+    const sync = () => {
+      const [toB, toA] = [A.encodeStateAsUpdate(B.encodeStateVector()), B.encodeStateAsUpdate(A.encodeStateVector())];
+      A.applyUpdate(toA);
+      B.applyUpdate(toB);
+    };
+    sync();
+    expect(fieldsShown(A, story)).toBe("REF a \\h=7");
+    expect(A.undo()).toBe(true);
+    if (who === "both peers") expect(B.undo()).toBe(true);
+    sync();
+    sync();
+    expect(fieldsShown(A, story)).toBe(fieldsShown(expected, story));
+    expect(matrixUnits(A, story)).toBe(matrixUnits(expected, story));
+    expect(matrixUnits(B, story)).toBe(matrixUnits(A, story));
+    const reopened = await open(await publish(bytes, A.encodeState()));
+    expect(matrixUnits(reopened, story)).toBe(matrixUnits(A, story));
+    for (const session of [expected, A, B, reopened]) session.destroy();
+  }
+);
+
 // Item 2: Enter in a field's link, Enter again in the moved text, then Backspace joining the first two paragraphs.
 // The field continues into the third, so the moved runs left ending the first paragraph stay text after the field,
 // as the seed of the save reads them. Joining the third paragraph back restores the untouched save.

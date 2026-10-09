@@ -184,15 +184,21 @@ impl DocUndoManager {
         self.step(false)
     }
 
-    /// Undoes or redoes one step, then re-anchors the markers in the text
-    /// this replica restored as new items ([`crate::bookmarks::rebind`]).
+    /// Undoes or redoes one step, re-reads what the fields whose projected
+    /// children it put back or removed show
+    /// ([`crate::ops::field_changes::refreshing_fields`]), then re-anchors the
+    /// markers in the text this replica restored as new items
+    /// ([`crate::bookmarks::rebind`]).
     fn step(&mut self, undoing: bool) -> bool {
         lock(&self.changed_stories).clear();
-        let applied = if undoing {
-            self.inner.undo_blocking()
-        } else {
-            self.inner.redo_blocking()
-        };
+        let inner = &mut self.inner;
+        let applied = crate::ops::field_changes::refreshing_fields(&self.doc, || {
+            if undoing {
+                inner.undo_blocking()
+            } else {
+                inner.redo_blocking()
+            }
+        });
         if applied {
             crate::bookmarks::rebind(&self.doc);
         }
