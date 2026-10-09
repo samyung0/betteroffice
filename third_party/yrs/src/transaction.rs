@@ -489,10 +489,13 @@ impl<'doc> WriteTxn for TransactionMut<'doc> {
 impl<'doc> Drop for TransactionMut<'doc> {
     fn drop(&mut self) {
         // Patched for BetterOffice: a panic unwinding through an open
-        // transaction leaves its document half updated, and the caller
-        // discards it. Committing it then could panic again (an observer, an
-        // inconsistent store), and a second panic while unwinding aborts the
-        // whole process.
+        // transaction leaves its document half updated. Committing it then
+        // could panic again (an observer, an inconsistent store), and a
+        // second panic while unwinding aborts the whole process. So it is not
+        // committed: its observers never fire, its store is not cleaned up
+        // and its work budget is not cleared, and the caller must drop the
+        // document. (A transaction opened and closed in a destructor during
+        // an unrelated unwind would not commit either; nothing does that.)
         if std::thread::panicking() {
             return;
         }
