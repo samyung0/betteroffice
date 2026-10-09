@@ -64,6 +64,7 @@ The per-layer crates expose individual pipeline stages:
 - [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): the tiny-skia backend that paints a PPTX display list to PNG.
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all four formats.
+- [betteroffice-wasm-alloc](https://crates.io/crates/betteroffice-wasm-alloc): the global allocator of the WASM modules, growing linear memory in steps of up to 64 MiB.
 
 ## Python packages
 
