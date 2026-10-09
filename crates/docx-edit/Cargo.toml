@@ -20,7 +20,9 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
-# `--features wasm` (driven by scripts/build-docx-wasm.ts).
+# `--features wasm` (driven by scripts/build-docx-wasm.ts). On wasm32 it also
+# installs betteroffice-wasm-alloc as the global allocator, so a crate with its
+# own allocator cannot enable it.
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-alloc"]
 # The seeded yrs image src is what the renderer paints, so this crate needs the
 # same TIFF transcode the docx-parse wasm build enables.
