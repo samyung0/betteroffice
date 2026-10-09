@@ -5,7 +5,13 @@
  * of the request that caused it.
  */
 
-import type { CellEdit, RangeStylePatch, WorkbookHandle } from '../wasm/loader';
+import type {
+  CellEdit,
+  MergedRange,
+  RangeStylePatch,
+  SelectionFormatting,
+  WorkbookHandle,
+} from '../wasm/loader';
 import {
   initWasm,
   isPngExportAvailable,
@@ -16,6 +22,7 @@ import {
 import type { GridMeta } from '../display-list/types';
 import { cellAddress, normalizeRange } from '../selection/index';
 import {
+  MUTATING_METHODS,
   SHEET_GONE,
   WORKBOOK_METHODS,
   type WorkbookCallRequest,
@@ -34,8 +41,9 @@ interface WorkerScope {
 
 const scope = self as unknown as WorkerScope;
 const methods = new Set<string>(WORKBOOK_METHODS);
-// As the editor caps them: the overlay draws merged ranges in view.
-const MAX_VISIBLE_MERGED_RANGES = 1024;
+// As the editor caps them: the overlay draws merged ranges in view; the
+// selection's only decide whether Unmerge applies.
+const MAX_MERGED_RANGES = 1024;
 // The engine's `rangeCells` cap (MAX_RANGE_CELLS in workbook.rs). A drawn
 // window may hold up to 250,000 cells, so it is read in blocks under it.
 const MAX_RANGE_CELLS = 100_000;
@@ -60,6 +68,13 @@ let workbook: WorkbookHandle | null = null;
 let epoch = 0;
 let seq = 0;
 let queue = Promise.resolve();
+// The selection's formatting and merged ranges, read once per selection and
+// kept until a change: scroll frames do not walk the selection again.
+let selectionReads: {
+  key: string;
+  formatting: SelectionFormatting;
+  merged: MergedRange[];
+} | null = null;
 
 scope.onmessage = (event) => {
   const request = event.data;
@@ -68,6 +83,9 @@ scope.onmessage = (event) => {
 
 async function handle(request: WorkbookWorkerRequest): Promise<void> {
   seq = request.id;
+  const changes =
+    request.type === 'toggle' || (request.type === 'call' && MUTATING_METHODS.has(request.method));
+  if (changes) selectionReads = null;
   try {
     const value = await answer(request);
     reply({ type: 'reply', id: request.id, ok: true, value }, transfers(value));
@@ -192,8 +210,7 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
     focus: selection
       ? quietly(() => open.cell(sheet, selection.focus.row, selection.focus.col), null)
       : null,
-    formatting: rangeA1 ? quietly(() => open.selectionFormatting(sheet, rangeA1), {}) : {},
-    selectionMerged: rangeA1 ? quietly(() => open.mergedRanges(sheet, rangeA1), []) : [],
+    ...selectionState(open, sheet, rangeA1, quietly),
     visibleMerged: grid ? visibleMerged(open, sheet, grid, quietly) : [],
     history: quietly(() => open.historyState(), {
       canUndo: false,
@@ -203,6 +220,24 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
     }),
     proposals: quietly(() => open.listProposals(), []),
   };
+}
+
+/** The selection's formatting and merged ranges, read again only after a change. */
+function selectionState(
+  open: WorkbookHandle,
+  sheet: number,
+  rangeA1: string | null,
+  quietly: <T>(read: () => T, fallback: T) => T
+): Pick<WorkbookFrame, 'formatting' | 'selectionMerged'> {
+  if (!rangeA1) return { formatting: {}, selectionMerged: [] };
+  const key = `${sheet}!${rangeA1}`;
+  if (selectionReads?.key !== key)
+    selectionReads = {
+      key,
+      formatting: quietly(() => open.selectionFormatting(sheet, rangeA1), {}),
+      merged: quietly(() => open.mergedRanges(sheet, rangeA1), []).slice(0, MAX_MERGED_RANGES),
+    };
+  return { formatting: selectionReads.formatting, selectionMerged: selectionReads.merged };
 }
 
 /** The merged ranges over the drawn window's span, as the editor reads them. */
@@ -219,7 +254,7 @@ function visibleMerged(
     grid.startRow + rows - 1,
     grid.startCol + cols - 1
   )}`;
-  return quietly(() => open.mergedRanges(sheet, span), []).slice(0, MAX_VISIBLE_MERGED_RANGES);
+  return quietly(() => open.mergedRanges(sheet, span), []).slice(0, MAX_MERGED_RANGES);
 }
 
 /**
