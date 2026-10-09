@@ -102,6 +102,11 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   Undo and Redo restored resolves to the same unit, and Undo after a delete,
   Undo and Redo removes only its own step instead of the text typed before it,
   with unit tests;
+- `UndoManager::try_process` (`src/undo.rs`) redoes a step's items in the
+  order its deletions list them, as Yjs does, not in hash order, so restored
+  copies get the same clocks every time and a later Undo no longer deletes a
+  neighbouring copy that merged with its own (tests in
+  `crates/pptx-edit/tests/yrs_undo_order.rs`, which CI runs);
 - `Store::next_live_item` (`src/store.rs`), a read-only lookup of the first
   live item right of a (deleted) item, so the DOCX editor finds the field a
   peer's delete ends at without computing a position (its unit test lives in

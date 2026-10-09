@@ -668,6 +668,11 @@ where
         origin: Origin,
     ) -> bool {
         let mut to_redo = HashSet::<ItemPtr>::new();
+        // Patched for BetterOffice: redo in the order the deletions list the
+        // items, as Yjs does. Hash order gave the copies random clocks, so a
+        // copy sometimes merged with its neighbour's and a later Undo of the
+        // neighbour deleted both.
+        let mut redo_order = Vec::<ItemPtr>::new();
         let mut to_delete = Vec::<ItemPtr>::new();
         let mut change_performed = false;
 
@@ -700,12 +705,14 @@ where
                     && !item.insertions.contains(ptr.id())
                 // Never redo structs in stackItem.insertions because they were created and deleted in the same capture interval.
                 {
-                    to_redo.insert(ptr);
+                    if to_redo.insert(ptr) {
+                        redo_order.push(ptr);
+                    }
                 }
             }
         }
 
-        for &ptr in to_redo.iter() {
+        for &ptr in redo_order.iter() {
             let mut ptr = ptr;
             change_performed |= ptr
                 .redo(&mut txn, &to_redo, &item.insertions, stack, other)
