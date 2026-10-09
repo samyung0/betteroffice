@@ -1,12 +1,15 @@
 //! A yrs transaction answers "what did it insert" from its insert set instead
 //! of building whole state vectors, whose cost grows with every client the
 //! document ever saw. Its update and its events must stay what the state
-//! vectors gave.
+//! vectors gave, and applying a peer's keystroke must cost the same at any
+//! client count (counted in bytes allocated).
 
-use std::cell::RefCell;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position};
 use yrs::types::{Attrs, EntryChange};
 use yrs::updates::decoder::Decode;
 use yrs::{
@@ -152,4 +155,98 @@ fn events_tell_new_types_and_entries_from_older_ones() {
     let mut seen = events.lock().unwrap().clone();
     seen.sort();
     assert_eq!(seen, ["a:updated,b:inserted", "inner:updated"]);
+}
+
+/// Counts the bytes each thread allocates, so the tests running beside one
+/// another in this binary do not count each other's.
+struct Counting;
+
+thread_local! {
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + layout.size()));
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let grown = new_size.saturating_sub(layout.size());
+        let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + grown));
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// Bytes this thread allocated while `run` ran.
+fn allocated(run: impl FnOnce()) -> usize {
+    let before = ALLOCATED.with(Cell::get);
+    run();
+    ALLOCATED.with(Cell::get) - before
+}
+
+/// Bytes allocated applying a peer's keystroke to an editor document that
+/// `writers` other clients typed into, with an update observer as the WASM
+/// session has. The peer wrote before, so the keystroke adds no client.
+fn peer_keystroke_bytes(writers: u64) -> usize {
+    let ctx = EditCtx::local("Ada", "2026-10-09T00:00:00Z");
+    let base = EditingDoc::new(1);
+    base.create_story("body", "Hello.", "Normal", "left")
+        .unwrap();
+    let state = base.encode_state_as_update_v1();
+    let replica = |client| {
+        let doc = EditingDoc::new(client);
+        doc.apply_update_v1(&state).unwrap();
+        doc
+    };
+    let main = replica(7);
+    for client in 0..writers {
+        let writer = replica(2_000 + client);
+        let before = writer.encode_state_vector_v1();
+        writer
+            .insert_text(&ctx, Position::new("body", 0), "w", FormatPolicy::Inherit)
+            .unwrap();
+        main.apply_update_v1(&writer.encode_diff_v1(&before).unwrap())
+            .unwrap();
+    }
+    // The peer types after "Hello.", so integrating its keystroke scans no
+    // concurrent items.
+    let peer = replica(1_000);
+    peer.apply_update_v1(&main.encode_state_as_update_v1())
+        .unwrap();
+    let end = writers as u32 + 6;
+    peer.insert_text(&ctx, Position::new("body", end), "a", FormatPolicy::Inherit)
+        .unwrap();
+    main.apply_update_v1(&peer.encode_diff_v1(&main.encode_state_vector_v1()).unwrap())
+        .unwrap();
+    let before = peer.encode_state_vector_v1();
+    peer.insert_text(
+        &ctx,
+        Position::new("body", end + 1),
+        "b",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let keystroke = peer.encode_diff_v1(&before).unwrap();
+    let _subscription = main.yrs_doc().observe_update_v1(|_txn, _event| {}).unwrap();
+    allocated(|| main.apply_update_v1(&keystroke).unwrap())
+}
+
+#[test]
+fn a_peer_keystroke_allocates_the_same_at_any_client_count() {
+    // A state vector allocates per client the document saw: with 1,000
+    // writers, each one built would add tens of KiB to every keystroke.
+    let few = peer_keystroke_bytes(10);
+    let many = peer_keystroke_bytes(1_000);
+    assert!(
+        many <= few + 1_024,
+        "a keystroke allocated {many} B with 1,000 writers, {few} B with 10"
+    );
 }
