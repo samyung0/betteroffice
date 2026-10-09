@@ -146,8 +146,7 @@ export type WorkbookWorkerRequest =
   | WorkbookOpenRequest
   | WorkbookCallRequest
   | WorkbookToggleRequest
-  | WorkbookFrameRequest
-  | { type: 'dispose'; id: number };
+  | WorkbookFrameRequest;
 
 export interface WorkbookOpened {
   clientId: number;
