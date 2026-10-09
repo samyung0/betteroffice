@@ -60,7 +60,12 @@ fn peers_keep_the_same_format_items_after_a_format_meets_a_delete() {
     for round in 0..3 {
         let word = format!("w{round}");
         peers[0]
-            .insert_text(&ctx(), Position::new("body", 0), &word, FormatPolicy::Inherit)
+            .insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                &word,
+                FormatPolicy::Inherit,
+            )
             .unwrap();
         sync(&peers[0], &peers[1]);
         // At once: one peer bolds the word, the other deletes it.
