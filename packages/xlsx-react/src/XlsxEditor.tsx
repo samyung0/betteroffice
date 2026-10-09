@@ -100,7 +100,10 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
 export interface XlsxEditorApi {
   clearSelection: () => void;
   focus: () => void;
-  /** The workbook, in its own worker. */
+  /**
+   * The workbook, in its own worker. A change made through it repaints the
+   * grid once the worker reports the change.
+   */
   handle: WorkbookProxy;
   /** Commits pending input, or rejects with the engine's error. */
   flush: () => Promise<void>;
@@ -607,7 +610,8 @@ function XlsxEditorContent({
   readOnlyRef.current = readOnly;
   // one frame request in the worker at a time; a view change meanwhile asks
   // again once it is answered, so frames never queue up behind a scroll.
-  const frameRequestRef = useRef({ inFlight: false, again: false });
+  // `id` is the last frame request posted.
+  const frameRequestRef = useRef({ inFlight: false, again: false, id: 0 });
   // the next frame opens the active sheet at its saved scroll.
   const initialScrollRef = useRef(false);
   // the last change posted, and the requests posted when a peer's change
@@ -793,6 +797,8 @@ function XlsxEditorContent({
           if (request.again && handleRef.current === proxy) requestFrame();
         });
       });
+    // the frame request just posted.
+    request.id = proxy.posted;
   }, []);
 
   // a change posted to the worker: counted until it is answered, and the
@@ -991,7 +997,15 @@ function XlsxEditorContent({
         proxy = opened;
         handleRef.current = opened;
         unsubscribeUpdates = opened.onUpdate((_update, origin) => {
-          if (disposed || origin !== 'remote') return;
+          if (disposed) return;
+          if (origin === 'local') {
+            // the editor tracks its own changes; one the host made through
+            // `handle` was posted by now, so frames posted before now may not
+            // show it and one after it is asked for.
+            lastMutationRef.current = Math.max(lastMutationRef.current, opened.posted);
+            if (frameRequestRef.current.id < opened.posted) requestFrame();
+            return;
+          }
           // a peer's change: the next frame shows it (and drops a draft
           // whose sheet it removed).
           remoteSeenRef.current = opened.posted;
