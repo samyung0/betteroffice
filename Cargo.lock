@@ -734,6 +734,7 @@ dependencies = [
  "betteroffice-docx-edit",
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-opc",
  "betteroffice-wasm-alloc",
  "serde_json",
  "wasm-bindgen",

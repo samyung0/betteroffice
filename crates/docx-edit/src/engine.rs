@@ -1537,9 +1537,15 @@ impl EngineSession {
             Some(fingerprints) => fingerprints,
             None => measured_fingerprints(&input)?,
         };
+        let refs = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .collect::<Vec<_>>();
         // The note fixpoint replays `base_input`; `input` itself moves into
-        // pagination and is never cloned again.
-        let base_input = input.clone();
+        // pagination. Only a note reference can reserve note space, so a
+        // document without one keeps a single measured arena.
+        let base_input = (!refs.is_empty()).then(|| input.clone());
         let body_has_section_break = input
             .measured
             .iter()
@@ -1552,11 +1558,6 @@ impl EngineSession {
             .take()
             .expect("layout retained after successful pagination");
         apply_document_regions(&mut initial_layout, &regions);
-        let refs = base_input
-            .measured
-            .iter()
-            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
-            .collect::<Vec<_>>();
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
         assign_note_presentations(&mut notes.contents, &presentations);
         if resident_body {
@@ -1573,7 +1574,9 @@ impl EngineSession {
         }
         let stabilized = stabilize_note_layout(
             |reserved| {
-                let mut pass = base_input.clone();
+                let mut pass = base_input
+                    .clone()
+                    .expect("note space comes from a note reference");
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 if resident_body {
                     stabilize_shape_wrapping(&mut pass, &regions, &measurement)?;
@@ -1590,7 +1593,7 @@ impl EngineSession {
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
         if !stabilized.reserved_heights.is_empty() {
-            let mut final_input = base_input;
+            let mut final_input = base_input.expect("note space comes from a note reference");
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             if resident_body {

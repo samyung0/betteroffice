@@ -23,3 +23,4 @@ wasm-alloc.workspace = true
 
 [dev-dependencies]
 docx-layout.workspace = true
+ooxml-opc.workspace = true
