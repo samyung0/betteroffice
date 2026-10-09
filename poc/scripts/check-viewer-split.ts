@@ -17,8 +17,6 @@ const splits: Split[] = [
     format: "DOCX",
     editor: "packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm",
     viewer: "packages/docx/src/wasm/generated/viewer/docx_view_wasm_bg.wasm",
-    // The view-only Cargo profile keeps the transient OOXML/Yrs lowering
-    // bridge size-optimized while the editor remains tuned for interaction.
     maxRatio: 0.8,
     forbiddenViewerDeclarations: [
       /save|serialize|write_docx/,
