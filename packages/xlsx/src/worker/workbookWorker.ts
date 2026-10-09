@@ -36,6 +36,9 @@ const scope = self as unknown as WorkerScope;
 const methods = new Set<string>(WORKBOOK_METHODS);
 // As the editor caps them: the overlay draws merged ranges in view.
 const MAX_VISIBLE_MERGED_RANGES = 1024;
+// The engine's `rangeCells` cap (MAX_RANGE_CELLS in workbook.rs). A drawn
+// window may hold up to 250,000 cells, so it is read in blocks under it.
+const MAX_RANGE_CELLS = 100_000;
 // Calls that read or write the sheet in their first argument.
 const SHEET_FIRST = new Set<WorkbookMethod>([
   'cell',
@@ -219,23 +222,32 @@ function visibleMerged(
   return quietly(() => open.mergedRanges(sheet, span), []).slice(0, MAX_VISIBLE_MERGED_RANGES);
 }
 
-/** Every drawn cell's editable text, one range read per run of drawn tracks. */
+/**
+ * The editable text of every non-empty drawn cell: one range read per run of
+ * drawn tracks, split into row blocks under the engine's range cap. Empty
+ * cells stay out, so the frame grows with the content drawn, not the window.
+ */
 function windowCells(open: WorkbookHandle, sheet: number, grid: GridMeta) {
   const cells: Record<string, CellEdit> = {};
   const rows = runs(tracks(grid.startRow, grid.rowIndices, grid.rowOffsets.length - 1));
   const cols = runs(tracks(grid.startCol, grid.colIndices, grid.colOffsets.length - 1));
-  for (const [top, bottom] of rows)
-    for (const [left, right] of cols) {
-      const block = open.rangeCells(
-        sheet,
-        `${cellAddress(top, left)}:${cellAddress(bottom, right)}`
-      );
-      block.forEach((line, row) =>
-        line.forEach((cell, col) => {
-          cells[`${top + row}:${left + col}`] = cell;
-        })
-      );
-    }
+  for (const [left, right] of cols) {
+    // a sheet has at most 16,384 columns, so a block holds at least six rows.
+    const step = Math.floor(MAX_RANGE_CELLS / (right - left + 1));
+    for (const [first, last] of rows)
+      for (let top = first; top <= last; top += step) {
+        const bottom = Math.min(last, top + step - 1);
+        const block = open.rangeCells(
+          sheet,
+          `${cellAddress(top, left)}:${cellAddress(bottom, right)}`
+        );
+        block.forEach((line, row) =>
+          line.forEach((cell, col) => {
+            if (cell.input) cells[`${top + row}:${left + col}`] = cell;
+          })
+        );
+      }
+  }
   return cells;
 }
 
