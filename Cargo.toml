@@ -50,6 +50,11 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   such as a field or a paragraph mark; `Text::apply_delta_as_yjs`, a delta
 #   whose deletions clean format items as Yjs 13.6.31's `cleanupFormattingGap`,
 #   for the native Office rebase (tested in office-service);
+#   `insert_attributes` and `insert_negated_attributes` write an edit's format
+#   items in key order, so one edit writes the same items on every replica;
+# - transactions: an update and its events read the transaction's insert set
+#   instead of whole state vectors, so their cost no longer grows with every
+#   client the document saw;
 # - Undo and Redo: `follow_redone` (src/store.rs) keeps the offset into a
 #   redone item as Yjs does, so a position inside text Undo and Redo restored
 #   stays on its unit and Undo after a delete, Undo and Redo removes only its
@@ -75,11 +80,12 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 # - read-only APIs: item, branch, store and update accessors,
 #   `Store::next_live_item` (the first live item right of a deleted one, for
 #   the DOCX peer re-read of a field's shown text; tested in docx-edit's
-#   field_changes) and `StickyIndex::get_offsets`.
+#   field_changes), `Item::redone` (the local link to the copy Undo made, for
+#   the DOCX marker re-anchor) and `StickyIndex::get_offsets`.
 # CI runs their tests in pptx-edit's yrs_memory, yrs_undo, yrs_undo_order,
 # yrs_hostile, yrs_decode_alloc and convergence, docx-edit's yrs_memory,
-# yrs_pending and concurrent_undo, and betteroffice-xlsx's
-# stable_collaboration. Carry the patches until upstream has the fixes and
+# yrs_pending, yrs_format_order, yrs_transaction_work and concurrent_undo, and
+# betteroffice-xlsx's stable_collaboration. Carry the patches until upstream has the fixes and
 # equivalent lookups, or the re-read no longer needs it; re-apply them on each
 # yrs upgrade.
 [patch.crates-io]
