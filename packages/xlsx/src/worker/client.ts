@@ -63,6 +63,9 @@ export interface WorkbookProxy extends WorkbookCalls {
 /** A call refused because its sheet stopped being the active one. */
 export class SheetGoneError extends Error {}
 
+/** The error of an open whose signal was aborted. */
+const OPEN_CANCELLED = 'workbook open was cancelled';
+
 /** The worker as the proxy uses it (a test can pass its own). */
 export interface WorkbookWorkerPort {
   onmessage: ((event: MessageEvent<WorkbookWorkerMessage>) => void) | null;
@@ -75,19 +78,19 @@ export interface WorkbookWorkerPort {
 export interface WorkbookWorkerOptions extends OpenWorkbookOptions {
   /** Shared Yrs state applied before the proxy is returned. */
   initialUpdate?: Uint8Array;
+  /** Aborted before the open finishes: the worker ends and the open rejects. */
+  signal?: AbortSignal;
   createWorker?: () => WorkbookWorkerPort;
 }
 
 function spawnWorkbookWorker(): WorkbookWorkerPort {
+  // module workers are required, with no main-thread fallback: say why the open fails.
+  if (typeof Worker === 'undefined')
+    throw new Error('this browser cannot run the workbook: it has no module workers');
   return new Worker(new URL('./workbookWorker.js', import.meta.url), {
     type: 'module',
     name: 'betteroffice-xlsx-workbook',
   });
-}
-
-/** Whether this environment can run the workbook in a worker. */
-export function isWorkbookWorkerAvailable(): boolean {
-  return typeof Worker !== 'undefined';
 }
 
 /**
@@ -98,6 +101,8 @@ export async function openWorkbookWorker(
   bytes: Uint8Array,
   options: WorkbookWorkerOptions = {}
 ): Promise<WorkbookProxy> {
+  const { signal } = options;
+  if (signal?.aborted) throw new Error(OPEN_CANCELLED);
   const worker = (options.createWorker ?? spawnWorkbookWorker)();
   const pending = new Map<
     number,
@@ -165,6 +170,8 @@ export async function openWorkbookWorker(
 
   const owned = bytes.slice();
   const initial = options.initialUpdate?.slice();
+  const cancel = () => fail(new Error(OPEN_CANCELLED));
+  signal?.addEventListener('abort', cancel, { once: true });
   let opened: WorkbookOpened;
   try {
     opened = await send<WorkbookOpened>(
@@ -180,6 +187,8 @@ export async function openWorkbookWorker(
   } catch (error) {
     worker.terminate();
     throw error;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
   }
 
   const calls = Object.fromEntries(

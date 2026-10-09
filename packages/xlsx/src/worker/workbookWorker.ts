@@ -78,7 +78,16 @@ let selectionReads: {
 
 scope.onmessage = (event) => {
   const request = event.data;
-  queue = queue.then(() => handle(request));
+  queue = queue
+    .then(() => handle(request))
+    .catch((error: unknown) => {
+      // a reply the worker could not post: thrown outside the queue, it
+      // fails the workbook through the proxy's onerror instead of leaving
+      // this and every later request unanswered.
+      setTimeout(() => {
+        throw error;
+      });
+    });
 };
 
 async function handle(request: WorkbookWorkerRequest): Promise<void> {
@@ -125,11 +134,6 @@ async function answer(request: WorkbookWorkerRequest): Promise<unknown> {
       proposals: isProposalsAvailable(),
       png: isPngExportAvailable(),
     } satisfies WorkbookOpened;
-  }
-  if (request.type === 'dispose') {
-    workbook?.dispose();
-    workbook = null;
-    return null;
   }
   const open = workbook;
   if (!open) throw new Error('workbook is not open');

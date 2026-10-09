@@ -977,6 +977,8 @@ function XlsxEditorContent({
     let unsubscribeUpdates = () => {};
     let cleanupReady = () => {};
     let disposed = false;
+    // closing or swapping the file during a long open ends its worker at once.
+    const opening = new AbortController();
     const runReadyCleanup = () => {
       const cleanup = cleanupReady;
       cleanupReady = () => {};
@@ -988,6 +990,7 @@ function XlsxEditorContent({
       collaborative: collaborationEnabled,
       clientId: collaborationClientId,
       initialUpdate: collaborationInitialUpdate,
+      signal: opening.signal,
     }).then(
       (opened) => {
         if (disposed) {
@@ -1052,6 +1055,7 @@ function XlsxEditorContent({
     );
     return () => {
       disposed = true;
+      opening.abort();
       runReadyCleanup();
       unsubscribeUpdates();
       proxy?.dispose();

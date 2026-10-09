@@ -96,7 +96,6 @@ export {
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
 export {
-  isWorkbookWorkerAvailable,
   openWorkbookWorker,
   SheetGoneError,
 } from './worker/client';

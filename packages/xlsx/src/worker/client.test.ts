@@ -193,6 +193,39 @@ describe('workbook worker', () => {
     expect((await proxy.frame(view)).formatting.bold).toBeFalsy();
   });
 
+  it('ends the worker when its open is cancelled', async () => {
+    let terminated = false;
+    const opening = new AbortController();
+    const open = openWorkbookWorker(sample(), {
+      signal: opening.signal,
+      // a worker that never answers, like one still opening a large file.
+      createWorker: () => ({
+        onmessage: null,
+        onerror: null,
+        onmessageerror: null,
+        postMessage: () => {},
+        terminate: () => {
+          terminated = true;
+        },
+      }),
+    });
+    opening.abort();
+    expect(terminated).toBe(true);
+    const error = await open.then(() => null, (e: Error) => e.message);
+    expect(error).toBe('workbook open was cancelled');
+  });
+
+  it('says why the open fails where there are no workers', async () => {
+    const { Worker } = globalThis;
+    Reflect.deleteProperty(globalThis, 'Worker');
+    try {
+      const error = await openWorkbookWorker(sample()).then(() => null, (e: Error) => e.message);
+      expect(error).toBe('this browser cannot run the workbook: it has no module workers');
+    } finally {
+      globalThis.Worker = Worker;
+    }
+  });
+
   it('fails every request once disposed', async () => {
     const proxy = await worker(48);
     proxy.dispose();
