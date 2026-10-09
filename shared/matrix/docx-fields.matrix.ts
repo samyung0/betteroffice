@@ -363,8 +363,9 @@ const NESTED_AFTER: Record<string, string> = {
   "[REF|xL(AA)[PAGE|7]L(BB)]": holder(field(`${run("x")}${link(run("AA"))}${field(run("7"), " PAGE ")}${link(run("BB"), "other")}`, " REF a \\h ")),
 };
 
-// Review F3 (accepted 2026-10-05): after two peers each delete half a link, Undo brings the text back without its
-// link; rows record it for one and both peers' Undo, also for a link outside any field.
+// Review F3: two peers each delete half a link, then one or both peers Undo, also for a link outside any field. The
+// field's rows are exact since the formatting cleanup is off and the field re-reads its shown text after the Undo
+// (Epo 2026-10-09/10); while the cleanup ran, Undo brought the text back without its link (accepted 2026-10-05).
 const PLAIN_LINK = p(P, `${run("a ")}${link(run("AA"))}${run(" b")}`);
 const peersUndo =
   (a: Edit, b: Edit, both: boolean): Edit =>

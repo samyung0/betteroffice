@@ -93,12 +93,12 @@ Accepted differences and unresolved cases stay in the baseline, so fixes show as
   it as text after the field (no tail move), so concurrent deletes converge without duplicates. One peer, two peers
   deleting the same link, and two peers each deleting half of it all land here; the `text` oracle checks the two-peer
   rows against one peer's delete.
-- `exact+text` rows (accepted 2026-10-05): two peers each delete half a field's last link, then one or both press
-  Undo. The two half deletes land exactly (each receiving peer re-reads the field's shown text), but the text an Undo
-  restores comes back without its link and child marks, before the field (yrs drops the formatting around text both
-  peers deleted); the `text` oracle (one peer deleting its half, or the untouched file) keeps its link. The same rows
-  over a plain hyperlink are `exact` and record text only: units carry no link marks, so these rows cannot see the
-  link loss (the saved file has `a AA b`, no link) or any later change to it.
+- Two peers each delete half a field's last link, then one or both press Undo: `exact`. The two half deletes land
+  exactly (each receiving peer re-reads the field's shown text), and so does the Undo: with yrs's formatting cleanup
+  off (Epo 2026-10-09) the restored text keeps its link and child marks, and the field re-reads its shown text after
+  the Undo and when a peer's update restores the link (Epo 2026-10-10). They were `exact+text` (accepted 2026-10-05)
+  while the cleanup dropped the formatting around text both peers deleted. The same rows over a plain hyperlink are
+  `exact` and record text only: units carry no link marks, so these rows cannot see whether the link survives.
 - `exact+moved` rows (accepted 2026-10-05, the concurrent-join class): Enter in `[REF|xL(AA)yy]`'s link while a peer
   deletes the whole field brings the field back. The nested `[REF|L(AA)[PAGE|7]yy]` row has no `text` oracle, so it is
   `exact` although the field comes back there too; it records the save only.
