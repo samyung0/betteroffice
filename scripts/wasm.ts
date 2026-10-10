@@ -141,6 +141,25 @@ async function intact(dir: string, expected: Record<string, string> | undefined)
   return true;
 }
 
+/** Sorts wasm-bindgen's raw export lists (`InitOutput`, the `_bg.wasm.d.ts` consts): they
+ * follow the linker's export order, which differs between Windows and Linux builds. */
+export function sortRawExports(declarations: string): string {
+  const out: string[] = [];
+  let run: string[] = [];
+  let initOutput = false;
+  for (const line of declarations.split('\n')) {
+    if (initOutput && line === '}') initOutput = false;
+    if (initOutput || line.startsWith('export const ')) {
+      run.push(line);
+      continue;
+    }
+    out.push(...run.sort(), line);
+    run = [];
+    if (line === 'export interface InitOutput {') initOutput = true;
+  }
+  return [...out, ...run.sort()].join('\n');
+}
+
 /** Builds every module whose inputs or vendored output changed. */
 export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
   requireWasmPack();
@@ -199,8 +218,9 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
       resolve(dest, `${name}.js`),
       glue.replace(fallback, `throw new Error('${crate} requires an explicit module or URL');`)
     );
-    for (const file of files.filter((file) => file !== `${name}.js`)) {
-      await copyFile(resolve(output, file), resolve(dest, file));
+    await copyFile(resolve(output, `${name}_bg.wasm`), resolve(dest, `${name}_bg.wasm`));
+    for (const file of [`${name}.d.ts`, `${name}_bg.wasm.d.ts`]) {
+      await writeFile(resolve(dest, file), sortRawExports(await readFile(resolve(output, file), 'utf8')));
     }
 
     await mkdir(dirname(stamp), { recursive: true });

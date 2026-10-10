@@ -175,21 +175,32 @@ export function vertical_move_json(display_list: string, position: number, direc
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
+    readonly __externref_table_alloc: () => number;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_docxviewdocument_free: (a: number, b: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_start: () => void;
+    readonly betteroffice_memory_grows: () => number;
+    readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
+    readonly close_display_list: (a: number) => void;
     readonly docxviewdocument_displayPagesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly docxviewdocument_fontRequirementsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly docxviewdocument_layout: (a: number, b: number, c: number) => [number, number, number];
     readonly docxviewdocument_layoutRequestJson: (a: number) => [number, number];
     readonly docxviewdocument_open: (a: number, b: number) => [number, number, number];
     readonly docxviewdocument_version: () => [number, number];
-    readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
     readonly layout_document_json: (a: number, b: number) => [number, number, number, number];
     readonly measure_paragraph_json: (a: number, b: number) => [number, number, number, number];
+    readonly memory: WebAssembly.Memory;
     readonly open_display_list: (a: number, b: number) => [number, number, number];
     readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
     readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
@@ -201,17 +212,6 @@ export interface InitOutput {
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-    readonly install_panic_hook: () => void;
-    readonly close_display_list: (a: number) => void;
-    readonly betteroffice_memory_grows: () => number;
-    readonly __wbindgen_exn_store: (a: number) => void;
-    readonly __externref_table_alloc: () => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
-    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_start: () => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
