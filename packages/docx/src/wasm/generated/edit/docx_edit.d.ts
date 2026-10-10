@@ -102,9 +102,11 @@ export class EditSession {
     apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, values_json: string, previous_json: string, author_name?: string | null, author_date?: string | null): void;
     /**
      * [`EditSession::apply_update_with_inference`] for the replica peers edit
-     * through: it then re-reads what each field a deleted range now ends at
-     * shows, and renames paragraph ids concurrent splits duplicated, as local
-     * system edits its peers and mirrors (the resident engine) receive.
+     * through: it then re-reads what each field a deleted range or an
+     * inserted item now ends at shows, renames paragraph ids concurrent
+     * splits duplicated and re-anchors markers that name text this replica's
+     * Undo restored, as local system edits its peers and mirrors (the
+     * resident engine) receive.
      */
     apply_peer_update(update: Uint8Array): string;
     /**
