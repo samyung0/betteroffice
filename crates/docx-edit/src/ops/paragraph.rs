@@ -1070,18 +1070,9 @@ impl EditingDoc {
         let touched = {
             let txn = yrs::Transact::transact(self.yrs_doc());
             let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
-            for (client, ranges) in inserted.iter() {
-                for range in ranges.iter() {
-                    let mut clock = range.start;
-                    while clock < range.end {
-                        let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
-                            break;
-                        };
-                        clock = item.id().clock + item.len();
-                        if let Some((story, para_id)) = inserted_para_id(&txn, item) {
-                            touched.entry(story).or_default().insert(para_id);
-                        }
-                    }
+            for item in crate::items_in(&txn, &inserted) {
+                if let Some((story, para_id)) = inserted_para_id(&txn, item) {
+                    touched.entry(story).or_default().insert(para_id);
                 }
             }
             touched

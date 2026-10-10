@@ -988,6 +988,49 @@ fn write_pilcrow_properties(
     }
 }
 
+/// The items `set` names, by client and clock. A catch-up update holds
+/// garbage-collected runs where a peer deleted a shared type (a paragraph
+/// mark a join removed, a field, a comment); they are stepped over by their
+/// length, so the items after them are read too.
+pub(crate) fn items_in<T: ReadTxn>(txn: &T, set: &yrs::IdSet) -> Vec<yrs::block::ItemPtr> {
+    let mut items = Vec::new();
+    for (client, ranges) in set.iter() {
+        for range in ranges.iter() {
+            let mut clock = range.start;
+            while clock < range.end {
+                let Some((block, item)) =
+                    txn.store().get_block_range(&yrs::ID::new(*client, clock))
+                else {
+                    break;
+                };
+                items.extend(item);
+                clock = block.clock + block.len;
+            }
+        }
+    }
+    items
+}
+
+/// The garbage-collected runs within `set`: tests check that a catch-up
+/// update holds one.
+#[cfg(test)]
+pub(crate) fn collected_runs<T: ReadTxn>(txn: &T, set: &yrs::IdSet) -> usize {
+    let mut runs = 0;
+    for (client, ranges) in set.iter() {
+        for range in ranges.iter() {
+            let mut clock = range.start;
+            while let Some((block, item)) = (clock < range.end)
+                .then(|| txn.store().get_block_range(&yrs::ID::new(*client, clock)))
+                .flatten()
+            {
+                runs += usize::from(item.is_none());
+                clock = block.clock + block.len;
+            }
+        }
+    }
+    runs
+}
+
 fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
     match map.get(txn, key) {
         Some(Out::Any(Any::String(value))) => Some(value.to_string()),

@@ -176,27 +176,14 @@ pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &IdSet) -> bool {
         .map(|root| BranchPtr::from(<yrs::MapRef as AsRef<Branch>>::as_ref(&root)))
         .collect();
     let in_roots = |branch: Option<BranchPtr>| branch.is_some_and(|branch| roots.contains(&branch));
-    inserted.iter().any(|(client, ranges)| {
-        ranges.iter().any(|range| {
-            let mut clock = range.start;
-            while clock < range.end {
-                let Some(item) = txn.store().get_item(&yrs::ID::new(*client, clock)) else {
-                    return false;
-                };
-                clock = item.id().clock + item.len();
-                let parent = item.parent_branch();
-                if in_roots(parent)
-                    || in_roots(
-                        parent
-                            .and_then(|entry| entry.item())
-                            .and_then(|entry| entry.parent_branch()),
-                    )
-                {
-                    return true;
-                }
-            }
-            false
-        })
+    crate::items_in(txn, inserted).into_iter().any(|item| {
+        let parent = item.parent_branch();
+        in_roots(parent)
+            || in_roots(
+                parent
+                    .and_then(|entry| entry.item())
+                    .and_then(|entry| entry.parent_branch()),
+            )
     })
 }
 
@@ -773,5 +760,50 @@ mod tests {
         for peer in &peers[1..] {
             assert_eq!(read(peer), read(&peers[0]));
         }
+    }
+
+    /// A catch-up update holds a garbage-collected run where the peer deleted
+    /// a shared type (the paragraph mark of a split it joined back); a
+    /// bookmark it sets after that run still counts as a marker write.
+    #[test]
+    fn a_marker_written_after_collected_content_counts() {
+        let base = EditingDoc::new(1);
+        base.create_story("body", "Hello brave new world.", "Normal", "left")
+            .unwrap();
+        let state = base.encode_state_as_update_v1();
+        let (peer, receiver) = (EditingDoc::new(702), EditingDoc::new(703));
+        for doc in [&peer, &receiver] {
+            doc.apply_update_v1(&state).unwrap();
+        }
+        let ctx = EditCtx::local("", "");
+        peer.split_paragraph(&ctx, Position::new("body", 5))
+            .unwrap();
+        peer.delete_range(&ctx, crate::StoryRange::new("body", 5, 6))
+            .unwrap();
+        bookmark(&peer, "body", 7, 6, 11);
+        let update = peer
+            .encode_diff_v1(&receiver.encode_state_vector_v1())
+            .unwrap();
+        let inserted = Arc::new(std::sync::Mutex::new(IdSet::new()));
+        let _subscription = {
+            let inserted = Arc::clone(&inserted);
+            receiver
+                .yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    inserted
+                        .lock()
+                        .unwrap()
+                        .merge_with(txn.insert_set().clone());
+                })
+                .unwrap()
+        };
+        receiver.apply_update_v1(&update).unwrap();
+        let inserted = inserted.lock().unwrap();
+        let txn = receiver.yrs_doc().transact();
+        assert!(
+            crate::collected_runs(&txn, &inserted) > 0,
+            "no collected run"
+        );
+        assert!(writes_markers(&txn, &inserted));
     }
 }

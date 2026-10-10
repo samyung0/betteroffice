@@ -1977,6 +1977,64 @@ fn concurrent_mid_splits_leave_every_peer_the_same_distinct_ids() {
     }
 }
 
+/// A catch-up update holds a garbage-collected run where the peer deleted a
+/// shared type (the paragraph mark of a split it joined back) before the
+/// mark of its next split: the receiver still renames the paragraph id that
+/// split duplicated with its own.
+#[test]
+fn a_split_after_collected_content_is_renamed() {
+    use yrs::{ReadTxn, Transact};
+    let base = EditingDoc::new(1);
+    base.create_story("body", "Alpha beta gamma", "Normal", "left")
+        .unwrap();
+    let update = base.encode_state_as_update_v1();
+    let (receiver, peer) = (EditingDoc::new(2), EditingDoc::new(3));
+    for doc in [&receiver, &peer] {
+        doc.apply_update_v1(&update).unwrap();
+    }
+    receiver
+        .split_paragraph(&ctx(), Position::new("body", 2))
+        .unwrap();
+    peer.split_paragraph(&ctx(), Position::new("body", 12))
+        .unwrap();
+    peer.delete_range(&ctx(), StoryRange::new("body", 12, 13))
+        .unwrap();
+    peer.split_paragraph(&ctx(), Position::new("body", 7))
+        .unwrap();
+    let diff = peer
+        .encode_diff_v1(&receiver.encode_state_vector_v1())
+        .unwrap();
+    receiver.applying_peer_update(|| receiver.apply_update_v1(&diff).unwrap());
+    {
+        let txn = receiver.yrs_doc().transact();
+        let peer_client = yrs::ClientID::new(3);
+        let end = txn.state_vector().get(&peer_client);
+        let mut clock = 0;
+        let mut collected = 0;
+        while clock < end {
+            let (block, item) = txn
+                .store()
+                .get_block_range(&yrs::ID::new(peer_client, clock))
+                .unwrap();
+            collected += usize::from(item.is_none());
+            clock = block.clock + block.len;
+        }
+        assert!(collected > 0, "no collected run");
+    }
+    let ids: Vec<ParagraphId> = receiver
+        .paragraphs("body")
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| paragraph.para_id)
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        3,
+        "{ids:?}"
+    );
+}
+
 /// Enter at a paragraph's end puts the new mark after the source one, so a
 /// peer's concurrent alignment change stays on the text, and two peers'
 /// Enters at that end give each new paragraph an id of its own.

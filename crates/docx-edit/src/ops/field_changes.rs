@@ -817,18 +817,11 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
             .collect();
         // Every inserted item: a restored copy and a peer's system write can
         // share one range of clocks.
-        for (client, ranges) in inserted.iter() {
-            for range in ranges.iter() {
-                let mut clock = range.start;
-                while clock < range.end {
-                    let Some(item) = txn.store().get_item(&ID::new(*client, clock)) else {
-                        break;
-                    };
-                    probes.push((*item.id(), true));
-                    clock = item.id().clock + item.len();
-                }
-            }
-        }
+        probes.extend(
+            crate::items_in(&txn, &inserted)
+                .into_iter()
+                .map(|item| (*item.id(), true)),
+        );
         for (end, restores) in probes {
             let Some((next, story)) = txn
                 .store()
@@ -2227,6 +2220,89 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(deleted, 1, "deleting the link re-read no field");
+    }
+
+    /// A catch-up update holds a garbage-collected run (the paragraph mark of
+    /// a split the peer joined back) before the link the peer's Undo
+    /// restored, right before a field that shows text: the receiver re-reads
+    /// that field. The receiver deleted the link itself, so the peer's delete
+    /// of it changes nothing there and only the restored copy can say so.
+    #[test]
+    fn a_link_restored_after_collected_content_is_re_read() {
+        use crate::{EditCtx, EditingDoc, Position, StoryRange, UndoSession};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use yrs::Transact;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="11111111"><w:r><w:t>a</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>x</w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>AA</w:t></w:r></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>tail text</w:t></w:r></w:p></w:body></w:document>"#;
+        let bytes = ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.to_vec())]).unwrap();
+        let base = EditingDoc::new(7);
+        crate::seed::seed_from_docx(&base, &bytes).unwrap();
+        let state = base.encode_state_as_update_v1();
+        let (peer, receiver) = (EditingDoc::new(702), EditingDoc::new(703));
+        for doc in [&peer, &receiver] {
+            doc.apply_update_v1(&state).unwrap();
+        }
+        let shown = |doc: &EditingDoc| {
+            let txn = doc.yrs_doc().transact();
+            let story = crate::story_ref(&txn, "body").unwrap();
+            snapshot(&story, &txn)
+                .iter()
+                .filter_map(|chunk| match &chunk.kind {
+                    ChunkKind::Embed(Some(map)) => map_string(map, &txn, "displayText"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let ctx = EditCtx::local("Ada", "2026-10-10T00:00:00Z");
+        // "a", the link's "AA" at 1..3, the field (showing "x") at 3, then
+        // "tail text" from 5.
+        receiver
+            .delete_range(&ctx, StoryRange::new("body", 1, 3))
+            .unwrap();
+        assert_eq!(shown(&receiver), ["x"]);
+        peer.split_paragraph(&ctx, Position::new("body", 7))
+            .unwrap();
+        peer.delete_range(&ctx, StoryRange::new("body", 7, 8))
+            .unwrap();
+        let undo = UndoSession::new();
+        undo.track(&peer);
+        peer.delete_range(&ctx, StoryRange::new("body", 1, 3))
+            .unwrap();
+        undo.add_undo_barrier();
+        assert!(undo.undo());
+        let update = peer
+            .encode_diff_v1(&receiver.encode_state_vector_v1())
+            .unwrap();
+        let rereads = Arc::new(AtomicUsize::new(0));
+        let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
+        let _observing = {
+            let (rereads, inserted) = (Arc::clone(&rereads), Arc::clone(&inserted));
+            receiver
+                .yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    if txn.origin() == Some(&yrs::Origin::from("system")) {
+                        rereads.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        inserted
+                            .lock()
+                            .unwrap()
+                            .merge_with(txn.insert_set().clone());
+                    }
+                })
+                .unwrap()
+        };
+        refreshing_fields(receiver.yrs_doc(), || {
+            receiver.apply_update_v1(&update).unwrap()
+        });
+        let txn = receiver.yrs_doc().transact();
+        assert!(
+            crate::collected_runs(&txn, &inserted.lock().unwrap()) > 0,
+            "no collected run"
+        );
+        assert_eq!(
+            rereads.load(Ordering::Relaxed),
+            1,
+            "the field was not re-read"
+        );
     }
 
     #[test]

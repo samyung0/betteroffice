@@ -1957,9 +1957,11 @@ impl EditSession {
     }
 
     /// [`EditSession::apply_update_with_inference`] for the replica peers edit
-    /// through: it then re-reads what each field a deleted range now ends at
-    /// shows, and renames paragraph ids concurrent splits duplicated, as local
-    /// system edits its peers and mirrors (the resident engine) receive.
+    /// through: it then re-reads what each field a deleted range or an
+    /// inserted item now ends at shows, renames paragraph ids concurrent
+    /// splits duplicated and re-anchors markers that name text this replica's
+    /// Undo restored, as local system edits its peers and mirrors (the
+    /// resident engine) receive.
     pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
         let doc = self.engine.doc();
         doc.applying_peer_update(|| {
