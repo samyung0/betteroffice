@@ -810,11 +810,20 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
         let txn = doc.transact();
         // The first live, countable item right of `item`, as
         // `Store::next_live_item` finds it, without looking `item` up again.
-        let next_live = |item: ItemPtr| {
+        // An insert's walk stops at another inserted item that is deleted or
+        // not countable (a format item): that item's own walk goes on from
+        // there by the same rule, so a run of k such items in one update
+        // costs k steps, not k²/2.
+        let next_live = |item: ItemPtr, restores: bool| {
             let mut next = item.right();
             while let Some(right) = next {
+                #[cfg(test)]
+                tests::PROBE_STEPS.with(|steps| steps.set(steps.get() + 1));
                 if !right.is_deleted() && right.is_countable() {
                     return Some(right);
+                }
+                if restores && inserted.contains(right.id()) {
+                    return None;
                 }
                 next = right.right();
             }
@@ -828,11 +837,11 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
             .collect::<Vec<_>>();
         // Every inserted item: a restored copy and a peer's system write can
         // share one range of clocks.
-        let inserted = crate::items_in(&txn, &inserted)
+        let inserted_items = crate::items_in(&txn, &inserted)
             .into_iter()
             .map(|item| (item, true));
-        for (item, restores) in deleted.into_iter().chain(inserted) {
-            let Some(next) = next_live(item) else {
+        for (item, restores) in deleted.into_iter().chain(inserted_items) {
+            let Some(next) = next_live(item, restores) else {
                 continue;
             };
             let Some(story) = next
@@ -2157,8 +2166,15 @@ fn resolved_sdt_content(content: &Any, how: Resolve<'_>, style: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use serde_json::json;
+
+    thread_local! {
+        /// The items the re-read probes' walks stepped over.
+        pub(super) static PROBE_STEPS: Cell<usize> = const { Cell::new(0) };
+    }
 
     /// The vendored yrs's `Store::next_live_item` (the peer re-read's lookup):
     /// tested here, since CI does not run the vendored crate's own tests.
@@ -2317,6 +2333,43 @@ mod tests {
             rereads.load(Ordering::Relaxed),
             1,
             "the field was not re-read"
+        );
+    }
+
+    /// One update holding a long run of deleted items (each typed at the
+    /// start, so none merges with the next, then all deleted) costs the
+    /// re-read probes steps linear in the run, as a reconnect or the runtime's
+    /// queued updates bring: an insert's walk stops at the next inserted
+    /// tombstone, whose own walk goes on.
+    #[test]
+    fn a_long_deleted_run_in_one_update_costs_linear_probe_steps() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Doc, StateVector, Text, Transact, Update};
+        let run = 2_000;
+        let writer = Doc::with_client_id(1);
+        let text = writer.get_or_insert_text("story");
+        for _ in 0..run {
+            text.insert(&mut writer.transact_mut(), 0, "x");
+        }
+        text.remove_range(&mut writer.transact_mut(), 0, run);
+        let state = writer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let fresh = Doc::with_client_id(2);
+        fresh.get_or_insert_text("story");
+        PROBE_STEPS.with(|steps| steps.set(0));
+        refreshing_fields(&fresh, || {
+            fresh
+                .transact_mut()
+                .apply_update(Update::decode_v1(&state).unwrap())
+                .unwrap()
+        });
+        // One step per inserted item, and the deleted range's own walk over
+        // the run; a walk to the run's end from every item takes 2 million.
+        let steps = PROBE_STEPS.with(Cell::get);
+        assert!(
+            steps <= 3 * run as usize,
+            "{steps} probe steps for a run of {run}"
         );
     }
 
