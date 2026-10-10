@@ -13,8 +13,8 @@ use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position};
 use yrs::types::{Attrs, EntryChange};
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, ClientID, DeepObservable, Doc, Map, MapPrelim, MapRef, Options, ReadTxn, StateVector,
-    Text, Transact, Update,
+    Any, ClientID, DeepObservable, Doc, GetString, Map, MapPrelim, MapRef, Options, ReadTxn,
+    StateVector, Text, Transact, Update,
 };
 
 fn doc(client: u64) -> Doc {
@@ -105,6 +105,51 @@ fn each_update_holds_the_structs_a_state_vector_diff_gives() {
             more => panic!("step {step} sent {} updates", more.len()),
         }
     }
+}
+
+/// A struct that arrives before one its client wrote earlier is integrated
+/// behind a skip, where the state vector stops. Its transaction's update,
+/// read from the insert set, holds that struct; diffing the state vectors, as
+/// upstream yrs does, gave an update without blocks. Pinned: the one place
+/// the insert set and a state-vector diff differ.
+#[test]
+fn a_struct_integrated_behind_a_skip_is_in_its_update() {
+    let five = ClientID::new(5);
+    let writer = doc(5);
+    let text = writer.get_or_insert_text("story");
+    text.insert(&mut writer.transact_mut(), 0, "abc");
+    let first = writer
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    // 5#3 "X" stays behind; 5#4 "Y" follows "c".
+    text.insert(&mut writer.transact_mut(), 0, "X");
+    text.insert(&mut writer.transact_mut(), 4, "Y");
+    let mut has_x = StateVector::default();
+    has_x.set_max(five, 4);
+    let only_y = writer.transact().encode_state_as_update_v1(&has_x);
+    let main = doc(7);
+    let main_text = main.get_or_insert_text("story");
+    main.transact_mut()
+        .apply_update(Update::decode_v1(&first).unwrap())
+        .unwrap();
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&sent);
+    let _subscription = main
+        .observe_update_v1(move |_txn, event| sink.borrow_mut().push(event.update.clone()))
+        .unwrap();
+    main.transact_mut()
+        .apply_update(Update::decode_v1(&only_y).unwrap())
+        .unwrap();
+    assert_eq!(main_text.get_string(&main.transact()), "abcY");
+    assert_eq!(main.transact().state_vector().get(&five), 3);
+    let sent = sent.borrow();
+    assert_eq!(sent.len(), 1);
+    let blocks = structs(&sent[0]);
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    assert!(
+        blocks[0].contains("<5#4>") && blocks[0].contains("'Y'"),
+        "{blocks:?}"
+    );
 }
 
 #[test]
