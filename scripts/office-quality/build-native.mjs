@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,6 +13,13 @@ export function nativeFeatures(layoutSource) {
   const signature = layoutSource.match(/pub fn register_substitute_measure_font\s*\(([^)]*)\)/s)?.[1];
   if (!signature) return [];
   return [/\bbold\s*:/.test(signature) ? 'substitute-styles' : 'substitute-metrics'];
+}
+
+/** The source's own patched yrs, which its edit crates need; empty when the source has none. */
+export function cargoPatches(source) {
+  const yrs = resolve(source, 'third_party/yrs');
+  if (!existsSync(resolve(yrs, 'Cargo.toml'))) return '';
+  return `\n[patch.crates-io]\nyrs = { path = ${JSON.stringify(yrs)} }\n`;
 }
 
 export async function buildNative(source, output) {
@@ -50,7 +58,7 @@ sha2 = "0.10"
 [profile.release]
 opt-level = 3
 lto = "thin"
-`);
+${cargoPatches(source)}`);
   const target = resolve(process.env.CARGO_TARGET_DIR ?? resolve(output, 'target'));
   const args = ['build', '--release', '--manifest-path', resolve(build, 'Cargo.toml')];
   if (features.length) args.push('--features', features.join(','));

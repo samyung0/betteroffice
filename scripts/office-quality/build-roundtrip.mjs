@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { cargoPatches } from './build-native.mjs';
 
 const execute = promisify(execFile);
 const [format, sourceArg, outputArg, mode] = process.argv.slice(2);
@@ -31,7 +32,7 @@ sha2 = "0.10"
 [profile.release]
 opt-level = 3
 lto = "thin"
-`);
+${cargoPatches(source)}`);
 const target = resolve(process.env.CARGO_TARGET_DIR ?? resolve(output, 'target'));
 await new Promise((accept, reject) => {
   const child = spawn('cargo', [...(mode === '--check' ? ['check'] : ['build', '--release']), '--manifest-path', resolve(build, 'Cargo.toml')], {

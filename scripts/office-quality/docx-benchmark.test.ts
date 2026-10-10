@@ -1,6 +1,9 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { expect, test } from 'bun:test';
 import { CHANNELS, METHOD, TRIALS, docxShards, mergeDocxBenchmarks, timingSummary } from './docx-benchmark.mjs';
-import { nativeFeatures } from './build-native.mjs';
+import { cargoPatches, nativeFeatures } from './build-native.mjs';
 import { renderSection } from './readme.mjs';
 
 function fixture() {
@@ -120,4 +123,12 @@ test('builds older and current Rust APIs with the same native host', () => {
   expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str) {}')).toEqual(['substitute-metrics']);
   expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str, bold: bool, italic: bool) {}'))
     .toEqual(['substitute-styles']);
+});
+
+test('native builds use the patched yrs of a source checkout that has one', () => {
+  const source = mkdtempSync(join(tmpdir(), 'native-source-'));
+  expect(cargoPatches(source)).toBe('');
+  mkdirSync(join(source, 'third_party/yrs'), { recursive: true });
+  writeFileSync(join(source, 'third_party/yrs/Cargo.toml'), '[package]\nname = "yrs"\n');
+  expect(cargoPatches(source)).toBe(`\n[patch.crates-io]\nyrs = { path = ${JSON.stringify(join(source, 'third_party/yrs'))} }\n`);
 });
