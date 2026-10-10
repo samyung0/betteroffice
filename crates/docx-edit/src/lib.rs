@@ -988,27 +988,19 @@ fn write_pilcrow_properties(
     }
 }
 
-/// The items `set` names, by client and clock. A catch-up update holds
-/// garbage-collected runs where a peer deleted a shared type (a paragraph
-/// mark a join removed, a field, a comment); they are stepped over by their
-/// length, so the items after them are read too.
+/// The items `set` names, by client and clock, each block read once. A
+/// catch-up update holds garbage-collected runs where a peer deleted a shared
+/// type (a paragraph mark a join removed, a field, a comment); they are
+/// stepped over, so the items after them are read too.
 pub(crate) fn items_in<T: ReadTxn>(txn: &T, set: &yrs::IdSet) -> Vec<yrs::block::ItemPtr> {
-    let mut items = Vec::new();
-    for (client, ranges) in set.iter() {
-        for range in ranges.iter() {
-            let mut clock = range.start;
-            while clock < range.end {
-                let Some((block, item)) =
-                    txn.store().get_block_range(&yrs::ID::new(*client, clock))
-                else {
-                    break;
-                };
-                items.extend(item);
-                clock = block.clock + block.len;
-            }
-        }
-    }
-    items
+    set.iter()
+        .flat_map(|(client, ranges)| {
+            ranges
+                .iter()
+                .flat_map(move |range| txn.store().blocks_in(client, range.start..range.end))
+        })
+        .filter_map(|(_, item)| item)
+        .collect()
 }
 
 /// The garbage-collected runs within `set`: tests check that a catch-up

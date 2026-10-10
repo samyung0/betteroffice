@@ -389,6 +389,30 @@ impl Store {
         Some((block.range(), block.as_item()))
     }
 
+    /// Patched for BetterOffice: the blocks of `client` that hold clocks in
+    /// `clocks` (items or garbage-collected runs) with their items, in clock
+    /// order. One search finds the first, so a walk over what an update
+    /// inserted reads each block once.
+    pub fn blocks_in(
+        &self,
+        client: &ClientID,
+        clocks: std::ops::Range<u32>,
+    ) -> impl Iterator<Item = (BlockRange, Option<ItemPtr>)> + '_ {
+        let list = self.blocks.get_client(client);
+        let first = list
+            .filter(|list| list.len() > 0)
+            .and_then(|list| list.find_index(clocks.start));
+        list.into_iter()
+            .flat_map(move |list| {
+                (first.unwrap_or(list.len())..list.len()).filter_map(move |at| list.get(at))
+            })
+            .map(|block| {
+                let block = block.as_ref();
+                (block.range(), block.as_item())
+            })
+            .take_while(move |(range, _)| range.clock < clocks.end)
+    }
+
     /// Patched for BetterOffice: the ID and parent of the first live, countable
     /// item right of the item holding `id` (also a deleted one), found by
     /// walking right from it instead of computing an index.

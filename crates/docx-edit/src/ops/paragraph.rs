@@ -1065,17 +1065,16 @@ impl EditingDoc {
         let result = apply();
         drop(subscription);
         let inserted = std::mem::take(&mut *inserted.lock().unwrap());
-        let markers =
-            crate::bookmarks::writes_markers(&yrs::Transact::transact(self.yrs_doc()), &inserted);
-        let touched = {
+        let (markers, touched) = {
             let txn = yrs::Transact::transact(self.yrs_doc());
+            let items = crate::items_in(&txn, &inserted);
             let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
-            for item in crate::items_in(&txn, &inserted) {
+            for &item in &items {
                 if let Some((story, para_id)) = inserted_para_id(&txn, item) {
                     touched.entry(story).or_default().insert(para_id);
                 }
             }
-            touched
+            (crate::bookmarks::writes_markers(&txn, &items), touched)
         };
         if !touched.is_empty() {
             self.rename_duplicates(Some(&touched));

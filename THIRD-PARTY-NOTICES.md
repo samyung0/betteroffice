@@ -209,7 +209,8 @@ Read-only accessors, for structure walks and guards that compute no index:
 - `Branch::start`, `item`, `entry_item` and `map_items` (`src/branch.rs`);
 - `Update::blocks` and `UpdateBlock` (`src/update.rs`, re-exported in
   `src/lib.rs`);
-- `Store::get_item`, `get_block_range` and `next_live_item` (the first live
+- `Store::get_item`, `get_block_range`, `blocks_in` (a client's blocks over a
+  clock range, found with one search) and `next_live_item` (the first live
   item right of a deleted one, so the DOCX editor finds the field an edit
   ends at) (`src/store.rs`, with unit tests and tests in `crates/docx-edit`);
 - `StickyIndex::get_offsets` (`src/sticky_index.rs`), which resolves many

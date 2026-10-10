@@ -788,9 +788,10 @@ pub(crate) fn refresh_shown(txn: &mut TransactionMut<'_>, story: &TextRef, ids: 
 /// one step right from its last item, each inserted item one step right
 /// from it; only a field found there reads its story.
 pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) -> R {
+    use yrs::block::{ItemContent, ItemPtr};
     use yrs::branch::BranchPtr;
     use yrs::types::TypeRef;
-    use yrs::{ID, IdSet, MapRef, Nested, Transact};
+    use yrs::{ID, IdSet, MapRef, Transact};
     let touched = Arc::new(std::sync::Mutex::new((IdSet::new(), IdSet::new())));
     let subscription = {
         let touched = Arc::clone(&touched);
@@ -807,32 +808,46 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
     let mut owners: Vec<(BranchPtr, i64)> = Vec::new();
     {
         let txn = doc.transact();
-        let mut probes: Vec<(ID, bool)> = deleted
+        // The first live, countable item right of `item`, as
+        // `Store::next_live_item` finds it, without looking `item` up again.
+        let next_live = |item: ItemPtr| {
+            let mut next = item.right();
+            while let Some(right) = next {
+                if !right.is_deleted() && right.is_countable() {
+                    return Some(right);
+                }
+                next = right.right();
+            }
+            None
+        };
+        let deleted = deleted
             .iter()
-            .flat_map(|(client, ranges)| {
-                ranges
-                    .iter()
-                    .map(|range| (ID::new(*client, range.end - 1), false))
-            })
-            .collect();
+            .flat_map(|(client, ranges)| ranges.iter().map(|range| ID::new(*client, range.end - 1)))
+            .filter_map(|end| txn.store().get_item(&end))
+            .map(|item| (item, false))
+            .collect::<Vec<_>>();
         // Every inserted item: a restored copy and a peer's system write can
         // share one range of clocks.
-        probes.extend(
-            crate::items_in(&txn, &inserted)
-                .into_iter()
-                .map(|item| (*item.id(), true)),
-        );
-        for (end, restores) in probes {
-            let Some((next, story)) = txn
-                .store()
-                .next_live_item(&end)
-                .filter(|(_, story)| matches!(story.type_ref(), TypeRef::Text))
+        let inserted = crate::items_in(&txn, &inserted)
+            .into_iter()
+            .map(|item| (item, true));
+        for (item, restores) in deleted.into_iter().chain(inserted) {
+            let Some(next) = next_live(item) else {
+                continue;
+            };
+            let Some(story) = next
+                .parent_branch()
+                .filter(|story| matches!(story.type_ref(), TypeRef::Text))
             else {
                 continue;
             };
-            let Some(map) = Nested::<MapRef>::new(next).get(&txn) else {
+            let ItemContent::Type(branch) = next.content() else {
                 continue;
             };
+            if !matches!(branch.type_ref(), TypeRef::Map) {
+                continue;
+            }
+            let map = MapRef::from(BranchPtr::from(branch.as_ref()));
             // Content put back changes what a field shows only from its whole
             // result (none of its projected children left) to its own runs, a
             // part of it; a field showing nothing stays so, which keeps typing

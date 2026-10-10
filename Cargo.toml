@@ -86,10 +86,10 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   drained client; `BlockStore::push` replaces only a skip, never a block
 #   already placed;
 # - read-only APIs: item, branch (`start`, `item`, `entry_item`, `map_items`),
-#   store (`get_item`, `get_block_range`) and update (`Update::blocks`)
-#   accessors, `Store::next_live_item` (the first live item right of a
-#   deleted one, for the DOCX field re-read), `Item::redone` (the local link
-#   to the copy Undo made, for the DOCX marker re-anchor) and
+#   store (`get_item`, `get_block_range`, `blocks_in`) and update
+#   (`Update::blocks`) accessors, `Store::next_live_item` (the first live item
+#   right of a deleted one, for the DOCX field re-read), `Item::redone` (the
+#   local link to the copy Undo made, for the DOCX marker re-anchor) and
 #   `StickyIndex::get_offsets`.
 # CI runs their tests in pptx-edit's yrs_memory, yrs_undo, yrs_undo_order,
 # yrs_hostile, yrs_decode_alloc, yrs_placement and convergence, docx-edit's

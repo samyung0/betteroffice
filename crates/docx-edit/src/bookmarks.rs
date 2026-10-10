@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use yrs::{
-    Any, Assoc, IdSet, IndexedSequence, Map, MapPrelim, Out, ReadTxn, StickyIndex, TextRef,
-    Transact, TransactionMut,
+    Any, Assoc, IndexedSequence, Map, MapPrelim, Out, ReadTxn, StickyIndex, TextRef, Transact,
+    TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -166,9 +166,10 @@ fn restored_copy<T: ReadTxn>(txn: &T, id: &yrs::ID) -> Option<yrs::block::ItemPt
     (redone && !item.is_deleted()).then_some(item)
 }
 
-/// Whether `inserted` (what a transaction inserted) writes a bookmark or a
-/// comment: an entry of either root, or a key of such an entry.
-pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &IdSet) -> bool {
+/// Whether `inserted` (the items a transaction inserted,
+/// [`crate::items_in`]) writes a bookmark or a comment: an entry of either
+/// root, or a key of such an entry.
+pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &[yrs::block::ItemPtr]) -> bool {
     use yrs::branch::{Branch, BranchPtr};
     let roots: Vec<BranchPtr> = [ROOT, crate::COMMENTS]
         .into_iter()
@@ -176,7 +177,7 @@ pub(crate) fn writes_markers<T: ReadTxn>(txn: &T, inserted: &IdSet) -> bool {
         .map(|root| BranchPtr::from(<yrs::MapRef as AsRef<Branch>>::as_ref(&root)))
         .collect();
     let in_roots = |branch: Option<BranchPtr>| branch.is_some_and(|branch| roots.contains(&branch));
-    crate::items_in(txn, inserted).into_iter().any(|item| {
+    inserted.iter().any(|item| {
         let parent = item.parent_branch();
         in_roots(parent)
             || in_roots(
@@ -784,7 +785,7 @@ mod tests {
         let update = peer
             .encode_diff_v1(&receiver.encode_state_vector_v1())
             .unwrap();
-        let inserted = Arc::new(std::sync::Mutex::new(IdSet::new()));
+        let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
         let _subscription = {
             let inserted = Arc::clone(&inserted);
             receiver
@@ -804,6 +805,6 @@ mod tests {
             crate::collected_runs(&txn, &inserted) > 0,
             "no collected run"
         );
-        assert!(writes_markers(&txn, &inserted));
+        assert!(writes_markers(&txn, &crate::items_in(&txn, &inserted)));
     }
 }
