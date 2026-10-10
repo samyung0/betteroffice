@@ -13,7 +13,7 @@ import type {
   TableCellRef,
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
-import { splitClusterRuns } from './clusterRuns';
+import { clusterPieces, splitClusterRuns } from './clusterRuns';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -82,6 +82,8 @@ interface MirrorBuildCtx {
    * element id for the note's doc-backlink to target.
    */
   noteRefIds: Set<string>;
+  /** Joined glyph runs stay one element unless their clip cuts them (text pages). */
+  joinedRuns: boolean;
 }
 
 export interface BuildMirrorPageOptions {
@@ -118,9 +120,17 @@ export function buildMirrorPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
+  return buildPage(page, options, false);
+}
+
+function buildPage(
+  page: DisplayPage,
+  options: BuildMirrorPageOptions,
+  joinedRuns: boolean
+): HTMLElement {
   const doc = options.document ?? document;
   const labels = options.labels;
-  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set() };
+  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set(), joinedRuns };
 
   const pageEl = doc.createElement('div');
   pageEl.className = MIRROR_CLASS_NAMES.page;
@@ -171,23 +181,25 @@ export function buildMirrorPage(
 
 /**
  * The mirror of a page away from the viewport: the accessible tree of
- * {@link buildMirrorPage} (roles, labels, links, language and text nodes in
- * reading order) without positioned runs or geometry. Elements that carry no
- * meaning for assistive technology unwrap into their text and empty ones go,
- * so a long document keeps every page readable by a screen reader while only
- * the pages near the viewport hold the full positioned mirror (one element per
- * glyph run, 100k+ on a 60-page document, styled and laid out on every scroll
- * frame).
+ * {@link buildMirrorPage} (roles, labels, links, language and text in reading
+ * order) without positioned runs or geometry. It is built from the joined text
+ * runs (one link per run, not per character; a run splits per glyph cluster
+ * only where its clip hides part of it), elements that carry no meaning for
+ * assistive technology unwrap into their text, empty ones go, and adjacent text
+ * merges. So a long document keeps every page readable by a screen reader
+ * while only the pages near the viewport hold the full positioned mirror (one
+ * element per glyph cluster, 100k+ on a 60-page document).
  */
 export function buildMirrorTextPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  const pageEl = buildMirrorPage(page, options);
+  const pageEl = buildPage(page, options, true);
   pageEl.classList.add(MIRROR_TEXT_PAGE_CLASS);
   pageEl.style.overflow = 'hidden';
   pageEl.style.setProperty('contain', 'strict');
   flattenMirrorChildren(pageEl);
+  pageEl.normalize();
   return pageEl;
 }
 
@@ -282,8 +294,9 @@ function appendMirrorPrimitives(
   ctx: MirrorBuildCtx
 ): void {
   const blocks = new Map<number | string, BlockGroup>();
+  const runs = ctx.joinedRuns ? primitives.flatMap(splitWhereClipped) : splitClusterRuns(primitives);
 
-  for (const p of splitClusterRuns(primitives)) {
+  for (const p of runs) {
     // live-pipeline blocks carry string ids in blockKey, goldens numeric ids
     // in blockId — exactly one is set when the primitive has block identity
     const blockId = p.kind === 'line' ? undefined : (p.blockKey ?? p.blockId);
@@ -866,23 +879,33 @@ function renderPageBorderMirror(
   return el;
 }
 
+type ClipBox = { x?: number; y?: number; w?: number; h?: number };
+
 /**
  * A run whose middle falls outside its clip is not painted (a table row cut by
  * a page break, which repeats the cut line on the next page, or by an exact
  * row height): screen readers and text-layer selection skip it.
  */
-function hideClippedOut(
-  el: HTMLElement,
-  rect: GeoRect,
-  clip: { x?: number; y?: number; w?: number; h?: number } | undefined
-): void {
-  if (!clip) return;
+function hideClippedOut(el: HTMLElement, rect: GeoRect, clip: ClipBox | undefined): void {
+  if (clip && clippedOut(rect, clip)) el.setAttribute('aria-hidden', 'true');
+}
+
+function clippedOut(rect: GeoRect, clip: ClipBox): boolean {
   const x = rect.x + rect.w / 2;
   const y = rect.y + rect.h / 2;
-  const inside =
+  return !(
     (clip.x === undefined || clip.w === undefined || (x >= clip.x && x <= clip.x + clip.w)) &&
-    (clip.y === undefined || clip.h === undefined || (y >= clip.y && y <= clip.y + clip.h));
-  if (!inside) el.setAttribute('aria-hidden', 'true');
+    (clip.y === undefined || clip.h === undefined || (y >= clip.y && y <= clip.y + clip.h))
+  );
+}
+
+/** A joined run splits per glyph cluster only when its clip hides some clusters and not others. */
+function splitWhereClipped(p: DisplayPrimitive): DisplayPrimitive[] {
+  const clip = p.kind === 'glyphRun' && p.clusterRuns ? p.clipGroup?.clip : undefined;
+  if (p.kind !== 'glyphRun' || !clip) return [p];
+  const hidden = clippedOut(glyphRunRect(p), clip);
+  const pieces = clusterPieces(p);
+  return pieces.every((piece) => clippedOut(glyphRunRect(piece), clip) === hidden) ? [p] : pieces;
 }
 
 function placeAt(el: HTMLElement, rect: GeoRect, offsetY = 0): void {

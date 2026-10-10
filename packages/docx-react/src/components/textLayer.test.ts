@@ -127,10 +127,20 @@ function textNode(root: HTMLElement, text: string): Text {
   throw new Error(`no text node ${text}`);
 }
 
+/** `offset` into the first occurrence of `text`; a far page merges adjacent runs' text. */
+function point(root: HTMLElement, text: string, offset: number): [Text, number] {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const at = (node as Text).data.indexOf(text);
+    if (at >= 0) return [node as Text, at + offset];
+  }
+  throw new Error(`no text ${text}`);
+}
+
 function rangeOver(root: HTMLElement, from: [string, number], to: [string, number]): Range {
   const range = document.createRange();
-  range.setStart(textNode(root, from[0]), from[1]);
-  range.setEnd(textNode(root, to[0]), to[1]);
+  range.setStart(...point(root, ...from));
+  range.setEnd(...point(root, ...to));
   return range;
 }
 
@@ -201,7 +211,7 @@ describe('text layer copy', () => {
       const root = mount(mirror(noted));
       expect(copyAll(root, [noted])).toBe('Body1\nMore');
       const fromNote = document.createRange();
-      fromNote.setStart(textNode(root, 'Note text'), 0);
+      fromNote.setStart(...point(root, 'Note text', 0));
       fromNote.setEndAfter(root.lastChild!);
       expect(textLayerText(fromNote, root, [noted])).toBe('Note text');
       document.body.replaceChildren();
