@@ -109,17 +109,25 @@ describe('DOCX viewer wasm', () => {
     }
   });
 
-  test('builds the display list at most eight pages at a time', async () => {
+  test('builds the display list at most eight pages at a time, then frees the engine', async () => {
     const ranges: [number, number][] = [];
+    let frees = 0;
     const build = DocxViewDocument.prototype.displayPagesJson;
+    const free = DocxViewDocument.prototype.free;
     DocxViewDocument.prototype.displayPagesJson = function (start, end) {
       ranges.push([start, end]);
       return build.call(this, start, end);
     };
+    DocxViewDocument.prototype.free = function () {
+      frees += 1;
+      free.call(this);
+    };
     try {
       const viewer = await openDocumentViewer(pagedPackage(20));
+      expect(frees).toBe(1);
       const { pages } = viewer.displayList();
       viewer.dispose();
+      expect(frees).toBe(1);
       expect(pages).toHaveLength(20);
       expect(pages.map((page) => page.pageIndex)).toEqual(pages.map((_, index) => index));
       expect(ranges).toEqual(
@@ -130,6 +138,7 @@ describe('DOCX viewer wasm', () => {
       );
     } finally {
       DocxViewDocument.prototype.displayPagesJson = build;
+      DocxViewDocument.prototype.free = free;
     }
   });
 
