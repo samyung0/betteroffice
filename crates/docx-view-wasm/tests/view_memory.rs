@@ -2,8 +2,8 @@
 //! counting allocator standing in for the wasm one.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::{Mutex, PoisonError};
 
 use docx_view_wasm::DocxViewDocument;
 use serde_json::{Value, json};
@@ -12,10 +12,13 @@ struct Counting;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+/// Bytes allocated so far, freed or not.
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 /// One test counts at a time.
 static COUNTING: Mutex<()> = Mutex::new(());
 
 fn grew(bytes: usize) {
+    ALLOCATED.fetch_add(bytes, Relaxed);
     let live = LIVE.fetch_add(bytes, Relaxed) + bytes;
     PEAK.fetch_max(live, Relaxed);
 }
@@ -150,7 +153,7 @@ fn open(bytes: &[u8], font: u32) -> (DocxViewDocument, String) {
 }
 
 /// Body lines on the first page, and whether it has a note area.
-fn first_page(document: &DocxViewDocument) -> (usize, bool) {
+fn first_page(document: &mut DocxViewDocument) -> (usize, bool) {
     let page: Value = serde_json::from_str(&document.display_pages_json(0, 1).unwrap()).unwrap();
     let page = &page["pages"][0];
     let lines = page["primitives"]
@@ -179,7 +182,7 @@ fn first_page(document: &DocxViewDocument) -> (usize, bool) {
 /// note still takes its space from the first page.
 #[test]
 fn the_region_pass_copies_the_arena_only_for_notes() {
-    let _counting = COUNTING.lock().unwrap();
+    let _counting = COUNTING.lock().unwrap_or_else(PoisonError::into_inner);
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
 
@@ -192,8 +195,8 @@ fn the_region_pass_copies_the_arena_only_for_notes() {
 
     let (mut noted, request) = open(&ladder(120, true), font);
     noted.layout(&request).unwrap();
-    let (plain_lines, _) = first_page(&plain);
-    let (noted_lines, note_shown) = first_page(&noted);
+    let (plain_lines, _) = first_page(&mut plain);
+    let (noted_lines, note_shown) = first_page(&mut noted);
     assert!(note_shown);
     assert!(noted_lines < plain_lines, "{noted_lines} < {plain_lines}");
 }
@@ -259,7 +262,7 @@ fn display(bytes: &[u8], font: u32) -> Display {
 /// never built in one piece.
 #[test]
 fn the_display_list_is_one_batch_of_joined_glyph_runs() {
-    let _counting = COUNTING.lock().unwrap();
+    let _counting = COUNTING.lock().unwrap_or_else(PoisonError::into_inner);
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let small = display(&ladder(80, false), font);
@@ -280,4 +283,80 @@ fn the_display_list_is_one_batch_of_joined_glyph_runs() {
     assert!(large.glyph_run_chars >= 20 * large.glyph_runs);
     assert!(large.primitives <= 100 * large.pages as usize);
     assert!(large.batch_peak * 4 <= small.batch_peak * 5);
+}
+
+/// `sections` one-page sections sharing a header with PAGE and NUMPAGES
+/// fields, so the display extras carry a measured header per section.
+fn sectioned(sections: usize) -> Vec<u8> {
+    let text = [SENTENCE; 5].join(" ");
+    let field = |code: &str| {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {code} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    };
+    let properties = r#"<w:headerReference w:type="default" r:id="rIdH"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>"#;
+    let paragraph = format!(r#"<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#);
+    let section_break = format!(r#"<w:p><w:pPr><w:sectPr>{properties}</w:sectPr></w:pPr></w:p>"#);
+    let body = vec![paragraph.clone(); sections].join(&section_break);
+    let parts = [
+        (
+            "[Content_Types].xml",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#.to_owned(),
+        ),
+        (
+            "_rels/.rels",
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{R}/officeDocument" Target="word/document.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="{R}/header" Target="header1.xml"/></Relationships>"#
+            ),
+        ),
+        (
+            "word/header1.xml",
+            format!(
+                r#"<w:hdr {W}><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>{}<w:r><w:t xml:space="preserve"> of </w:t></w:r>{}</w:p>{paragraph}</w:hdr>"#,
+                field("PAGE"),
+                field("NUMPAGES")
+            ),
+        ),
+        (
+            "word/document.xml",
+            format!(
+                r#"<w:document {W} xmlns:r="{R}"><w:body>{body}<w:sectPr>{properties}</w:sectPr></w:body></w:document>"#
+            ),
+        ),
+    ]
+    .map(|(path, xml)| (path.to_owned(), xml.into_bytes()));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Pages laid out and bytes allocated a page while building them all.
+fn allocated_per_page(bytes: &[u8], font: u32) -> (u32, usize) {
+    let (mut document, request) = open(bytes, font);
+    let pages = document.layout(&request).unwrap();
+    let start = ALLOCATED.load(Relaxed);
+    for first in (0..pages).step_by(PAGE_BATCH as usize) {
+        document
+            .display_pages_json(first, (first + PAGE_BATCH).min(pages))
+            .unwrap();
+    }
+    (pages, (ALLOCATED.load(Relaxed) - start) / pages as usize)
+}
+
+/// The display extras, which carry a measured header per section, are read
+/// once per document: a page costs the same with 8 sections as with 40.
+#[test]
+fn the_display_extras_are_read_once_per_document() {
+    let _counting = COUNTING.lock().unwrap_or_else(PoisonError::into_inner);
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let (few_pages, few) = allocated_per_page(&sectioned(8), font);
+    let (many_pages, many) = allocated_per_page(&sectioned(40), font);
+    eprintln!("pages {few_pages} / {many_pages}; allocated a page {few} / {many} bytes");
+    assert_eq!((few_pages, many_pages), (8, 40));
+    assert!(many * 4 <= few * 5, "{many} > 1.25 x {few}");
 }

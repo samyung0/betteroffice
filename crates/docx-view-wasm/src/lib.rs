@@ -3,6 +3,7 @@
 use wasm_alloc as _;
 
 use docx_edit::{EngineSession, package_media, parse_docx_for_edit, seed_parsed_docx_in_place};
+use docx_layout::display_list::ResidentDisplayInput;
 use docx_parse::S9PackageWire;
 use docx_parse::section::SectionProperties;
 use serde_json::{Value, json};
@@ -17,8 +18,8 @@ const DEFAULT_PAGE_GAP: f64 = 24.0;
 pub struct DocxViewDocument {
     engine: EngineSession,
     request: String,
-    /// What the display list is built with once laid out.
-    extras: Option<String>,
+    /// What the display list is built with once laid out, parsed once.
+    display: Option<ResidentDisplayInput>,
 }
 
 #[wasm_bindgen]
@@ -32,7 +33,7 @@ impl DocxViewDocument {
         Ok(Self {
             engine,
             request,
-            extras: None,
+            display: None,
         })
     }
 
@@ -65,9 +66,9 @@ impl DocxViewDocument {
             .engine
             .layout_document_with_regions(request)
             .map_err(js_error)?;
-        self.extras = Some(
+        self.display = Some(
             self.engine
-                .region_display_extras(&extras.to_string())
+                .region_display_input(&extras.to_string())
                 .map_err(js_error)?,
         );
         u32::try_from(pages).map_err(js_error)
@@ -76,13 +77,13 @@ impl DocxViewDocument {
     /// `{ pages }` display list JSON of pages `start..end`, built from the
     /// engine's typed state; the host frees the document after the last one.
     #[wasm_bindgen(js_name = displayPagesJson)]
-    pub fn display_pages_json(&self, start: u32, end: u32) -> Result<String, JsValue> {
-        let extras = self
-            .extras
-            .as_deref()
+    pub fn display_pages_json(&mut self, start: u32, end: u32) -> Result<String, JsValue> {
+        let display = self
+            .display
+            .as_mut()
             .ok_or_else(|| js_error("DOCX view is not laid out"))?;
         self.engine
-            .display_pages_json(extras, start as usize..end as usize)
+            .display_pages_json(display, start as usize..end as usize)
             .map_err(js_error)
     }
 
@@ -283,10 +284,10 @@ mod tests {
 
     /// The paged build writes the list the whole-layout JSON round trip
     /// (`layout_document_with_regions_json` then `build_display_list_json`)
-    /// wrote. The round trip parses floats without `float_roundtrip`, so in
-    /// two fixtures a few numbers it read back sit up to 4 ULP from the
-    /// engine's own values, which the paged build keeps (and the editor
-    /// paints); every other fixture is byte-identical.
+    /// wrote. The round trip read floats back without `float_roundtrip`, so
+    /// in two fixtures the text of a few numbers differs from the engine's
+    /// own values, which the paged build keeps (and the editor paints); those
+    /// compare within 4 ULP once parsed, every other fixture byte-identical.
     #[test]
     fn paged_display_list_matches_the_json_round_trip() {
         let fixtures: [(&str, &[u8], bool); 8] = [

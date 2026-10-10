@@ -229,6 +229,27 @@ pub fn build_resident_display_pages_observed(
     })
 }
 
+/// [`build_resident_display_pages_observed`] with the extras parsed once
+/// (see [`display_list::ResidentDisplayInput`]).
+pub fn build_resident_display_pages_from_observed(
+    input: &mut display_list::ResidentDisplayInput,
+    pagination: &types::Input,
+    layout: &types::Layout,
+    pages: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<display_list::DisplayList, String> {
+    MEASURE_FONTS.with(|store| {
+        display_list::build_resident_display_pages_from_with_fonts_observed(
+            input,
+            pagination,
+            layout,
+            &store.borrow(),
+            pages,
+            observe_phase,
+        )
+    })
+}
+
 /// Rebuilds the pagination-dirtied pages of an engine-owned list in place and
 /// shifts the converged suffix's body positions by stable block-id deltas.
 #[allow(clippy::too_many_arguments)]

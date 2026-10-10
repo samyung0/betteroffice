@@ -2532,7 +2532,7 @@ impl EngineSession {
     /// `extras` with the retained region pass's headers/footers in place of
     /// its own, re-serialized: a host frame and the next key then hash the
     /// same bytes, so the key keeps the incremental display path.
-    pub fn region_display_extras(&self, extras: &str) -> Result<String, String> {
+    fn region_display_extras(&self, extras: &str) -> Result<String, String> {
         let mut value: serde_json::Value = serde_json::from_str(extras)
             .map_err(|error| format!("parse display extras: {error}"))?;
         let fields = value
@@ -2643,15 +2643,39 @@ impl EngineSession {
         Ok(display_json)
     }
 
-    /// Display list JSON of `pages` alone, built from the retained pagination
-    /// state with `extras` (after a region pass, [`Self::region_display_extras`]).
-    pub fn display_pages_json(
+    /// `extras` with the region pass's headers and footers, parsed once for
+    /// [`Self::display_pages_json`].
+    pub fn region_display_input(
         &self,
         extras: &str,
+    ) -> Result<docx_layout::display_list::ResidentDisplayInput, String> {
+        let extras = self.region_display_extras(extras)?;
+        let pagination = self.pagination.borrow();
+        docx_layout::display_list::ResidentDisplayInput::new(
+            pagination
+                .input
+                .as_ref()
+                .ok_or_else(|| "resident pagination input is not built".to_owned())?,
+            pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?
+                .pages
+                .len(),
+            &extras,
+        )
+    }
+
+    /// Display list JSON of `pages` alone, built from the retained pagination
+    /// state with `input` (see [`Self::region_display_input`]).
+    pub fn display_pages_json(
+        &self,
+        input: &mut docx_layout::display_list::ResidentDisplayInput,
         pages: std::ops::Range<usize>,
     ) -> Result<String, String> {
         let pagination = self.pagination.borrow();
-        let list = docx_layout::build_resident_display_pages_observed(
+        let list = docx_layout::build_resident_display_pages_from_observed(
+            input,
             pagination
                 .input
                 .as_ref()
@@ -2660,7 +2684,6 @@ impl EngineSession {
                 .layout
                 .as_ref()
                 .ok_or_else(|| "resident layout is not built".to_owned())?,
-            extras,
             pages,
             &mut || {},
         )?;

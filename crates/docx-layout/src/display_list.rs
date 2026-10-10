@@ -10487,6 +10487,39 @@ pub fn build_display_list_value_from_resident_with_fonts(
 /// transient copy of typed pagination state a whole-list build holds.
 const RESIDENT_DISPLAY_BATCH: usize = 8;
 
+/// The display extras and layout options of a resident build, parsed once:
+/// a host building a few pages at a time reuses it for every range.
+pub struct ResidentDisplayInput(BuildInput);
+
+impl ResidentDisplayInput {
+    /// `extras` (headers/footers, font chains, comment metadata) with the
+    /// options of `pagination`, for a layout of `page_count` pages.
+    pub fn new(
+        pagination: &crate::types::Input,
+        page_count: usize,
+        extras: &str,
+    ) -> Result<Self, String> {
+        let mut wire: serde_json::Map<String, Value> =
+            serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
+        wire.insert(
+            "options".to_owned(),
+            serde_json::to_value(&pagination.options)
+                .map_err(|e| format!("encode resident layout options: {e}"))?,
+        );
+        // Pages and the blocks they place come from pagination, never the extras.
+        wire.insert("layout".to_owned(), serde_json::json!({}));
+        wire.insert("measured".to_owned(), serde_json::json!([]));
+        let mut wire = Value::Object(wire);
+        normalize_integral_json_numbers(&mut wire);
+        let mut input: BuildInput = serde_json::from_value(wire)
+            .map_err(|e| format!("parse resident display input: {e}"))?;
+        input.layout.pages = std::iter::repeat_with(PageIn::default)
+            .take(page_count)
+            .collect();
+        Ok(Self(input))
+    }
+}
+
 /// Builds display pages `pages` straight from typed pagination state. Each
 /// batch converts only its pages and the blocks they place, then drops them,
 /// so no second copy of the measured arena or the layout outlives the build.
@@ -10500,26 +10533,34 @@ pub fn build_resident_display_pages_with_fonts_observed(
     pages: std::ops::Range<usize>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<DisplayList, String> {
-    if pages.start > pages.end || pages.end > layout.pages.len() {
+    let mut input = ResidentDisplayInput::new(pagination, layout.pages.len(), extras)?;
+    build_resident_display_pages_from_with_fonts_observed(
+        &mut input,
+        pagination,
+        layout,
+        fonts,
+        pages,
+        observe_phase,
+    )
+}
+
+/// [`build_resident_display_pages_with_fonts_observed`] with extras parsed
+/// once; `input` is left as it came, ready for the next range.
+pub fn build_resident_display_pages_from_with_fonts_observed(
+    input: &mut ResidentDisplayInput,
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    pages: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<DisplayList, String> {
+    let input = &mut input.0;
+    if pages.start > pages.end
+        || pages.end > layout.pages.len()
+        || input.layout.pages.len() != layout.pages.len()
+    {
         return Err("resident display page range is invalid".to_owned());
     }
-    let mut wire: serde_json::Map<String, Value> =
-        serde_json::from_str(extras).map_err(|e| format!("parse display extras: {e}"))?;
-    wire.insert(
-        "options".to_owned(),
-        serde_json::to_value(&pagination.options)
-            .map_err(|e| format!("encode resident layout options: {e}"))?,
-    );
-    // Pages and the blocks they place come from pagination, never the extras.
-    wire.insert("layout".to_owned(), serde_json::json!({}));
-    wire.insert("measured".to_owned(), serde_json::json!([]));
-    let mut wire = Value::Object(wire);
-    normalize_integral_json_numbers(&mut wire);
-    let mut input: BuildInput =
-        serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))?;
-    input.layout.pages = std::iter::repeat_with(PageIn::default)
-        .take(layout.pages.len())
-        .collect();
 
     let mut list = DisplayList {
         contract_version: input.contract_version,
@@ -10550,7 +10591,7 @@ pub fn build_resident_display_pages_with_fonts_observed(
         }
         let selected: HashSet<usize> = batch.clone().collect();
         list.pages
-            .extend(build_display_list_selected(&input, fonts, Some(&selected)).pages);
+            .extend(build_display_list_selected(input, fonts, Some(&selected)).pages);
         for index in batch.clone() {
             input.layout.pages[index] = PageIn::default();
         }
