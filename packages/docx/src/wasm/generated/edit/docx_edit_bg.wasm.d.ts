@@ -81,6 +81,7 @@ export const editsession_load: (a: number, b: number, c: number) => [number, num
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_materialize_docx: (a: number) => [number, number, number, number];
+export const editsession_measure_font_bytes: (a: number, b: number) => [number, number, number, number];
 export const editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_media_json: (a: number) => [number, number, number, number];
 export const editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];

@@ -1236,7 +1236,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let undoTracked = false;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
-  const residentFonts: YrsResidentFontRegistration[] = [];
+  // Registrations in order: a raw face by its id (its bytes stay only in this
+  // engine and are copied out per worker snapshot), or a measurement view.
+  const residentFonts: Array<number | { substituteOf: number; family: string }> = [];
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
   let residentLayoutInput: string | null = null;
@@ -1361,10 +1363,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         ownsResidentFontStore = true;
       }
       const id = session.register_measure_font(bytes);
-      // Kept by reference for the worker replay, which copies it per snapshot:
-      // the font registry hands over shared, never-written font buffers.
-      residentFonts.push(bytes);
-      residentFontsRevision += 1;
+      // The engine registers identical bytes once and answers their first id.
+      if (!residentFonts.includes(id)) {
+        residentFonts.push(id);
+        residentFontsRevision += 1;
+      }
       return id;
     },
     registerSubstituteFont: (base, family) => {
@@ -1465,7 +1468,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         fonts: fontsCurrent
           ? []
           : residentFonts.map((font) =>
-              font instanceof Uint8Array ? font.slice() : { ...font }
+              typeof font === 'number' ? session.measure_font_bytes(font) : { ...font }
             ),
         fontsRevision: residentFontsRevision,
         ...(state ? {} : { media: session.media_json() }),

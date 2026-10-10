@@ -170,12 +170,12 @@ export class TextMeasureFontRegistry {
    */
   private lastResortIds = new Map<string, Promise<number | null>>();
   /**
-   * Byte-identity dedupe across every registration path. Providers cache
-   * their fetches, so the same face requested under several chain keys (or
-   * as both a family face and a script fallback) resolves to one buffer —
-   * and must produce one engine id, not one copy of the bytes per key.
-   * Rejections are evicted. Weak so buffers of a cleared registry can be
-   * collected.
+   * Byte-identity dedupe across every registration path: concurrent loads of
+   * one face share a buffer, so the same face requested under several chain
+   * keys (or as both a family face and a script fallback) registers once. A
+   * later load of a face hands over new bytes, which the engine itself
+   * matches to the face's first id. Rejections are evicted. Weak so buffers
+   * of a cleared registry can be collected.
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
   private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();

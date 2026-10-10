@@ -502,6 +502,12 @@ export class EditSession {
      */
     materialize_docx(): string | undefined;
     /**
+     * A copy of the bytes measurement font `id` was registered with: what a
+     * worker engine registers to measure with the same face, since the font
+     * bytes live only in this module's memory.
+     */
+    measure_font_bytes(id: number): Uint8Array;
+    /**
      * Measurement input JSON in, `ParagraphExtent` JSON out. Also records the
      * paragraph's immutable width/font envelope under its stable block id, so
      * a later resident edit re-measures only the changed block. Errors with
@@ -1068,7 +1074,8 @@ export function range_rects_region_json(display_list: string, region: string, pa
  * Register a font for measurement from raw sfnt bytes; returns the font id
  * that `measure_paragraph_json` inputs reference in their `fontChains`.
  * Malformed bytes (attacker-controlled embedded fonts) are rejected as an
- * error at this boundary, mirroring `FontStore::register`.
+ * error at this boundary, mirroring `FontStore::register`. Bytes identical to
+ * an earlier registration answer its id.
  */
 export function register_measure_font(bytes: Uint8Array): number;
 
@@ -1178,6 +1185,7 @@ export interface InitOutput {
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
+    readonly editsession_measure_font_bytes: (a: number, b: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_media_json: (a: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];

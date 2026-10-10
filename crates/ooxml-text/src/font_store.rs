@@ -1,6 +1,6 @@
 //! Font registry over raw font bytes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -235,6 +235,9 @@ struct FontEntry {
     // pointer, not the heap bytes, so the views stay valid.
     face: Option<rustybuzz::Face<'static>>,
     data: Box<[u8]>,
+    /// Hash of `data`, computed the first time a registration of the same
+    /// length has to tell the two apart.
+    data_hash: Cell<Option<u64>>,
     metrics: FontMetrics,
     /// Horizontal multiplier every advance, offset and outline this entry
     /// reports is scaled by. See [`FontStore::advance_scale`].
@@ -316,6 +319,7 @@ impl FontStore {
             bytes_of: None,
             face,
             data,
+            data_hash: Cell::new(None),
             metrics,
             advance_scale: 1.0,
             char_cache: RefCell::new(HashMap::new()),
@@ -370,6 +374,7 @@ impl FontStore {
             bytes_of: Some(owner),
             face: None,
             data: Box::default(),
+            data_hash: Cell::new(None),
             metrics,
             advance_scale,
             char_cache: RefCell::new(HashMap::new()),
@@ -507,6 +512,27 @@ impl FontStore {
             .find(|&id| self.covers(id, ch).unwrap_or(false))
     }
 
+    /// The id identical `bytes` were registered under, if any, so a host that
+    /// loads a face again (and so hands over a new copy) can keep one. Only
+    /// same-length entries are hashed, each once, so a hostile set of
+    /// equal-length fonts costs one pass over each, not one comparison per pair.
+    pub fn find(&self, bytes: &[u8]) -> Option<FontId> {
+        let mut hash = None;
+        let index = self.fonts.iter().position(|entry| {
+            if entry.bytes_of.is_some() || entry.data.len() != bytes.len() {
+                return false;
+            }
+            let own = *hash.get_or_insert_with(|| content_hash(bytes));
+            let theirs = entry.data_hash.get().unwrap_or_else(|| {
+                let theirs = content_hash(&entry.data);
+                entry.data_hash.set(Some(theirs));
+                theirs
+            });
+            own == theirs && *entry.data == *bytes
+        })?;
+        Some(FontId(index as u32))
+    }
+
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
         self.fonts.get(id.0 as usize).ok_or(FontError::UnknownFont)
     }
@@ -524,6 +550,13 @@ impl FontStore {
     fn font_ref(entry: &FontEntry) -> FontRef<'_> {
         FontRef::new(&entry.data).expect("bytes validated at register()")
     }
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -574,6 +607,28 @@ mod tests {
             store.cached_shape(&key("filler 0 0".to_owned())).is_none(),
             "entries untouched for a full generation age out"
         );
+    }
+
+    #[test]
+    fn finds_the_registration_of_identical_bytes() {
+        let mut store = FontStore::new();
+        assert_eq!(store.find(LIBERATION_SANS), None);
+        let first = store.register(LIBERATION_SANS.to_vec()).unwrap();
+        store
+            .register_substitute(
+                first,
+                crate::word_fonts::requested_line_metrics("Roboto").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(store.find(LIBERATION_SANS), Some(first));
+        // same length, different bytes: not that font
+        let mut other = LIBERATION_SANS.to_vec();
+        let last = other.len() - 1;
+        other[last] ^= 1;
+        assert_eq!(store.find(&other), None);
+        let other_id = store.register(other.clone()).unwrap();
+        assert_eq!(store.find(&other), Some(other_id));
+        assert_eq!(store.find(LIBERATION_SANS), Some(first));
     }
 
     #[test]

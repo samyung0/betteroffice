@@ -146,7 +146,8 @@ export function range_rects_region_json(display_list: string, region: string, pa
  * Register a font for measurement from raw sfnt bytes; returns the font id
  * that `measure_paragraph_json` inputs reference in their `fontChains`.
  * Malformed bytes (attacker-controlled embedded fonts) are rejected as an
- * error at this boundary, mirroring `FontStore::register`.
+ * error at this boundary, mirroring `FontStore::register`. Bytes identical to
+ * an earlier registration answer its id.
  */
 export function register_measure_font(bytes: Uint8Array): number;
 

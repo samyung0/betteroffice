@@ -1343,6 +1343,13 @@ impl EditSession {
         docx_layout::register_measure_font(bytes)
     }
 
+    /// A copy of the bytes measurement font `id` was registered with: what a
+    /// worker engine registers to measure with the same face, since the font
+    /// bytes live only in this module's memory.
+    pub fn measure_font_bytes(&self, id: u32) -> Result<Vec<u8>, JsValue> {
+        docx_layout::measure_font_bytes(id).map_err(|e| JsValue::from_str(&e))
+    }
+
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics

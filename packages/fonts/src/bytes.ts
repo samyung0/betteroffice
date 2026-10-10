@@ -49,6 +49,11 @@ function validateByteLength(
   return bytes;
 }
 
+/**
+ * Loads in flight, so concurrent requests for one face share one buffer. A
+ * settled load is dropped: the bytes live only as long as their consumer keeps
+ * them (the text engines copy them into WASM).
+ */
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
 export function loadFontBytes(
@@ -79,9 +84,10 @@ export function loadFontBytes(
     }
     return validateByteLength(face, await response.arrayBuffer());
   })();
-  promise.catch(() => {
+  const settle = () => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);
-  });
+  };
+  promise.then(settle, settle);
   bytesCache.set(key, promise);
   return promise;
 }

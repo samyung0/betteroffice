@@ -448,15 +448,32 @@ thread_local! {
 /// Register a font for measurement from raw sfnt bytes; returns the font id
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
-/// error at this boundary, mirroring `FontStore::register`.
+/// error at this boundary, mirroring `FontStore::register`. Bytes identical to
+/// an earlier registration answer its id.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     MEASURE_FONTS.with(|store| {
+        let mut store = store.borrow_mut();
+        // A face loaded again arrives as a new copy of the same bytes.
+        if let Some(id) = store.find(bytes) {
+            return Ok(id.to_u32());
+        }
         store
-            .borrow_mut()
             .register(bytes.to_vec())
             .map(|id| id.to_u32())
             .map_err(|e| JsValue::from_str(&e.to_string()))
+    })
+}
+
+/// A copy of the bytes measurement font `id` was registered with, so a
+/// second engine can register the same face from this one.
+pub fn measure_font_bytes(id: u32) -> Result<Vec<u8>, String> {
+    MEASURE_FONTS.with(|store| {
+        store
+            .borrow()
+            .font_bytes(ooxml_text::FontId::from_u32(id))
+            .map(<[u8]>::to_vec)
+            .map_err(|e| e.to_string())
     })
 }
 

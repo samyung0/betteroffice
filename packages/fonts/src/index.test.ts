@@ -80,6 +80,28 @@ describe('loading', () => {
     expect(a).toBe(b);
   });
 
+  test('keeps no bytes once a load settles: concurrent loads share a fetch, later ones fetch again', async () => {
+    const realFetch = globalThis.fetch;
+    const face = resolveMetricCompatFace('Calibri', false, false)!;
+    const bytes = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      return new Response(bytes);
+    }) as unknown as typeof fetch;
+    try {
+      const provider = createFontProvider({ baseUrl: 'https://example.test/settle/' });
+      const load = provider.resolve('Calibri', false, false)!;
+      const [a, b] = await Promise.all([load(), load()]);
+      expect(a).toBe(b);
+      expect(fetches).toBe(1);
+      await load();
+      expect(fetches).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test('pins a relative provider base to the route where it is created', async () => {
     const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
     const realFetch = globalThis.fetch;
