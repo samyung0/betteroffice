@@ -2,7 +2,7 @@
 //! revision list leaves them out; Accept All and Reject All resolve them and
 //! leave each field as the seed makes it of its export.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -808,12 +808,21 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
     let mut owners: Vec<(BranchPtr, i64)> = Vec::new();
     {
         let txn = doc.transact();
+        let deleted = deleted
+            .iter()
+            .flat_map(|(client, ranges)| ranges.iter().map(|range| ID::new(*client, range.end - 1)))
+            .filter_map(|end| txn.store().get_item(&end))
+            .map(|item| (item, false))
+            .collect::<Vec<_>>();
+        let deleted_starts: HashSet<ID> = deleted.iter().map(|(item, _)| *item.id()).collect();
         // The first live, countable item right of `item`, as
         // `Store::next_live_item` finds it, without looking `item` up again.
-        // An insert's walk stops at another inserted item that is deleted or
-        // not countable (a format item): that item's own walk goes on from
-        // there by the same rule, so a run of k such items in one update
-        // costs k steps, not k²/2.
+        // A walk hands off to another walk of its kind that goes on from
+        // where it stands, by the same rule and to the same item: an insert's
+        // walk at another inserted item that is deleted or not countable (a
+        // format item), a deleted range's walk at the item another deleted
+        // range's walk starts from. So a run of k such items costs k steps,
+        // not k²/2, however many inserts or deleted ranges end in it.
         let next_live = |item: ItemPtr, restores: bool| {
             let mut next = item.right();
             while let Some(right) = next {
@@ -822,19 +831,18 @@ pub(crate) fn refreshing_fields<R>(doc: &yrs::Doc, apply: impl FnOnce() -> R) ->
                 if !right.is_deleted() && right.is_countable() {
                     return Some(right);
                 }
-                if restores && inserted.contains(right.id()) {
+                let hands_off = if restores {
+                    inserted.contains(right.id())
+                } else {
+                    deleted_starts.contains(right.id())
+                };
+                if hands_off {
                     return None;
                 }
                 next = right.right();
             }
             None
         };
-        let deleted = deleted
-            .iter()
-            .flat_map(|(client, ranges)| ranges.iter().map(|range| ID::new(*client, range.end - 1)))
-            .filter_map(|end| txn.store().get_item(&end))
-            .map(|item| (item, false))
-            .collect::<Vec<_>>();
         // Every inserted item: a restored copy and a peer's system write can
         // share one range of clocks.
         let inserted_items = crate::items_in(&txn, &inserted)
@@ -2370,6 +2378,56 @@ mod tests {
         assert!(
             steps <= 3 * run as usize,
             "{steps} probe steps for a run of {run}"
+        );
+    }
+
+    /// One update deleting a run whose every character is a range of its own
+    /// (its writer typed elsewhere between them, as copy writers or comments
+    /// do) costs the deleted ranges' walks steps linear in the ranges, on the
+    /// peer that receives it and on one whose Undo does it: a range's walk
+    /// stops at the item the next range's walk starts from.
+    #[test]
+    fn many_deleted_ranges_in_one_run_cost_linear_probe_steps() {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Doc, ReadTxn, StateVector, Text, Transact, Update};
+        let ranges = 2_000;
+        let writer = Doc::with_client_id(1);
+        let (story, other) = (
+            writer.get_or_insert_text("story"),
+            writer.get_or_insert_text("other"),
+        );
+        for at in 0..ranges {
+            story.insert(&mut writer.transact_mut(), at, "x");
+            other.insert(&mut writer.transact_mut(), at, "y");
+        }
+        let receiver = Doc::with_client_id(2);
+        receiver
+            .transact_mut()
+            .apply_update(
+                Update::decode_v1(
+                    &writer
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let before = writer.transact().state_vector();
+        story.remove_range(&mut writer.transact_mut(), 0, ranges);
+        let deletion = writer.transact().encode_state_as_update_v1(&before);
+        PROBE_STEPS.with(|steps| steps.set(0));
+        refreshing_fields(&receiver, || {
+            receiver
+                .transact_mut()
+                .apply_update(Update::decode_v1(&deletion).unwrap())
+                .unwrap()
+        });
+        // One step per range; a walk to the run's end from every range takes
+        // two million.
+        let steps = PROBE_STEPS.with(Cell::get);
+        assert!(
+            steps <= 3 * ranges as usize,
+            "{steps} probe steps for {ranges} ranges"
         );
     }
 
