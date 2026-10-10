@@ -209,3 +209,69 @@ test('a fonts change still syncs the worker in full', async () => {
     h.free();
   }
 });
+
+test('a relayout delta shifts later pages in place, so their objects and query-store copies stay', async () => {
+  globalThis.Worker = RecordingWorker as unknown as typeof Worker;
+  const native = createEditSession(9302);
+  native.load_json(JSON.stringify([{
+    storyId: 'body',
+    paragraphs: Array.from({ length: 150 }, (_, index) => ({ text: `Paragraph ${index} of the body` })),
+  }]));
+  const request = JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  });
+  const inputs = JSON.parse(native.layout_document_with_regions_json(request));
+  const first = native.relayout_frame(request, '{}', 0);
+  const probe: YrsResidentWorkerProbe = { layoutRevision: 1, fontsRevision: 0, regionLayoutInput: request };
+  const listeners = new Set<(update: Uint8Array, origin: 'local' | 'remote') => void>();
+  const engine = {
+    residentWorkerProbe: () => ({ ...probe }),
+    residentWorkerSnapshot: () => ({
+      clientId: 1, state: new Uint8Array(), selection: null, fonts: [], fontsRevision: 0,
+      renderInputs: [], measureInputs: [], layoutInput: request, layoutWithRegions: true, layoutRevision: 1,
+    }),
+    onUpdate: (listener: (update: Uint8Array, origin: 'local' | 'remote') => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    selection: () => null,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  try {
+    const { result, rerender, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(settle);
+    const worker = RecordingWorker.current!;
+    await act(async () => worker.reply(worker.of('bootstrap')[0]!, first, 1));
+    const pages = result.current.frame!.pages;
+    expect(pages.length).toBeGreaterThan(2);
+    const last = pages.at(-1)!.page;
+
+    // A peer types at the document's start: every later page only shifts.
+    const [opening] = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string }>;
+    native.insert_text('body', opening!.paraId, 0, 'x', undefined, undefined);
+    for (const listener of listeners) listener(new Uint8Array([1]), 'remote');
+    probe.layoutRevision = 2;
+    await act(async () => {
+      rerender({ layout: { ...inputs.layout } });
+      await settle();
+    });
+    const [relayout] = worker.of('relayout');
+    const delta = native.relayout_frame(request, '{}', relayout!.expectedFrameEpoch);
+    await act(async () => {
+      worker.reply(relayout!, delta, 2);
+      await settle();
+    });
+    expect(result.current.frame!.frameEpoch).toBe(2);
+    expect(result.current.frame!.pages.at(-1)!.page).toBe(last);
+    unmount();
+  } finally {
+    native.free();
+  }
+});

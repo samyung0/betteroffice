@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildRustDisplayList,
   buildRustDisplayFrame,
-  applyFrameDelta,
   applyFrameDeltaOwned,
   createCanvasImageResolver,
   createDisplayListQueries,
@@ -649,7 +648,9 @@ export function useRustDisplayList(
       // next request then asks for a full frame).
       if (workerRef.current?.client !== client) return;
       if (!bootstrapping && snapshotRef.current.frame !== previous) return;
-      nextFrame = applyFrameDelta(previous, decodeFrameDelta(result.frame));
+      // Serialized: this delta applies once, so position-only pages shift in
+      // place and the query store and mirrors keep them (as for local input).
+      nextFrame = applyFrameDeltaOwned(previous, decodeFrameDelta(result.frame));
     } catch (cause) {
       if (workerRef.current?.client !== client) return;
       (workerFrameRequestRef.current ?? request).fallback(cause);
