@@ -206,7 +206,18 @@ fn a_burst_of_peer_updates_costs_one_layout_and_one_frame() {
     let before = worker.stats();
     let frame = fixture.relayout(&worker);
     let after = worker.stats();
+    assert_eq!(
+        after.region_fast_path_hits - before.region_fast_path_hits,
+        1
+    );
     assert_eq!(after.pagination_calls - before.pagination_calls, 1);
+    assert_eq!(
+        after.incremental_pagination_calls - before.incremental_pagination_calls,
+        1
+    );
+    // More than one update since the last frame: the body is lowered again
+    // in full, once; the header is not.
+    assert_eq!(after.lower_cache_misses - before.lower_cache_misses, 1);
     assert_eq!(after.display_builds - before.display_builds, 1);
     assert_eq!(after.frame_epoch - before.frame_epoch, 1);
     assert_eq!(
