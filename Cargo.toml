@@ -51,10 +51,16 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   whose deletions clean format items as Yjs 13.6.31's `cleanupFormattingGap`,
 #   for the native Office rebase (tested in office-service);
 #   `insert_attributes` and `insert_negated_attributes` write an edit's format
-#   items in key order, so one edit writes the same items on every replica;
+#   items in key order, so one edit writes the same items in every run; a
+#   surrogate pair split inside gives two replacement characters as in Yjs;
 # - transactions: an update and its events read the transaction's insert set
 #   instead of whole state vectors, so their cost no longer grows with every
-#   client the document saw;
+#   client the document saw; a struct integrated behind a skip (it arrived
+#   before one its client wrote earlier) is in its transaction's update and
+#   counts as older in later events, where upstream's state-vector diff left
+#   it out; a work counter and budget (`TransactionMut::limit_work`,
+#   `UpdateError::WorkBudgetExceeded`) stops integration past a budget; the
+#   commit is skipped while a panic unwinds through a transaction;
 # - Undo and Redo: `follow_redone` (src/store.rs) keeps the offset into a
 #   redone item as Yjs does, so a position inside text Undo and Redo restored
 #   stays on its unit and Undo after a delete, Undo and Redo removes only its
@@ -73,21 +79,24 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   #667/#676), so none is left pointing into the type's freed branch;
 # - updates: `Update::decode` refuses a client's section that starts inside or
 #   before an earlier one for that client, which yrs placed twice, freeing the
-#   first copy; limits for hostile updates (nesting, reservations, the native
-#   viewer's UTF-8 validation, a client without structs); pending structs are
-#   retried once the unit they wait on arrives; a surrogate pair splits into
-#   two replacement characters as in Yjs;
-# - read-only APIs: item, branch, store and update accessors,
-#   `Store::next_live_item` (the first live item right of a deleted one, for
-#   the DOCX peer re-read of a field's shown text; tested in docx-edit's
-#   field_changes), `Item::redone` (the local link to the copy Undo made, for
-#   the DOCX marker re-anchor) and `StickyIndex::get_offsets`.
+#   first copy; limits for hostile updates (`Any` nesting depth, no
+#   reservation from a declared length, checked UTF-8, a client without
+#   structs applying as nothing); pending structs are retried once the unit
+#   they wait on arrives; the struct picker runs in a loop, not a call per
+#   drained client; `BlockStore::push` replaces only a skip, never a block
+#   already placed;
+# - read-only APIs: item, branch (`start`, `item`, `entry_item`, `map_items`),
+#   store (`get_item`, `get_block_range`) and update (`Update::blocks`)
+#   accessors, `Store::next_live_item` (the first live item right of a
+#   deleted one, for the DOCX field re-read), `Item::redone` (the local link
+#   to the copy Undo made, for the DOCX marker re-anchor) and
+#   `StickyIndex::get_offsets`.
 # CI runs their tests in pptx-edit's yrs_memory, yrs_undo, yrs_undo_order,
-# yrs_hostile, yrs_decode_alloc and convergence, docx-edit's yrs_memory,
-# yrs_pending, yrs_format_order, yrs_transaction_work and concurrent_undo, and
-# betteroffice-xlsx's stable_collaboration. Carry the patches until upstream has the fixes and
-# equivalent lookups, or the re-read no longer needs it; re-apply them on each
-# yrs upgrade.
+# yrs_hostile, yrs_decode_alloc, yrs_placement and convergence, docx-edit's
+# yrs_memory, yrs_pending, yrs_format_order, yrs_transaction_work and
+# concurrent_undo, and betteroffice-xlsx's stable_collaboration. Carry the
+# patches until upstream has the fixes and equivalent lookups, or the re-read
+# no longer needs it; re-apply them on each yrs upgrade.
 [patch.crates-io]
 yrs = { path = "third_party/yrs" }
 

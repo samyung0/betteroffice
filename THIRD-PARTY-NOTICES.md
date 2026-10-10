@@ -90,26 +90,83 @@ https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
 ## yrs (vendored copy)
 
 `third_party/yrs` is the `yrs` 0.27.3 crate from crates.io (upstream
-https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
+https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from
+the changes below, each marked "Patched for BetterOffice" in the code.
+
+Text:
 
 - one match arm in `clean_format_gap` (`src/types/text.rs`) that counts a
   shared type as content;
+- `Text::apply_delta_as_yjs` (`src/types/text.rs`, with
+  `yjs_clean_format_gap`): a delta whose deletions clean the format items
+  they leave behind as Yjs 13.6.31's `deleteText` does, for the native Office
+  rebase (tested in `crates/office-service`, which CI runs);
 - `insert_attributes` and `insert_negated_attributes` (`src/types/text.rs`)
   write an edit's format items in key order, not in hash order, so one edit
-  writes the same items on every replica (tests in
+  writes the same items in every run and layout (tests in
   `crates/docx-edit/tests/yrs_format_order.rs`, which CI runs);
+- a split at a UTF-16 offset inside a surrogate pair, at a slice boundary or
+  in an `ItemContent` split, gives two replacement characters as Yjs does,
+  instead of panicking (`split_str_utf16_lossy` in `src/block.rs`, with a unit
+  test).
+
+Transactions and updates:
+
 - a transaction reads its insert set instead of building whole state vectors
   to tell what it inserted (`emit_update_v1`/`v2` and `write_blocks_since` in
   `src/store.rs`, `encode_update` and `add_changed_type` in
   `src/transaction.rs`, `event_keys` in `src/types/mod.rs`), so its cost no
-  longer grows with every client the document saw (tests in
-  `crates/docx-edit/tests/yrs_transaction_work.rs`);
-- `Item::redone` (`src/block.rs`), a read-only accessor of the local link
-  from a deleted item to the copy Undo or Redo made of it, so the DOCX editor
-  re-anchors markers that name restored text;
+  longer grows with every client the document saw. One result differs from a
+  state-vector diff. A struct that arrives before one its client wrote earlier
+  is integrated behind a skip, where the state vector stops. Its
+  transaction's update now holds that struct (upstream sent none), and later
+  transactions count it as made before them, so changes to it raise events
+  (upstream counted it as new and raised none). Tests are in
+  `crates/docx-edit/tests/yrs_transaction_work.rs`, which pins the skip case;
+- a pending update waits on each client's held state (`BlockStore::get_state`
+  in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
+  instead of its clock past skips, and on every client its stacked structs
+  wait on, so structs that arrive before one they depend on are applied once
+  it arrives (tests in `crates/docx-edit/tests/yrs_pending.rs`);
+- `Update::decode` (`src/update.rs`) refuses an update in which a client's
+  section starts inside or before an earlier one for that client, which yrs
+  placed twice (CI runs its test in `crates/pptx-edit/tests/yrs_memory.rs`);
+- limits for hostile input. `Any` decoding stops at `MAX_DECODE_DEPTH` (128)
+  nesting levels (`src/any.rs`). No decoder reserves memory from a length the
+  input declares: `src/any.rs`, the client and struct lists in
+  `src/update.rs`, `src/state_vector.rs`, `src/id_set.rs`,
+  `src/sync/awareness.rs` and two `ItemContent` decoders in `src/block.rs`.
+  An update listing a client with no structs applies as nothing
+  (`src/update.rs`). Tests are in `crates/pptx-edit/tests/yrs_hostile.rs` and
+  `yrs_decode_alloc.rs`, and in `tests/decode_memory.rs` with its `[[test]]`
+  entry in the crate's `Cargo.toml`;
 - checked UTF-8 decoding instead of `from_utf8_unchecked` at three call sites
   (`src/encoding/read.rs`, `src/updates/decoder.rs`, `src/lib.rs`), so both
   update decoders reject invalid strings (see issue #224), with a unit test;
+- a work counter with an optional budget (`Work` in `src/block_store.rs`,
+  `TransactionMut::limit_work` and `work` in `src/transaction.rs`,
+  `UpdateError::WorkBudgetExceeded` in `src/error.rs`).
+  - Integration counts each item a conflict scan passes, each step of a map
+    key's walk, the blocks a split or merge moves, picker switches and pending
+    merges (`src/block.rs`, `src/update.rs`, `src/transaction.rs`,
+    `src/id_set.rs`, `src/store.rs`).
+  - Past the budget, `apply_update` stops before the next struct, a scan
+    stops and the commit merges no more; the document must then be dropped.
+  - A budget ends with its transaction (tests in
+    `crates/pptx-edit/tests/yrs_placement.rs`);
+- `BlockPicker::next` (`src/update.rs`) takes the next struct in a loop, not
+  a call per drained client, so a chain of 20,000 clients no longer
+  overflows the stack (tests in `crates/pptx-edit/tests/yrs_placement.rs`);
+- `BlockStore::push` (`src/block_store.rs`) replaces only a skip; a block
+  already placed stays, so it is never freed while its sequence links it
+  (tests in `crates/pptx-edit/tests/yrs_placement.rs`);
+- `TransactionMut::drop` (`src/transaction.rs`) skips the commit while a
+  panic unwinds through it, so a second panic cannot abort the process; the
+  document must then be dropped (tests in
+  `crates/pptx-edit/tests/yrs_placement.rs`).
+
+Undo and garbage collection:
+
 - `follow_redone` (`src/store.rs`) keeps the offset into each redone item, as
   Yjs's `followRedone` does, so a sticky index inside a multi-unit item that
   Undo and Redo restored resolves to the same unit, and Undo after a delete,
@@ -123,10 +180,6 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
 - the same function deletes no more units of a redone copy than its step
   inserted (as y-crdt PR #674), so Undo no longer takes a peer's restored
   text along with the copy it merged into;
-- `Store::next_live_item` (`src/store.rs`), a read-only lookup of the first
-  live item right of a (deleted) item, so the DOCX editor finds the field a
-  peer's delete ends at without computing a position (its unit test lives in
-  `crates/docx-edit`, which CI runs);
 - `Item::gc` (`src/block.rs`) and `GCCollector::collect_marked` (`src/gc.rs`)
   collect a collected type's children even when Undo keeps them, as Yjs does
   (upstream PR #682), so none is left pointing into the type's freed branch,
@@ -145,16 +198,24 @@ https://github.com/y-crdt/y-crdt). Its sources are byte-identical apart from:
   `crates/docx-edit/tests/yrs_memory.rs` and `concurrent_undo.rs`, and
   `crates/betteroffice-xlsx/tests/stable_collaboration.rs`);
 - `UndoManager::clear_undo` and `clear_redo` (`src/undo.rs`) clear only their
-  own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`);
-- `Update::decode` (`src/update.rs`) refuses an update in which a client's
-  section starts inside or before an earlier one for that client, which yrs
-  placed twice (CI runs its test in `crates/pptx-edit/tests/yrs_memory.rs`);
-- a pending update waits on each client's held state (`BlockStore::get_state`
-  in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
-  instead of its clock past skips, and on every client its stacked structs wait
-  on, so structs that arrive before one they depend on are applied once it
-  arrives (tests in `crates/docx-edit/tests/yrs_pending.rs`);
-- a `[lints]` block in its `Cargo.toml` that allows its upstream warnings.
+  own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`).
+
+Read-only accessors, for structure walks and guards that compute no index:
+
+- `Item::origin`, `right_origin`, `left`, `right`, `parent_sub`, `content`,
+  `update_parent` (with `UpdateParent`), `parent_branch` and `redone` (the
+  local link from a deleted item to the copy Undo or Redo made of it)
+  (`src/block.rs`);
+- `Branch::start`, `item`, `entry_item` and `map_items` (`src/branch.rs`);
+- `Update::blocks` and `UpdateBlock` (`src/update.rs`, re-exported in
+  `src/lib.rs`);
+- `Store::get_item`, `get_block_range` and `next_live_item` (the first live
+  item right of a deleted one, so the DOCX editor finds the field an edit
+  ends at) (`src/store.rs`, with unit tests and tests in `crates/docx-edit`);
+- `StickyIndex::get_offsets` (`src/sticky_index.rs`), which resolves many
+  indexes in one walk as `get_offset` resolves each, with unit tests.
+
+Its `Cargo.toml` also has a `[lints]` block that allows its upstream warnings.
 
 The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for
 the registry crate via `[patch.crates-io]`, so it is compiled into the crates
