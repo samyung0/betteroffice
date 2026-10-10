@@ -26,7 +26,6 @@ import { useEffect, useRef } from 'react';
 import {
   buildMirrorPage,
   buildMirrorTextPage,
-  displayPageRevision,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -34,12 +33,15 @@ import { useTranslation } from '../../i18n';
 
 export function CanvasPageMirror({
   page,
+  revision,
   zoom = 1,
   defer = false,
   full = true,
   selectable = false,
 }: {
   page: DisplayPage;
+  /** `displayPageRevision(page)`: a position shift keeps the page object. */
+  revision: number;
   zoom?: number;
   /** Off-window pages build at idle time instead of inside the mount flush. */
   defer?: boolean;
@@ -64,7 +66,7 @@ export function CanvasPageMirror({
     const built = builtForRef.current;
     if (
       built?.page === page &&
-      built.revision === displayPageRevision(page) &&
+      built.revision === revision &&
       built.t === t &&
       built.full === full
     ) {
@@ -73,7 +75,7 @@ export function CanvasPageMirror({
     // A page crossing the viewport window already holds the other form of its
     // mirror, so the swap waits for idle time instead of a scroll frame.
     const swapOnly =
-      built?.page === page && built.revision === displayPageRevision(page) && built.t === t;
+      built?.page === page && built.revision === revision && built.t === t;
     let releaseHold: (() => void) | undefined;
     const build = (): void => {
       // Going plain would drop the selection end this page holds: wait until
@@ -101,7 +103,7 @@ export function CanvasPageMirror({
       // Clearing in effect cleanup creates a detached-DOM window on every page
       // update; unmounting already removes the host and its complete subtree.
       host.replaceChildren(mirror);
-      builtForRef.current = { page, revision: displayPageRevision(page), t, full };
+      builtForRef.current = { page, revision, t, full };
     };
     if (!defer && !swapOnly) {
       build();
@@ -119,7 +121,7 @@ export function CanvasPageMirror({
       clearTimeout(id);
       releaseHold?.();
     };
-  }, [page, t, defer, full, selectable]);
+  }, [page, revision, t, defer, full, selectable]);
 
   return (
     <div

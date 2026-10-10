@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
+  displayPageRevision,
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
   GlyphCache,
@@ -185,11 +186,13 @@ function nextPageWindow(
 /**
  * One page's surface: canvas + a11y mirror + optional interactive overlay.
  * Memoized so a keystroke's snapshot commit re-renders only the pages whose
- * `DisplayPage` identity actually changed — the owned frame-delta path keeps
- * untouched pages' identity stable across keystrokes.
+ * `DisplayPage` identity or revision changed — the owned frame-delta path keeps
+ * untouched pages' identity stable across keystrokes, and shifts a page's
+ * positions in place under a new revision.
  */
 const CanvasPageSurface = memo(function CanvasPageSurface({
   page,
+  revision,
   pageKey,
   zoom,
   interactive,
@@ -199,6 +202,8 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   registerCanvas,
 }: {
   page: DisplayPage;
+  /** `displayPageRevision(page)`: the mirror and overlay hold its positions. */
+  revision: number;
   pageKey: string;
   zoom: number;
   interactive: boolean;
@@ -222,13 +227,19 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
       />
       <CanvasPageMirror
         page={page}
+        revision={revision}
         zoom={zoom}
         defer={deferChrome}
         full={fullMirror}
         selectable={selectableText}
       />
       {interactive ? (
-        <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
+        <CanvasInteractiveOverlay
+          page={page}
+          revision={revision}
+          zoom={zoom}
+          defer={deferChrome}
+        />
       ) : null}
     </div>
   );
@@ -684,6 +695,7 @@ export function CanvasPagesView({
             <CanvasPageSurface
               key={surfaceKey}
               page={page}
+              revision={displayPageRevision(page)}
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}

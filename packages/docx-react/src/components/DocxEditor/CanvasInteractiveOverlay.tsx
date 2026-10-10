@@ -18,7 +18,6 @@
 import { useEffect, useRef } from 'react';
 import {
   buildInteractiveOverlayPage,
-  displayPageRevision,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -26,10 +25,13 @@ import { useTranslation } from '../../i18n';
 
 export function CanvasInteractiveOverlay({
   page,
+  revision,
   zoom = 1,
   defer = false,
 }: {
   page: DisplayPage;
+  /** `displayPageRevision(page)`: a position shift keeps the page object. */
+  revision: number;
   zoom?: number;
   /** See {@link CanvasPageMirror} — off-window pages build at idle time. */
   defer?: boolean;
@@ -43,7 +45,7 @@ export function CanvasInteractiveOverlay({
     const host = hostRef.current;
     if (!host) return;
     const built = builtForRef.current;
-    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
+    if (built?.page === page && built.revision === revision && built.t === t) {
       return;
     }
     const build = (): void => {
@@ -55,7 +57,7 @@ export function CanvasInteractiveOverlay({
         },
       });
       host.replaceChildren(overlay);
-      builtForRef.current = { page, revision: displayPageRevision(page), t };
+      builtForRef.current = { page, revision, t };
     };
     if (!defer) {
       build();
@@ -70,7 +72,7 @@ export function CanvasInteractiveOverlay({
     }
     const id = setTimeout(build, 150);
     return () => clearTimeout(id);
-  }, [page, t, defer]);
+  }, [page, revision, t, defer]);
 
   return (
     <div
