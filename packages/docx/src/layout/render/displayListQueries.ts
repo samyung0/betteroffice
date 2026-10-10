@@ -579,6 +579,10 @@ export function createDisplayListQueries(
     try {
       handle = eng.openDisplayList(getJson());
       storeRevisions = jsonRevisions;
+      // The store holds the parsed list now; the string (tens of MB on a long
+      // document) is not kept for queries that go by handle.
+      json = null;
+      jsonRevisions = null;
     } catch (error) {
       handle = null;
       if (isWasmTrap(error)) {

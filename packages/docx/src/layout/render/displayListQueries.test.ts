@@ -100,6 +100,42 @@ describe('createDisplayListQueries handle lifecycle', () => {
     expect(calls.rangeJson).toBe(1);
   });
 
+  test('keeps no list JSON once the handle holds the parsed list', () => {
+    const { engine } = fakeEngine();
+    const list = { pages: [page(0)] };
+    const stringify = JSON.stringify;
+    let serialized = 0;
+    JSON.stringify = ((value: unknown, ...rest: []) => {
+      if (value === list) serialized += 1;
+      return stringify(value, ...rest);
+    }) as typeof JSON.stringify;
+    try {
+      let opened = '';
+      let fallback = '';
+      engine.openDisplayList = (json) => {
+        opened = json;
+        return 1;
+      };
+      engine.hitTestRegionsByHandle = () => {
+        throw new Error('unknown display-list handle 1');
+      };
+      engine.hitTestRegionsJson = (json) => {
+        fallback = json;
+        return 'null';
+      };
+      const queries = createDisplayListQueries(list, engine);
+      queries.prime();
+      expect(serialized).toBe(1);
+      // The handle fails, so the query falls back to JSON: the list serializes
+      // again because the string the handle opened with was not kept.
+      queries.hitTestRegions(0, 1, 1);
+      expect(fallback).toBe(opened);
+      expect(serialized).toBe(2);
+    } finally {
+      JSON.stringify = stringify;
+    }
+  });
+
   test('routes vertical movement through the retained handle', () => {
     const { engine, calls } = fakeEngine();
     const queries = createDisplayListQueries({ pages: [page(0)] }, engine);
