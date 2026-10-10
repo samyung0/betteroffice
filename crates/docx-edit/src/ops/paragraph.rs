@@ -1089,10 +1089,10 @@ impl EditingDoc {
     /// Renames paragraph ids that concurrent splits of one paragraph
     /// duplicated within a story, the same way on every peer. One mark keeps
     /// the id: the one an earlier rename gave it (the id is `{client}.{clock}`
-    /// of its own item), else a source mark, earliest first, else the lowest
-    /// `(client, clock)`. Each other mark takes `{client}.{clock}` of its own
-    /// item. A system edit, outside Undo. Returns the `(old, new)` pairs. Run
-    /// over a loaded state, which may have been stored before any peer
+    /// of its own item), else the lowest `(client, clock)`, so a source mark
+    /// (the seed client, 0). Each other mark takes `{client}.{clock}` of its
+    /// own item. A system edit, outside Undo. Returns the `(old, new)` pairs.
+    /// Run over a loaded state, which may have been stored before any peer
     /// renamed.
     pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
         self.rename_duplicates(None)
@@ -1162,8 +1162,7 @@ impl EditingDoc {
             let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             marks.sort_by_key(|(id, _)| {
                 let owner = format!("{}.{}", id.client, id.clock) == duplicated;
-                let source = id.client.get() == crate::seed::SEED_CLIENT_ID;
-                (!owner, !source, id.client, id.clock)
+                (!owner, id.client, id.clock)
             });
             let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
             for (id, map) in &marks[1..] {
