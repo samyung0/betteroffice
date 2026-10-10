@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -354,6 +354,7 @@ pub fn measure_blocks_with_shape_offsets(
     let default_width = widths.first().copied().unwrap_or(0.0);
     let extracted =
         extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
+    let _float_pass = (!extracted.is_empty()).then(FloatPass::enter);
     let mut margin_groups = BTreeMap::<u64, Vec<AnchoredFloatingZone>>::new();
     let mut paragraph_zones = BTreeMap::<usize, Vec<FloatingZone>>::new();
     for anchored in extracted {
@@ -553,16 +554,21 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
-    let lookup = extent_cache_lookup(
-        paragraph,
-        content_width,
-        config,
-        floating_zones,
-        cumulative_y,
-    );
+    let lookup = if FLOAT_PASS.with(Cell::get) {
+        extent_cache_lookup(
+            paragraph,
+            content_width,
+            config,
+            floating_zones,
+            cumulative_y,
+        )
+    } else {
+        ExtentLookup::Miss(None)
+    };
     if let ExtentLookup::Hit(extent) = lookup {
         return Ok(extent);
     }
+    PARAGRAPH_MEASURES.with(|count| count.set(count.get() + 1));
     let mut extent = if !content_width.is_finite() || content_width <= 0.0 {
         synthetic_paragraph_extent(paragraph, content_width)
     } else {
@@ -646,8 +652,11 @@ impl ExtentCacheGeneration {
     }
 }
 
-/// Measured paragraph extents reused across pagination passes; same
-/// two-generation aging as `ooxml_text`'s shape cache.
+/// Measured paragraph extents reused across passes that measure around floating
+/// zones: those re-measure every block on every edit (an extent depends on its
+/// flow position there), while every other pass reuses its own retained
+/// measurements and keeps no copy here. Same two-generation aging as
+/// `ooxml_text`'s shape cache.
 #[derive(Default)]
 struct ExtentCache {
     hot: ExtentCacheGeneration,
@@ -673,6 +682,10 @@ impl ExtentCache {
 }
 
 thread_local! {
+    /// Set while `measure_blocks_with_shape_offsets` measures around floating zones.
+    static FLOAT_PASS: Cell<bool> = const { Cell::new(false) };
+    /// Paragraphs measured (cache misses included, hits not), for tests.
+    static PARAGRAPH_MEASURES: Cell<u64> = const { Cell::new(0) };
     static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
     /// Key scratch reused per lookup so a hit allocates nothing.
     static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -680,6 +693,26 @@ thread_local! {
 
 pub(crate) fn clear_extent_cache() {
     EXTENT_CACHE.with(|cache| *cache.borrow_mut() = ExtentCache::default());
+}
+
+/// Paragraphs this thread has measured rather than answered from the cache.
+pub fn paragraph_measure_count() -> u64 {
+    PARAGRAPH_MEASURES.with(Cell::get)
+}
+
+/// Marks a pass that measures around floating zones; restores the flag on drop.
+struct FloatPass(bool);
+
+impl FloatPass {
+    fn enter() -> Self {
+        Self(FLOAT_PASS.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for FloatPass {
+    fn drop(&mut self) {
+        FLOAT_PASS.with(|flag| flag.set(self.0));
+    }
 }
 
 enum ExtentLookup {

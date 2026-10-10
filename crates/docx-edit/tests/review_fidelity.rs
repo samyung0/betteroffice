@@ -1442,6 +1442,52 @@ fn line_unit_paragraph_spacing_uses_each_sections_grid_pitch() {
 }
 
 #[test]
+fn typing_beside_a_floating_shape_measures_only_the_edited_paragraphs() {
+    // A floating zone sends every pass through the full measure; the paragraph
+    // extent cache answers the paragraphs before the edit (those after it moved
+    // in the document, which is part of their key).
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let text = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod";
+    let body = (0..40)
+        .map(|i| {
+            let shape = if i == 0 { SHAPE } else { "" };
+            format!(r#"<w:p>{shape}<w:r><w:t xml:space="preserve">{i:02} {text}</w:t></w:r></w:p>"#)
+        })
+        .collect::<String>();
+    let bytes = document(&body, "");
+    let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+    let engine = EngineSession::new(74234);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let request = json!({"bodyStory":"body", "renderEnv":{}, "options":{"pageGap":24},
+        "regions":{"sections":parsed.document.package.document.sections},
+        "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}}).to_string();
+    let extras = json!({"fontChains":{"calibri|0|0":[font]}}).to_string();
+    engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame(&extras, 0).unwrap();
+    let stride = text.len() + 4;
+    engine
+        .doc()
+        .insert_text(
+            &docx_edit::EditCtx::local("", ""),
+            docx_edit::Position::new("body", (30 * stride + 6) as u32),
+            "x",
+            docx_edit::FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let before = docx_layout::measure_blocks::paragraph_measure_count();
+    engine.apply_and_layout("body", 1).unwrap();
+    let measured = docx_layout::measure_blocks::paragraph_measure_count() - before;
+    assert_eq!(
+        engine.stats().region_fast_path_fallback,
+        Some("floating zones")
+    );
+    assert!(
+        measured <= 40 - 30,
+        "{measured} paragraphs measured for one keystroke"
+    );
+}
+
+#[test]
 fn line_unit_paragraph_spacing_reuses_clean_blocks_after_editing() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:beforeLines="50" w:afterLines="50"/></w:pPr></w:style>"#;
