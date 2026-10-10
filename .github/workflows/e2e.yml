@@ -3,7 +3,7 @@ name: End-to-end
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, capy-ci]
   workflow_dispatch:
 
 permissions:
