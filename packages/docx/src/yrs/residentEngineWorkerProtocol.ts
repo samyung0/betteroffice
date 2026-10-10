@@ -30,6 +30,18 @@ export type ResidentEngineWorkerRequest =
       paintCaret: boolean;
     }
   | {
+      /** Lay out the updates already applied (`applyUpdate`) the way a local
+       * edit is laid out, and answer with a FrameDelta of the changed pages. */
+      id: number;
+      type: 'relayout';
+      layoutInput: string;
+      extras: string;
+      expectedFrameEpoch: number;
+      selection: YrsSelection | null;
+      layoutRevision: number;
+      paintCaret: boolean;
+    }
+  | {
       id: number;
       type: 'applyInput';
       text: string;

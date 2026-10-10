@@ -573,6 +573,20 @@ export interface YrsResidentWorkerSnapshot {
 }
 
 /**
+ * {@link YrsSession.residentWorkerProbe}: enough to pick between a worker
+ * relayout (the worker holds every update and the fonts) and a full sync.
+ *
+ * @internal
+ */
+export interface YrsResidentWorkerProbe {
+  layoutRevision: number;
+  fontsRevision: number;
+  /** The last region layout request, or null when the last pass was not a
+   * region pass (only a sync replays that). */
+  regionLayoutInput: string | null;
+}
+
+/**
  * What the sync target already holds, so a snapshot can ship deltas instead
  * of the whole world.
  *
@@ -804,7 +818,7 @@ export interface YrsSession extends CollaborationReplica {
    * font bytes. Steady-state frame builds consult this instead of building a
    * full snapshot.
    */
-  residentWorkerProbe(): { layoutRevision: number } | null;
+  residentWorkerProbe(): YrsResidentWorkerProbe | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
   displayVerticalMoveJson(
@@ -1468,7 +1482,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     residentWorkerProbe: () => {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
-      return { layoutRevision: residentLayoutRevision };
+      return {
+        layoutRevision: residentLayoutRevision,
+        fontsRevision: residentFontsRevision,
+        regionLayoutInput: residentLayoutWithRegions ? residentLayoutInput : null,
+      };
     },
     displayHitTestRegionsJson: (pageIndex, x, y) =>
       session.display_hit_test_regions_json(pageIndex, x, y),

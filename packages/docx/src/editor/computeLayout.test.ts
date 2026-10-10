@@ -63,7 +63,7 @@ describe('computeLayout retained kernel inputs', () => {
     const session = {
       layoutDocumentWithRegionsRetainedJson: () =>
         JSON.stringify({ layout, notesConverged: true }),
-      residentWorkerProbe: () => ({ layoutRevision: 1 }),
+      residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: '' }),
       retainedKernelInputsJson: (expectedLayoutRevision: number) => {
         expect(expectedLayoutRevision).toBe(1);
         kernelFetches += 1;
@@ -222,7 +222,7 @@ describe('computeLayout default style forwarding', () => {
         seen.push(JSON.parse(input).renderEnv);
         return JSON.stringify({ layout: { pages: [] }, notesConverged: true });
       },
-      residentWorkerProbe: () => ({ layoutRevision: 1 }),
+      residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: '' }),
       retainedKernelInputsJson: () => JSON.stringify({ measured: [], options: {} }),
     };
     computeLayout({
@@ -247,7 +247,7 @@ describe('computeLayout default style forwarding', () => {
     const session = {
       layoutDocumentWithRegionsRetainedJson: () =>
         JSON.stringify({ layout: { pages: [] }, notesConverged: true }),
-      residentWorkerProbe: () => ({ layoutRevision: 1 }),
+      residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: '' }),
       retainedKernelInputsJson: () => JSON.stringify({ measured: [], options: {} }),
     };
     const computation = computeLayout({

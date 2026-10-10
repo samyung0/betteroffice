@@ -609,6 +609,14 @@ export class EditSession {
      */
     reject_change(target_json: string): string;
     /**
+     * For a resident worker replica: lays out the updates applied since its
+     * last frame against the host's region request (`request_json`) through
+     * the local-edit path and returns the binary `FrameDelta` of the changed
+     * pages (see [`EngineSession::relayout_frame`]). Errors unless the epoch
+     * is a non-negative safe integer, and on layout or build failure.
+     */
+    relayout_frame(request_json: string, extras_json: string, expected_frame_epoch: number): Uint8Array;
+    /**
      * [`EditingDoc::rename_duplicate_para_ids`], for a client that loaded a
      * stored state: returns how many paragraph ids it renamed.
      */
@@ -1184,6 +1192,7 @@ export interface InitOutput {
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_relayout_frame: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_rename_duplicate_para_ids: (a: number) => number;
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];

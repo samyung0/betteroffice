@@ -152,6 +152,28 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'relayout') {
+    if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.relayoutFrame(
+      request.layoutInput,
+      request.extras,
+      request.expectedFrameEpoch
+    );
+    layoutRevision = request.layoutRevision;
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret
+    );
+    return;
+  }
   if (request.type === 'applyUpdate') {
     session.applyUpdate(request.update);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);

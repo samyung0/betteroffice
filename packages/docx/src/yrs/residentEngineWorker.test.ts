@@ -37,7 +37,7 @@ beforeAll(async () => {
         name: 'isolated-worker-dependencies',
         setup(build) {
           build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
-            importer.endsWith('/residentEngineWorker.ts') && path in modules
+            importer.replaceAll('\\', '/').endsWith('/residentEngineWorker.ts') && path in modules
               ? { path, namespace: 'worker-test' }
               : undefined
           );
@@ -87,10 +87,19 @@ function worker() {
     presented: [] as number[],
     failRaster: null as number | null,
     failPresent: null as number | null,
+    relayouts: [] as Array<[string, string, number]>,
+    selections: [] as unknown[],
     session: {
       loadState() {},
       clearFonts() {},
       layoutDocumentJson() {},
+      relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number) {
+        harness.relayouts.push([layoutInput, extras, expectedFrameEpoch]);
+        return new Uint8Array([frameEpoch]);
+      },
+      setSelection(anchor: unknown, head: unknown) {
+        harness.selections.push([anchor, head]);
+      },
       onUpdate() {
         return () => {};
       },
@@ -214,6 +223,22 @@ function worker() {
         extras: '',
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
+      });
+    },
+    relayout(upserts: number[], layoutRevision: number) {
+      delta(upserts, false);
+      harness.caret = null;
+      return send({
+        type: 'relayout',
+        layoutInput: '{"bodyStory":"body"}',
+        extras: '{}',
+        expectedFrameEpoch: frameEpoch - 1,
+        selection: {
+          anchor: { story: 'body', paraId: 'p1', offset: 2 },
+          head: { story: 'body', paraId: 'p1', offset: 2 },
+        },
+        layoutRevision,
+        paintCaret: false,
       });
     },
     attach(active: number[], zoom = 1, color = '#000') {
@@ -400,5 +425,22 @@ describe('resident worker page damage', () => {
     expect(w.harness.rasterized).toEqual([2]);
     expect(w.surfaces.get('1')!.pixels).toBe('1:120');
     expect(w.surfaces.get('2')!.pixels).toBe('2:100|caret:#f00');
+  });
+});
+
+describe('resident worker relayout', () => {
+  test('lays out the applied updates against the host request and repaints only the changed page', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([1, 2, 3]);
+    w.resetCalls();
+    const reply = await w.relayout([2], 7);
+    expect(reply.ok).toBe(true);
+    if (!reply.ok) return;
+    expect(w.harness.relayouts).toEqual([['{"bodyStory":"body"}', '{}', 1]]);
+    expect(w.harness.selections).toHaveLength(1);
+    expect(reply.layoutRevision).toBe(7);
+    expect(reply.frame).toBeInstanceOf(ArrayBuffer);
+    expect(w.harness.rasterized).toEqual([2]);
   });
 });

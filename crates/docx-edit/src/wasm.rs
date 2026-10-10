@@ -1451,6 +1451,32 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// For a resident worker replica: lays out the updates applied since its
+    /// last frame against the host's region request (`request_json`) through
+    /// the local-edit path and returns the binary `FrameDelta` of the changed
+    /// pages (see [`EngineSession::relayout_frame`]). Errors unless the epoch
+    /// is a non-negative safe integer, and on layout or build failure.
+    pub fn relayout_frame(
+        &self,
+        request_json: &str,
+        extras_json: &str,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if !(expected_frame_epoch.is_finite()
+            && expected_frame_epoch >= 0.0
+            && expected_frame_epoch.fract() == 0.0
+            && expected_frame_epoch <= MAX_SAFE_INTEGER)
+        {
+            return Err(js_err(
+                "expected_frame_epoch must be a non-negative safe integer",
+            ));
+        }
+        self.engine
+            .relayout_frame(request_json, extras_json, expected_frame_epoch as u64)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
     /// body selection. `caretRect` is null whenever there is no selection, the
     /// selection is not a collapsed body caret, or the retained layout has no

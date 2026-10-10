@@ -79,6 +79,30 @@ struct EditLog {
     pending: Option<StoryEdit>,
     /// The last committed transaction's edit and the document epoch it made.
     last: Option<(u64, StoryEdit)>,
+    /// A transaction since the last full region pass changed a story outside
+    /// the body's tree, a comment or a bookmark: the body-only region fast
+    /// path would keep stale header, footer or note geometry.
+    outside_body: bool,
+}
+
+/// The body story and the stories nested in it (table cells are
+/// `body:t0:r0c0`, as `remove_story_tree` assumes).
+fn is_body_story(story: &str) -> bool {
+    story == "body" || story.starts_with("body:")
+}
+
+/// Whether every event stays inside the body's story tree.
+fn events_stay_in_body(txn: &yrs::TransactionMut, events: &yrs::types::Events) -> bool {
+    use yrs::types::{Event, PathSegment};
+    events.iter().all(|event| match event.path().front() {
+        Some(PathSegment::Key(story)) => is_body_story(story),
+        Some(PathSegment::Index(_)) => false,
+        // The stories map itself: stories added or removed.
+        None => match event {
+            Event::Map(event) => event.keys(txn).keys().all(|story| is_body_story(story)),
+            _ => false,
+        },
+    })
 }
 
 /// A plain insert when `events` hold exactly one story's text event whose
@@ -948,11 +972,13 @@ impl EngineSession {
             "docx-edit-engine",
             move |txn, events| {
                 let edit = classify_story_events(txn, events);
+                let in_body = events_stay_in_body(txn, events);
                 let mut log = log.borrow_mut();
                 log.pending = Some(match log.pending {
                     None => edit,
                     Some(_) => StoryEdit::Other,
                 });
+                log.outside_body |= !in_body;
             },
         );
         for root in [crate::COMMENTS, crate::bookmarks::ROOT] {
@@ -960,7 +986,9 @@ impl EngineSession {
             yrs_doc.get_or_insert_map(root).observe_deep_with(
                 "docx-edit-engine",
                 move |_txn, _events| {
-                    log.borrow_mut().pending = Some(StoryEdit::Other);
+                    let mut log = log.borrow_mut();
+                    log.pending = Some(StoryEdit::Other);
+                    log.outside_body = true;
                 },
             );
         }
@@ -1652,6 +1680,7 @@ impl EngineSession {
         // Only the region-measured arena may seed the next pass's reuse walk.
         self.pagination.borrow_mut().measured_with =
             resident_body.then_some(measurement_fingerprint);
+        self.edits.borrow_mut().outside_body = false;
         Ok(notes_converged)
     }
 
@@ -2374,6 +2403,30 @@ impl EngineSession {
         self.build_display_list_frame(&extras, expected_frame_epoch)
     }
 
+    /// Lay out every update applied since the last frame (a peer's, or one the
+    /// host made) the way a local edit is laid out — re-measure the changed
+    /// body paragraphs, paginate incrementally, rebuild only the pages that
+    /// changed — and return the FrameDelta against `expected_frame_epoch`. A
+    /// `request_json` other than the retained region request, a change outside
+    /// the body's story tree, or a fast-path refusal runs the full region pass
+    /// over `request_json` instead.
+    pub fn relayout_frame(
+        &self,
+        request_json: &str,
+        extras_json: &str,
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let same_request = self
+            .regions
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.request_json == request_json);
+        if !(same_request && self.apply_and_layout_regions_resident("body", &mut |_| {})?) {
+            self.layout_document_with_regions_value(request_json)?;
+        }
+        self.build_display_list_frame(extras_json, expected_frame_epoch)
+    }
+
     /// Fallback for edits the resident region path cannot absorb: replay the
     /// retained region request through the full pass (no serialization).
     fn apply_and_layout_regions_full(&self) -> Result<(), String> {
@@ -2415,6 +2468,9 @@ impl EngineSession {
     ) -> Result<Result<(), &'static str>, String> {
         if story != "body" {
             return Ok(Err("story"));
+        }
+        if self.edits.borrow().outside_body {
+            return Ok(Err("outside body"));
         }
         let fast_config = {
             let state = self.regions.borrow();

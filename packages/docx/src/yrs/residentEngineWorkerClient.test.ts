@@ -175,6 +175,39 @@ describe('watchdog', () => {
   });
 });
 
+describe('relayout', () => {
+  test('makes an invalidated client ready again at the reported layout revision', async () => {
+    const { worker, client } = setup();
+    const boot = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await boot;
+    client.invalidate(new Uint8Array([7]), null);
+    expect(client.isReady()).toBe(false);
+    const frame = client.relayout('{"bodyStory":"body"}', '{}', 1, selection, 4);
+    const request = worker.posted.at(-1)!;
+    expect(request).toMatchObject({
+      type: 'relayout',
+      layoutInput: '{"bodyStory":"body"}',
+      expectedFrameEpoch: 1,
+      selection,
+      layoutRevision: 4,
+    });
+    worker.reply({ id: request.id, started: true });
+    expect(armedBudgets()).toEqual([15_000]);
+    worker.reply({
+      id: request.id,
+      ok: true,
+      frame: new ArrayBuffer(0),
+      caret: { frameEpoch: 0, caretRect: null },
+      selection: null,
+      layoutRevision: 4,
+    });
+    await frame;
+    expect(client.isReady()).toBe(true);
+    expect(client.layoutRevision()).toBe(4);
+  });
+});
+
 describe('worker failure', () => {
   test('onerror rejects every pending request and refuses later ones', async () => {
     const { worker, client } = setup();

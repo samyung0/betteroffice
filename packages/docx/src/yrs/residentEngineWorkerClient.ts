@@ -59,6 +59,8 @@ type AwaitedRequest = Exclude<
 const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   bootstrap: 15_000,
   sync: 15_000,
+  // Replaces a sync after remote or structural updates; may be a full region pass.
+  relayout: 15_000,
   attachCanvases: 15_000,
   buildFrame: 5_000,
   applyInput: 5_000,
@@ -187,6 +189,35 @@ export class ResidentEngineWorkerClient {
     const result = frameResult(
       await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
+    return result;
+  }
+
+  /**
+   * Lay out the updates the worker already holds (each `invalidate` sent one)
+   * against `layoutInput`, the host's latest region request, and answer with a
+   * FrameDelta of the changed pages. Requires the worker's fonts to match.
+   */
+  async relayout(
+    layoutInput: string,
+    extras: string,
+    expectedFrameEpoch: number,
+    selection: YrsSelection | null,
+    layoutRevision: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
+    const result = frameResult(
+      await this.request({
+        type: 'relayout',
+        layoutInput,
+        extras,
+        expectedFrameEpoch,
+        selection,
+        layoutRevision,
+        paintCaret,
+      })
+    );
+    this.ready = true;
+    this.revision = result.layoutRevision;
     return result;
   }
 

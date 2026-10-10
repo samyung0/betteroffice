@@ -65,7 +65,7 @@ test('starts a fresh frame and query history after a worker with a higher epoch 
       expectedEpochs.push(epoch);
       return native.build_display_list_frame(input, epoch);
     },
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: null }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
     selection: () => null,
@@ -79,6 +79,7 @@ test('starts a fresh frame and query history after a worker with a higher epoch 
       { initialProps: { layout: inputs.layout as Layout } }
     );
     await act(async () => {
+      await flushRequest(() => worker!.bootstrapId !== 0);
       worker!.reply();
     });
     await waitFor(() => {
@@ -159,6 +160,12 @@ class InputFakeWorker {
   }
 }
 
+/** Frame requests leave through the worker queue a few microtasks later. */
+async function flushRequest(posted: () => boolean): Promise<void> {
+  for (let i = 0; i < 25 && !posted(); i += 1) await Promise.resolve();
+  expect(posted()).toBe(true);
+}
+
 async function flushInputRequest(worker: InputFakeWorker): Promise<void> {
   for (let i = 0; i < 25 && !worker.posted.some((request) => request.type === 'applyInput'); i += 1) {
     await Promise.resolve();
@@ -194,7 +201,7 @@ test('falls back to the main thread and keeps the keystroke when the worker cras
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: null }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
@@ -208,6 +215,7 @@ test('falls back to the main thread and keeps the keystroke when the worker cras
       { initialProps: { layout: inputs.layout as Layout } }
     );
     await act(async () => {
+      await flushRequest(() => worker!.posted.some((request) => request.type === 'bootstrap'));
       worker!.replyBootstrap();
     });
     await waitFor(() => {
@@ -265,7 +273,7 @@ test('surfaces an engine-level input rejection instead of falling back', async (
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: null }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
@@ -279,6 +287,7 @@ test('surfaces an engine-level input rejection instead of falling back', async (
       { initialProps: { layout: inputs.layout as Layout } }
     );
     await act(async () => {
+      await flushRequest(() => worker!.posted.some((request) => request.type === 'bootstrap'));
       worker!.replyBootstrap();
     });
     await waitFor(() => {
@@ -332,7 +341,7 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
       native.build_display_list_frame(input, epoch),
     applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: null }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
@@ -346,6 +355,7 @@ test('falls back to the main thread and keeps the keystroke when the worker retu
       { initialProps: { layout: inputs.layout as Layout } }
     );
     await act(async () => {
+      await flushRequest(() => worker!.posted.some((request) => request.type === 'bootstrap'));
       worker!.replyBootstrap();
     });
     await waitFor(() => {
@@ -409,7 +419,7 @@ test('keeps editing on the main thread when the worker fails before the host eng
       return native.apply_input(text, epoch);
     },
     residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
-    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: null }),
     residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
     onUpdate: () => () => {},
     selection: () => JSON.parse(native.selection()) as YrsSelection,
@@ -423,6 +433,7 @@ test('keeps editing on the main thread when the worker fails before the host eng
       { initialProps: { layout: inputs.layout as Layout } }
     );
     await act(async () => {
+      await flushRequest(() => worker!.posted.some((request) => request.type === 'bootstrap'));
       worker!.replyBootstrap();
     });
     await waitFor(() => {

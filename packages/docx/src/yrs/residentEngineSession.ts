@@ -37,6 +37,10 @@ export type ResidentEngineSession = Pick<
 > & {
   /** Attaches the main replica's source package media. */
   setMedia(mediaJson: string): void;
+  /** Lays out the updates applied since the last frame through the local-edit
+   * path (a full region pass when the request changed or a story outside the
+   * body did) and returns a FrameDelta of the changed pages. */
+  relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number): Uint8Array;
 };
 
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
@@ -79,6 +83,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
       session.layout_document_with_regions_retained_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    relayoutFrame: (layoutInput, extras, expectedFrameEpoch) =>
+      session.relayout_frame(layoutInput, extras, expectedFrameEpoch),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
