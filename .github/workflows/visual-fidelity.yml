@@ -27,8 +27,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Forks (Capy dispatches it on capy-ci at each pin bump) skip the README commit and render publishing.
   prepare:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.repository != 'openooxml/betteroffice'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -772,7 +773,7 @@ jobs:
   publish:
     needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip]
     if: >-
-      !cancelled() && github.ref == 'refs/heads/main' &&
+      !cancelled() && (github.ref == 'refs/heads/main' || github.repository != 'openooxml/betteroffice') &&
       needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip.result == 'success' &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
@@ -904,6 +905,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
+        if: github.repository == 'openooxml/betteroffice'
         run: |
           python3 - <<'PY'
           import os
@@ -925,6 +927,7 @@ jobs:
           PY
 
       - name: Detect a changed report
+        if: github.repository == 'openooxml/betteroffice'
         id: changed
         run: |
           if git diff --quiet -- README.md; then

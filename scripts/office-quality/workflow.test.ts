@@ -144,3 +144,13 @@ test('a shard of the slowest possible samples still finishes inside the job time
   expect(probe['timeout-minutes']).toBeGreaterThan(worstSeconds / 60);
   expect(worstSeconds).toBeLessThan(probe['timeout-minutes'] * 60 * 0.75);
 });
+
+test("forks run the benchmark by hand only and keep the README commit and renders upstream-only", () => {
+  const upstream = "github.repository == 'openooxml/betteroffice'";
+  expect(Object.keys(workflow.on)).toEqual(['workflow_dispatch']);
+  expect(prepare.if).toBe(`github.ref == 'refs/heads/main' || github.repository != 'openooxml/betteroffice'`);
+  expect(publish.if).toContain(`(github.ref == 'refs/heads/main' || github.repository != 'openooxml/betteroffice')`);
+  for (const name of ['Replace the generated README section', 'Detect a changed report'])
+    expect(publish.steps.find((step: any) => step.name === name).if).toBe(upstream);
+  expect(publish.steps.find((step: any) => step.run?.includes('publish-renders.mjs')).if).toContain(upstream);
+});
