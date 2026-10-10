@@ -159,13 +159,14 @@ test('a burst of remote updates costs one relayout delta, and layouts landing me
     }
     expect(worker.of('relayout')).toHaveLength(1);
 
-    // The reply's content is older than the updates since, yet it is applied:
-    // the next relayout diffs against it instead of asking for a full frame.
+    // The reply's content is older than the updates since, yet it is chained:
+    // the next relayout diffs against it instead of asking for a full frame,
+    // and only that newer frame is rendered.
     await act(async () => {
       worker.reply(relayouts[0]!, h.nextFrame(), 2);
       await settle();
     });
-    expect(result.current.frame?.frameEpoch).toBe(2);
+    expect(result.current.frame?.frameEpoch).toBe(1);
     const followUp = worker.of('relayout');
     expect(followUp).toHaveLength(2);
     expect(followUp[1]).toMatchObject({ expectedFrameEpoch: 2, layoutRevision: 5 });

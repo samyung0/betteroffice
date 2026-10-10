@@ -656,6 +656,12 @@ export function useRustDisplayList(
       (workerFrameRequestRef.current ?? request).fallback(cause);
       return;
     }
+    if (workerFrameQueuedRef.current) {
+      // A newer frame is already queued: the next delta builds on this one
+      // (the worker painted it), and only the newest is rendered.
+      snapshotRef.current = { ...snapshotRef.current, frame: nextFrame };
+      return;
+    }
     const nextSnapshot = createRustDisplayListSnapshot(
       nextFrame.displayList,
       nextFrame,
