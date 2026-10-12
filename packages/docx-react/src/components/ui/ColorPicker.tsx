@@ -95,11 +95,11 @@ const S_BUTTON: CSSProperties = {
   height: '32px',
   padding: '2px 6px',
   border: 'none',
-  borderRadius: '4px',
+  borderRadius: 'var(--doc-toolbar-control-radius, 4px)',
   backgroundColor: 'transparent',
   cursor: 'pointer',
   transition: 'background-color 0.1s',
-  color: 'var(--doc-text-muted)',
+  color: 'var(--doc-toolbar-control-fg, var(--doc-text-muted))',
 };
 
 const S_DROPDOWN: CSSProperties = {
@@ -219,11 +219,11 @@ const S_SPLIT_APPLY_BTN: CSSProperties = {
   width: 'var(--doc-color-split-width, 28px)',
   padding: '2px 4px',
   border: 'none',
-  borderRadius: '4px',
+  borderRadius: 'var(--doc-toolbar-control-radius, 4px)',
   backgroundColor: 'transparent',
   cursor: 'pointer',
   transition: 'background-color 0.1s',
-  color: 'var(--doc-text-muted)',
+  color: 'var(--doc-toolbar-control-fg, var(--doc-text-muted))',
 };
 
 const S_SPLIT_ARROW_BTN: CSSProperties = {
@@ -233,11 +233,11 @@ const S_SPLIT_ARROW_BTN: CSSProperties = {
   width: '18px',
   padding: 0,
   border: 'none',
-  borderRadius: '4px',
+  borderRadius: 'var(--doc-toolbar-control-radius, 4px)',
   backgroundColor: 'transparent',
   cursor: 'pointer',
   transition: 'background-color 0.1s',
-  color: 'var(--doc-text-muted)',
+  color: 'var(--doc-toolbar-control-fg, var(--doc-text-muted))',
 };
 
 // ============================================================================
@@ -607,7 +607,7 @@ export function ColorPicker({
   const buttonStyle: CSSProperties = {
     ...S_BUTTON,
     ...(disabled
-      ? { cursor: 'default', opacity: 0.38 }
+      ? { cursor: 'default', opacity: 'var(--doc-toolbar-disabled-opacity, 0.38)' }
       : isOpen
         ? { backgroundColor: 'var(--doc-primary-light)', color: 'var(--doc-primary)' }
         : isHovered
@@ -641,7 +641,9 @@ export function ColorPicker({
           className="docx-color-picker-split"
           style={{
             ...S_SPLIT_GROUP,
-            ...(disabled ? { opacity: 0.38, cursor: 'default' } : null),
+            ...(disabled
+              ? { opacity: 'var(--doc-toolbar-disabled-opacity, 0.38)', cursor: 'default' }
+              : null),
           }}
         >
           <button

@@ -94,11 +94,11 @@ const BUTTON_STYLE: CSSProperties = {
   height: '32px',
   padding: '4px',
   border: 'none',
-  borderRadius: '4px',
+  borderRadius: 'var(--doc-toolbar-control-radius, 4px)',
   backgroundColor: 'transparent',
   cursor: 'pointer',
   transition: 'background-color 0.1s',
-  color: 'var(--doc-text-muted)',
+  color: 'var(--doc-toolbar-control-fg, var(--doc-text-muted))',
 };
 
 const BUTTON_HOVER_STYLE: CSSProperties = {
@@ -115,7 +115,7 @@ const BUTTON_ACTIVE_STYLE: CSSProperties = {
 const BUTTON_DISABLED_STYLE: CSSProperties = {
   ...BUTTON_STYLE,
   cursor: 'default',
-  opacity: 0.38,
+  opacity: 'var(--doc-toolbar-disabled-opacity, 0.38)',
 };
 
 const COMPACT_BUTTON_STYLE: CSSProperties = {

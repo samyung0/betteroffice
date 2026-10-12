@@ -93,7 +93,7 @@ export function EditableCombobox({
         border: `1px solid ${toolbarColors.border}`,
         borderRadius: 'var(--pptx-input-radius, 4px)',
         background: toolbarColors.surface,
-        opacity: disabled ? 0.48 : 1,
+        opacity: disabled ? 'var(--pptx-disabled-opacity, 0.48)' : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
       }}

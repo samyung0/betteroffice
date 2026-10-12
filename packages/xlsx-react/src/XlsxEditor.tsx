@@ -441,7 +441,7 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
   },
   nameBox: {
     appearance: 'none',
-    width: 64,
+    width: 'var(--xlsx-name-box-width, 64px)',
     height: 28,
     flex: '0 0 auto',
     boxSizing: 'border-box',
