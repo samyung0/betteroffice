@@ -493,8 +493,8 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
   flatRail: {
     display: 'flex',
     alignItems: 'center',
-    height: 39,
-    padding: '0 8px',
+    height: 'calc(var(--xlsx-toolbar-height, 40px) - 1px)',
+    padding: 'var(--xlsx-toolbar-padding, 0 8px)',
     boxSizing: 'border-box',
     overflowX: 'auto',
     overflowY: 'hidden',

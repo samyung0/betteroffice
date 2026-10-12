@@ -934,8 +934,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
           display: 'flex',
           alignItems: 'center',
           minWidth: 0,
-          height: 40,
-          padding: '0 8px',
+          height: 'var(--xlsx-toolbar-height, 40px)',
+          padding: 'var(--xlsx-toolbar-padding, 0 8px)',
           borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
           background: 'var(--xlsx-chrome-bg, #ffffff)',
           color: toolbarColors.text,
@@ -964,7 +964,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
               .filter((group) => group !== false)
               .map((group, index) => (
                 <Fragment key={group.key}>
-                  {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
+                  {index > 0 && (
+                    <ToolbarSeparator
+                      style={{
+                        height: 'var(--xlsx-divider-height, 28px)',
+                        margin: 'var(--xlsx-divider-margin, 0 6px)',
+                      }}
+                    />
+                  )}
                   <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
                 </Fragment>
               ))}

@@ -181,7 +181,7 @@ export function ToolbarGroup({
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 1,
+        gap: 'var(--pptx-group-gap, 1px)',
         flex: '0 0 auto',
         ...style,
       }}

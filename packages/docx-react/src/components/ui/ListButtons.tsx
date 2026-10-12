@@ -77,13 +77,13 @@ export interface ListButtonProps {
 const CONTAINER_STYLE: CSSProperties = {
   display: 'inline-flex',
   alignItems: 'center',
-  gap: '4px',
+  gap: 'var(--doc-list-gap, 4px)',
 };
 
 const BUTTON_GROUP_STYLE: CSSProperties = {
   display: 'inline-flex',
   alignItems: 'center',
-  gap: '4px',
+  gap: 'var(--doc-list-gap, 4px)',
 };
 
 const BUTTON_STYLE: CSSProperties = {
@@ -108,8 +108,8 @@ const BUTTON_HOVER_STYLE: CSSProperties = {
 
 const BUTTON_ACTIVE_STYLE: CSSProperties = {
   ...BUTTON_STYLE,
-  backgroundColor: 'var(--doc-primary-light)',
-  color: 'var(--doc-primary)',
+  backgroundColor: 'var(--doc-list-active-bg, var(--doc-primary-light))',
+  color: 'var(--doc-list-active-fg, var(--doc-primary))',
 };
 
 const BUTTON_DISABLED_STYLE: CSSProperties = {
@@ -119,16 +119,16 @@ const BUTTON_DISABLED_STYLE: CSSProperties = {
 };
 
 const COMPACT_BUTTON_STYLE: CSSProperties = {
-  width: '28px',
-  height: '28px',
+  width: 'var(--doc-toolbar-button-size, 28px)',
+  height: 'var(--doc-toolbar-button-size, 28px)',
   padding: '2px',
 };
 
 const SEPARATOR_STYLE: CSSProperties = {
   width: '1px',
-  height: '20px',
-  backgroundColor: 'var(--doc-border)',
-  margin: '0 6px',
+  height: 'var(--doc-list-divider-height, 20px)',
+  backgroundColor: 'var(--doc-list-divider-color, var(--doc-border))',
+  margin: 'var(--doc-list-divider-margin, 0 6px)',
 };
 
 // ============================================================================
