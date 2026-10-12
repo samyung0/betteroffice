@@ -206,7 +206,7 @@ const S_COLOR_BAR: CSSProperties = {
 const S_SPLIT_GROUP: CSSProperties = {
   display: 'inline-flex',
   alignItems: 'stretch',
-  height: '32px',
+  height: 'var(--doc-color-split-height, 32px)',
   gap: '2px',
 };
 
@@ -216,7 +216,7 @@ const S_SPLIT_APPLY_BTN: CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   gap: 0,
-  width: '28px',
+  width: 'var(--doc-color-split-width, 28px)',
   padding: '2px 4px',
   border: 'none',
   borderRadius: '4px',

@@ -4058,7 +4058,7 @@ const styles: Record<string, CSSProperties> = {
     alignItems: 'center',
     flex: '0 0 auto',
     height: 'var(--pptx-toolbar-height, 40px)',
-    padding: '0 4px 0 8px',
+    padding: 'var(--pptx-toolbar-padding, 0 4px 0 8px)',
     background: 'var(--pptx-surface, #ffffff)',
     borderBottom: '1px solid var(--pptx-divider, #e2e8f0)',
     boxSizing: 'border-box',

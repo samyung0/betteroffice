@@ -1070,7 +1070,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
             .filter((group) => group !== false)
             .map((group, index) => (
               <Fragment key={group.key}>
-                {index > 0 && <ToolbarSeparator style={{ height: 28, margin: '0 6px' }} />}
+                {index > 0 && (
+                  <ToolbarSeparator
+                    style={{
+                      height: 'var(--pptx-divider-height, 28px)',
+                      margin: 'var(--pptx-divider-margin, 0 6px)',
+                    }}
+                  />
+                )}
                 <ToolbarGroup label={group.label}>{group.node}</ToolbarGroup>
               </Fragment>
             ))}
