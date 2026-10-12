@@ -113,6 +113,7 @@ import { IconSetContext, type IconSet } from './ui/Icons';
 // Paginated editor
 import { type PagedEditorRef, DEFAULT_PAGE_WIDTH } from './DocxEditor/PagedEditor';
 import { type DocxZoom, fitZoom, usePaneWidth, usePinchZoom } from './DocxEditor/pageZoom';
+import { usePagedList } from './DocxEditor/hooks/usePagedList';
 
 // Plugin API types
 import type { RenderedDomContext } from '../plugin-api/types';
@@ -440,7 +441,8 @@ export interface DocxEditorRef {
   /**
    * Draws the print pages one at a time, handing each to `each` (which encodes
    * it) before the canvas is released, so a long document never holds every
-   * page's bitmap at once.
+   * page's bitmap at once. Right after an edit it waits for the edit's layout
+   * when the pages are not there yet.
    */
   renderPages: <T>(
     each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
@@ -1477,13 +1479,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
   const { displayList: printList, resolveImage: printImages } = canvasRenderer;
+  const pagedList = usePagedList(printList);
   const renderPages = useCallback(
     async <T,>(
       each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
     ) => {
-      if (!printList) return [];
+      const list = await pagedList();
       const results: T[] = [];
-      for (const page of printList.pages) {
+      for (const page of list.pages) {
         const canvas = await rasterizeDisplayPage(page, { resolveImage: printImages });
         try {
           results.push(await each({ canvas, width: page.width, height: page.height }));
@@ -1495,7 +1498,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
       return results;
     },
-    [printList, printImages]
+    [pagedList, printImages]
   );
 
   // Expose ref methods
