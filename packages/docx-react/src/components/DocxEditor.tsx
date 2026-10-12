@@ -112,6 +112,7 @@ import { IconSetContext, type IconSet } from './ui/Icons';
 
 // Paginated editor
 import { type PagedEditorRef, DEFAULT_PAGE_WIDTH } from './DocxEditor/PagedEditor';
+import { type DocxZoom, fitZoom, usePaneWidth, usePinchZoom } from './DocxEditor/pageZoom';
 
 // Plugin API types
 import type { RenderedDomContext } from '../plugin-api/types';
@@ -187,8 +188,13 @@ export interface DocxEditorProps {
   onShowRulerChange?: (visible: boolean) => void;
   /** Unit for ruler display (default: 'inch') */
   rulerUnit?: 'inch' | 'cm';
-  /** Initial zoom level (default: 1.0) */
-  initialZoom?: number;
+  /**
+   * Initial zoom (default: 1.0). 'fit' fits the widest page to the pane's
+   * width, at most 100%, and re-fits on resize until a zoom is picked.
+   */
+  initialZoom?: DocxZoom;
+  /** A two-finger pinch over the pages zooms the document (default: false). */
+  pinchZoom?: boolean;
   /** Whether to show hidden (vanished) text in the layout (default: false) */
   showHiddenText?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
@@ -533,7 +539,7 @@ export interface DocxEditorRef {
 interface EditorState {
   isLoading: boolean;
   parseError: string | null;
-  zoom: number;
+  zoom: DocxZoom;
   /** Current selection formatting for toolbar */
   selectionFormatting: SelectionFormatting;
   /** Paragraph indent data for ruler */
@@ -629,6 +635,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onShowRulerChange,
     rulerUnit = 'inch',
     initialZoom = 1.0,
+    pinchZoom = false,
     showHiddenText = false,
     readOnly: readOnlyProp = false,
     disableFindReplaceShortcuts = false,
@@ -811,6 +818,23 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const containerRef = useRef<HTMLDivElement>(null);
   const editorContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Reserve against the WIDEST page in the doc, not the portrait default: pages
+  // center via `alignItems:center`, so a landscape section (wider than
+  // DEFAULT_PAGE_WIDTH) gets a smaller side margin and, with the old default,
+  // slid left under the outline toggle/panel. Taking the max across all section
+  // widths also covers mixed-orientation docs.
+  const docBody = history.state?.package?.document;
+  const sectionPageWidths = [
+    docBody?.finalSectionProperties?.pageWidth,
+    ...(docBody?.sections?.map((s) => s.properties?.pageWidth) ?? []),
+  ].filter((w): w is number => typeof w === 'number' && w > 0);
+  const maxPageWidthPx = sectionPageWidths.length
+    ? Math.round(Math.max(...sectionPageWidths) / 15)
+    : DEFAULT_PAGE_WIDTH;
+  const zoomFit = state.zoom === 'fit';
+  const paneWidth = usePaneWidth(scrollContainerRef, zoomFit && !state.isLoading);
+  // 100% only until the pane is first measured, before anything paints.
+  const zoom = state.zoom === 'fit' ? (fitZoom(paneWidth, maxPageWidthPx) ?? 1) : state.zoom;
   const [documentFonts, setDocumentFonts] = useState<FontOption[]>([]);
   const {
     showOutline,
@@ -1083,7 +1107,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     partEditOpen: partEditTarget !== null,
     readOnly,
     isLoading: state.isLoading,
-    zoom: state.zoom,
+    zoom,
     canvasHostRef: canvasRenderer.canvasHostRef,
     displayListQueries: canvasRenderer.queries,
   });
@@ -1234,9 +1258,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     };
   }, [yrsCore.session]);
 
-  const handleZoomChange = useCallback((zoom: number) => {
-    setState((prev) => ({ ...prev, zoom }));
+  const handleZoomChange = useCallback((level: number) => {
+    setState((prev) => ({ ...prev, zoom: level }));
   }, []);
+  usePinchZoom({
+    target: scrollContainerRef,
+    content: editorContentRef,
+    enabled: pinchZoom && !state.isLoading,
+    zoom,
+    onZoom: handleZoomChange,
+  });
 
   const {
     hyperlinkPopupData,
@@ -1362,6 +1393,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       },
       showRuler,
       onToggleRuler: () => setShowRuler((visible) => !visible),
+      zoomFit,
     }),
     [
       handleContextMenuAction,
@@ -1371,6 +1403,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setShowCommentsSidebar,
       showRuler,
       setShowRuler,
+      zoomFit,
     ]
   );
 
@@ -1462,8 +1495,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleSave,
     handleDirectPrint,
     renderPages,
-    zoom: state.zoom,
-    setZoom: (zoom: number) => setState((prev) => ({ ...prev, zoom })),
+    zoom,
+    setZoom: handleZoomChange,
     scrollPageInfo,
     loadParsedDocument,
     loadBuffer,
@@ -1736,22 +1769,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // The outline toggle/panel inset past the vertical ruler when it's shown,
     // so the page must clear that extra width too.
     (showVerticalRuler && (showOutline || floatingOutlineButton) ? RULER_WIDTH : 0);
-  // Reserve against the WIDEST page in the doc, not the portrait default: pages
-  // center via `alignItems:center`, so a landscape section (wider than
-  // DEFAULT_PAGE_WIDTH) gets a smaller side margin and, with the old default,
-  // slid left under the outline toggle/panel. Taking the max across all section
-  // widths also covers mixed-orientation docs.
-  const docBody = history.state?.package?.document;
-  const sectionPageWidths = [
-    docBody?.finalSectionProperties?.pageWidth,
-    ...(docBody?.sections?.map((s) => s.properties?.pageWidth) ?? []),
-  ].filter((w): w is number => typeof w === 'number' && w > 0);
-  const maxPageWidthPx = sectionPageWidths.length
-    ? Math.round(Math.max(...sectionPageWidths) / 15)
-    : DEFAULT_PAGE_WIDTH;
 
   const minLayoutWidth =
-    2 * outlineLeftAllowance + maxPageWidthPx + (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0);
+    2 * outlineLeftAllowance +
+    maxPageWidthPx * zoom +
+    (sidebarOpen ? SIDEBAR_DOCUMENT_SHIFT * 2 : 0);
 
   const liveYrsStory = (() => {
     try {
@@ -1955,7 +1977,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         onEditorContextMenu={handleEditorContextMenu}
         horizontalRulerProps={{
           sectionProps: history.state?.package.document?.finalSectionProperties,
-          zoom: state.zoom,
+          zoom,
           unit: rulerUnit,
           editable: !readOnly,
           onLeftMarginChange: handleLeftMarginChange,
@@ -1972,7 +1994,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         }}
         verticalRulerProps={{
           sectionProps: initialSectionProperties,
-          zoom: state.zoom,
+          zoom,
           unit: rulerUnit,
           editable: !readOnly,
           onTopMarginChange: handleTopMarginChange,
@@ -2019,7 +2041,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               toolbarExtra={toolbarExtra}
               fontFamilies={fontFamilies}
               documentFonts={documentFonts}
-              zoom={state.zoom}
+              zoom={zoom}
               showZoomControl={showZoomControl}
               showFontPicker={showFontPicker}
               showFontSizePicker={showFontSizePicker}
@@ -2059,7 +2081,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               notifyRef: canvasA11yNotifyRef,
             }}
             sidebarOpen={sidebarOpen}
-            zoom={state.zoom}
+            zoom={zoom}
             interactive={!readOnly}
           >
             <DocxEditorPagedArea
@@ -2084,7 +2106,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onNoteClick={setPartEditTarget}
               onRemoveHeaderFooter={handleRemoveHeaderFooter}
               onBodyClick={handleBodyClick}
-              zoom={state.zoom}
+              zoom={zoom}
               readOnly={readOnly}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
@@ -2243,7 +2265,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           canvasHostRef={canvasRenderer.canvasHostRef}
           displayListQueries={canvasRenderer.queries}
           sidebarOpen={sidebarOpen}
-          zoom={state.zoom}
+          zoom={zoom}
         />
       ) : null}
       {canvasFindOverlayTarget && canvasRenderer.queries ? (
@@ -2253,7 +2275,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           canvasHostRef={canvasRenderer.canvasHostRef}
           displayListQueries={canvasRenderer.queries}
           sidebarOpen={sidebarOpen}
-          zoom={state.zoom}
+          zoom={zoom}
         />
       ) : null}
     </>

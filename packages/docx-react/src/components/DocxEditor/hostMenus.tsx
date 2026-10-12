@@ -9,6 +9,7 @@ import { useTranslation } from '../../i18n';
 import { useEditorToolbar } from '../EditorToolbarContext';
 import { paragraphStyleOptions } from '../ui/StylePicker';
 import type { TextContextAction } from '../TextContextMenu';
+import type { DocxZoom } from './pageZoom';
 
 export type HostMenuEntry =
   | {
@@ -38,8 +39,8 @@ export interface DocxMenuModel {
   menus: HostMenu[];
   /** `file` comes with Insert › Image when the host picked the image. */
   run: (id: string, value?: string, file?: File) => void;
-  /** The editor's zoom (1 = 100%), for a host that keeps it across editors. */
-  zoom: number;
+  /** The editor's zoom (1 = 100%, or 'fit'), for a host that keeps it across editors. */
+  zoom: DocxZoom;
 }
 
 /** Commands that live outside the toolbar context. */
@@ -52,6 +53,8 @@ export interface HostMenuActions {
   onToggleComments: () => void;
   showRuler: boolean;
   onToggleRuler: () => void;
+  /** The zoom follows the pane width ('fit'). */
+  zoomFit: boolean;
 }
 
 const ZOOMS = [50, 75, 90, 100, 125, 150, 200];
@@ -527,7 +530,7 @@ export function HostMenus({
     []
   );
 
-  const zoom = ctx.zoom ?? 1;
+  const zoom = actions.zoomFit ? 'fit' : (ctx.zoom ?? 1);
   useEffect(() => {
     onMenus({ menus, run, zoom });
   }, [menus, onMenus, run, zoom]);

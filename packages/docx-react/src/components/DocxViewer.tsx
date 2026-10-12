@@ -8,6 +8,7 @@ import {
   type DisplayList,
 } from '@betteroffice/docx/layout/render';
 import { CanvasPagesView } from './DocxEditor/CanvasPagesView';
+import { type DocxZoom, fitZoom, usePaneWidth, usePinchZoom } from './DocxEditor/pageZoom';
 import { DefaultLoadingIndicator, ParseError } from './DocxEditorHelpers';
 import { useTextLayer } from './textLayer';
 
@@ -20,7 +21,11 @@ export interface DocxViewerProps {
 
 export interface DocxDisplayListViewerProps {
   displayList: DisplayList;
-  zoom?: number;
+  /** 'fit' fits the widest page to the viewer's width, at most 100%. */
+  zoom?: DocxZoom;
+  /** A two-finger pinch zooms the pages; the level goes to `onZoomChange`. */
+  pinchZoom?: boolean;
+  onZoomChange?: (zoom: number) => void;
 }
 
 /**
@@ -30,10 +35,26 @@ export interface DocxDisplayListViewerProps {
 export function DocxDisplayListViewer({
   displayList,
   zoom = 1,
+  pinchZoom = false,
+  onZoomChange,
 }: DocxDisplayListViewerProps) {
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const hostRef = useRef<HTMLDivElement>(null);
   useTextLayer(hostRef, displayList.pages);
+  const paneWidth = usePaneWidth(hostRef, zoom === 'fit');
+  const pageWidth = useMemo(
+    () => Math.max(0, ...displayList.pages.map((page) => page.width)),
+    [displayList]
+  );
+  // 100% only until the pane is first measured, before anything paints.
+  const level = zoom === 'fit' ? (fitZoom(paneWidth, pageWidth) ?? 1) : zoom;
+  usePinchZoom({
+    target: hostRef,
+    content: hostRef,
+    enabled: pinchZoom,
+    zoom: level,
+    onZoom: onZoomChange,
+  });
   return (
     <CanvasPagesView
       displayList={displayList}
@@ -42,7 +63,7 @@ export function DocxDisplayListViewer({
       interactive={false}
       resolveImage={resolveImage}
       selectableText
-      zoom={zoom}
+      zoom={level}
     />
   );
 }

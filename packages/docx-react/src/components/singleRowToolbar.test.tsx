@@ -279,6 +279,7 @@ test('host menus describe the editor and run their commands', () => {
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   let model: DocxMenuModel | null = null;
   render(
@@ -347,6 +348,7 @@ test('Insert offers table of contents, and its update while the document has one
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   const onInsertTOC = mock(() => {});
   const onUpdateTOC = mock(() => {});
@@ -396,6 +398,7 @@ test('host menus list the first 40 paragraph styles and refuse a disabled item',
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   const documentStyles = Array.from({ length: 50 }, (_, index) => ({
     styleId: `Style${index}`,
@@ -438,6 +441,7 @@ test("a read-only editor's host menus say which items edit and keep the others u
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   let model: DocxMenuModel | null = null;
   render(
@@ -502,11 +506,12 @@ test('host menus report the zoom, so a host can open the next editor at it', () 
     onToggleRuler: () => {},
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   let model: DocxMenuModel | null = null;
-  const toolbar = (zoom: number) => (
+  const toolbar = (zoom: number, zoomFit = false) => (
     <EditorToolbar singleRow hostMenus zoom={zoom} onZoomChange={() => {}}>
-      <HostMenus onMenus={(next) => (model = next)} actions={actions} />
+      <HostMenus onMenus={(next) => (model = next)} actions={{ ...actions, zoomFit }} />
     </EditorToolbar>
   );
   const { rerender } = render(toolbar(1.5));
@@ -514,6 +519,15 @@ test('host menus report the zoom, so a host can open the next editor at it', () 
   expect(zoomOf()).toBe(1.5);
   rerender(toolbar(2));
   expect(zoomOf()).toBe(2);
+  // Fitted to the pane: 'fit', and no level ticked at the fitted 40%.
+  rerender(toolbar(0.4, true));
+  expect(zoomOf()).toBe('fit');
+  const view = (model as DocxMenuModel | null)?.menus.find((menu) => menu.id === 'view');
+  const levels = view?.items.find((item) => item.kind === 'submenu' && item.id === 'zoom');
+  const ticked =
+    levels?.kind === 'submenu' &&
+    levels.items.some((item) => item.kind === 'item' && item.checked);
+  expect(ticked).toBe(false);
 });
 
 test('View › Show ruler ticks while the rulers show and toggles them, also read-only', () => {
@@ -525,6 +539,7 @@ test('View › Show ruler ticks while the rulers show and toggles them, also rea
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: true,
+    zoomFit: false,
   };
   let model: DocxMenuModel | null = null;
   render(
@@ -555,6 +570,7 @@ test('Format › Table holds the six table items with their state and runs them'
     onToggleRuler: mock(() => {}),
     showComments: false,
     showRuler: false,
+    zoomFit: false,
   };
   const onTableAction = mock((_action: unknown) => {});
   const tableContext = {
