@@ -1805,6 +1805,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
       runLayoutPipeline,
+      scheduleLayout,
       updateSelectionOverlay,
       headerContent,
       footerContent,

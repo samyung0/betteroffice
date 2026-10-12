@@ -7,7 +7,9 @@
  *  1. Web-font loading completes — measurement is Rust-only (font bytes,
  *     not browser fonts), so the layout itself cannot change; the re-run
  *     re-rasterizes canvas text drawn through CSS-font fallback paths so
- *     late-loading embedded faces show up.
+ *     late-loading embedded faces show up. It is no edit, so it lays out as
+ *     a peer's update does: the viewport stays and the caret is not scrolled
+ *     to (a wider toolbar after a rotation loads faces too).
  *
  *  2. Header / footer content or render-env changes — runLayoutPipeline does include
  *     these in its deps, but only re-runs when explicitly called. The
@@ -19,8 +21,10 @@ import { useEffect, useRef } from 'react';
 
 import type { HeaderFooter } from '@betteroffice/docx/types/document';
 import type { YrsRenderEnv } from '@betteroffice/docx/yrs';
+import type { LayoutUpdateOrigin } from '../internals/viewportAnchoring';
 export interface UseLayoutTriggersOptions {
   runLayoutPipeline: () => void;
+  scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
   updateSelectionOverlay: () => void;
   headerContent?: HeaderFooter | null;
   footerContent?: HeaderFooter | null;
@@ -32,6 +36,7 @@ export interface UseLayoutTriggersOptions {
 export function useLayoutTriggers(opts: UseLayoutTriggersOptions): void {
   const {
     runLayoutPipeline,
+    scheduleLayout,
     updateSelectionOverlay,
     headerContent,
     footerContent,
@@ -41,6 +46,8 @@ export function useLayoutTriggers(opts: UseLayoutTriggersOptions): void {
   } = opts;
   const runLayoutPipelineRef = useRef(runLayoutPipeline);
   runLayoutPipelineRef.current = runLayoutPipeline;
+  const scheduleLayoutRef = useRef(scheduleLayout);
+  scheduleLayoutRef.current = scheduleLayout;
   const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
   updateSelectionOverlayRef.current = updateSelectionOverlay;
 
@@ -48,7 +55,7 @@ export function useLayoutTriggers(opts: UseLayoutTriggersOptions): void {
   // fonts as they finish loading.
   useEffect(() => {
     const handleFontsLoaded = () => {
-      runLayoutPipelineRef.current();
+      scheduleLayoutRef.current('remote');
       updateSelectionOverlayRef.current();
     };
     window.document.fonts.addEventListener('loadingdone', handleFontsLoaded);

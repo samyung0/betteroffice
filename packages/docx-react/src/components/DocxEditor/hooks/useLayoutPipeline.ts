@@ -424,6 +424,29 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return () => cancelAnimationFrame(rafId);
   }, [captureCurrentViewportAnchor, displayListQueries]);
 
+  // A zoom change (a re-fit on resize, View › Zoom, a pinch) keeps the line at
+  // the pane's top where it was, as View's scroll anchoring does.
+  const anchoredZoomRef = useRef(zoom);
+  useLayoutEffect(() => {
+    if (anchoredZoomRef.current === zoom) return;
+    anchoredZoomRef.current = zoom;
+    const anchor = currentViewportAnchorRef.current?.anchor;
+    const queries = displayListQueriesRef.current;
+    const pagesEl = pagesContainerRef.current;
+    const host = interactionPageHostRef?.current ?? pagesEl;
+    const scrollParent =
+      getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
+    if (!anchor || !queries || !host || !scrollParent?.isConnected) return;
+    restoreDisplayListViewportAnchor(anchor, queries, host, scrollParent, resolveViewportPosition);
+    expectedScrollTopRef.current = scrollParent.scrollTop;
+  }, [
+    zoom,
+    getScrollContainer,
+    interactionPageHostRef,
+    pagesContainerRef,
+    resolveViewportPosition,
+  ]);
+
   useEffect(() => {
     const pagesEl = pagesContainerRef.current;
     const scrollParent =
