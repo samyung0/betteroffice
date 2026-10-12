@@ -1160,6 +1160,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 ? session.updateTableOfContents(caret, before)
                 : session.insertTableOfContents(caret!, before);
               if (!receipt) return false;
+              // A local edit, even when a font load queued a peer-style pass
+              // this frame: the caret is scrolled to.
+              scheduleLayout('local');
               runLayoutPipeline();
               const laidOut = getLatestLayout();
               const after =
@@ -1372,6 +1375,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         paragraphStyleValues,
         readOnly,
         runLayoutPipeline,
+        scheduleLayout,
         yrsCore.inputPositionMap,
         yrsCore.publishDirectInput,
         yrsCore.session,

@@ -10,7 +10,7 @@
  */
 
 import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, ReactNode, SetStateAction } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
 import {
   projectYrsComments,
@@ -315,6 +315,12 @@ export interface DocxEditorProps {
   commentsSidebarOpen?: boolean;
   /** Fires with the next open state whenever the editor wants to show or hide the comments sidebar. Fires in both controlled and uncontrolled modes. */
   onCommentsSidebarOpenChange?: (open: boolean) => void;
+  /**
+   * Whether the comments sidebar opens by itself (default: true): for a
+   * document with comments or tracked changes, the first card, or the caret in
+   * a commented range. Adding a comment and View › Show comments still open it.
+   */
+  autoOpenComments?: boolean;
   /**
    * Callback when rendered DOM context is ready (for plugin overlays).
    * Used by PluginHost to get access to the rendered page DOM for positioning.
@@ -664,6 +670,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onCommentsChange,
     commentsSidebarOpen,
     onCommentsSidebarOpenChange,
+    autoOpenComments = true,
     onRenderedDomContextReady,
     pluginOverlays,
     pluginSidebarItems,
@@ -711,6 +718,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const [showCommentsSidebar, setShowCommentsSidebar] = useControllableBoolean(
     commentsSidebarOpen,
     onCommentsSidebarOpenChange
+  );
+  const autoOpenCommentsSidebar = useCallback(
+    (open: SetStateAction<boolean>) => {
+      if (autoOpenComments) setShowCommentsSidebar(open);
+    },
+    [autoOpenComments, setShowCommentsSidebar]
   );
   // Auto-open the sidebar the first time a comment / tracked change
   // appears so users see the card without manually toggling. Latches so
@@ -931,7 +944,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
     }, []),
     setComments,
-    setShowCommentsSidebar,
+    setShowCommentsSidebar: autoOpenCommentsSidebar,
     onError,
     resetForNewDocument,
     commentsLoadedRef,
@@ -995,7 +1008,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setComments,
     isLoading: state.isLoading,
     trackedChangesCount: trackedChanges.length,
-    setShowCommentsSidebar,
+    setShowCommentsSidebar: autoOpenCommentsSidebar,
     trackedChangesLoadedRef,
   });
 
@@ -1846,10 +1859,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
     }
     if (cursorSidebarItem) {
-      setShowCommentsSidebar(true);
+      autoOpenCommentsSidebar(true);
     }
     setExpandedSidebarItem(cursorSidebarItem);
-  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, setShowCommentsSidebar]);
+  }, [comments, resolvedCommentIds, commentSidebarItems, revisionIdAliases, autoOpenCommentsSidebar]);
 
   const handleYrsToolbarSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {
@@ -1867,8 +1880,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (sidebarAutoOpenedRef.current) return;
     if (commentSidebarItems.length === 0 && reviewAllItems.length === 0) return;
     sidebarAutoOpenedRef.current = true;
-    setShowCommentsSidebar(true);
-  }, [commentSidebarItems, reviewAllItems]);
+    autoOpenCommentsSidebar(true);
+  }, [commentSidebarItems, reviewAllItems, autoOpenCommentsSidebar]);
 
   const editorContainerStyle: CSSProperties = {
     flex: 1,

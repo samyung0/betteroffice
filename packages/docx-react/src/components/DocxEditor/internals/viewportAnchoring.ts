@@ -69,3 +69,30 @@ export function shouldScrollCaretIntoView(
 ): boolean {
   return layoutUpdateOrigin === 'local' || selectionChanged;
 }
+
+/**
+ * The scrollTop that keeps the document point at the pane's top in place when
+ * the pages' scale goes from `from` to `to`. `columnTop` is the first page's top
+ * in the scroll content and `gap` the space between pages, neither of which
+ * scales; `heights` are the page heights at 100%.
+ */
+export function rescaleScrollTop(
+  scrollTop: number,
+  columnTop: number,
+  heights: readonly number[],
+  gap: number,
+  from: number,
+  to: number
+): number {
+  if (scrollTop <= columnTop) return scrollTop;
+  let top = columnTop;
+  let next = columnTop;
+  for (const height of heights) {
+    const into = scrollTop - top;
+    if (into <= height * from) return next + (into / from) * to;
+    if (into <= height * from + gap) return next + height * to + (into - height * from);
+    top += height * from + gap;
+    next += height * to + gap;
+  }
+  return next + (scrollTop - top);
+}

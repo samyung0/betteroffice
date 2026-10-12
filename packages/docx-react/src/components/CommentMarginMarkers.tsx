@@ -53,8 +53,9 @@ export function CommentMarginMarkers({
       style={{
         position: 'absolute',
         top: 0,
-        // Position just past the page right edge
-        left: `calc(50% + ${(pageWidth * zoom) / 2 + 6}px)`,
+        // Just past the page right edge, but inside the pages' column when the
+        // pane is only as wide as a fitted page and its padding.
+        left: `min(calc(50% + ${(pageWidth * zoom) / 2 + 6}px), calc(100% - 24px))`,
         zIndex: 30,
         pointerEvents: 'none',
       }}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   openDocumentViewer,
   type DocxViewerAnalysis,
@@ -8,7 +8,13 @@ import {
   type DisplayList,
 } from '@betteroffice/docx/layout/render';
 import { CanvasPagesView } from './DocxEditor/CanvasPagesView';
-import { type DocxZoom, fitZoom, usePaneWidth, usePinchZoom } from './DocxEditor/pageZoom';
+import {
+  type DocxZoom,
+  fitZoom,
+  scrollerOf,
+  usePaneWidth,
+  usePinchZoom,
+} from './DocxEditor/pageZoom';
 import { DefaultLoadingIndicator, ParseError } from './DocxEditorHelpers';
 import { useTextLayer } from './textLayer';
 
@@ -41,7 +47,13 @@ export function DocxDisplayListViewer({
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const hostRef = useRef<HTMLDivElement>(null);
   useTextLayer(hostRef, displayList.pages);
-  const paneWidth = usePaneWidth(hostRef, zoom === 'fit');
+  // The scroll pane: its width is the fit's (the pages' host is as wide as a
+  // zoomed page), and the whole of it takes a pinch, gutters included.
+  const paneRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    paneRef.current = hostRef.current && scrollerOf(hostRef.current);
+  }, []);
+  const paneWidth = usePaneWidth(paneRef, zoom === 'fit');
   const pageWidth = useMemo(
     () => Math.max(0, ...displayList.pages.map((page) => page.width)),
     [displayList]
@@ -49,7 +61,7 @@ export function DocxDisplayListViewer({
   // 100% only until the pane is first measured, before anything paints.
   const level = zoom === 'fit' ? (fitZoom(paneWidth, pageWidth) ?? 1) : zoom;
   usePinchZoom({
-    target: hostRef,
+    target: paneRef,
     content: hostRef,
     enabled: pinchZoom,
     zoom: level,

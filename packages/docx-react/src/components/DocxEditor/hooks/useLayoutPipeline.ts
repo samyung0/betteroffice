@@ -22,7 +22,11 @@ import type {
 } from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import {
+  CANVAS_PAGE_GAP_PX,
+  resolveDisplayPageClientRect,
+  type DisplayListQueries,
+} from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
   captureDisplayListScrollAnchor,
@@ -36,6 +40,7 @@ import {
 import {
   mergeLayoutUpdateOrigin,
   PendingScrollRestoreController,
+  rescaleScrollTop,
   type LayoutUpdateOrigin,
 } from '../internals/viewportAnchoring';
 
@@ -424,28 +429,41 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return () => cancelAnimationFrame(rafId);
   }, [captureCurrentViewportAnchor, displayListQueries]);
 
-  // A zoom change (a re-fit on resize, View › Zoom, a pinch) keeps the line at
-  // the pane's top where it was, as View's scroll anchoring does.
+  // A zoom change (a re-fit on resize, View › Zoom, a pinch) keeps the point at
+  // the pane's top where it was, as View's scroll anchoring does. It rescales
+  // the last scroll position seen, so a fling or a scroll just before needs no
+  // captured anchor, and a shrink that clamped the scroll does not count.
   const anchoredZoomRef = useRef(zoom);
+  const lastScrollTopRef = useRef<number | null>(null);
   useLayoutEffect(() => {
-    if (anchoredZoomRef.current === zoom) return;
+    const from = anchoredZoomRef.current;
+    if (from === zoom) return;
     anchoredZoomRef.current = zoom;
-    const anchor = currentViewportAnchorRef.current?.anchor;
     const queries = displayListQueriesRef.current;
     const pagesEl = pagesContainerRef.current;
     const host = interactionPageHostRef?.current ?? pagesEl;
     const scrollParent =
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-    if (!anchor || !queries || !host || !scrollParent?.isConnected) return;
-    restoreDisplayListViewportAnchor(anchor, queries, host, scrollParent, resolveViewportPosition);
+    if (!queries || !host || !scrollParent?.isConnected) return;
+    const first = resolveDisplayPageClientRect(host, queries, 0);
+    if (!first) return;
+    const columnTop =
+      scrollParent.scrollTop + first.top - scrollParent.getBoundingClientRect().top;
+    const heights = Array.from(
+      { length: queries.pageCount() },
+      (_, index) => queries.pageSize(index)?.height ?? 0
+    );
+    scrollParent.scrollTop = rescaleScrollTop(
+      lastScrollTopRef.current ?? scrollParent.scrollTop,
+      columnTop,
+      heights,
+      CANVAS_PAGE_GAP_PX,
+      from,
+      zoom
+    );
     expectedScrollTopRef.current = scrollParent.scrollTop;
-  }, [
-    zoom,
-    getScrollContainer,
-    interactionPageHostRef,
-    pagesContainerRef,
-    resolveViewportPosition,
-  ]);
+    lastScrollTopRef.current = scrollParent.scrollTop;
+  }, [zoom, getScrollContainer, interactionPageHostRef, pagesContainerRef]);
 
   useEffect(() => {
     const pagesEl = pagesContainerRef.current;
@@ -466,6 +484,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     });
     let captureTimer: ReturnType<typeof setTimeout> | null = null;
     const captureAfterScroll = (): void => {
+      lastScrollTopRef.current = scrollParent.scrollTop;
       const expectedScrollTop = expectedScrollTopRef.current;
       expectedScrollTopRef.current = null;
       if (

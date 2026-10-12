@@ -17,13 +17,19 @@ export function fitZoom(paneWidth: number, pageWidth: number): number | null {
   return room > 0 && pageWidth > 0 ? Math.min(1, room / pageWidth) : null;
 }
 
-/** `pane`'s client width, followed through resizes while `enabled`; 0 until measured. */
+/**
+ * `pane`'s client width, followed through resizes while `enabled`; 0 until
+ * measured. A pane collapsed past the page column's padding keeps the last
+ * width, so the fit holds instead of jumping to 100%.
+ */
 export function usePaneWidth(pane: RefObject<HTMLElement | null>, enabled: boolean): number {
   const [width, setWidth] = useState(0);
   useLayoutEffect(() => {
     const node = pane.current;
     if (!enabled || !node) return;
-    const measure = () => setWidth(node.clientWidth);
+    const measure = () => {
+      if (node.clientWidth > 2 * CANVAS_PAGES_PADDING_PX) setWidth(node.clientWidth);
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);
@@ -32,7 +38,8 @@ export function usePaneWidth(pane: RefObject<HTMLElement | null>, enabled: boole
   return width;
 }
 
-function scrollerOf(element: HTMLElement): HTMLElement {
+/** The nearest scrolling ancestor of `element`, else the document's scroller. */
+export function scrollerOf(element: HTMLElement): HTMLElement {
   for (let node = element.parentElement; node; node = node.parentElement) {
     const { overflowX, overflowY } = getComputedStyle(node);
     if (/auto|scroll/.test(overflowX + overflowY)) return node;
@@ -151,13 +158,19 @@ export function usePinchZoom({
     };
     surface.addEventListener('touchstart', start, { passive: true });
     surface.addEventListener('touchmove', move, { passive: true });
+    // The browser or the system took the gesture: the zoom (and a fit) stays.
+    const cancel = () => {
+      if (!gesture) return;
+      gesture = null;
+      clearPreview();
+    };
     surface.addEventListener('touchend', end, { passive: true });
-    surface.addEventListener('touchcancel', end, { passive: true });
+    surface.addEventListener('touchcancel', cancel, { passive: true });
     return () => {
       surface.removeEventListener('touchstart', start);
       surface.removeEventListener('touchmove', move);
       surface.removeEventListener('touchend', end);
-      surface.removeEventListener('touchcancel', end);
+      surface.removeEventListener('touchcancel', cancel);
       surface.style.touchAction = '';
       clearPreview();
     };

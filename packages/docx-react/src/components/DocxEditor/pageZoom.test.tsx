@@ -49,7 +49,7 @@ beforeAll(async () => {
   Object.defineProperty(window.HTMLElement.prototype, 'clientWidth', {
     configurable: true,
     get(this: HTMLElement) {
-      return this.classList.contains('canvas-pages') ? paneWidth : 0;
+      return this.classList.contains('pane') ? paneWidth : 0;
     },
   });
 });
@@ -98,15 +98,17 @@ test('a fitted viewer re-fits on resize until a pinch picks a level, then never'
   function Host() {
     const [zoom, setZoom] = useState<DocxZoom>('fit');
     return (
-      <DocxDisplayListViewer
-        displayList={displayList}
-        zoom={zoom}
-        pinchZoom
-        onZoomChange={(level) => {
-          levels.push(level);
-          setZoom(level);
-        }}
-      />
+      <div className="pane" style={{ overflowX: 'auto', overflowY: 'auto' }}>
+        <DocxDisplayListViewer
+          displayList={displayList}
+          zoom={zoom}
+          pinchZoom
+          onZoomChange={(level) => {
+            levels.push(level);
+            setZoom(level);
+          }}
+        />
+      </div>
     );
   }
   const page = displayList.pages[0]!;
@@ -116,7 +118,9 @@ test('a fitted viewer re-fits on resize until a pinch picks a level, then never'
   const width = () => Number.parseFloat(canvas().style.width);
   expect(width()).toBeCloseTo(page.width * fitZoom(348, page.width)!, 3);
   const host = container.querySelector('.canvas-pages')!;
-  expect((host as HTMLElement).style.touchAction).toBe('pan-x pan-y');
+  // The whole scroll pane takes the pinch, gutters included.
+  const pane = container.querySelector<HTMLElement>('.pane')!;
+  expect(pane.style.touchAction).toBe('pan-x pan-y');
 
   paneWidth = 390;
   await act(async () => {
@@ -125,6 +129,12 @@ test('a fitted viewer re-fits on resize until a pinch picks a level, then never'
   const fitted = fitZoom(390, page.width)!;
   expect(width()).toBeCloseTo(page.width * fitted, 3);
   expect(observers.size).toBe(1);
+  // A pane collapsed to nothing keeps the fit rather than going to 100%.
+  paneWidth = 0;
+  await act(async () => {
+    for (const observer of observers) observer.callback();
+  });
+  expect(width()).toBeCloseTo(page.width * fitted, 3);
 
   await pinch(host, 100, 150);
   expect(levels).toEqual([Math.round(fitted * 1.5 * 100) / 100]);
@@ -140,7 +150,7 @@ test('a fitted viewer re-fits on resize until a pinch picks a level, then never'
   expect(width()).toBeCloseTo(page.width * levels[0]!, 3);
 });
 
-test('a pinch previews its scale, stays within 25–200%, and a two-finger tap keeps the level', async () => {
+test('a pinch previews its scale, stays within 25–200%, and a two-finger tap or a cancel keeps the level', async () => {
   const onZoom = mock((_level: number) => {});
   let preview = '';
   function Pinchable({ zoom, enabled }: { zoom: number; enabled: boolean }) {
@@ -172,6 +182,19 @@ test('a pinch previews its scale, stays within 25–200%, and a two-finger tap k
   rerender(<Pinchable zoom={0.25} enabled />);
 
   await pinch(surface, 100, 100);
+  expect(onZoom).toHaveBeenCalledTimes(2);
+  expect(surface.style.transform).toBe('');
+
+  // A cancelled gesture (the system took it) drops its preview and commits nothing.
+  await act(async () => {
+    surface.dispatchEvent(touch('touchstart', [[0, 0], [100, 0]]));
+    surface.dispatchEvent(touch('touchmove', [[0, 0], [300, 0]]));
+  });
+  await nextFrame();
+  expect(surface.style.transform).toBe('scale(3)');
+  await act(async () => {
+    surface.dispatchEvent(touch('touchcancel', []));
+  });
   expect(onZoom).toHaveBeenCalledTimes(2);
   expect(surface.style.transform).toBe('');
 
