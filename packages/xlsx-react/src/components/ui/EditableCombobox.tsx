@@ -115,7 +115,7 @@ export function EditableCombobox({
         border: bordered ? `1px solid ${toolbarColors.border}` : 0,
         borderRadius: 4,
         background: bordered ? 'var(--xlsx-input-bg, #ffffff)' : 'transparent',
-        opacity: disabled ? 0.48 : 1,
+        opacity: disabled ? 'var(--xlsx-disabled-opacity, 0.48)' : 1,
         boxSizing: 'border-box',
         flex: '0 0 auto',
       }}

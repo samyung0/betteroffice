@@ -120,7 +120,7 @@ function interactiveButtonStyle(
     background: active ? colors.active : hovered && !disabled ? colors.hover : 'transparent',
     color: disabled ? toolbarColors.disabled : active ? colors.activeText : toolbarColors.text,
     cursor: disabled ? 'default' : 'pointer',
-    opacity: disabled ? 0.48 : 1,
+    opacity: disabled ? 'var(--xlsx-disabled-opacity, 0.48)' : 1,
     ...style,
   };
 }
