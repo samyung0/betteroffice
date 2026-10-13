@@ -1365,37 +1365,64 @@ fn prune_timing(root: &mut XmlElement) {
     });
 }
 
-/// What a time node can no longer refer to: shapes off the slide and time
-/// nodes pruned away.
-struct Gone<'a> {
-    shapes: &'a HashSet<String>,
-    nodes: HashSet<String>,
+/// One time node of a `p:tnLst`, indexed in document pre-order.
+struct TimeNode {
+    parent: Option<usize>,
+    /// It sits in its parent's `p:subTnLst`, which goes alone when emptied.
+    sub: bool,
+    /// One past the last node of its subtree.
+    end: usize,
+    /// Its own `p:cTn` ids, which other nodes wait on.
+    ids: Vec<String>,
+    /// The nodes it waits on (`p:tn`).
+    waits: Vec<String>,
+    /// The shapes it targets or is triggered by.
+    shapes: Vec<String>,
+    /// The build group of the nearest effect at or above it.
+    group: Option<String>,
+    /// Its `p:childTnLst` nodes; it goes when the prune empties them.
+    children: usize,
 }
 
 /// Prunes one `p:timing`; false when nothing of it is left to keep. A node
-/// whose start or end waits on a pruned node (`p:tn`) goes too, until none
-/// does; a build entry goes with its shape, or with the last effect it built.
+/// goes when its own target or trigger is a shape off the slide, when it waits
+/// (`p:tn`) on a node that goes or does not exist, or when its child list is
+/// emptied; a build entry goes with its shape, or with the last effect it
+/// built. One pass collects the nodes, a worklist marks what goes, one pass
+/// removes it: linear in nodes and waits, however long a chain of nodes
+/// waiting on each other (security regression: parity-px N1).
 fn prune_timing_element(timing: &mut XmlElement, live: &HashSet<String>) -> bool {
-    let built = effect_builds(timing);
-    let mut keep = true;
-    if let Some(list) = timing.child_mut("tnLst") {
-        let mut gone = Gone {
-            shapes: live,
-            nodes: time_node_ids(list),
-        };
-        loop {
-            if prune_time_list(list, &gone) {
-                keep = false;
-                break;
-            }
-            let nodes = time_node_ids(list);
-            if nodes == gone.nodes {
-                break;
-            }
-            gone.nodes = nodes;
-        }
+    let mut nodes = Vec::new();
+    if let Some(list) = timing.child("tnLst") {
+        collect_time_nodes(list, None, false, None, &mut nodes);
     }
-    let still_built = effect_builds(timing);
+    let removed = pruned_time_nodes(&nodes, live);
+    let effects = |kept: bool| {
+        nodes
+            .iter()
+            .zip(&removed)
+            .filter(|(_, removed)| !kept || !**removed)
+            .flat_map(|(node, _)| {
+                node.group.iter().flat_map(move |group| {
+                    node.shapes
+                        .iter()
+                        .map(move |shape| (shape.clone(), group.clone()))
+                })
+            })
+            .collect::<HashSet<_>>()
+    };
+    let (built, still_built) = (effects(false), effects(true));
+    let roots = nodes
+        .iter()
+        .zip(&removed)
+        .filter(|(node, _)| node.parent.is_none());
+    let mut keep = true;
+    if roots.clone().next().is_some() && roots.clone().all(|(_, removed)| *removed) {
+        keep = false;
+    } else if let Some(list) = timing.child_mut("tnLst") {
+        let mut next = 0;
+        remove_time_nodes(list, &nodes, &removed, &mut next);
+    }
     if let Some(builds) = timing.child_mut("bldLst") {
         builds.children.retain(|node| {
             let XmlNode::Element(build) = node else {
@@ -1418,82 +1445,164 @@ fn prune_timing_element(timing: &mut XmlElement, live: &HashSet<String>) -> bool
     keep && timing.child("tnLst").is_some()
 }
 
-fn time_node_ids(list: &XmlElement) -> HashSet<String> {
-    list.descendants_named("cTn")
-        .into_iter()
-        .filter_map(|node| node.attribute("id").map(str::to_owned))
-        .collect()
-}
-
-/// The (shape, build group) pairs the effects in a timing animate, which its
-/// build entries name.
-fn effect_builds(timing: &XmlElement) -> HashSet<(String, String)> {
-    let mut pairs = HashSet::new();
-    for effect in timing.descendants_named("cTn") {
-        let Some(group) = effect.attribute("grpId") else {
-            continue;
-        };
-        for target in TIME_TARGETS
-            .iter()
-            .flat_map(|name| effect.descendants_named(name))
-        {
-            if let Some(shape) = target.attribute("spid") {
-                pairs.insert((shape.to_owned(), group.to_owned()));
-            }
-        }
-    }
-    pairs
-}
-
 /// The elements naming a shape a time node targets or waits on.
 const TIME_TARGETS: [&str; 3] = ["spTgt", "inkTgt", "bmkTgt"];
 
-/// Prunes the time nodes of a list; true when it held some and holds none now
-/// (an empty list is invalid, so its owner goes).
-fn prune_time_list(list: &mut XmlElement, gone: &Gone<'_>) -> bool {
-    let held = list.child_elements().next().is_some();
-    list.children.retain_mut(|node| match node {
-        XmlNode::Element(node) => !names_gone(node, gone) && !prune_own_lists(node, gone),
-        XmlNode::Text(_) => true,
-    });
-    held && list.child_elements().next().is_none()
+/// Indexes the nodes of a time node list and everything under them.
+fn collect_time_nodes(
+    list: &XmlElement,
+    parent: Option<usize>,
+    sub: bool,
+    group: Option<&str>,
+    nodes: &mut Vec<TimeNode>,
+) {
+    for element in list.child_elements() {
+        let index = nodes.len();
+        let mut node = TimeNode {
+            parent,
+            sub,
+            end: 0,
+            ids: Vec::new(),
+            waits: Vec::new(),
+            shapes: Vec::new(),
+            group: None,
+            children: 0,
+        };
+        let mut lists = Vec::new();
+        collect_own(element, &mut node, &mut lists);
+        node.group = node.group.or_else(|| group.map(str::to_owned));
+        node.children = lists
+            .iter()
+            .filter(|list| list.local_name() == "childTnLst")
+            .map(|list| list.child_elements().count())
+            .sum();
+        let group = node.group.clone();
+        nodes.push(node);
+        for list in lists {
+            let sub = list.local_name() == "subTnLst";
+            collect_time_nodes(list, Some(index), sub, group.as_deref(), nodes);
+        }
+        nodes[index].end = nodes.len();
+    }
 }
 
-/// Whether a time node's own target or trigger, outside its child lists,
-/// names a shape that is gone (a media bookmark included) or a pruned node.
-fn names_gone(element: &XmlElement, gone: &Gone<'_>) -> bool {
-    element.child_elements().any(|child| {
+/// A node's own ids, waits, targets and build group, outside its lists, and
+/// those lists in document order.
+fn collect_own<'a>(element: &'a XmlElement, node: &mut TimeNode, lists: &mut Vec<&'a XmlElement>) {
+    for child in element.child_elements() {
         let name = child.local_name();
-        !TIME_NODE_LISTS.contains(&name)
-            && ((TIME_TARGETS.contains(&name)
-                && child
-                    .attribute("spid")
-                    .is_some_and(|id| !gone.shapes.contains(id)))
-                || (name == "tn"
-                    && child
-                        .attribute("val")
-                        .is_some_and(|id| !gone.nodes.contains(id)))
-                || names_gone(child, gone))
-    })
+        if TIME_NODE_LISTS.contains(&name) {
+            lists.push(child);
+            continue;
+        }
+        if TIME_TARGETS.contains(&name)
+            && let Some(shape) = child.attribute("spid")
+        {
+            node.shapes.push(shape.to_owned());
+        }
+        if name == "tn"
+            && let Some(id) = child.attribute("val")
+        {
+            node.waits.push(id.to_owned());
+        }
+        if name == "cTn" {
+            if let Some(id) = child.attribute("id") {
+                node.ids.push(id.to_owned());
+            }
+            if let Some(group) = child.attribute("grpId") {
+                node.group = Some(group.to_owned());
+            }
+        }
+        collect_own(child, node, lists);
+    }
 }
 
-/// Prunes the lists a time node owns, dropping an emptied `p:subTnLst`; true
-/// when its `p:childTnLst` emptied, so the node goes.
-fn prune_own_lists(element: &mut XmlElement, gone: &Gone<'_>) -> bool {
-    let mut emptied = false;
-    element.children.retain_mut(|node| {
-        let XmlNode::Element(child) = node else {
+/// Which nodes go: each node is marked once, and each wait followed once.
+fn pruned_time_nodes(nodes: &[TimeNode], live: &HashSet<String>) -> Vec<bool> {
+    let mut waiting: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        for id in &node.waits {
+            waiting.entry(id.as_str()).or_default().push(index);
+        }
+    }
+    let known: HashSet<&str> = nodes
+        .iter()
+        .flat_map(|node| node.ids.iter().map(String::as_str))
+        .collect();
+    let mut children: Vec<usize> = nodes.iter().map(|node| node.children).collect();
+    let mut removed = vec![false; nodes.len()];
+    let mut work: Vec<usize> = (0..nodes.len())
+        .filter(|&index| {
+            let node = &nodes[index];
+            node.shapes.iter().any(|shape| !live.contains(shape))
+                || node.waits.iter().any(|id| !known.contains(id.as_str()))
+        })
+        .collect();
+    while let Some(index) = work.pop() {
+        if removed[index] {
+            continue;
+        }
+        let mut at = index;
+        while at < nodes[index].end {
+            if removed[at] {
+                at = nodes[at].end;
+                continue;
+            }
+            removed[at] = true;
+            for id in &nodes[at].ids {
+                work.extend(waiting.get(id.as_str()).into_iter().flatten());
+            }
+            at += 1;
+        }
+        if let Some(parent) = nodes[index].parent
+            && !nodes[index].sub
+            && !removed[parent]
+        {
+            children[parent] -= 1;
+            if children[parent] == 0 {
+                work.push(parent);
+            }
+        }
+    }
+    removed
+}
+
+/// Removes the marked nodes in the order [`collect_time_nodes`] indexed
+/// them, and a `p:subTnLst` that leaves empty.
+fn remove_time_nodes(
+    list: &mut XmlElement,
+    nodes: &[TimeNode],
+    removed: &[bool],
+    next: &mut usize,
+) {
+    list.children.retain_mut(|child| {
+        let XmlNode::Element(element) = child else {
+            return true;
+        };
+        let index = *next;
+        if removed[index] {
+            *next = nodes[index].end;
+            return false;
+        }
+        *next += 1;
+        remove_in_own(element, nodes, removed, next);
+        true
+    });
+}
+
+fn remove_in_own(element: &mut XmlElement, nodes: &[TimeNode], removed: &[bool], next: &mut usize) {
+    element.children.retain_mut(|child| {
+        let XmlNode::Element(child) = child else {
             return true;
         };
         if !TIME_NODE_LISTS.contains(&child.local_name()) {
-            emptied |= prune_own_lists(child, gone);
+            remove_in_own(child, nodes, removed, next);
             return true;
         }
-        let now_empty = prune_time_list(child, gone);
-        emptied |= now_empty && child.local_name() == "childTnLst";
-        !(now_empty && child.local_name() == "subTnLst")
+        let held = child.child_elements().next().is_some();
+        remove_time_nodes(child, nodes, removed, next);
+        !(held && child.local_name() == "subTnLst" && child.child_elements().next().is_none())
     });
-    emptied
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
