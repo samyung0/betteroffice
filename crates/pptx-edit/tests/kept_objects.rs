@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{DeckSession, EditCtx, EditError, TextStyle, TextStylePatch};
+use pptx_edit::{DeckSession, EditCtx, EditError, ParagraphSpacing, TextStyle, TextStylePatch};
 
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
@@ -71,8 +71,16 @@ const CLICK_TITLE: &str = r#"<p:par><p:cTn id="3" fill="hold"><p:stCondLst><p:co
 /// The next click: the chart (3) fades in.
 const CLICK_CHART: &str = r#"<p:par><p:cTn id="7" fill="hold"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="8" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="9" presetID="10" presetClass="entr" presetSubtype="0" fill="hold" grpId="0" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="10" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="3"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set><p:animEffect transition="in" filter="fade"><p:cBhvr><p:cTn id="11" dur="500"/><p:tgtEl><p:spTgt spid="3"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>"#;
 
-/// A trigger: clicking the title (2) plays or pauses the narration (7).
-const TITLE_TRIGGER: &str = r#"<p:seq concurrent="1" nextAc="seek"><p:cTn id="12" restart="whenNotActive" fill="hold" evtFilter="cancelBubble" nodeType="interactiveSeq"><p:stCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:stCondLst><p:endSync evt="end" delay="0"><p:rtn val="all"/></p:endSync><p:childTnLst><p:par><p:cTn id="13" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="14" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="15" presetID="2" presetClass="mediacall" presetSubtype="0" fill="hold" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:cmd type="call" cmd="togglePause"><p:cBhvr><p:cTn id="16" dur="1" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:cmd></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn><p:nextCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:nextCondLst></p:seq>"#;
+/// A trigger: clicking the title (2) plays or pauses the narration (7) and
+/// shows the chart (3) as its build group 1.
+const TITLE_TRIGGER: &str = r#"<p:seq concurrent="1" nextAc="seek"><p:cTn id="12" restart="whenNotActive" fill="hold" evtFilter="cancelBubble" nodeType="interactiveSeq"><p:stCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:stCondLst><p:endSync evt="end" delay="0"><p:rtn val="all"/></p:endSync><p:childTnLst><p:par><p:cTn id="13" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="14" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="15" presetID="2" presetClass="mediacall" presetSubtype="0" fill="hold" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:cmd type="call" cmd="togglePause"><p:cBhvr><p:cTn id="16" dur="1" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:cmd></p:childTnLst></p:cTn></p:par><p:par><p:cTn id="23" presetID="1" presetClass="entr" presetSubtype="0" fill="hold" grpId="1" nodeType="withEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="24" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="3"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn><p:nextCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:nextCondLst></p:seq>"#;
+
+/// A media bookmark trigger: reaching the video's (6) bookmark plays the
+/// narration (7).
+const BOOKMARK_TRIGGER: &str = r#"<p:seq concurrent="1" nextAc="seek"><p:cTn id="25" restart="whenNotActive" fill="hold" evtFilter="cancelBubble" nodeType="interactiveSeq"><p:stCondLst><p:cond evt="onMediaBookmark" delay="0"><p14:bmkTgt xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" spid="6" bmkName="Intro"/></p:cond></p:stCondLst><p:endSync evt="end" delay="0"><p:rtn val="all"/></p:endSync><p:childTnLst><p:par><p:cTn id="26" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="27" presetID="2" presetClass="mediacall" presetSubtype="0" fill="hold" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:cmd type="call" cmd="playFrom(0.0)"><p:cBhvr><p:cTn id="28" dur="1" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:cmd></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:seq>"#;
+
+/// Shows the chart (3) once the video's media node (17) ends.
+const AFTER_VIDEO: &str = r#"<p:par><p:cTn id="30" fill="hold"><p:stCondLst><p:cond evt="onEnd" delay="0"><p:tn val="17"/></p:cond></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="31" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="3"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set></p:childTnLst></p:cTn></p:par>"#;
 
 const VIDEO_NODE: &str = r#"<p:video><p:cMediaNode vol="80000"><p:cTn id="17" fill="hold" display="0"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="6"/></p:tgtEl></p:cMediaNode></p:video>"#;
 
@@ -80,6 +88,8 @@ const AUDIO_NODE: &str = r#"<p:audio><p:cMediaNode vol="80000"><p:cTn id="18" fi
 
 const BUILD_TITLE: &str = r#"<p:bldP spid="2" grpId="0"/>"#;
 const BUILD_CHART: &str = r#"<p:bldGraphic spid="3" grpId="0"><p:bldAsOne/></p:bldGraphic>"#;
+const BUILD_CHART_ON_TRIGGER: &str =
+    r#"<p:bldGraphic spid="3" grpId="1"><p:bldAsOne/></p:bldGraphic>"#;
 
 /// The slide's timing as PowerPoint writes it: the main sequence's clicks,
 /// then trigger sequences, then the media nodes, and the build list.
@@ -92,9 +102,9 @@ fn timing(clicks: &str, triggers: &str, media: &str, builds: &str) -> String {
 fn full_timing() -> String {
     timing(
         &[CLICK_TITLE, CLICK_CHART].concat(),
-        TITLE_TRIGGER,
-        &[VIDEO_NODE, AUDIO_NODE].concat(),
-        &[BUILD_TITLE, BUILD_CHART].concat(),
+        &[TITLE_TRIGGER, BOOKMARK_TRIGGER].concat(),
+        &[VIDEO_NODE, AUDIO_NODE, AFTER_VIDEO].concat(),
+        &[BUILD_TITLE, BUILD_CHART, BUILD_CHART_ON_TRIGGER].concat(),
     )
 }
 
@@ -439,8 +449,10 @@ fn timing_targets(slide: &str) -> (Vec<String>, Vec<String>) {
 #[test]
 fn deleting_animated_shapes_and_a_video_prunes_their_timing() {
     let slide = delete_and_save(&["Title 1", "Lecture clip"]);
-    // The title's click, the trigger it was and the video's node go, with the
-    // title's build entry; the chart's click and the narration's node stay.
+    // The title's click, the trigger it was (with the chart's build group 1
+    // it alone used), the video's node, its bookmark trigger and what waited
+    // on its end go, with the title's build entry; the chart's click and the
+    // narration's node stay.
     let expected = timing(CLICK_CHART, "", AUDIO_NODE, BUILD_CHART);
     let tail = format!("{TRANSITION}{expected}</p:sld>");
     assert!(slide.ends_with(&canonical(&tail)), "{slide}");
@@ -516,7 +528,21 @@ fn text_edits_on_an_equation_are_refused_with_the_reason() {
             .set_paragraph_alignment(&context, &story, 0, 1, Some("ctr"))
             .err(),
         session.insert_paragraph_break(&context, &story, 0).err(),
+        session
+            .clear_text_formatting(&context, &story, 0, 1, None)
+            .err(),
+        session
+            .set_paragraph_list(&context, &story, 0, 1, None, &[])
+            .err(),
+        session
+            .change_paragraph_level(&context, &story, 0, 1, 1, None)
+            .err(),
+        session
+            .set_paragraph_spacing(&context, &story, 0, 1, &ParagraphSpacing::default())
+            .err(),
+        session.delete_paragraph_break(&context, &story, 0).err(),
     ];
+    assert_eq!(attempts.len(), 11, "every guarded text edit");
     for attempt in attempts {
         assert!(
             matches!(&attempt, Some(EditError::EquationText(id)) if *id == story),
@@ -530,4 +556,91 @@ fn text_edits_on_an_equation_are_refused_with_the_reason() {
     );
     assert_eq!(session.story(&story).unwrap().plain_text(), " ");
     assert!(session.save().is_ok());
+}
+
+/// The equation and a caption grouped: PowerPoint wraps the whole group, the
+/// math group in mc:Choice and the picture group in mc:Fallback.
+fn grouped_deck() -> Vec<u8> {
+    let caption = r#"<p:sp><p:nvSpPr><p:cNvPr id="21" name="Caption"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="4600000"/><a:ext cx="1625600" cy="369332"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Area</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let group = |inner: &str| {
+        format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="Group 19"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="457200" y="4114800"/><a:ext cx="1625600" cy="854532"/><a:chOff x="457200" y="4114800"/><a:chExt cx="1625600" cy="854532"/></a:xfrm></p:grpSpPr>{inner}{caption}</p:grpSp>"#
+        )
+    };
+    let choice = EQUATION.find("<p:sp>").unwrap()..EQUATION.find("</mc:Choice>").unwrap();
+    let fallback = EQUATION.find("<mc:Fallback>").unwrap() + "<mc:Fallback>".len()
+        ..EQUATION.find("</mc:Fallback>").unwrap();
+    let grouped = format!(
+        "{}{}{}{}{}",
+        &EQUATION[..choice.start],
+        group(&EQUATION[choice.clone()]),
+        &EQUATION[choice.end..fallback.start],
+        group(&EQUATION[fallback.clone()]),
+        &EQUATION[fallback.end..]
+    );
+    let mut parts = ooxml_opc::unzip_parts(&deck()).unwrap();
+    let (_, slide) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    *slide = String::from_utf8(slide.clone())
+        .unwrap()
+        .replace(EQUATION, &grouped)
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn a_grouped_equation_refuses_text_and_its_group_edits_reach_both_branches() {
+    let session = DeckSession::open(&grouped_deck(), 4106).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let group = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Group 19")
+        .unwrap();
+    let story = |name: &str| {
+        group
+            .children
+            .iter()
+            .find(|shape| shape.name == name)
+            .unwrap()
+            .text_stories[0]
+            .id
+            .clone()
+    };
+    let context = EditCtx::local("kept");
+    let equation = story("TextBox 4");
+    assert!(matches!(
+        session.insert_text(&context, &equation, 0, "y", &TextStyle::default()),
+        Err(EditError::EquationText(id)) if id == equation
+    ));
+    session
+        .insert_text(
+            &context,
+            &story("Caption"),
+            0,
+            "Big ",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    session
+        .move_shape(&context, &slide.id, &group.id, 1_000_000, 2_000_000)
+        .unwrap();
+
+    let saved = saved_slide(&parts(&session.save().unwrap()));
+    let branch = |open: &str, close: &str| {
+        let start = saved.find(open).unwrap();
+        saved[start..saved[start..].find(close).unwrap() + start].to_owned()
+    };
+    let moved = canonical(r#"<a:off x="1000000" y="2000000"/>"#);
+    for branch in [
+        branch("<mc:Choice", "</mc:Choice>"),
+        branch("<mc:Fallback", "</mc:Fallback>"),
+    ] {
+        assert_eq!(branch.matches("Big ").count(), 1, "{branch}");
+        assert_eq!(branch.matches(&moved).count(), 1, "{branch}");
+    }
+    assert!(saved.contains("<m:t>x</m:t>"));
 }

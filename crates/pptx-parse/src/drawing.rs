@@ -137,13 +137,8 @@ fn parse_shape_children(
             if let Some(branch) = alternate_content_branch(child) {
                 let mut parsed =
                     parse_shape_children(branch, relationships, part, budget, elements)?;
-                if branch.local_name() == "Fallback" && !child.descendants_named("oMath").is_empty()
-                {
-                    for node in &mut parsed {
-                        if let ShapeNode::Shape(shape) = node {
-                            shape.equation = true;
-                        }
-                    }
+                if branch.local_name() == "Fallback" {
+                    flag_equations(&mut parsed, &math_shape_ids(child));
                 }
                 shapes.extend(parsed);
             }
@@ -183,6 +178,35 @@ fn parse_shape_children(
         }
     }
     Ok(shapes)
+}
+
+/// The ids of the shapes holding math in an `mc:AlternateContent`, grouped
+/// ones included: PowerPoint wraps a group holding an equation whole.
+fn math_shape_ids(alternate: &XmlElement) -> Vec<u32> {
+    alternate
+        .descendants_named("sp")
+        .into_iter()
+        .filter(|shape| !shape.descendants_named("oMath").is_empty())
+        .filter_map(|shape| {
+            shape
+                .child("nvSpPr")?
+                .child("cNvPr")?
+                .attribute("id")?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// Marks the fallback copies of those shapes, which picture the math.
+fn flag_equations(nodes: &mut [ShapeNode], ids: &[u32]) {
+    for node in nodes {
+        match node {
+            ShapeNode::Shape(shape) if ids.contains(&shape.base.id) => shape.equation = true,
+            ShapeNode::Group(group) => flag_equations(&mut group.children, ids),
+            _ => {}
+        }
+    }
 }
 
 fn parse_shape(

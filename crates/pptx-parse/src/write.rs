@@ -1365,16 +1365,50 @@ fn prune_timing(root: &mut XmlElement) {
     });
 }
 
-/// Prunes one `p:timing`; false when nothing of it is left to keep.
+/// What a time node can no longer refer to: shapes off the slide and time
+/// nodes pruned away.
+struct Gone<'a> {
+    shapes: &'a HashSet<String>,
+    nodes: HashSet<String>,
+}
+
+/// Prunes one `p:timing`; false when nothing of it is left to keep. A node
+/// whose start or end waits on a pruned node (`p:tn`) goes too, until none
+/// does; a build entry goes with its shape, or with the last effect it built.
 fn prune_timing_element(timing: &mut XmlElement, live: &HashSet<String>) -> bool {
+    let built = effect_builds(timing);
     let mut keep = true;
     if let Some(list) = timing.child_mut("tnLst") {
-        keep = !prune_time_list(list, live);
+        let mut gone = Gone {
+            shapes: live,
+            nodes: time_node_ids(list),
+        };
+        loop {
+            if prune_time_list(list, &gone) {
+                keep = false;
+                break;
+            }
+            let nodes = time_node_ids(list);
+            if nodes == gone.nodes {
+                break;
+            }
+            gone.nodes = nodes;
+        }
     }
+    let still_built = effect_builds(timing);
     if let Some(builds) = timing.child_mut("bldLst") {
         builds.children.retain(|node| {
-            !matches!(node, XmlNode::Element(build)
-                if build.attribute("spid").is_some_and(|id| !live.contains(id)))
+            let XmlNode::Element(build) = node else {
+                return true;
+            };
+            let Some(shape) = build.attribute("spid") else {
+                return true;
+            };
+            let effect = (
+                shape.to_owned(),
+                build.attribute("grpId").unwrap_or_default().to_owned(),
+            );
+            live.contains(shape) && (!built.contains(&effect) || still_built.contains(&effect))
         });
     }
     timing.children.retain(|node| {
@@ -1384,41 +1418,78 @@ fn prune_timing_element(timing: &mut XmlElement, live: &HashSet<String>) -> bool
     keep && timing.child("tnLst").is_some()
 }
 
+fn time_node_ids(list: &XmlElement) -> HashSet<String> {
+    list.descendants_named("cTn")
+        .into_iter()
+        .filter_map(|node| node.attribute("id").map(str::to_owned))
+        .collect()
+}
+
+/// The (shape, build group) pairs the effects in a timing animate, which its
+/// build entries name.
+fn effect_builds(timing: &XmlElement) -> HashSet<(String, String)> {
+    let mut pairs = HashSet::new();
+    for effect in timing.descendants_named("cTn") {
+        let Some(group) = effect.attribute("grpId") else {
+            continue;
+        };
+        for target in TIME_TARGETS
+            .iter()
+            .flat_map(|name| effect.descendants_named(name))
+        {
+            if let Some(shape) = target.attribute("spid") {
+                pairs.insert((shape.to_owned(), group.to_owned()));
+            }
+        }
+    }
+    pairs
+}
+
+/// The elements naming a shape a time node targets or waits on.
+const TIME_TARGETS: [&str; 3] = ["spTgt", "inkTgt", "bmkTgt"];
+
 /// Prunes the time nodes of a list; true when it held some and holds none now
 /// (an empty list is invalid, so its owner goes).
-fn prune_time_list(list: &mut XmlElement, live: &HashSet<String>) -> bool {
+fn prune_time_list(list: &mut XmlElement, gone: &Gone<'_>) -> bool {
     let held = list.child_elements().next().is_some();
     list.children.retain_mut(|node| match node {
-        XmlNode::Element(node) => !names_gone_shape(node, live) && !prune_own_lists(node, live),
+        XmlNode::Element(node) => !names_gone(node, gone) && !prune_own_lists(node, gone),
         XmlNode::Text(_) => true,
     });
     held && list.child_elements().next().is_none()
 }
 
 /// Whether a time node's own target or trigger, outside its child lists,
-/// names a shape that is gone.
-fn names_gone_shape(element: &XmlElement, live: &HashSet<String>) -> bool {
+/// names a shape that is gone (a media bookmark included) or a pruned node.
+fn names_gone(element: &XmlElement, gone: &Gone<'_>) -> bool {
     element.child_elements().any(|child| {
-        !TIME_NODE_LISTS.contains(&child.local_name())
-            && ((matches!(child.local_name(), "spTgt" | "inkTgt")
-                && child.attribute("spid").is_some_and(|id| !live.contains(id)))
-                || names_gone_shape(child, live))
+        let name = child.local_name();
+        !TIME_NODE_LISTS.contains(&name)
+            && ((TIME_TARGETS.contains(&name)
+                && child
+                    .attribute("spid")
+                    .is_some_and(|id| !gone.shapes.contains(id)))
+                || (name == "tn"
+                    && child
+                        .attribute("val")
+                        .is_some_and(|id| !gone.nodes.contains(id)))
+                || names_gone(child, gone))
     })
 }
 
 /// Prunes the lists a time node owns, dropping an emptied `p:subTnLst`; true
 /// when its `p:childTnLst` emptied, so the node goes.
-fn prune_own_lists(element: &mut XmlElement, live: &HashSet<String>) -> bool {
+fn prune_own_lists(element: &mut XmlElement, gone: &Gone<'_>) -> bool {
     let mut emptied = false;
     element.children.retain_mut(|node| {
         let XmlNode::Element(child) = node else {
             return true;
         };
         if !TIME_NODE_LISTS.contains(&child.local_name()) {
-            emptied |= prune_own_lists(child, live);
+            emptied |= prune_own_lists(child, gone);
             return true;
         }
-        let now_empty = prune_time_list(child, live);
+        let now_empty = prune_time_list(child, gone);
         emptied |= now_empty && child.local_name() == "childTnLst";
         !(now_empty && child.local_name() == "subTnLst")
     });
@@ -1543,6 +1614,15 @@ fn patch_shape_children(
                         )
                     })?;
                 if let ShapeWrite::Patch { patch, .. } = write {
+                    mirror_patch(
+                        &mut children[target],
+                        &slot.path,
+                        patch,
+                        theme,
+                        prefixes,
+                        part,
+                        elements,
+                    )?;
                     let element =
                         element_at_path(&mut children[target], &slot.path).ok_or_else(|| {
                             write_error(
@@ -1561,7 +1641,6 @@ fn patch_shape_children(
                         sink,
                         budget,
                     )?;
-                    mirror_transform(&mut children[target], &slot.path, patch, prefixes, part)?;
                 }
             }
             ShapeWrite::Add(add) => {
@@ -1785,20 +1864,34 @@ fn patch_shape(
     Ok(())
 }
 
+/// One edit to repeat on the copies of a shape in the other
+/// `mc:AlternateContent` branches: the copy is found by element name and id
+/// along `chain`, from the wrapper's branch down through groups.
+struct Mirror<'a> {
+    chain: Vec<(String, String)>,
+    patch: &'a ShapePatch,
+    /// The edited text body as it was; text is repeated only into a copy whose
+    /// body is the same, so the paragraph writes land alike.
+    text_body: Option<XmlElement>,
+}
+
 /// A shape PowerPoint writes in more than one `mc:AlternateContent` branch
-/// moves in all of them: an equation keeps its math in the choice and a
-/// picture of it in the fallback this crate reads and edits, and PowerPoint
-/// shows the choice. The copies are the same element with the same id.
-fn mirror_transform(
+/// takes the edit in all of them: an equation keeps its math in the choice
+/// and a picture of it in the fallback this crate reads and edits, and
+/// PowerPoint shows the choice, around a grouped equation too. Moves and
+/// resizes are repeated, and text into a copy holding the same text (never
+/// into math, which is refused upstream). Runs before the read branch is
+/// patched, whose source ordinals it reads.
+#[allow(clippy::too_many_arguments)]
+fn mirror_patch(
     wrapper: &mut XmlNode,
     path: &[usize],
     patch: &ShapePatch,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
+    elements: ShapeElements,
 ) -> Result<(), PptxError> {
-    if patch.offset.is_none() && patch.extent.is_none() {
-        return Ok(());
-    }
     let &[read, child] = path else {
         return Ok(());
     };
@@ -1808,18 +1901,11 @@ fn mirror_transform(
     let Some(XmlNode::Element(branch)) = wrapper.children.get(read) else {
         return Ok(());
     };
-    let Some(XmlNode::Element(shape)) = branch.children.get(child) else {
+    let Some(XmlNode::Element(edited)) = branch.children.get(child) else {
         return Ok(());
     };
-    let (name, Some(id)) = (shape.name.clone(), shape_id(shape)) else {
-        return Ok(());
-    };
-    let transform = ShapePatch {
-        offset: patch.offset,
-        extent: patch.extent,
-        inherited: patch.inherited,
-        ..ShapePatch::default()
-    };
+    let mut mirrors = Vec::new();
+    plan_mirrors(edited, patch, Vec::new(), elements, &mut mirrors);
     for (index, branch) in wrapper.children.iter_mut().enumerate() {
         let XmlNode::Element(branch) = branch else {
             continue;
@@ -1827,16 +1913,84 @@ fn mirror_transform(
         if index == read || !matches!(branch.local_name(), "Choice" | "Fallback") {
             continue;
         }
-        for copy in branch.children.iter_mut() {
-            if let XmlNode::Element(copy) = copy
-                && copy.name == name
-                && shape_id(copy).as_deref() == Some(id.as_str())
-            {
+        for mirror in &mirrors {
+            let Some(copy) = find_copy(branch, &mirror.chain) else {
+                continue;
+            };
+            let patch = mirror.patch;
+            if patch.offset.is_some() || patch.extent.is_some() {
+                let transform = ShapePatch {
+                    offset: patch.offset,
+                    extent: patch.extent,
+                    inherited: patch.inherited,
+                    ..ShapePatch::default()
+                };
                 patch_transform(copy, &transform, prefixes, part)?;
+            }
+            if mirror.text_body.is_some()
+                && copy.child("txBody") == mirror.text_body.as_ref()
+                && copy.descendants_named("oMath").is_empty()
+            {
+                for text in &patch.texts {
+                    patch_text(copy, text, theme, prefixes, part)?;
+                }
             }
         }
     }
     Ok(())
+}
+
+fn plan_mirrors<'a>(
+    edited: &XmlElement,
+    patch: &'a ShapePatch,
+    mut chain: Vec<(String, String)>,
+    elements: ShapeElements,
+    out: &mut Vec<Mirror<'a>>,
+) {
+    let Some(id) = shape_id(edited) else {
+        return;
+    };
+    chain.push((edited.name.clone(), id));
+    if patch.offset.is_some() || patch.extent.is_some() || !patch.texts.is_empty() {
+        out.push(Mirror {
+            chain: chain.clone(),
+            patch,
+            text_body: edited.child("txBody").cloned(),
+        });
+    }
+    if patch.children.is_empty() {
+        return;
+    }
+    let slots: Vec<Option<XmlNode>> = edited.children.iter().cloned().map(Some).collect();
+    let found = shape_slots(&slots, elements);
+    for write in &patch.children {
+        if let ShapeWrite::Patch {
+            source_index,
+            patch,
+        } = write
+            && let Some(slot) = found.get(*source_index).filter(|slot| slot.path.is_empty())
+            && let Some(Some(XmlNode::Element(child))) = slots.get(slot.position)
+        {
+            plan_mirrors(child, patch, chain.clone(), elements, out);
+        }
+    }
+}
+
+fn find_copy<'a>(
+    mut current: &'a mut XmlElement,
+    chain: &[(String, String)],
+) -> Option<&'a mut XmlElement> {
+    for (name, id) in chain {
+        current = current.children.iter_mut().find_map(|node| match node {
+            XmlNode::Element(element)
+                if &element.name == name && shape_id(element).as_deref() == Some(id.as_str()) =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })?;
+    }
+    Some(current)
 }
 
 fn shape_id(shape: &XmlElement) -> Option<String> {
