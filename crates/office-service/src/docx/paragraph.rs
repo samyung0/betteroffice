@@ -937,6 +937,9 @@ pub(crate) fn paragraph_from_story(
     );
     paragraph.set("formatting", formatting);
     paragraph.set("content", V::array(content));
+    if let V::Bool(bullet) = properties.get("listIsBullet") {
+        paragraph.set("listIsBullet", V::Bool(bullet));
+    }
     if base_paragraph.is_some_and(|base| base.get("renderedPageBreakBefore").truthy()) {
         paragraph.set("renderedPageBreakBefore", V::Bool(true));
     }

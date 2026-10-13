@@ -1785,6 +1785,7 @@ function paragraphFromStory(
     formatting: paragraphAttrsToFormatting(attrs, seeded(attrs)),
     content,
   };
+  if (typeof properties.listIsBullet === 'boolean') paragraph.listIsBullet = properties.listIsBullet;
   if (baseParagraph?.renderedPageBreakBefore) paragraph.renderedPageBreakBefore = true;
 
   const pPrIns = trackedInfo(properties.pPrIns, true);

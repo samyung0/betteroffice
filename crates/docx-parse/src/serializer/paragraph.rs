@@ -685,6 +685,35 @@ fn paragraph_has_comment_reference(paragraph: &Paragraph, id: f64) -> bool {
     held
 }
 
+/// Calls `found` with each list paragraph's `numId` and the list kind an
+/// editor gave it (`list_is_bullet`), for the paragraphs `blocks` write.
+pub(crate) fn block_list_kinds(blocks: &[BlockContent], found: &mut impl FnMut(f64, bool)) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(paragraph) => {
+                let num_id = paragraph
+                    .formatting
+                    .as_ref()
+                    .and_then(|formatting| formatting.num_pr.as_ref())
+                    .and_then(|num_pr| num_pr.num_id)
+                    .filter(|id| *id > 0.0);
+                if let (Some(num_id), Some(bullet)) = (num_id, paragraph.list_is_bullet) {
+                    found(num_id, bullet);
+                }
+            }
+            BlockContent::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        block_list_kinds(&cell.content, found);
+                    }
+                }
+            }
+            BlockContent::BlockSdt(sdt) => block_list_kinds(&sdt.content, found),
+            BlockContent::RawXml(_) => {}
+        }
+    }
+}
+
 /// Calls `found` with the id of each comment reference `blocks` write.
 pub(crate) fn block_comment_references(blocks: &[BlockContent], found: &mut impl FnMut(f64)) {
     for block in blocks {
@@ -1070,6 +1099,7 @@ mod tests {
                 }],
             }))],
             list_rendering: None,
+            list_is_bullet: None,
             rendered_page_break_before: Some(true),
             section_properties: None,
         };

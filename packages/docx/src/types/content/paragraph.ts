@@ -94,6 +94,12 @@ export interface Paragraph {
   content: ParagraphContent[];
   /** Computed list rendering (if this is a list item) */
   listRendering?: ListRendering;
+  /**
+   * The list kind an editor shows the paragraph with, set by the save
+   * projection from `listIsBullet`: the save defines a `numId` the numbering
+   * lacks as that kind.
+   */
+  listIsBullet?: boolean;
   /** Word's cached layout says this paragraph started on a new rendered page. */
   renderedPageBreakBefore?: boolean;
   /** Section properties (if this paragraph ends a section) */

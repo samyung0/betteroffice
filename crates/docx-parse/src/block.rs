@@ -844,6 +844,7 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
             },
         }))],
         list_rendering: None,
+        list_is_bullet: None,
         rendered_page_break_before: None,
         section_properties: None,
     }
@@ -861,6 +862,7 @@ fn empty_paragraph() -> Paragraph {
         p_pr_del: None,
         content: Vec::new(),
         list_rendering: None,
+        list_is_bullet: None,
         rendered_page_break_before: None,
         section_properties: None,
     }

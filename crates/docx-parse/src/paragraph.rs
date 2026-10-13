@@ -168,6 +168,11 @@ pub struct Paragraph {
     pub content: Vec<ParagraphContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_rendering: Option<ListRendering>,
+    /// The list kind an editor shows the paragraph with, which the save
+    /// projections carry over from `listIsBullet`: the save defines a
+    /// `numId` the numbering lacks as that kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_is_bullet: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_page_break_before: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,6 +269,7 @@ pub fn parse_paragraph(
         p_pr_del: None,
         content: Vec::new(),
         list_rendering: None,
+        list_is_bullet: None,
         rendered_page_break_before: (!in_header_footer
             && paragraph_starts_with_rendered_page_break(element))
         .then_some(true),

@@ -4,7 +4,7 @@
 //! and re-emit unchanged markup, so every byte outside an explicitly changed
 //! paragraph remains authored exactly as it appeared in the source package.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -27,8 +27,8 @@ use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
-use super::numbering::{numbering_fragments, serialize_numbering_xml};
-use super::paragraph::{block_comment_references, serialize_paragraph};
+use super::numbering::{insert_numbering_entries, serialize_numbering_xml};
+use super::paragraph::{block_comment_references, block_list_kinds, serialize_paragraph};
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
@@ -36,7 +36,7 @@ use super::parts::{
 };
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
-use super::xml_writer::{escape_xml, int_attr};
+use super::xml_writer::escape_xml;
 
 const EMPTY_RELS_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>";
 const HEADER_CONTENT_TYPE: &str =
@@ -202,6 +202,8 @@ pub fn write_docx_s13_parts(
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
+    add_list_button_numbering(&request, &mut package)?;
+
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
@@ -221,7 +223,6 @@ pub fn write_docx_s13_parts(
         }
     }
 
-    add_list_button_numbering(request.numbering.as_ref(), &mut package);
     serialize_comment_parts(&request.document, &mut package, &mut context)?;
 
     if request.options.update_modified_date || request.options.modified_by.is_some() {
@@ -487,81 +488,107 @@ fn ensure_header_footer_parts(
     Ok(())
 }
 
-/// Adds the definitions of the bullet and number buttons' ids
-/// ([`list_button_num_ids`]) that a saved story uses and the source lacks,
-/// into `word/numbering.xml`, which it creates when the package has none.
-fn add_list_button_numbering(numbering: Option<&NumberingDefinitions>, package: &mut Package) {
+/// Defines each `numId` a list paragraph uses that the source numbering
+/// lacks, as the kind the editor shows it (`list_is_bullet`; a paragraph the
+/// file itself left dangling has none and stays as it is). When either of the
+/// bullet and number buttons' ids ([`list_button_num_ids`]) is defined, so is
+/// the other, so the next base's button ids come after every id this one
+/// handed out, and edits rebased onto it keep their kind (Epo 2026-10-13).
+fn add_list_button_numbering(
+    request: &S13SaveRequest,
+    package: &mut Package,
+) -> Result<(), ParseError> {
+    let numbering = request.numbering.as_ref();
+    let defined = |id: f64| {
+        numbering.is_some_and(|numbering| numbering.nums.iter().any(|num| num.num_id == id))
+    };
+    let mut kinds = BTreeMap::new();
+    let stories = std::iter::once(&request.document.content)
+        .chain(
+            request
+                .header_entries
+                .iter()
+                .chain(&request.footer_entries)
+                .map(|(_, story)| &story.content),
+        )
+        .chain(
+            request
+                .footnotes
+                .iter()
+                .chain(&request.endnotes)
+                .map(|note| &note.content),
+        );
+    for blocks in stories {
+        block_list_kinds(blocks, &mut |id, bullet| {
+            if !defined(id) {
+                kinds.entry(id as i64).or_insert(bullet);
+            }
+        });
+    }
+    if kinds.is_empty() {
+        return Ok(());
+    }
     let (bullet_id, number_id) = list_button_num_ids(numbering);
+    if kinds.contains_key(&(bullet_id as i64)) || kinds.contains_key(&(number_id as i64)) {
+        kinds.entry(bullet_id as i64).or_insert(true);
+        kinds.entry(number_id as i64).or_insert(false);
+    }
     let last_abstract = numbering
         .into_iter()
         .flat_map(|numbering| &numbering.abstract_nums)
         .map(|abstract_numbering| abstract_numbering.abstract_num_id)
         .fold(0.0, f64::max);
-    let entries = package.refs();
-    let used = |id: f64| {
-        let marker = format!("<w:numId w:val=\"{}\"/>", int_attr(Some(id)));
-        entries.iter().any(|(path, bytes)| {
-            path.starts_with("word/")
-                && path.ends_with(".xml")
-                && path != "word/numbering.xml"
-                && std::str::from_utf8(bytes).is_ok_and(|xml| xml.contains(&marker))
-        })
-    };
-    let defined = |id: f64| {
-        numbering.is_some_and(|numbering| numbering.nums.iter().any(|num| num.num_id == id))
-    };
-    let added: Vec<_> = [
-        (true, bullet_id, last_abstract + 1.0),
-        (false, number_id, last_abstract + 2.0),
-    ]
-    .into_iter()
-    .filter(|&(_, id, _)| !defined(id) && used(id))
-    .map(|(bullet, id, abstract_id)| list_button_numbering(bullet, id, abstract_id))
-    .collect();
-    drop(entries);
-    if added.is_empty() {
-        return;
-    }
-    let Some(xml) = package.text("word/numbering.xml") else {
-        if numbering.is_none_or(|numbering| numbering.nums.is_empty()) {
-            let (abstract_nums, nums) = added.into_iter().unzip();
-            ensure_numbering_part(
-                Some(&NumberingDefinitions {
-                    abstract_nums,
-                    nums,
-                }),
-                package,
-            );
-        }
-        return;
-    };
-    let Some(end) = xml.rfind("</w:numbering>") else {
-        return;
-    };
-    // CT_Numbering: abstract definitions, then instances, then numIdMacAtCleanup.
-    let tail = xml.find("<w:numIdMacAtCleanup").unwrap_or(end);
-    let first_num = [xml.find("<w:num "), xml.find("<w:num>")]
+    let entries: Vec<_> = kinds
         .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(tail);
-    let (mut abstracts, mut nums) = (String::new(), String::new());
-    for (abstract_numbering, instance) in &added {
-        let (abstract_xml, num_xml) = numbering_fragments(abstract_numbering, instance);
-        abstracts.push_str(&abstract_xml);
-        nums.push_str(&num_xml);
+        .zip(1..)
+        .map(|((id, bullet), offset)| {
+            list_button_numbering(bullet, id as f64, last_abstract + f64::from(offset))
+        })
+        .collect();
+
+    let rels_path = "word/_rels/document.xml.rels";
+    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, rels_path));
+    let path = match relationships.target_of_type(relationship_types::NUMBERING) {
+        Some(target) => resolve_relative_path(&package.document_path, target)?,
+        None => {
+            let relationship_id = relationships.next_id();
+            relationships.push_new(
+                relationship_id,
+                relationship_types::NUMBERING,
+                "numbering.xml".to_owned(),
+                None,
+            );
+            if let Some(updated) = relationships.serialize() {
+                package.set_text(rels_path, updated);
+            }
+            "word/numbering.xml".to_owned()
+        }
+    };
+    let xml = match package.text(&path) {
+        Some(xml) => insert_numbering_entries(&xml, &entries).ok_or_else(|| {
+            save_error(format!(
+                "{path} has no numbering root to add list definitions to"
+            ))
+        })?,
+        None => {
+            let (abstract_nums, nums) = entries.into_iter().unzip();
+            serialize_numbering_xml(&NumberingDefinitions {
+                abstract_nums,
+                nums,
+            })
+        }
+    };
+    package.set_text(path.clone(), xml);
+    if let Some(content_types) = package.text("[Content_Types].xml")
+        && !content_types.contains(&format!("PartName=\"/{path}\""))
+    {
+        let entry =
+            format!("<Override PartName=\"/{path}\" ContentType=\"{NUMBERING_CONTENT_TYPE}\"/>");
+        if let Some(updated) = append_before(&content_types, "</Types>", &entry) {
+            package.set_text("[Content_Types].xml", updated);
+        }
     }
-    package.set_text(
-        "word/numbering.xml",
-        [
-            &xml[..first_num],
-            &abstracts,
-            &xml[first_num..tail],
-            &nums,
-            &xml[tail..],
-        ]
-        .concat(),
-    );
+    Ok(())
 }
 
 fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut Package) {
@@ -931,6 +958,14 @@ impl RelationshipsIndex {
 
     fn target<'a>(&'a self, entry: &RelationshipEntry) -> Option<&'a str> {
         self.attr(&entry.target)
+    }
+
+    /// The target of the first relationship of `relationship_type`.
+    fn target_of_type(&self, relationship_type: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|entry| self.attr(&entry.relationship_type) == Some(relationship_type))
+            .and_then(|entry| self.target(entry))
     }
 
     fn target_matches(&self, entry: &RelationshipEntry, href: &str) -> bool {

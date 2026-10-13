@@ -266,9 +266,9 @@ fn parse_numbering_instance(
     let Some(num_id) = element.parse_numeric_attribute(Some("w"), "numId", 1.0) else {
         return Ok(None);
     };
-    let Some(abstract_num_id) = numeric_child(element, "abstractNumId", "val") else {
-        return Ok(None);
-    };
+    // Without an abstract numbering the instance draws no list, but it keeps
+    // its id (abstract -1, which no definition carries) so new ids skip it.
+    let abstract_num_id = numeric_child(element, "abstractNumId", "val").unwrap_or(-1.0);
     let override_elements: Vec<_> = element.children_named("w", "lvlOverride").collect();
     let level_overrides = if override_elements.is_empty() {
         None
@@ -841,6 +841,24 @@ fn attribute_owned(element: &XmlElement, attribute: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_num_without_an_abstract_numbering_keeps_its_id_for_new_ids() {
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let numbering = parse_numbering(
+            Some(br#"<w:numbering xmlns:w="w"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="5"/></w:numbering>"#),
+            "word/numbering.xml",
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(numbering.definitions.nums[1].num_id, 5.0);
+        assert_eq!(numbering.definitions.nums[1].abstract_num_id, -1.0);
+        assert_eq!(
+            list_button_num_ids(Some(&numbering.definitions)),
+            (6.0, 7.0)
+        );
+    }
+
     use super::*;
     use crate::xml::ParseLimits;
 

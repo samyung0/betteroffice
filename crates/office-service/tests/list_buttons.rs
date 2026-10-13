@@ -1,13 +1,16 @@
 //! Lists made with the editor's bullet and number buttons save with numbering
-//! definitions of their own (Epo 2026-10-13): the next two `w:num` ids after
-//! the source's (`docx_parse::numbering::list_button_num_ids`), defined in
-//! numbering.xml, which the save creates when the file has none.
+//! definitions of their own (Epo 2026-10-13): the buttons write the next two
+//! `w:num` ids after the source's (`docx_parse::numbering::list_button_num_ids`),
+//! and the save defines each id a paragraph uses that the numbering lacks as
+//! that paragraph's kind, in the numbering part (created when missing).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use docx_edit::{EditCtx, EditingDoc, ParaAttrDelta, ParaSelector, ParagraphId};
-use office_service::{Checkpoint, Determinism, Format, export, seed, sha256_hex};
+use docx_parse::numbering::{list_button_num_ids, parse_numbering};
+use docx_parse::xml::{ParseBudget, ParseLimits};
+use office_service::{Checkpoint, Determinism, Format, export, rebase, seed, sha256_hex};
 use yrs::Any;
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -15,12 +18,15 @@ const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relations
 const OFFICE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
 
 fn package(numbering: Option<&str>) -> Vec<u8> {
+    named_package("numbering.xml", numbering)
+}
+
+/// A package whose numbering part, when it has one, is `word/{name}`.
+fn named_package(name: &str, numbering: Option<&str>) -> Vec<u8> {
     let (override_xml, rel) = if numbering.is_some() {
         (
-            format!(
-                r#"<Override PartName="/word/numbering.xml" ContentType="{OFFICE}.numbering+xml"/>"#
-            ),
-            format!(r#"<Relationship Id="rIdNum" Type="{R}/numbering" Target="numbering.xml"/>"#),
+            format!(r#"<Override PartName="/word/{name}" ContentType="{OFFICE}.numbering+xml"/>"#),
+            format!(r#"<Relationship Id="rIdNum" Type="{R}/numbering" Target="{name}"/>"#),
         )
     } else {
         Default::default()
@@ -59,7 +65,7 @@ fn package(numbering: Option<&str>) -> Vec<u8> {
         ),
     ];
     if let Some(numbering) = numbering {
-        parts.push(("word/numbering.xml".to_owned(), numbering.to_owned()));
+        parts.push((format!("word/{name}"), numbering.to_owned()));
     }
     let parts: Vec<(String, Vec<u8>)> = parts
         .into_iter()
@@ -128,23 +134,41 @@ fn list_button(doc: &EditingDoc, paragraph: ParagraphId, bullet: bool, num_id: f
     .unwrap();
 }
 
+fn checkpoint<'a>(base_sha256: &'a str, state: &'a [u8]) -> Checkpoint<'a> {
+    Checkpoint {
+        format: Format::Docx,
+        schema_version: 1,
+        base_sha256,
+        state,
+    }
+}
+
 fn save(base: &[u8], doc: &EditingDoc) -> Vec<u8> {
     let state = doc.encode_state_as_update_v1();
     let sha = sha256_hex(base);
     export(
         base,
-        Checkpoint {
-            format: Format::Docx,
-            schema_version: 1,
-            base_sha256: &sha,
-            state: &state,
-        },
+        checkpoint(&sha, &state),
         Determinism {
             seed: &"0".repeat(64),
             now: "2026-10-13T00:00:00.000Z",
         },
     )
     .unwrap()
+}
+
+/// The ids the buttons write over `base`, read from its numbering part.
+fn button_ids(base: &[u8]) -> (f64, f64) {
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let xml = part(base, "word/numbering.xml");
+    let numbering = parse_numbering(
+        (!xml.is_empty()).then_some(xml.as_bytes()),
+        "word/numbering.xml",
+        &mut budget,
+    )
+    .unwrap();
+    list_button_num_ids(Some(&numbering.definitions))
 }
 
 fn part(saved: &[u8], path: &str) -> String {
@@ -224,4 +248,66 @@ fn two_peers_toolbar_lists_save_each_definition_once() {
     assert_eq!(numbering.matches("<w:num ").count(), 2);
     assert_eq!(numbering.matches("<w:abstractNum ").count(), 2);
     assert_eq!(reopened_lists(&saved), ["bullet", "decimal", "bullet"]);
+}
+
+/// A publication captures one list; the other kind is made after the capture
+/// and rebased onto the published file, then a new list is made over that
+/// file. Every list saves as it shows, in both orders (the save defines the
+/// buttons' other id with the first, so the next base's ids are new).
+#[test]
+fn toolbar_lists_keep_their_kind_across_a_publication() {
+    for first_bullet in [true, false] {
+        let base = package(None);
+        let (bullet_id, number_id) = button_ids(&base);
+        let id = |bullet: bool| if bullet { bullet_id } else { number_id };
+        let doc = open(&seed(Format::Docx, &base).unwrap(), 4321);
+        list_button(&doc, paragraph(&doc, 0), first_bullet, id(first_bullet));
+        let captured = doc.encode_state_as_update_v1();
+        let published = save(&base, &doc);
+        list_button(&doc, paragraph(&doc, 1), !first_bullet, id(!first_bullet));
+        let latest = doc.encode_state_as_update_v1();
+        let sha = sha256_hex(&base);
+        let rebased = rebase(
+            &base,
+            checkpoint(&sha, &captured),
+            checkpoint(&sha, &latest),
+            &published,
+        )
+        .unwrap();
+        let next = open(&rebased.state, 4322);
+        let (next_bullet, _) = button_ids(&published);
+        assert!(next_bullet > bullet_id.max(number_id), "{next_bullet}");
+        list_button(&next, paragraph(&next, 2), true, next_bullet);
+        let kind = |bullet: bool| if bullet { "bullet" } else { "decimal" };
+        assert_eq!(
+            reopened_lists(&save(&published, &next)),
+            [kind(first_bullet), kind(!first_bullet), "bullet"],
+            "first bullet {first_bullet}"
+        );
+    }
+}
+
+/// The numbering part is found through the document's relationships. (The
+/// parser itself reads only `word/numbering.xml`, so this checks the XML.)
+#[test]
+fn toolbar_lists_save_into_a_numbering_part_of_another_name() {
+    let base = named_package("lists.xml", Some(&word_numbering()));
+    let doc = open(&seed(Format::Docx, &base).unwrap(), 4331);
+    list_button(&doc, paragraph(&doc, 0), true, 3.0);
+    let saved = save(&base, &doc);
+    let lists = part(&saved, "word/lists.xml");
+    assert!(lists.starts_with(&word_numbering()[..word_numbering().find("<w:num ").unwrap()]));
+    assert!(lists.contains(
+        r#"<w:abstractNum w:abstractNumId="2"><w:multiLevelType w:val="hybridMultilevel"/>"#
+    ));
+    assert!(
+        lists.contains(r#"<w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#)
+    );
+    assert_eq!(part(&saved, "word/numbering.xml"), "");
+    assert_eq!(
+        part(&saved, "word/_rels/document.xml.rels")
+            .matches("/numbering\"")
+            .count(),
+        1
+    );
 }

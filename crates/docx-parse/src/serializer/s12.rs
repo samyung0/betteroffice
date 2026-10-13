@@ -351,6 +351,7 @@ mod tests {
                     }],
                 }))],
                 list_rendering: None,
+                list_is_bullet: None,
                 rendered_page_break_before: None,
                 section_properties: None,
             }))],
