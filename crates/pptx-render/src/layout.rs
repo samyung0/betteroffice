@@ -7295,6 +7295,7 @@ mod tests {
         package.masters[0]
             .shapes
             .push(ShapeNode::Shape(pptx_parse::Shape {
+                equation: false,
                 has_preset_geometry: true,
                 effects: None,
                 base: pptx_parse::ShapeBase {
@@ -8825,6 +8826,7 @@ mod tests {
             children: Vec::new(),
         };
         let layout_shape = ShapeNode::Shape(pptx_parse::Shape {
+            equation: false,
             has_preset_geometry: true,
             style: None,
             paths: Vec::new(),

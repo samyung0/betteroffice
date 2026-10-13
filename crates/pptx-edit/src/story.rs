@@ -339,7 +339,7 @@ impl DeckSession {
         validate_xml_text(text)?;
         validate_text_style(style)?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -367,7 +367,7 @@ impl DeckSession {
         end: u32,
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_range(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         if end > start {
@@ -398,7 +398,7 @@ impl DeckSession {
         validate_xml_text(text)?;
         validate_text_style(style)?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if start > end || end > final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -444,7 +444,7 @@ impl DeckSession {
         )?;
         validate_run_extras(patch.strike.as_deref(), patch.highlight.as_deref())?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
@@ -475,7 +475,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_alignment(alignment)?;
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
@@ -523,7 +523,7 @@ impl DeckSession {
             None => RUN_ATTRIBUTES.to_vec(),
         };
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         let cleared: Attrs = keys
@@ -569,7 +569,7 @@ impl DeckSession {
         }
         let source = crate::deck::source_text_body(&self.package, story_id);
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         let pilcrows = selected_pilcrows(&story, &txn, start, end);
@@ -697,7 +697,7 @@ impl DeckSession {
         }
         let source = crate::deck::source_text_body(&self.package, story_id);
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
@@ -752,7 +752,7 @@ impl DeckSession {
             validate_spacing(value)?;
         }
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (_, pilcrow) in selected_pilcrows(&story, &txn, start, end) {
@@ -783,7 +783,7 @@ impl DeckSession {
         index: u32,
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -809,7 +809,7 @@ impl DeckSession {
         index: u32,
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
-        let story = story_ref(&txn, story_id)?;
+        let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index >= final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -1178,6 +1178,17 @@ fn pilcrow_json_string<T: ReadTxn>(
         Some(_) => Err(EditError::InvalidState(format!(
             "paragraph {key} is not a string"
         ))),
+    }
+}
+
+impl DeckSession {
+    /// The story an edit may change. An equation's text box holds a picture of
+    /// the math PowerPoint shows instead, so its text is refused.
+    fn editable_story<T: ReadTxn>(&self, txn: &T, story_id: &str) -> EditResult<TextRef> {
+        if crate::deck::is_equation_story(self.package(), story_id) {
+            return Err(EditError::EquationText(story_id.to_owned()));
+        }
+        story_ref(txn, story_id)
     }
 }
 

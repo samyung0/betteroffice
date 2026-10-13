@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{DeckSession, EditCtx, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, EditError, TextStyle, TextStylePatch};
 
 const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
@@ -454,4 +454,80 @@ fn deleting_every_animated_shape_drops_the_timing() {
     let slide = delete_and_save(&["Title 1", "Chart 2", "Lecture clip", "Narration"]);
     let tail = format!("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}</p:sld>");
     assert!(slide.ends_with(&canonical(&tail)), "{slide}");
+}
+
+/// The equation's slide id, shape id and the story of its fallback text box.
+fn equation(session: &DeckSession) -> (String, String, String) {
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "TextBox 4")
+        .unwrap();
+    (
+        slide.id.clone(),
+        shape.id.clone(),
+        shape.text_stories[0].id.clone(),
+    )
+}
+
+#[test]
+fn moving_an_equation_moves_its_math_with_its_picture() {
+    let session = DeckSession::open(&deck(), 4104).unwrap();
+    let (slide, shape, _) = equation(&session);
+    let context = EditCtx::local("kept");
+    session
+        .move_shape(&context, &slide, &shape, 1_000_000, 2_000_000)
+        .unwrap();
+    session
+        .resize_shape(&context, &slide, &shape, 3_251_200, 738_664)
+        .unwrap();
+    let saved = saved_slide(&parts(&session.save().unwrap()));
+    let start = saved.find("<mc:AlternateContent").unwrap();
+    let end = saved[start..].find("</mc:AlternateContent>").unwrap() + start;
+    let wrapper = &saved[start..end];
+
+    // PowerPoint shows the math in mc:Choice; Capy draws the fallback.
+    let moved = canonical(r#"<a:off x="1000000" y="2000000"/><a:ext cx="3251200" cy="738664"/>"#);
+    assert_eq!(wrapper.matches(&moved).count(), 2, "{wrapper}");
+    assert!(!wrapper.contains("4114800"), "{wrapper}");
+    assert!(wrapper.contains("<m:t>x</m:t>"));
+}
+
+#[test]
+fn text_edits_on_an_equation_are_refused_with_the_reason() {
+    let session = DeckSession::open(&deck(), 4105).unwrap();
+    let (_, _, story) = equation(&session);
+    let context = EditCtx::local("kept");
+    let style = TextStyle::default();
+    let bold = TextStylePatch {
+        bold: Some(true),
+        ..TextStylePatch::default()
+    };
+    let attempts = [
+        session.insert_text(&context, &story, 0, "y", &style).err(),
+        session.delete_text(&context, &story, 0, 1).err(),
+        session
+            .replace_text(&context, &story, 0, 1, "y", &style)
+            .err(),
+        session.format_text(&context, &story, 0, 1, &bold).err(),
+        session
+            .set_paragraph_alignment(&context, &story, 0, 1, Some("ctr"))
+            .err(),
+        session.insert_paragraph_break(&context, &story, 0).err(),
+    ];
+    for attempt in attempts {
+        assert!(
+            matches!(&attempt, Some(EditError::EquationText(id)) if *id == story),
+            "{attempt:?}"
+        );
+    }
+    assert!(
+        EditError::EquationText(story.clone())
+            .to_string()
+            .contains("is an equation: its math can only be changed in PowerPoint")
+    );
+    assert_eq!(session.story(&story).unwrap().plain_text(), " ");
+    assert!(session.save().is_ok());
 }

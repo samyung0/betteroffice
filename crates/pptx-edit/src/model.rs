@@ -452,6 +452,8 @@ pub enum EditError {
     InvalidAdjustment(String),
     #[error("invalid text: {0}")]
     InvalidText(String),
+    #[error("story {0:?} is an equation: its math can only be changed in PowerPoint")]
+    EquationText(String),
     #[error("update observer failed: {0}")]
     Observer(String),
     #[error("JSON boundary error: {0}")]

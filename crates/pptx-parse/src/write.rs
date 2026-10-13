@@ -1561,6 +1561,7 @@ fn patch_shape_children(
                         sink,
                         budget,
                     )?;
+                    mirror_transform(&mut children[target], &slot.path, patch, prefixes, part)?;
                 }
             }
             ShapeWrite::Add(add) => {
@@ -1782,6 +1783,68 @@ fn patch_shape(
         )?;
     }
     Ok(())
+}
+
+/// A shape PowerPoint writes in more than one `mc:AlternateContent` branch
+/// moves in all of them: an equation keeps its math in the choice and a
+/// picture of it in the fallback this crate reads and edits, and PowerPoint
+/// shows the choice. The copies are the same element with the same id.
+fn mirror_transform(
+    wrapper: &mut XmlNode,
+    path: &[usize],
+    patch: &ShapePatch,
+    prefixes: &Prefixes,
+    part: &str,
+) -> Result<(), PptxError> {
+    if patch.offset.is_none() && patch.extent.is_none() {
+        return Ok(());
+    }
+    let &[read, child] = path else {
+        return Ok(());
+    };
+    let XmlNode::Element(wrapper) = wrapper else {
+        return Ok(());
+    };
+    let Some(XmlNode::Element(branch)) = wrapper.children.get(read) else {
+        return Ok(());
+    };
+    let Some(XmlNode::Element(shape)) = branch.children.get(child) else {
+        return Ok(());
+    };
+    let (name, Some(id)) = (shape.name.clone(), shape_id(shape)) else {
+        return Ok(());
+    };
+    let transform = ShapePatch {
+        offset: patch.offset,
+        extent: patch.extent,
+        inherited: patch.inherited,
+        ..ShapePatch::default()
+    };
+    for (index, branch) in wrapper.children.iter_mut().enumerate() {
+        let XmlNode::Element(branch) = branch else {
+            continue;
+        };
+        if index == read || !matches!(branch.local_name(), "Choice" | "Fallback") {
+            continue;
+        }
+        for copy in branch.children.iter_mut() {
+            if let XmlNode::Element(copy) = copy
+                && copy.name == name
+                && shape_id(copy).as_deref() == Some(id.as_str())
+            {
+                patch_transform(copy, &transform, prefixes, part)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn shape_id(shape: &XmlElement) -> Option<String> {
+    shape
+        .descendants_named("cNvPr")
+        .first()
+        .and_then(|properties| properties.attribute("id"))
+        .map(str::to_owned)
 }
 
 fn shape_properties_mut<'a>(

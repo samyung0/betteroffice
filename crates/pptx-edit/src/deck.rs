@@ -212,6 +212,14 @@ pub(crate) fn source_text_body<'a>(
     source_story(package, story_id).map(|(_, _, body)| body)
 }
 
+/// Whether a seeded story is the text of an equation's fallback.
+pub(crate) fn is_equation_story(package: &PptxPackage, story_id: &str) -> bool {
+    matches!(
+        source_story(package, story_id),
+        Some((_, ShapeNode::Shape(shape), _)) if shape.equation
+    )
+}
+
 /// The slide, node and text body of a seeded story.
 fn source_story<'a>(
     package: &'a PptxPackage,

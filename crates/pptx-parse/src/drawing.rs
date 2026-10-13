@@ -135,13 +135,17 @@ fn parse_shape_children(
     for child in parent.child_elements() {
         if child.local_name() == "AlternateContent" {
             if let Some(branch) = alternate_content_branch(child) {
-                shapes.extend(parse_shape_children(
-                    branch,
-                    relationships,
-                    part,
-                    budget,
-                    elements,
-                )?);
+                let mut parsed =
+                    parse_shape_children(branch, relationships, part, budget, elements)?;
+                if branch.local_name() == "Fallback" && !child.descendants_named("oMath").is_empty()
+                {
+                    for node in &mut parsed {
+                        if let ShapeNode::Shape(shape) = node {
+                            shape.equation = true;
+                        }
+                    }
+                }
+                shapes.extend(parsed);
             }
             continue;
         }
@@ -216,6 +220,7 @@ fn parse_shape(
             .child("txBody")
             .map(|body| parse_text_body(body, part, budget))
             .transpose()?,
+        equation: false,
     })
 }
 

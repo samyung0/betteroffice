@@ -357,6 +357,10 @@ pub struct Shape {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<ShapeEffects>,
     pub text: Option<TextBody>,
+    /// The fallback PowerPoint writes for an equation: a picture of the math,
+    /// which sits in an `mc:Choice` this crate does not read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub equation: bool,
 }
 
 /// An `a:blipFill` on a shape: the image, and the box it stretches into.
