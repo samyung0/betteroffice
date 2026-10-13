@@ -3,6 +3,7 @@ export { presentationImageBlob } from './render/image';
 export { installEmbeddedFonts, removeFontFaces } from './render/fonts';
 export type { EmbeddedFontSource } from './render/fonts';
 export { StaleProposalError } from './proposals';
+export { EquationTextError } from './wasm/errors';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';

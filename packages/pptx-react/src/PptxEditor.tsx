@@ -7,6 +7,7 @@ import {
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
   slideToPng,
+  EquationTextError,
   StaleProposalError,
 } from '@betteroffice/pptx';
 import type {
@@ -623,7 +624,8 @@ function PptxEditorContent({
 
   const reportError = useCallback((value: unknown) => {
     const next = value instanceof Error ? value : new Error(String(value));
-    setError(next.message);
+    // A refusal is the host's to show; the editor's own box is for failures.
+    if (!(next instanceof EquationTextError)) setError(next.message);
     onErrorRef.current?.(next);
   }, []);
 

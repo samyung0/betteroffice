@@ -1150,7 +1150,13 @@ fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
     Ok(client_id as u64)
 }
 
-fn js_error(error: impl std::fmt::Display) -> JsValue {
+fn js_error<E: std::fmt::Display + 'static>(error: E) -> JsValue {
+    // A refusal the host shows as a notice: a code, not engine text.
+    if let Some(crate::EditError::EquationText(_)) =
+        (&error as &dyn std::any::Any).downcast_ref::<crate::EditError>()
+    {
+        return JsValue::from_str(r#"{"code":"equationText"}"#);
+    }
     JsValue::from_str(&error.to_string())
 }
 

@@ -6,7 +6,7 @@ import initWasmModule, {
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
-import { StaleProposalError } from '../proposals';
+import { toError } from './errors';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
   CollaborationReplica,
@@ -901,18 +901,4 @@ function jsonCall<T>(operation: () => string): T {
 
 function call<T>(operation: () => string): T {
   return jsonCall(operation);
-}
-
-function toError(error: unknown): Error {
-  if (error instanceof Error) return error;
-  if (typeof error === 'string') {
-    try {
-      const parsed = JSON.parse(error);
-      if (parsed.code === 'staleProposal' && Array.isArray(parsed.targets)
-          && parsed.targets.every((target: unknown) => typeof target === 'string')) {
-        return new StaleProposalError(parsed.targets);
-      }
-    } catch {}
-  }
-  return new Error(typeof error === 'string' ? error : String(error));
 }
