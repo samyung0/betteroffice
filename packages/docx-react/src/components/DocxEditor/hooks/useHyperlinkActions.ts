@@ -28,7 +28,9 @@ export function useHyperlinkActions({
         type: 'setHyperlink',
         href: data.url || '',
         tooltip: data.tooltip,
-        displayText: data.displayText,
+        // A new link at the caret without text shows its address, as in Word.
+        displayText:
+          data.displayText ?? (hyperlinkDialog.state.isEditing ? undefined : data.url),
         editExisting: hyperlinkDialog.state.isEditing,
       });
       hyperlinkDialog.close();
