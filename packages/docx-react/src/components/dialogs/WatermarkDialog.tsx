@@ -163,6 +163,8 @@ export function WatermarkDialog({
   >(undefined);
   const [scale, setScale] = useState(100);
   const [washout, setWashout] = useState(true);
+  // A picked picture still being prepared and read: Apply waits for it.
+  const [preparing, setPreparing] = useState(false);
 
   // Seed the form from the current watermark each time the dialog opens.
   useEffect(() => {
@@ -194,15 +196,19 @@ export function WatermarkDialog({
   const handlePickFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const picked = e.target.files?.[0];
     if (!picked) return;
+    setPreparing(true);
     let file: File;
     try {
       file = prepareImage ? await prepareImage(picked) : picked;
     } catch (error) {
+      setPreparing(false);
       onError?.(error instanceof Error ? error : new Error('Failed to prepare image'));
       return;
     }
     const reader = new FileReader();
+    reader.onerror = () => setPreparing(false);
     reader.onload = () => {
+      setPreparing(false);
       const url = typeof reader.result === 'string' ? reader.result : undefined;
       setPictureUrl(url);
       setPictureDims(undefined);
@@ -263,7 +269,7 @@ export function WatermarkDialog({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') onClose();
   };
-  const applyDisabled = mode === 'picture' && !pictureUrl;
+  const applyDisabled = mode === 'picture' && (!pictureUrl || preparing);
 
   return (
     <div style={OVERLAY} onClick={onClose} onMouseDown={stop} onKeyDown={handleKeyDown}>
@@ -273,6 +279,7 @@ export function WatermarkDialog({
         onMouseDown={stop}
         role="dialog"
         aria-label={t('dialogs.watermark.title')}
+        aria-busy={preparing}
       >
         <div style={HEADER}>{t('dialogs.watermark.title')}</div>
 
@@ -303,9 +310,18 @@ export function WatermarkDialog({
           {mode === 'picture' && (
             <div style={SUBFORM}>
               <div style={ROW}>
-                <input type="file" accept="image/*" onChange={handlePickFile} />
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handlePickFile}
+                  disabled={preparing}
+                />
               </div>
-              {pictureUrl && (
+              {preparing ? (
+                <div style={ROW} role="status">
+                  {t('loading.label')}
+                </div>
+              ) : pictureUrl && (
                 <div style={ROW}>
                   <img src={pictureUrl} alt="" style={{ maxHeight: '60px', maxWidth: '120px' }} />
                 </div>
@@ -442,7 +458,9 @@ export function WatermarkDialog({
           <button
             style={{
               ...PRIMARY_BTN,
-              ...(applyDisabled ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              ...(applyDisabled
+                ? { opacity: 0.5, cursor: preparing ? 'progress' : 'not-allowed' }
+                : {}),
             }}
             onClick={handleApply}
             disabled={applyDisabled}

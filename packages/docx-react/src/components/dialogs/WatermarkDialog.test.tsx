@@ -54,3 +54,49 @@ test('a picture watermark is the file prepareImage returns, and its refusal appl
   expect(applied[0]).toMatchObject({ kind: 'picture', dataUrl: prepared });
   expect(picked).toEqual(['huge.webp', 'logo.webp']);
 });
+
+test('while a new picture is prepared Apply waits, so the old picture cannot be applied in its place', async () => {
+  const applied: (Watermark | null)[] = [];
+  let release!: () => void;
+  const view = render(
+    <WatermarkDialog
+      isOpen
+      onClose={() => {}}
+      onApply={(watermark) => applied.push(watermark)}
+      current={{ kind: 'picture', dataUrl: 'data:image/png;base64,b2xk', scale: 1, washout: true }}
+      prepareImage={async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return new File(['new'], 'new.jpg', { type: 'image/jpeg' });
+      }}
+    />
+  );
+  const apply = view.getByRole('button', { name: /apply/i }) as HTMLButtonElement;
+  expect(apply.disabled).toBe(false);
+  const input = view.container.querySelector('input[type="file"]') as HTMLInputElement;
+  await act(async () => {
+    fireEvent.change(input, { target: { files: [new File(['photo'], 'photo.webp', { type: 'image/webp' })] } });
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  // Busy: Apply and the picker wait, and the dialog says so.
+  expect(apply.disabled).toBe(true);
+  expect(input.disabled).toBe(true);
+  expect(view.getByRole('status').textContent).toBe('Loading');
+  act(() => {
+    fireEvent.click(apply);
+  });
+  expect(applied).toEqual([]);
+
+  await act(async () => {
+    release();
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  const prepared = `data:image/jpeg;base64,${btoa('new')}`;
+  await waitFor(() => expect(apply.disabled).toBe(false));
+  act(() => {
+    fireEvent.click(apply);
+  });
+  expect(applied).toHaveLength(1);
+  expect(applied[0]).toMatchObject({ kind: 'picture', dataUrl: prepared });
+});
