@@ -387,6 +387,22 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         }
     }
     patch_chart_parts(wb, package, origins, &mut parts)?;
+    for (index, plan) in sheets.iter().enumerate() {
+        let axes = sheet_axes.get(index).and_then(|axes| axes.as_ref());
+        let source = plan.origin.and_then(|origin| package.sheets.get(origin));
+        let (Some(axes), Some(source)) = (axes.filter(|axes| !axes.is_identity()), source) else {
+            continue;
+        };
+        let rels = package.part_bytes(&relationship_part_path(&source.path));
+        for (anchored, path) in crate::anchored::anchored_parts(&source.path, rels)? {
+            let Some(bytes) = parts.get(&path) else {
+                continue;
+            };
+            if let Some(moved) = crate::anchored::move_anchored(anchored, bytes, axes)? {
+                parts.set(path, moved)?;
+            }
+        }
+    }
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let empty_provenance = SharedStringCells::new();
@@ -399,7 +415,10 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         let axes = sheet_axes.get(index).and_then(|axes| axes.as_ref());
         let output = match source {
             Some(source) if source.is_worksheet() => {
+                let ranges_move = axes.is_some_and(|axes| !axes.is_identity())
+                    && source.template.child("protectedRanges").is_some();
                 if shared_strings_stable
+                    && !ranges_move
                     && original.is_some_and(|original| sheet_body_matches(sheet, original))
                 {
                     continue;
@@ -1265,6 +1284,14 @@ impl<'a> PartStore<'a> {
             budget: source_bytes
                 .saturating_mul(2)
                 .saturating_add(GENERATED_BYTES_HEADROOM),
+        }
+    }
+
+    fn get(&self, path: &str) -> Option<&[u8]> {
+        match &self.slots[*self.positions.get(&normalized_part_name(path))?] {
+            Slot::Source(_, bytes) => Some(bytes),
+            Slot::Owned(_, bytes) => Some(bytes),
+            Slot::Removed => None,
         }
     }
 
@@ -2561,6 +2588,14 @@ fn worksheet_xml_with_template(
 
     if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
         replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
+    }
+    if let Some(axes) = sheet_axes.filter(|axes| !axes.is_identity())
+        && let Some(ranges) = template.child("protectedRanges")
+    {
+        replacements.push((
+            "protectedRanges",
+            crate::anchored::move_protected_ranges(&ranges.bytes, axes)?,
+        ));
     }
 
     let mut relationships = None;

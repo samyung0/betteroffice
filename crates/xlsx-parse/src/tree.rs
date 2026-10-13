@@ -123,6 +123,8 @@ pub(crate) struct Element {
     /// byte span of the content between the start and end tags; empty for a
     /// self-closing tag, which [`Element::splice_target`] therefore refuses.
     pub(crate) content: Range<usize>,
+    /// byte span of the whole element, its tags included.
+    pub(crate) span: Range<usize>,
     self_closing: bool,
 }
 
@@ -277,6 +279,15 @@ impl Element {
     pub(crate) fn splice_target(&self) -> Option<Range<usize>> {
         (!self.self_closing).then(|| self.content.clone())
     }
+
+    /// the span of the start tag, the whole element when it is self-closing.
+    pub(crate) fn start_tag(&self) -> Range<usize> {
+        self.span.start..if self.self_closing {
+            self.span.end
+        } else {
+            self.content.start
+        }
+    }
 }
 
 struct Budget {
@@ -423,6 +434,11 @@ impl Part {
         parse_text(&self.text)
     }
 
+    /// the decoded text of a span an [`Element`] recorded.
+    pub(crate) fn text(&self, span: Range<usize>) -> &str {
+        &self.text[span]
+    }
+
     /// rewrite disjoint spans of the decoded text and re-encode the result.
     pub(crate) fn splice(&self, edits: &[Edit]) -> Result<Vec<u8>, ParseError> {
         let spliced = splice_text(&self.text, edits)?;
@@ -558,7 +574,8 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
                     return Err(ParseError::DepthExceeded);
                 }
                 namespaces.open(&start)?;
-                let element = open_element(&start, closed, false, &mut budget, &namespaces)?;
+                let element =
+                    open_element(&start, opened..closed, false, &mut budget, &namespaces)?;
                 stack.push(element);
             }
             Event::Empty(start) => {
@@ -566,7 +583,7 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
                     return Err(ParseError::DepthExceeded);
                 }
                 namespaces.open(&start)?;
-                let element = open_element(&start, closed, true, &mut budget, &namespaces);
+                let element = open_element(&start, opened..closed, true, &mut budget, &namespaces);
                 namespaces.close();
                 place(element?, &mut stack, &mut root)?;
             }
@@ -576,6 +593,7 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
                     .ok_or_else(|| ParseError::Malformed("unbalanced end tag".into()))?;
                 namespaces.close();
                 done.content.end = opened.max(done.content.start);
+                done.span.end = closed;
                 place(done, &mut stack, &mut root)?;
             }
             Event::Text(text) => {
@@ -606,7 +624,7 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
 
 fn open_element(
     start: &BytesStart<'_>,
-    content_start: usize,
+    tag: Range<usize>,
     self_closing: bool,
     budget: &mut Budget,
     namespaces: &Namespaces,
@@ -643,7 +661,8 @@ fn open_element(
         namespace,
         attributes,
         children: Vec::new(),
-        content: content_start..content_start,
+        content: tag.end..tag.end,
+        span: tag,
         self_closing,
     })
 }

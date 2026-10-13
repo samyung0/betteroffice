@@ -1,6 +1,7 @@
 //! streaming spreadsheetml parser + serializer over `xlsx_model`. parse treats
 //! every byte as attacker-controlled with depth and collection caps.
 
+mod anchored;
 mod axis;
 mod chart;
 mod formula;

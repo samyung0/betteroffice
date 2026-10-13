@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::{AnchorCell, AnchorEditAs, ChartAnchor};
 
 /// A monotone partial map from source index to current index on one axis.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +101,29 @@ impl AxisMap {
             cursor = end;
         }
         ranges
+    }
+
+    /// The current span of the surviving indices in `first..=last`, gaps and
+    /// insertions inside included; `None` when every one was deleted.
+    pub fn span(&self, first: u32, last: u32) -> Option<(u32, u32)> {
+        let ranges = self.current_ranges(first..last.saturating_add(1));
+        Some((ranges.first()?.start, ranges.last()?.end - 1))
+    }
+
+    /// Where a drawing marker on source index `source` lands, as a chart's
+    /// marker does through each edit: its current index, or the point its row
+    /// or column was deleted at. One pushed past the grid stays on its edge.
+    pub fn marker(&self, source: u32) -> u32 {
+        let landing = self.current(source).unwrap_or_else(|| {
+            match self.current_ranges(source..self.limit).first() {
+                Some(next) => next.start,
+                None => self
+                    .current_ranges(0..source)
+                    .last()
+                    .map_or(0, |previous| previous.end),
+            }
+        });
+        landing.min(self.limit.saturating_sub(1))
     }
 
     /// Records `count` indices inserted at current index `at`.
@@ -222,6 +246,52 @@ impl Default for SheetAxes {
 impl SheetAxes {
     pub fn is_identity(&self) -> bool {
         self.rows.is_identity() && self.cols.is_identity()
+    }
+
+    /// A drawing anchor moved along the axes, honouring `editAs` as a chart
+    /// anchor does (xlsx-ops `remap_anchor`): a two-cell anchor moves and
+    /// resizes, a one-cell one moves and keeps its size, an absolute one stays.
+    pub(crate) fn move_anchor(&self, anchor: ChartAnchor) -> ChartAnchor {
+        let mark = |cell: AnchorCell| AnchorCell {
+            row: self.rows.marker(cell.row),
+            col: self.cols.marker(cell.col),
+            ..cell
+        };
+        match anchor {
+            ChartAnchor::Absolute { .. }
+            | ChartAnchor::TwoCell {
+                edit_as: AnchorEditAs::Absolute,
+                ..
+            } => anchor,
+            ChartAnchor::OneCell { from, extent } => ChartAnchor::OneCell {
+                from: mark(from),
+                extent,
+            },
+            ChartAnchor::TwoCell {
+                from,
+                to,
+                edit_as: AnchorEditAs::TwoCell,
+            } => ChartAnchor::TwoCell {
+                from: mark(from),
+                to: mark(to),
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            ChartAnchor::TwoCell { from, to, edit_as } => {
+                let moved = mark(from);
+                let shift = |index: u32, delta: i64, limit: u32| {
+                    (i64::from(index) + delta).clamp(0, i64::from(limit) - 1) as u32
+                };
+                ChartAnchor::TwoCell {
+                    from: moved,
+                    to: AnchorCell {
+                        row: shift(to.row, i64::from(moved.row) - i64::from(from.row), MAX_ROWS),
+                        col: shift(to.col, i64::from(moved.col) - i64::from(from.col), MAX_COLS),
+                        ..to
+                    },
+                    edit_as,
+                }
+            }
+        }
     }
 }
 

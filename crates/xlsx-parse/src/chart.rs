@@ -16,6 +16,7 @@ use xlsx_model::{
     ChartRefKind, ErrorValue, SheetChart,
 };
 
+use crate::axis::SheetAxes;
 use crate::package::PartContentType;
 use crate::tree::{
     Edit, Element, Part, Replacement, escape_text, names_are_resolvable, parse_tree,
@@ -1067,6 +1068,28 @@ pub(crate) fn patch_drawing_anchors(
     }
     edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// Moves the anchors a grid edit carries that the model does not (pictures,
+/// shapes and groups: every anchor but a related chart's) along `axes`;
+/// `None` when none moved.
+pub(crate) fn move_drawing_anchors(
+    part: &[u8],
+    axes: &SheetAxes,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let moved: Vec<(usize, ChartAnchor)> = read_anchors(&parse_tree(part)?)?
+        .into_iter()
+        .enumerate()
+        .filter(|(_, anchor)| matches!(anchor.chart, AnchorChart::None))
+        .filter_map(|(index, anchor)| {
+            let moved = axes.move_anchor(anchor.anchor);
+            (moved != anchor.anchor).then_some((index, moved))
+        })
+        .collect();
+    if moved.is_empty() {
+        return Ok(None);
+    }
+    patch_drawing_anchors(part, &moved).map(Some)
 }
 
 /// The anchor elements [`read_anchors`] modelled, in the same order, so an

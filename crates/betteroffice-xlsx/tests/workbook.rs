@@ -5175,10 +5175,16 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     assert!(worksheet.contains(r#"<autoFilter ref="A1:B2""#));
     assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
     assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
-    assert_eq!(
-        after["xl/drawings/drawing1.xml"],
-        before["xl/drawings/drawing1.xml"]
-    );
+    // The drawing's anchor and the note move with the inserted row.
+    let drawing = String::from_utf8(before["xl/drawings/drawing1.xml"].clone())
+        .unwrap()
+        .replace("<xdr:row>0</xdr:row>", "<xdr:row>1</xdr:row>")
+        .replace("<xdr:row>2</xdr:row>", "<xdr:row>3</xdr:row>");
+    assert_eq!(after["xl/drawings/drawing1.xml"], drawing.into_bytes());
+    let comments = String::from_utf8(before["xl/comments1.xml"].clone())
+        .unwrap()
+        .replace(r#"ref="B2""#, r#"ref="B3""#);
+    assert_eq!(after["xl/comments1.xml"], comments.into_bytes());
     Workbook::open(&saved).unwrap();
 }
 
