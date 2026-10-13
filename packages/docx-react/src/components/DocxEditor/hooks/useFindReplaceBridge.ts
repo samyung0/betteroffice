@@ -19,6 +19,21 @@ type YrsFindResult = FindResult & {
   matches: YrsFindMatch[];
 };
 
+/** Body paragraphs' text with U+FFFC per embed, so string offsets are Loc offsets. */
+function bodyParagraphs(session: YrsSession): { paraId: string; text: string }[] {
+  const paragraphs: { paraId: string; text: string }[] = [];
+  let text = '';
+  for (const segment of session.storySegments('body')) {
+    if (segment.kind === 'text') text += segment.text;
+    else if (segment.kind === 'embed') text += '￼';
+    else {
+      paragraphs.push({ paraId: segment.paraId, text });
+      text = '';
+    }
+  }
+  return paragraphs;
+}
+
 function findMatchesInYrs(
   session: YrsSession,
   locToDisplayPosition: (loc: YrsLoc) => number | null,
@@ -26,7 +41,7 @@ function findMatchesInYrs(
   options: FindOptions
 ): YrsFindMatch[] {
   const matches: YrsFindMatch[] = [];
-  const paragraphs = session.paragraphs('body');
+  const paragraphs = bodyParagraphs(session);
   for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
     const paragraph = paragraphs[paragraphIndex];
     if (!paragraph.text) continue;
