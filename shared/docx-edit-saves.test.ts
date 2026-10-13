@@ -3,8 +3,9 @@ import { exportOffice, seedOffice } from "./office-checkpoint";
 import { createYrsSession, type YrsSession } from "../packages/docx/src/yrs";
 import { rezipContainer, unzipContainer } from "../packages/docx/src/wasm/opc";
 
-// Edits saved the way the collaboration service publishes them: the base
-// package, its seed and the editor's state through exportOffice.
+// Edits published the way the collaboration service publishes them (Capy's
+// path, through TS yrsToDocument): the base package, its seed and the editor's
+// state through exportOffice.
 
 const fixed = { seed: "0".repeat(64), now: "2026-10-13T00:00:00.000Z" };
 const W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -112,4 +113,85 @@ test("text typed into a header and a footer is saved into their parts", async ()
       '<w:headerReference w:type="default" r:id="rIdH"/>'
     );
   }
+});
+
+const DGM = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+const A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const FRAME = `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="3657600" cy="914400"/><wp:docPr id="1" name="Diagram 1"/><a:graphic xmlns:a="${A}"><a:graphicData uri="${DGM}"><dgm:relIds xmlns:dgm="${DGM}" r:dm="rIdDm" r:lo="rIdLo" r:qs="rIdQs" r:cs="rIdCs"/></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+const point = (id: string, label: string) =>
+  `<dgm:pt modelId="${id}"><dgm:prSet/><dgm:spPr/><dgm:t><a:bodyPr/><a:p><a:r><a:t>${label}</a:t></a:r></a:p></dgm:t></dgm:pt>`;
+const diagram = (name: string, xml: string, kind: string, id: string, rel: string): Part => ({
+  path: `word/diagrams/${name}.xml`,
+  xml,
+  contentType: `${OFFICE}.drawingml.${kind}+xml`,
+  rel: { id, type: `${R}/${rel}` },
+});
+const DIAGRAM_PARTS: Part[] = [
+  diagram(
+    "data1",
+    `<dgm:dataModel xmlns:dgm="${DGM}" xmlns:a="${A}"><dgm:ptLst><dgm:pt modelId="0" type="doc"><dgm:prSet/><dgm:spPr/></dgm:pt>${point("1", "Plan")}${point("2", "Test")}</dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="3" srcId="0" destId="1" srcOrd="0" destOrd="0"/><dgm:cxn modelId="4" srcId="0" destId="2" srcOrd="1" destOrd="0"/></dgm:cxnLst><dgm:bg/><dgm:whole/></dgm:dataModel>`,
+    "diagramData",
+    "rIdDm",
+    "diagramData"
+  ),
+  diagram(
+    "layout1",
+    `<dgm:layoutDef xmlns:dgm="${DGM}" uniqueId="urn:microsoft.com/office/officeart/2005/8/layout/process1"><dgm:title val=""/><dgm:layoutNode name="Name0"/></dgm:layoutDef>`,
+    "diagramLayout",
+    "rIdLo",
+    "diagramLayout"
+  ),
+  diagram(
+    "quickStyle1",
+    `<dgm:styleDef xmlns:dgm="${DGM}" uniqueId="urn:microsoft.com/office/officeart/2005/8/quickstyle/simple1"/>`,
+    "diagramStyle",
+    "rIdQs",
+    "diagramQuickStyle"
+  ),
+  diagram(
+    "colors1",
+    `<dgm:colorsDef xmlns:dgm="${DGM}" uniqueId="urn:microsoft.com/office/officeart/2005/8/colors/accent1_2"/>`,
+    "diagramColors",
+    "rIdCs",
+    "diagramColors"
+  ),
+];
+
+test("a SmartArt frame and its parts are published as authored after an edit to its paragraph", async () => {
+  const bytes = docx(`<w:p w14:paraId="10000001">${run("Steps: ")}<w:r>${FRAME}</w:r>${run(" done.")}</w:p>`, DIAGRAM_PARTS);
+  for (const saved of await publishTwice(bytes, typeAt("body", 0, "Two "))) {
+    const xml = text(saved, "word/document.xml")!;
+    expect(xml).toContain("Two Steps: ");
+    expect(xml).toContain(FRAME);
+    const rels = text(saved, "word/_rels/document.xml.rels")!;
+    for (const part of DIAGRAM_PARTS) {
+      expect(text(saved, part.path)).toBe(part.xml);
+      expect(rels).toContain(`Id="${part.rel!.id}"`);
+    }
+  }
+});
+
+const RUBY = `<w:ruby><w:rubyPr><w:hps w:val="10"/><w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr><w:rt><w:r><w:t>かんじ</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby>`;
+
+test("a phonetic guide is published with its guide, base text and run formatting, bold over it too", async () => {
+  const bytes = docx(
+    `<w:p w14:paraId="10000001">${run("読み: ")}<w:r><w:rPr><w:color w:val="C00000"/></w:rPr>${RUBY}</w:r>${run(" です")}</w:p>`
+  );
+  for (const saved of await publishTwice(bytes, typeAt("body", 0, "Lesson "))) {
+    const xml = text(saved, "word/document.xml")!;
+    expect(xml).toContain("Lesson 読み: ");
+    expect(xml).toContain(`<w:r><w:rPr><w:color w:val="C00000"/></w:rPr>${RUBY}</w:r>`);
+  }
+  const bold = await publishTwice(bytes, (session) => {
+    const [{ paraId }] = session.paragraphs("body");
+    // The guide is one unit, after "読み: ".
+    session.toggleMark(
+      { story: "body", start: { paraId, offset: 4 }, end: { paraId, offset: 5 } },
+      { type: "bold" }
+    );
+  });
+  for (const saved of bold)
+    expect(text(saved, "word/document.xml")).toContain(
+      `<w:r><w:rPr><w:b/><w:bCs/><w:color w:val="C00000"/></w:rPr>${RUBY}</w:r>`
+    );
 });
