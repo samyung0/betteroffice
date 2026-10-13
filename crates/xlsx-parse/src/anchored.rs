@@ -3,7 +3,7 @@
 //! other than charts (which move with the model), and protected ranges. A note
 //! whose cell was deleted goes with it, as in Excel.
 
-use xlsx_model::addr::{CellRange, CellRef};
+use xlsx_model::addr::{CellRange, CellRef, col_to_letters};
 
 use crate::ParseError;
 use crate::axis::SheetAxes;
@@ -55,8 +55,17 @@ pub(crate) fn move_anchored(
         Anchored::ThreadedComments => Some("threadedComment"),
         Anchored::Vml => None,
     };
-    let source = Part::decode(part)?;
-    let root = source.tree()?;
+    let parsed = Part::decode(part).and_then(|source| {
+        let root = source.tree()?;
+        Ok((source, root))
+    });
+    let (source, root) = match (parsed, local) {
+        (Ok(parsed), _) => parsed,
+        // Note VML is often not well-formed XML (an unclosed `<br>` in a
+        // textbox); it is written back as it was (Epo 2026-10-13).
+        (Err(_), None) => return Ok(None),
+        (Err(error), Some(_)) => return Err(error),
+    };
     let mut edits = Vec::new();
     match local {
         Some(local) => move_refs(&source, &root, local, axes, &mut edits),
@@ -182,18 +191,7 @@ pub(crate) fn move_protected_ranges(
         };
         let moved = sqref
             .split_whitespace()
-            .filter_map(|reference| match CellRange::parse_a1(reference) {
-                Ok(cells) => {
-                    let (top, bottom) = axes.rows.span(cells.start.row, cells.end.row)?;
-                    let (left, right) = axes.cols.span(cells.start.col, cells.end.col)?;
-                    Some(
-                        CellRange::new(CellRef::new(top, left), CellRef::new(bottom, right))
-                            .to_a1(),
-                    )
-                }
-                // a spelling other than A1 or A1:B2 stays as authored.
-                Err(_) => Some(reference.to_owned()),
-            })
+            .filter_map(|reference| move_reference(reference, axes))
             .collect::<Vec<_>>()
             .join(" ");
         if moved.is_empty() {
@@ -211,6 +209,52 @@ pub(crate) fn move_protected_ranges(
         return Ok(None);
     }
     source.splice(&edits).map(Some)
+}
+
+/// One `sqref` reference moved along `axes`: a cell or range (`A1`, `A1:B2`),
+/// whole columns (`B:D`) or whole rows (`2:4`) keep their surviving part;
+/// `None` when it was wholly deleted. Anything else is not a reference
+/// `ST_Sqref` allows and stays as authored.
+fn move_reference(reference: &str, axes: &SheetAxes) -> Option<String> {
+    if let Ok(cells) = CellRange::parse_a1(reference) {
+        let (top, bottom) = axes.rows.span(cells.start.row, cells.end.row)?;
+        let (left, right) = axes.cols.span(cells.start.col, cells.end.col)?;
+        return Some(CellRange::new(CellRef::new(top, left), CellRef::new(bottom, right)).to_a1());
+    }
+    let Some((first, last)) = reference.split_once(':') else {
+        return Some(reference.to_owned());
+    };
+    let column = |letters: &str| {
+        letters
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic())
+            .then(|| {
+                CellRef::parse_a1(&format!("{letters}1"))
+                    .ok()
+                    .map(|cell| cell.col)
+            })
+            .flatten()
+    };
+    let row = |digits: &str| {
+        digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| digits.parse::<u32>().ok()?.checked_sub(1))
+            .flatten()
+    };
+    if let (Some(first), Some(last)) = (column(first), column(last)) {
+        let (left, right) = axes.cols.span(first.min(last), first.max(last))?;
+        return Some(format!(
+            "{}:{}",
+            col_to_letters(left),
+            col_to_letters(right)
+        ));
+    }
+    if let (Some(first), Some(last)) = (row(first), row(last)) {
+        let (top, bottom) = axes.rows.span(first.min(last), first.max(last))?;
+        return Some(format!("{}:{}", top + 1, bottom + 1));
+    }
+    Some(reference.to_owned())
 }
 
 /// A start tag with one attribute's value replaced, its quoting kept. Values

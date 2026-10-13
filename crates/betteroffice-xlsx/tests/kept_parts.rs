@@ -16,9 +16,9 @@ const SHEET_PROTECTION: &str = r#"<sheetProtection algorithmName="SHA-512" hashV
 const PROTECTED_RANGES: &str =
     r#"<protectedRanges><protectedRange name="Scores" sqref="B2:B3"/></protectedRanges>"#;
 
-fn worksheet() -> String {
+fn worksheet(ranges: &str) -> String {
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:B3"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="B1" t="inlineStr"><is><t>Score</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Ada</t></is></c><c r="B2"><v>90</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Lin</t></is></c><c r="B3"><v>85</v></c></row></sheetData>{SHEET_PROTECTION}{PROTECTED_RANGES}<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><drawing r:id="rId1"/><legacyDrawing r:id="rId2"/></worksheet>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:B3"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="B1" t="inlineStr"><is><t>Score</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Ada</t></is></c><c r="B2"><v>90</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Lin</t></is></c><c r="B3"><v>85</v></c></row></sheetData>{SHEET_PROTECTION}{ranges}<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><drawing r:id="rId1"/><legacyDrawing r:id="rId2"/></worksheet>"#
     )
 }
 
@@ -84,6 +84,10 @@ fn edit_text(parts: &mut [(String, Vec<u8>)], path: &str, from: &str, to: &str) 
 }
 
 fn source() -> Vec<u8> {
+    source_with(&vml(), PROTECTED_RANGES)
+}
+
+fn source_with(vml: &str, ranges: &str) -> Vec<u8> {
     let mut sheet = Sheet::new("Grades");
     sheet.set_cell(
         at("B2"),
@@ -101,7 +105,7 @@ fn source() -> Vec<u8> {
     set(
         &mut parts,
         "xl/worksheets/sheet1.xml",
-        worksheet().as_bytes(),
+        worksheet(ranges).as_bytes(),
     );
     set(
         &mut parts,
@@ -115,7 +119,7 @@ fn source() -> Vec<u8> {
         THREADED.as_bytes(),
     );
     set(&mut parts, "xl/persons/person.xml", PERSONS.as_bytes());
-    set(&mut parts, "xl/drawings/vmlDrawing1.vml", vml().as_bytes());
+    set(&mut parts, "xl/drawings/vmlDrawing1.vml", vml.as_bytes());
     set(&mut parts, "xl/drawings/drawing1.xml", drawing().as_bytes());
     set(
         &mut parts,
@@ -255,7 +259,13 @@ fn sheet_and_workbook_protection_survive_an_edit_and_a_save() {
 /// Applies structural edits on a collaborative replica and returns the source
 /// and saved packages.
 fn restructure_and_save(ops: Vec<Op>) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>) {
-    let source = source();
+    restructure_source_and_save(source(), ops)
+}
+
+fn restructure_source_and_save(
+    source: Vec<u8>,
+    ops: Vec<Op>,
+) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>) {
     let mut workbook = Workbook::open_collaborative(&source, 5103).unwrap();
     workbook
         .apply_ops(ops, CalculationOptions::default())
@@ -404,5 +414,133 @@ fn deleting_noted_cells_drops_their_notes_and_pulls_pictures_to_the_deletion() {
     assert!(
         sheet.contains(r#"<protectedRange name="Scores" sqref="A2"/>"#),
         "{sheet}"
+    );
+}
+
+#[test]
+fn a_note_drawing_that_is_not_well_formed_is_kept_while_its_notes_move() {
+    // Excel 2007-era note boxes carry HTML-style markup such as an unclosed
+    // <br>; such a part is written back as it was (Epo 2026-10-13).
+    let html = vml().replace(
+        "<x:ClientData ObjectType=\"Note\"><x:MoveWithCells/><x:SizeWithCells/><x:Anchor>1, 15",
+        "<v:textbox style='mso-direction-alt:auto'><div style='text-align:left'><font face=\"Tahoma\" size=\"8\"><b>Ms Tan:</b></font><font face=\"Tahoma\" size=\"8\"><br></font></div></v:textbox><x:ClientData ObjectType=\"Note\"><x:MoveWithCells/><x:SizeWithCells/><x:Anchor>1, 15",
+    );
+    assert_ne!(html, vml());
+    let (source, saved) = restructure_source_and_save(
+        source_with(&html, PROTECTED_RANGES),
+        vec![Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        }],
+    );
+    assert_eq!(
+        saved["xl/drawings/vmlDrawing1.vml"],
+        source["xl/drawings/vmlDrawing1.vml"]
+    );
+    let comments = text(&saved, "xl/comments1.xml");
+    assert!(comments.contains(r#"<comment ref="B3""#) && comments.contains(r#"<comment ref="A4""#));
+}
+
+#[test]
+fn whole_column_and_row_protected_ranges_move_as_cell_ranges_do() {
+    let ranges = r#"<protectedRanges><protectedRange name="Scores" sqref="B:B C2:C3"/><protectedRange name="Rows" sqref="3:4"/></protectedRanges>"#;
+    let saved_ranges = |ops: Vec<Op>| {
+        let (_, saved) = restructure_source_and_save(source_with(&vml(), ranges), ops);
+        let sheet = text(&saved, "xl/worksheets/sheet1.xml");
+        let start = sheet.find("<protectedRanges>").unwrap();
+        let end = sheet.find("</protectedRanges>").unwrap() + "</protectedRanges>".len();
+        sheet[start..end].to_owned()
+    };
+    assert_eq!(
+        saved_ranges(vec![
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        ]),
+        r#"<protectedRanges><protectedRange name="Scores" sqref="C:C D3:D4"/><protectedRange name="Rows" sqref="4:5"/></protectedRanges>"#
+    );
+    // Deleting column B drops its whole-column range and moves C2:C3 left;
+    // deleting row 3 shrinks 3:4.
+    assert_eq!(
+        saved_ranges(vec![
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 1,
+            },
+        ]),
+        r#"<protectedRanges><protectedRange name="Scores" sqref="B2"/><protectedRange name="Rows" sqref="3:3"/></protectedRanges>"#
+    );
+}
+
+#[test]
+fn two_peers_restructuring_a_noted_sheet_save_the_same_file() {
+    let source = source();
+    let options = CalculationOptions::default();
+    let mut left = Workbook::open_collaborative(&source, 5111).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 5112).unwrap();
+    // At once: one deletes row 2 (the thread on B2), the other inserts a
+    // column before A and types.
+    left.apply_ops(
+        vec![Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        }],
+        options,
+    )
+    .unwrap();
+    right
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    right
+        .edit_cell(SheetId(0), at("A1"), "Class", options)
+        .unwrap();
+    let from_left = left.encode_state_as_update_v1();
+    let from_right = right.encode_state_as_update_v1();
+    left.apply_update_v1(&from_right, options).unwrap();
+    right.apply_update_v1(&from_left, options).unwrap();
+
+    let saved = left.save().unwrap();
+    assert_eq!(saved, right.save().unwrap());
+    let saved = parts(&saved);
+    // The thread went with its row; the note on A3 is on B2 now.
+    let comments = text(&saved, "xl/comments1.xml");
+    assert_eq!(comments.matches("<comment ").count(), 1);
+    assert!(
+        comments.contains(r#"<comment ref="B2" authorId="1""#),
+        "{comments}"
+    );
+    assert_eq!(
+        text(&saved, "xl/threadedComments/threadedComment1.xml")
+            .matches("<threadedComment ")
+            .count(),
+        0
+    );
+    let notes = text(&saved, "xl/drawings/vmlDrawing1.vml");
+    assert_eq!(notes.matches("<v:shape ").count(), 1);
+    assert!(
+        notes.contains("<x:Row>1</x:Row><x:Column>1</x:Column>"),
+        "{notes}"
     );
 }
