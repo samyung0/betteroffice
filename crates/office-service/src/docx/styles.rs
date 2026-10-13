@@ -258,8 +258,15 @@ impl Numbering {
             abstracts.insert(id, item);
         }
         let mut nums = HashMap::new();
+        // A num with no abstract numbering (abstract -1) draws no list.
         for item in definitions.get("nums").items() {
-            nums.insert(key(&item.get("numId")), item);
+            if item
+                .get("abstractNumId")
+                .as_num()
+                .is_some_and(|id| id >= 0.0)
+            {
+                nums.insert(key(&item.get("numId")), item);
+            }
         }
         Self {
             abstracts,
@@ -872,5 +879,18 @@ mod tests {
         assert_eq!(enclosing_cell_story("body:sdt1"), None);
         assert!(is_cell_story("hf:rId7:t2:r10c0"));
         assert!(!is_cell_story("body:t0:r1"));
+    }
+
+    #[test]
+    fn a_num_without_an_abstract_numbering_draws_no_list() {
+        let definitions = V::parse(
+            r#"{"abstractNums":[],"nums":[{"numId":5,"abstractNumId":-1,"levelOverrides":[{"ilvl":0,"lvl":{"ilvl":0,"numFmt":"decimal","lvlText":"%1."}}]}]}"#,
+        )
+        .unwrap();
+        let numbering = Numbering::new(&definitions);
+        assert!(matches!(
+            numbering.level(&V::Num(5.0), &V::Num(0.0)),
+            V::Null
+        ));
     }
 }

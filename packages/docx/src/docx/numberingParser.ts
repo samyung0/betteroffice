@@ -89,8 +89,9 @@ export function createNumberingMap(definitions: NumberingDefinitions): Numbering
   }
 
   const numMap = new Map<number, NumberingInstance>();
+  // A num with no abstract numbering (abstract -1) draws no list.
   for (const num of definitions.nums) {
-    numMap.set(num.numId, num);
+    if (num.abstractNumId >= 0) numMap.set(num.numId, num);
   }
 
   return {

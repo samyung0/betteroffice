@@ -266,8 +266,8 @@ fn parse_numbering_instance(
     let Some(num_id) = element.parse_numeric_attribute(Some("w"), "numId", 1.0) else {
         return Ok(None);
     };
-    // Without an abstract numbering the instance draws no list, but it keeps
-    // its id (abstract -1, which no definition carries) so new ids skip it.
+    // Without an abstract numbering the instance draws no list (get_instance
+    // skips it), but it keeps its id (abstract -1) so new ids skip it.
     let abstract_num_id = numeric_child(element, "abstractNumId", "val").unwrap_or(-1.0);
     let override_elements: Vec<_> = element.children_named("w", "lvlOverride").collect();
     let level_overrides = if override_elements.is_empty() {
@@ -591,12 +591,14 @@ impl NumberingMap {
             .find(|value| value.abstract_num_id == abstract_num_id)
     }
 
+    /// The instance `num_id` names; one with no abstract numbering (abstract
+    /// -1) draws no list, though its id stays counted for new ids.
     pub fn get_instance(&self, num_id: f64) -> Option<&NumberingInstance> {
         self.definitions
             .nums
             .iter()
             .rev()
-            .find(|value| value.num_id == num_id)
+            .find(|value| value.num_id == num_id && value.abstract_num_id >= 0.0)
     }
 
     pub fn has_numbering(&self, num_id: f64) -> bool {
@@ -845,8 +847,9 @@ mod tests {
     fn a_num_without_an_abstract_numbering_keeps_its_id_for_new_ids() {
         let limits = crate::xml::ParseLimits::default();
         let mut budget = crate::xml::ParseBudget::new(&limits);
+        // Num 5 has no abstract numbering, only a full level override.
         let numbering = parse_numbering(
-            Some(br#"<w:numbering xmlns:w="w"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="5"/></w:numbering>"#),
+            Some(br#"<w:numbering xmlns:w="w"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="5"><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:lvlOverride></w:num></w:numbering>"#),
             "word/numbering.xml",
             &mut budget,
         )
@@ -857,6 +860,8 @@ mod tests {
             list_button_num_ids(Some(&numbering.definitions)),
             (6.0, 7.0)
         );
+        assert!(!numbering.has_numbering(5.0));
+        assert_eq!(numbering.get_level(5.0, 0.0), None);
     }
 
     use super::*;
