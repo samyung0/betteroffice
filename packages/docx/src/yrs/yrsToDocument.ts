@@ -800,14 +800,17 @@ function chartRunFromPayload(payload: Attrs): Run | null {
   }
 }
 
-function opaqueDrawingRun(payload: Attrs): Run {
+function opaqueDrawingRun(payload: Attrs, attributes: Attrs): Run {
   const text = asString(payload.text);
+  const kind = asString(payload.kind) ?? '';
+  // A phonetic guide keeps its run's formatting, as text does.
+  const run: Run = kind === 'ruby' ? createTextRun('', attributes) : { type: 'run', content: [] };
   return {
-    type: 'run',
+    ...run,
     content: [
       {
         type: 'opaqueDrawing',
-        kind: asString(payload.kind) ?? '',
+        kind,
         xml: asString(payload.xml) ?? '',
         ...(text === undefined ? {} : { text }),
       },
@@ -1008,7 +1011,7 @@ function rawContentForItem(item: InlineItem): ParagraphContent | null {
     case 'chart':
       return chartRunFromPayload(item.payload);
     case 'opaqueDrawing':
-      return opaqueDrawingRun(item.payload);
+      return opaqueDrawingRun(item.payload, item.attributes);
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)

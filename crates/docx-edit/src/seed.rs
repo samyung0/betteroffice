@@ -1485,6 +1485,7 @@ fn run_content_to_units(
             hidden_marks(marks),
             1,
         )],
+        // A phonetic guide keeps its run's formatting, as text does.
         "opaqueDrawing" => vec![embed_unit(
             "opaqueDrawing",
             map_from_value(json!({
@@ -1492,7 +1493,11 @@ fn run_content_to_units(
                 "xml": field(Some(content), "xml"),
                 "text": field(Some(content), "text"),
             })),
-            hidden_marks(marks),
+            if string(field(Some(content), "kind")) == Some("ruby") {
+                marks
+            } else {
+                hidden_marks(marks)
+            },
             1,
         )],
         "footnoteRef" => field(Some(content), "id")

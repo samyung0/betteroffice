@@ -1,7 +1,7 @@
 //! Markup the editor draws but cannot edit is saved as authored after an edit
 //! to its paragraph (Epo 2026-09-25, keep the original XML).
 
-use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position};
+use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position, SimpleFormat, StoryRange};
 use office_service::{Checkpoint, Determinism, Format, export, seed, sha256_hex};
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -68,16 +68,23 @@ fn package(body: &str, parts: &[Part]) -> Vec<u8> {
 /// Seeds `base`, types `typed` at the start of the first body paragraph and
 /// exports; the saved package's parts by path.
 fn type_and_export(base: &[u8], typed: &str) -> Vec<(String, String)> {
+    edit_and_export(base, |doc| {
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 0),
+            typed,
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    })
+}
+
+/// Seeds `base`, runs `edit` and exports; the saved package's parts by path.
+fn edit_and_export(base: &[u8], edit: impl FnOnce(&EditingDoc)) -> Vec<(String, String)> {
     let seeded = seed(Format::Docx, base).unwrap();
     let doc = EditingDoc::new(4101);
     doc.load_state_v1(&seeded).unwrap();
-    doc.insert_text(
-        &EditCtx::local("", ""),
-        Position::new("body", 0),
-        typed,
-        FormatPolicy::Inherit,
-    )
-    .unwrap();
+    edit(&doc);
     let state = doc.encode_state_as_update_v1();
     let sha = sha256_hex(base);
     let saved = export(
@@ -211,21 +218,41 @@ fn a_smart_art_frame_saves_as_authored_after_an_edit_to_its_paragraph() {
     }
 }
 
-/// A phonetic guide keeps its guide and base text, with their runs'
-/// formatting, after an edit to its paragraph.
+/// A phonetic guide keeps its guide, base text and run formatting after an
+/// edit to its paragraph, and formatting applied over it saves.
 #[test]
 fn a_phonetic_guide_saves_as_authored_after_an_edit_to_its_paragraph() {
     let ruby = r#"<w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"/><w:hps w:val="10"/><w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr><w:rt><w:r><w:rPr><w:sz w:val="10"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr><w:b/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby>"#;
     let body = format!(
-        r#"<w:p w14:paraId="10000001">{}<w:r>{ruby}</w:r>{}</w:p>"#,
+        r#"<w:p w14:paraId="10000001">{}<w:r><w:rPr><w:color w:val="C00000"/></w:rPr>{ruby}</w:r>{}</w:p>"#,
         run("読み: "),
         run(" です")
     );
-    let saved = type_and_export(&package(&body, &[]), "Lesson ");
+    let base = package(&body, &[]);
+    let saved = type_and_export(&base, "Lesson ");
     let document = part(&saved, "word/document.xml");
     assert!(document.contains("Lesson 読み: "), "{document}");
     assert!(
-        document.contains(&format!("<w:r>{ruby}</w:r>")),
+        document.contains(&format!(
+            r#"<w:r><w:rPr><w:color w:val="C00000"/></w:rPr>{ruby}</w:r>"#
+        )),
+        "{document}"
+    );
+
+    // Bold over the guide (after "読み: ", four units in).
+    let saved = edit_and_export(&base, |doc| {
+        doc.toggle_format(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", 4, 5),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    });
+    let document = part(&saved, "word/document.xml");
+    assert!(
+        document.contains(&format!(
+            r#"<w:r><w:rPr><w:b/><w:bCs/><w:color w:val="C00000"/></w:rPr>{ruby}</w:r>"#
+        )),
         "{document}"
     );
 }

@@ -796,16 +796,23 @@ fn chart_run_from_payload(payload: &V) -> Option<V> {
     Some(obj! { "type": "run", "content": arr![obj! { "type": "chart", "chart": chart }] })
 }
 
-fn opaque_drawing_run(payload: &V) -> V {
+fn opaque_drawing_run(payload: &V, attributes: &V) -> V {
+    let kind = st(&payload.get("kind"));
     let content = obj! {
         "type": "opaqueDrawing",
-        "kind": st(&payload.get("kind")).map(V::Str).unwrap_or(V::str("")),
+        "kind": kind.clone().map(V::Str).unwrap_or(V::str("")),
         "xml": st(&payload.get("xml")).map(V::Str).unwrap_or(V::str("")),
     };
     if let Some(text) = st(&payload.get("text"))
         && let Some(object) = content.obj()
     {
         object.set("text", V::Str(text));
+    }
+    // A phonetic guide keeps its run's formatting, as text does.
+    if kind.as_deref() == Some("ruby") {
+        let run = o(&create_text_run("", attributes)).unwrap_or_default();
+        run.set("content", arr![content]);
+        return V::Obj(run);
     }
     obj! { "type": "run", "content": arr![content] }
 }
@@ -1130,7 +1137,7 @@ pub(crate) fn raw_content_for_item(item: &V) -> Result<Option<V>> {
         "horizontalRule" => Some(horizontal_rule_run(&payload, &attributes)?),
         "shape" => Some(shape_run_from_payload(&payload)),
         "chart" => chart_run_from_payload(&payload),
-        "opaqueDrawing" => Some(opaque_drawing_run(&payload)),
+        "opaqueDrawing" => Some(opaque_drawing_run(&payload, &attributes)),
         "field" => Some(
             comment_reference_from_payload(&payload)
                 .unwrap_or_else(|| field_from_payload(&payload, &attributes)),
