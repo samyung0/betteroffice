@@ -97,6 +97,8 @@ export function DocxEditorDialogs({
   onWatermarkApply,
   currentWatermark,
   watermarkPresets,
+  prepareImage,
+  onError,
   document,
   footnotePropsOpen,
   onFootnotePropsClose,
@@ -143,6 +145,8 @@ export function DocxEditorDialogs({
   onWatermarkApply: (watermark: Watermark | null) => void;
   currentWatermark: Watermark | undefined;
   watermarkPresets?: readonly string[];
+  prepareImage?: (file: File) => Promise<File>;
+  onError?: (error: Error) => void;
   document: Document | null;
   // Footnote properties
   footnotePropsOpen: boolean;
@@ -237,6 +241,8 @@ export function DocxEditorDialogs({
           onApply={onWatermarkApply}
           current={currentWatermark}
           presets={watermarkPresets}
+          prepareImage={prepareImage}
+          onError={onError}
         />
       )}
       {footnotePropsOpen && (

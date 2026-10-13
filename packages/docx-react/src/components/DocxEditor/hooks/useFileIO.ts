@@ -21,6 +21,27 @@ function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
 }
 
+function readImageDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      typeof reader.result === 'string'
+        ? resolve(reader.result)
+        : reject(new Error('Failed to read image'));
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read image'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function decodeImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Failed to decode image'));
+    image.src = src;
+  });
+}
+
 // Page-break CSS for the print popup. The core `openPrintWindow` already zeros
 // the page margins; these rules put one canvas raster per printed sheet.
 // — never `document.write` / `innerHTML` — per the print security contract in
@@ -115,6 +136,7 @@ export function useFileIO({
   loadBuffer,
   focusActiveEditor,
   prepareImage,
+  onImagePending,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   displayList: DisplayList | null;
@@ -130,6 +152,8 @@ export function useFileIO({
   loadBuffer: (buffer: DocxInput) => Promise<void>;
   focusActiveEditor: () => void;
   prepareImage?: DocxEditorProps['prepareImage'];
+  /** An inserted image is being prepared or read, until it lands. */
+  onImagePending?: (pending: boolean) => void;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
@@ -251,50 +275,51 @@ export function useFileIO({
     imageInputRef.current?.click();
   }, []);
 
-  /** Inserts an image file at the selection, as Insert › Image does, after `prepareImage`. */
+  // One picture at a time: a pick while another is being prepared is ignored.
+  const insertingRef = useRef(false);
+
+  /**
+   * Inserts an image file at the selection, as Insert › Image does, after
+   * `prepareImage`; reported as pending input until it lands.
+   */
   const insertImageFile = useCallback(
     async (picked: File) => {
-      let file: File;
+      if (insertingRef.current) return;
+      insertingRef.current = true;
+      onImagePending?.(true);
       try {
-        file = prepareImage ? await prepareImage(picked) : picked;
+        const file = prepareImage ? await prepareImage(picked) : picked;
+        const dataUrl = await readImageDataUrl(file);
+        const image = await decodeImage(dataUrl);
+        let width = image.naturalWidth;
+        let height = image.naturalHeight;
+        if (width > INSERT_IMAGE_MAX_WIDTH_PX) {
+          height = Math.round(height * (INSERT_IMAGE_MAX_WIDTH_PX / width));
+          width = INSERT_IMAGE_MAX_WIDTH_PX;
+        }
+        const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+        const inserted = pagedEditorRef.current?.applyYrsCommand({
+          type: 'insertImage',
+          image: {
+            src: dataUrl,
+            alt: file.name,
+            width,
+            height,
+            rId,
+            wrapType: 'inline',
+            displayMode: 'inline',
+          },
+        });
+        // A slow prepareImage: focus stays wherever the user went meanwhile.
+        if (inserted && document.hasFocus()) focusActiveEditor();
       } catch (error) {
-        onError?.(toFileIOError(error, 'Failed to prepare image'));
-        return;
+        onError?.(toFileIOError(error, 'Failed to insert image'));
+      } finally {
+        insertingRef.current = false;
+        onImagePending?.(false);
       }
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result;
-        if (typeof dataUrl !== 'string') return;
-        const image = new Image();
-        image.onload = () => {
-          let width = image.naturalWidth;
-          let height = image.naturalHeight;
-          if (width > INSERT_IMAGE_MAX_WIDTH_PX) {
-            height = Math.round(height * (INSERT_IMAGE_MAX_WIDTH_PX / width));
-            width = INSERT_IMAGE_MAX_WIDTH_PX;
-          }
-          const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
-          const inserted = pagedEditorRef.current?.applyYrsCommand({
-            type: 'insertImage',
-            image: {
-              src: dataUrl,
-              alt: file.name,
-              width,
-              height,
-              rId,
-              wrapType: 'inline',
-              displayMode: 'inline',
-            },
-          });
-          if (inserted) focusActiveEditor();
-        };
-        image.onerror = () => onError?.(new Error('Failed to decode image'));
-        image.src = dataUrl;
-      };
-      reader.onerror = () => onError?.(reader.error ?? new Error('Failed to read image'));
-      reader.readAsDataURL(file);
     },
-    [focusActiveEditor, onError, pagedEditorRef, prepareImage]
+    [focusActiveEditor, onError, onImagePending, pagedEditorRef, prepareImage]
   );
 
   const handleImageFileChange = useCallback(

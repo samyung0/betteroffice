@@ -1358,7 +1358,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             yrsInputRef.current?.displaySelection() ?? displaySelection,
             docChanged
           );
-          yrsInputRef.current?.focus();
+          // An image lands after a slow prepareImage: the focus stays wherever
+          // the user went meanwhile (a host menu, say).
+          if (command.type !== 'insertImage' || window.document.hasFocus()) {
+            yrsInputRef.current?.focus();
+          }
           return true;
         } catch (error) {
           console.error('[yrs] non-toolbar command failed', error);

@@ -980,6 +980,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return session.onUpdate(refresh);
   }, [yrsCore.session, setComments]);
 
+  // Pending input is typing queued in the input or an inserted image still
+  // being prepared; the host hears the two as one.
+  const pendingRef = useRef({ image: false, input: false });
+  const onPendingChangeRef = useRef(onPendingChange);
+  onPendingChangeRef.current = onPendingChange;
+  const reportPending = useCallback((part: 'image' | 'input', pending: boolean) => {
+    pendingRef.current[part] = pending;
+    onPendingChangeRef.current?.(pendingRef.current.image || pendingRef.current.input);
+  }, []);
+  const reportInputPending = useCallback(
+    (pending: boolean) => reportPending('input', pending),
+    [reportPending]
+  );
+  const reportImagePending = useCallback(
+    (pending: boolean) => reportPending('image', pending),
+    [reportPending]
+  );
+
   const {
     imageInputRef,
     docxInputRef,
@@ -1006,6 +1024,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     loadBuffer,
     focusActiveEditor,
     prepareImage,
+    onImagePending: reportImagePending,
   });
 
   // Auto-open the sidebar once if the loaded document already has tracked changes.
@@ -2107,7 +2126,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             <DocxEditorPagedArea
               yrsCore={yrsCore}
               onError={reportLayoutError}
-              onPendingChange={onPendingChange}
+              onPendingChange={reportInputPending}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
@@ -2247,6 +2266,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             showWatermark={showWatermark}
             onWatermarkClose={() => setShowWatermark(false)}
             onWatermarkApply={handleWatermarkApply}
+            prepareImage={prepareImage}
+            onError={onError}
             currentWatermark={currentWatermark}
             watermarkPresets={watermarkPresets}
             document={history.state}

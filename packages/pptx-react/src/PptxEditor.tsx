@@ -164,10 +164,11 @@ export interface PptxEditorApi {
   /** Runs a host menu command; false when it is unavailable now. */
   runCommand: (id: PptxCommandId, value?: string) => boolean;
   /**
-   * Inserts an image a host picked, as the toolbar's image button does; the
-   * name's extension gives its type. Rejects when inserting is unavailable.
+   * Inserts an image a host picked, as the toolbar's image button does, with
+   * the picked file's MIME `type` (without it, the name's extension gives the
+   * type). Rejects when inserting is unavailable.
    */
-  insertImage: (bytes: Uint8Array, name: string) => Promise<void>;
+  insertImage: (bytes: Uint8Array, name: string, type?: string) => Promise<void>;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -491,7 +492,7 @@ function PptxEditorContent({
   onFirstPaintRef.current = onFirstPaint;
   const firstPaintPendingRef = useRef(false);
   const runCommandRef = useRef<(id: PptxCommandId, value?: string) => boolean>(() => false);
-  const insertImageRef = useRef<(bytes: Uint8Array, name: string) => Promise<void>>(() =>
+  const insertImageRef = useRef<(bytes: Uint8Array, name: string, type?: string) => Promise<void>>(() =>
     Promise.resolve()
   );
   const onCommandStateRef = useRef(onCommandState);
@@ -625,10 +626,11 @@ function PptxEditorContent({
   const imageInsertAllowedRef = useRef(false);
   imageInsertAllowedRef.current = !readOnly && !canvasReview.reviewing;
 
-  const reportError = useCallback((value: unknown) => {
+  /** `refused`: the host turned the input down (prepareImage) and shows it. */
+  const reportError = useCallback((value: unknown, refused = false) => {
     const next = value instanceof Error ? value : new Error(String(value));
     // A refusal is the host's to show; the editor's own box is for failures.
-    if (!(next instanceof EquationTextError)) setError(next.message);
+    if (!(refused || next instanceof EquationTextError)) setError(next.message);
     onErrorRef.current?.(next);
   }, []);
 
@@ -912,9 +914,9 @@ function PptxEditorContent({
             focus: () => stageRef.current?.focus(),
             runCommand: (id, value) =>
               handleRef.current === opened && runCommandRef.current(id, value),
-            insertImage: (bytes, name) =>
+            insertImage: (bytes, name, type) =>
               handleRef.current === opened
-                ? insertImageRef.current(bytes, name)
+                ? insertImageRef.current(bytes, name, type)
                 : Promise.reject(new Error('Presentation is no longer open')),
           });
         } catch (value) {
@@ -1371,8 +1373,18 @@ function PptxEditorContent({
   const insertPicture = async (picked: File) => {
     const handle = handleRef.current;
     if (!handle || !imageInsertAllowedRef.current) return;
+    let file = picked;
+    if (prepareImage) {
+      try {
+        file = await prepareImage(picked);
+      } catch (value) {
+        if (handleRef.current === handle && imageInsertAllowedRef.current) {
+          reportError(value, true);
+        }
+        throw value;
+      }
+    }
     try {
-      const file = prepareImage ? await prepareImage(picked) : picked;
       if (file.size > MAX_INSERT_IMAGE_BYTES) {
         throw new Error(
           `image is ${file.size} bytes, exceeds the ${MAX_INSERT_IMAGE_BYTES}-byte limit`
@@ -1422,7 +1434,8 @@ function PptxEditorContent({
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
       recentClickRef.current = null;
-      if (next) stageRef.current?.focus();
+      // A slow prepareImage: focus stays wherever the user went meanwhile.
+      if (next && document.hasFocus()) stageRef.current?.focus();
     } catch (value) {
       if (handleRef.current === handle && imageInsertAllowedRef.current) {
         reportError(value);
@@ -2975,13 +2988,9 @@ function PptxEditorContent({
     'arrange.centerOnPage': editable && objectsActive && selection === null,
   };
 
-  insertImageRef.current = (bytes, name) =>
+  insertImageRef.current = (bytes, name, type) =>
     commandEnabled['insert.image']
-      ? insertPictureFile(
-          new File([bytes.slice()], name, {
-            type: INSERT_IMAGE_TYPES[name.split('.').pop()?.toLowerCase() ?? ''],
-          })
-        )
+      ? insertPictureFile(new File([bytes.slice()], name, { type }))
       : Promise.reject(new Error('Inserting an image is unavailable'));
 
   runCommandRef.current = (id, value) => {

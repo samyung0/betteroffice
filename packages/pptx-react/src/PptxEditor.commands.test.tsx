@@ -179,7 +179,7 @@ describe('PptxEditor host commands', () => {
     }
   }, 60_000);
 
-  it('inserts what prepareImage returns from the toolbar and the host, and nothing when it refuses', async () => {
+  it('inserts what prepareImage returns from the toolbar and the host, and leaves a refusal to the host', async () => {
     const originalImage = useFakeImage();
     try {
       const picked: string[] = [];
@@ -201,18 +201,20 @@ describe('PptxEditor host commands', () => {
       });
       await waitFor(() => expect(shapes().length).toBe(before + 1));
       await act(async () => {
-        await api.insertImage(PNG, 'chart.png');
+        await api.insertImage(PNG, 'chart', 'image/webp');
       });
-      expect(shapes().slice(before).map((shape) => shape.name)).toEqual(['small-photo.png', 'small-chart.png']);
+      expect(shapes().slice(before).map((shape) => shape.name)).toEqual(['small-photo.png', 'small-chart']);
 
       refuse = true;
       await act(async () => {
-        await expect(api.insertImage(PNG, 'big.png')).rejects.toThrow('image too large');
+        await expect(api.insertImage(PNG, 'big.png', 'image/png')).rejects.toThrow('image too large');
       });
       expect(shapes().length).toBe(before + 2);
-      // The host's bytes arrive typed by their name, as a picked file is.
-      expect(picked).toEqual(['photo.png image/png', 'chart.png image/png', 'big.png image/png']);
+      // The host's type reaches prepareImage as a picked file's does.
+      expect(picked).toEqual(['photo.png image/png', 'chart image/webp', 'big.png image/png']);
       expect(errors.map((error) => error.message)).toEqual(['image too large']);
+      // The host tells the user; the stage shows no error line of its own.
+      expect(view.queryByText('image too large')).toBeNull();
     } finally {
       globalThis.Image = originalImage;
     }

@@ -10,7 +10,7 @@ import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, renderHook } = await import('@testing-library/react');
 let fixture: Document;
 beforeAll(async () => {
   fixture = await parseDocx(
@@ -226,8 +226,9 @@ test('the save shortcut invokes only the focused editor and ignores repeat event
   expect(activeRequests).toBe(1);
 });
 
-test('an inserted image is the file prepareImage returns, and its refusal inserts nothing', async () => {
+test('an inserted image is the file prepareImage returns: one at a time, pending until it lands, focus left where the user went, a refusal inserting nothing', async () => {
   const originalImage = globalThis.Image;
+  const originalHasFocus = document.hasFocus;
   class FakeImage {
     onload: (() => void) | null = null;
     onerror: (() => void) | null = null;
@@ -242,7 +243,10 @@ test('an inserted image is the file prepareImage returns, and its refusal insert
     const commands: { image: Record<string, unknown> }[] = [];
     const errors: Error[] = [];
     const picked: string[] = [];
+    const pending: boolean[] = [];
+    let focused = 0;
     let refuse = false;
+    let release!: () => void;
     const editor = {
       applyYrsCommand: (command: { image: Record<string, unknown> }) => {
         commands.push(command);
@@ -261,33 +265,72 @@ test('an inserted image is the file prepareImage returns, and its refusal insert
         onPrint: undefined,
         onDocumentNameChange: undefined,
         loadBuffer: async () => {},
-        focusActiveEditor: () => {},
+        focusActiveEditor: () => {
+          focused += 1;
+        },
+        onImagePending: (value) => pending.push(value),
         prepareImage: async (file) => {
           picked.push(file.name);
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
           if (refuse) throw new Error('image too large');
           return new File(['jpeg'], 'photo.jpg', { type: 'image/jpeg' });
         },
       })
     );
-    await act(async () => {
-      await result.current.insertImageFile(new File(['png bytes'], 'photo.png', { type: 'image/png' }));
+    document.hasFocus = () => true;
+    let first!: Promise<void>;
+    act(() => {
+      first = result.current.insertImageFile(new File(['png bytes'], 'photo.png', { type: 'image/png' }));
     });
-    await waitFor(() => expect(commands).toHaveLength(1));
+    // A second pick while the first is prepared is ignored.
+    await act(async () => {
+      await result.current.insertImageFile(new File(['png'], 'again.png', { type: 'image/png' }));
+    });
+    expect(picked).toEqual(['photo.png']);
+    expect(pending).toEqual([true]);
+    await act(async () => {
+      release();
+      await first;
+    });
     expect(commands[0].image).toMatchObject({
       alt: 'photo.jpg',
       src: `data:image/jpeg;base64,${btoa('jpeg')}`,
       width: 612,
       height: 306,
     });
+    expect(pending).toEqual([true, false]);
+    expect(focused).toBe(1);
+
+    // The user went elsewhere (another frame or window) meanwhile: no focus.
+    document.hasFocus = () => false;
+    let second!: Promise<void>;
+    act(() => {
+      second = result.current.insertImageFile(new File(['png'], 'later.png', { type: 'image/png' }));
+    });
+    await act(async () => {
+      release();
+      await second;
+    });
+    expect(commands).toHaveLength(2);
+    expect(focused).toBe(1);
 
     refuse = true;
-    await act(async () => {
-      await result.current.insertImageFile(new File(['png'], 'big.png', { type: 'image/png' }));
+    let third!: Promise<void>;
+    act(() => {
+      third = result.current.insertImageFile(new File(['png'], 'big.png', { type: 'image/png' }));
     });
-    expect(commands).toHaveLength(1);
-    expect(picked).toEqual(['photo.png', 'big.png']);
+    await act(async () => {
+      release();
+      await third;
+    });
+    expect(commands).toHaveLength(2);
+    expect(picked).toEqual(['photo.png', 'later.png', 'big.png']);
     expect(errors.map((error) => error.message)).toEqual(['image too large']);
+    expect(pending).toEqual([true, false, true, false, true, false]);
   } finally {
     globalThis.Image = originalImage;
+    document.hasFocus = originalHasFocus;
   }
 });

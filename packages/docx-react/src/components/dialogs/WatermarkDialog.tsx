@@ -32,6 +32,10 @@ export interface WatermarkDialogProps {
    * the preset dropdown entirely.
    */
   presets?: readonly string[];
+  /** Turns a picked picture into the one the watermark gets, as for inserted images. */
+  prepareImage?: (file: File) => Promise<File>;
+  /** A picture `prepareImage` refuses. */
+  onError?: (error: Error) => void;
 }
 
 type Mode = 'none' | 'picture' | 'text';
@@ -137,6 +141,8 @@ export function WatermarkDialog({
   onApply,
   current,
   presets = DEFAULT_WATERMARK_PRESETS,
+  prepareImage,
+  onError,
 }: WatermarkDialogProps): React.ReactElement | null {
   const { t } = useTranslation();
 
@@ -185,9 +191,16 @@ export function WatermarkDialog({
     }
   }, [isOpen, current]);
 
-  const handlePickFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handlePickFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = e.target.files?.[0];
+    if (!picked) return;
+    let file: File;
+    try {
+      file = prepareImage ? await prepareImage(picked) : picked;
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error('Failed to prepare image'));
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const url = typeof reader.result === 'string' ? reader.result : undefined;
@@ -201,7 +214,7 @@ export function WatermarkDialog({
       img.src = url;
     };
     reader.readAsDataURL(file);
-  }, []);
+  }, [onError, prepareImage]);
 
   const handleApply = useCallback(() => {
     if (mode === 'none') {
