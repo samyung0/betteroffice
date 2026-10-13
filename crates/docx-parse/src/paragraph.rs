@@ -1275,11 +1275,12 @@ pub(crate) fn parse_run_composed(
     let mut replacement = replacements.into_iter();
     let mut content = Vec::new();
     for item in run.content {
-        if matches!(item, RunContent::OpaqueDrawing { .. }) {
+        // A phonetic guide is no drawing: it keeps its place untouched.
+        if matches!(&item, RunContent::OpaqueDrawing { kind, .. } if kind != "ruby") {
             match replacement.next() {
                 Some(Some(mut parsed)) => {
                     if let (
-                        RunContent::OpaqueDrawing { kind, xml },
+                        RunContent::OpaqueDrawing { kind, xml, .. },
                         [
                             RunContent::Drawing { source_xml, .. }
                             | RunContent::Shape { source_xml, .. },
@@ -1333,6 +1334,7 @@ fn parse_drawing_owned(
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
                 xml: element.to_raw_inline_xml(),
+                text: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1360,6 +1362,7 @@ fn parse_drawing_owned(
             None => RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
                 xml,
+                text: None,
             },
         }]);
     }
@@ -2238,7 +2241,7 @@ mod tests {
             })
             .flat_map(|run| &run.content)
             .filter_map(|item| match item {
-                RunContent::OpaqueDrawing { kind, xml } => Some((kind.as_str(), xml.as_str())),
+                RunContent::OpaqueDrawing { kind, xml, .. } => Some((kind.as_str(), xml.as_str())),
                 _ => None,
             })
             .collect::<Vec<_>>();

@@ -801,6 +801,7 @@ function chartRunFromPayload(payload: Attrs): Run | null {
 }
 
 function opaqueDrawingRun(payload: Attrs): Run {
+  const text = asString(payload.text);
   return {
     type: 'run',
     content: [
@@ -808,6 +809,7 @@ function opaqueDrawingRun(payload: Attrs): Run {
         type: 'opaqueDrawing',
         kind: asString(payload.kind) ?? '',
         xml: asString(payload.xml) ?? '',
+        ...(text === undefined ? {} : { text }),
       },
     ],
   };

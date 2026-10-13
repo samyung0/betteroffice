@@ -210,3 +210,22 @@ fn a_smart_art_frame_saves_as_authored_after_an_edit_to_its_paragraph() {
         }
     }
 }
+
+/// A phonetic guide keeps its guide and base text, with their runs'
+/// formatting, after an edit to its paragraph.
+#[test]
+fn a_phonetic_guide_saves_as_authored_after_an_edit_to_its_paragraph() {
+    let ruby = r#"<w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"/><w:hps w:val="10"/><w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr><w:rt><w:r><w:rPr><w:sz w:val="10"/></w:rPr><w:t>かんじ</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr><w:b/></w:rPr><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby>"#;
+    let body = format!(
+        r#"<w:p w14:paraId="10000001">{}<w:r>{ruby}</w:r>{}</w:p>"#,
+        run("読み: "),
+        run(" です")
+    );
+    let saved = type_and_export(&package(&body, &[]), "Lesson ");
+    let document = part(&saved, "word/document.xml");
+    assert!(document.contains("Lesson 読み: "), "{document}");
+    assert!(
+        document.contains(&format!("<w:r>{ruby}</w:r>")),
+        "{document}"
+    );
+}

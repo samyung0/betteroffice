@@ -215,9 +215,11 @@ export interface ChartContent {
  */
 export interface OpaqueDrawingContent {
   type: 'opaqueDrawing';
-  /** Source element: `drawing`, `pict`, `object` or `alternateContent`. */
+  /** Source element: `drawing`, `pict`, `object`, `alternateContent` or `ruby`. */
   kind: string;
   xml: string;
+  /** A phonetic guide's base text, shown in its place. */
+  text?: string;
 }
 
 /**

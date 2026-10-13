@@ -1490,6 +1490,7 @@ fn run_content_to_units(
             map_from_value(json!({
                 "kind": field(Some(content), "kind"),
                 "xml": field(Some(content), "xml"),
+                "text": field(Some(content), "text"),
             })),
             hidden_marks(marks),
             1,

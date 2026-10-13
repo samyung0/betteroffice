@@ -797,14 +797,17 @@ fn chart_run_from_payload(payload: &V) -> Option<V> {
 }
 
 fn opaque_drawing_run(payload: &V) -> V {
-    obj! {
-        "type": "run",
-        "content": arr![obj! {
-            "type": "opaqueDrawing",
-            "kind": st(&payload.get("kind")).map(V::Str).unwrap_or(V::str("")),
-            "xml": st(&payload.get("xml")).map(V::Str).unwrap_or(V::str("")),
-        }],
+    let content = obj! {
+        "type": "opaqueDrawing",
+        "kind": st(&payload.get("kind")).map(V::Str).unwrap_or(V::str("")),
+        "xml": st(&payload.get("xml")).map(V::Str).unwrap_or(V::str("")),
+    };
+    if let Some(text) = st(&payload.get("text"))
+        && let Some(object) = content.obj()
+    {
+        object.set("text", V::Str(text));
     }
+    obj! { "type": "run", "content": arr![content] }
 }
 
 fn hex_rgb(value: &str) -> String {

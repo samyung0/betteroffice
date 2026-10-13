@@ -136,9 +136,16 @@ pub enum RunContent {
     },
     #[serde(rename = "chart")]
     Chart { chart: Box<crate::chart::Chart> },
-    /// A drawing the parser does not model, replayed verbatim on save.
+    /// A drawing the parser does not model, replayed verbatim on save; a
+    /// phonetic guide (`w:ruby`, kind `ruby`) too, its base text in `text`,
+    /// which editors show in its place.
     #[serde(rename = "opaqueDrawing")]
-    OpaqueDrawing { kind: String, xml: String },
+    OpaqueDrawing {
+        kind: String,
+        xml: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -347,13 +354,20 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
             "drawing" | "pict" | "object" => output.push(RunContent::OpaqueDrawing {
                 kind: child.local_name().to_owned(),
                 xml: child.to_raw_inline_xml(),
+                text: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
                     kind: "alternateContent".to_owned(),
                     xml: child.to_raw_inline_xml(),
+                    text: None,
                 });
             }
+            "ruby" => output.push(RunContent::OpaqueDrawing {
+                kind: "ruby".to_owned(),
+                xml: child.to_raw_inline_xml(),
+                text: Some(ruby_base_text(child)),
+            }),
             "cr" => output.push(RunContent::Break {
                 break_type: Some("textWrapping".to_owned()),
                 clear: None,
@@ -486,6 +500,16 @@ fn text_node_content(element: &XmlElement) -> String {
     let mut output = String::new();
     append_text_node_content(element, &mut output);
     output
+}
+
+/// The text a phonetic guide sits over: its `w:rubyBase` runs' text.
+fn ruby_base_text(ruby: &XmlElement) -> String {
+    ruby.child("w", "rubyBase")
+        .into_iter()
+        .flat_map(|base| base.children_named("w", "r"))
+        .flat_map(|run| run.children_named("w", "t"))
+        .map(run_text_node_content)
+        .collect()
 }
 
 fn run_text_node_content(element: &XmlElement) -> String {

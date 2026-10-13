@@ -779,7 +779,13 @@ function runContentToUnits(content: RunContent, marks: readonly MarkDescriptor[]
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart))];
     case 'opaqueDrawing':
-      return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml })];
+      return [
+        embedUnit('opaqueDrawing', {
+          kind: content.kind,
+          xml: content.xml,
+          ...(content.text === undefined ? {} : { text: content.text }),
+        }),
+      ];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks)];
     case 'endnoteRef':
