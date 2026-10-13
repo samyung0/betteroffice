@@ -47,14 +47,17 @@ pub(super) fn numbering_fragments(
 /// (CT_Numbering's order), a self-closing root opened for them. An entry whose
 /// `numId` the part already has is left out, and the added abstract
 /// numberings take the ids after the part's own. The children are found by
-/// walking the root's tags, whatever their prefix; the new elements declare
-/// `w` themselves when the root uses another prefix. `None` when the part's
-/// root is not a well-formed `numbering` element.
+/// walking the root's tags, whatever their prefix, past a byte order mark;
+/// the new elements declare `w` themselves when the root uses another prefix.
+/// A part holding no element (empty, whitespace or a declaration) becomes a
+/// fresh part of `entries`. `None` when the part holds something other than a
+/// `numbering` element (another encoding, another root), whose definitions a
+/// fresh part would lose.
 pub(super) fn insert_numbering_entries(
     xml: &str,
     entries: &[(AbstractNumbering, NumberingInstance)],
 ) -> Option<String> {
-    let mut at = 0;
+    let mut at = if xml.starts_with('\u{feff}') { 3 } else { 0 };
     // The prolog: declaration, comments, doctype and whitespace.
     loop {
         at += xml[at..].len() - xml[at..].trim_start().len();
@@ -68,6 +71,16 @@ pub(super) fn insert_numbering_entries(
         } else {
             break;
         };
+    }
+    if xml[at..].is_empty() {
+        let (abstract_nums, nums) = entries.iter().cloned().unzip();
+        return Some(serialize_numbering_xml(&NumberingDefinitions {
+            abstract_nums,
+            nums,
+        }));
+    }
+    if !xml[at..].starts_with('<') {
+        return None;
     }
     let root = tag_name(xml, at)?;
     let (prefix, local) = root.rsplit_once(':').unwrap_or(("", root));
@@ -568,5 +581,46 @@ mod tests {
         );
 
         assert_eq!(insert_numbering_entries("<w:styles/>", &bullet(1.0)), None);
+    }
+
+    #[test]
+    fn list_definitions_read_past_a_byte_order_mark_and_fill_an_empty_part() {
+        let w = W_NS;
+        // A byte order mark stays in front.
+        let marked =
+            format!("\u{feff}<?xml version=\"1.0\"?><w:numbering xmlns:w=\"{w}\"></w:numbering>");
+        let saved = insert_numbering_entries(&marked, &bullet(1.0)).unwrap();
+        assert!(saved.starts_with('\u{feff}'));
+        assert_eq!(
+            children(saved.trim_start_matches('\u{feff}')),
+            ["abstractNum@9", "num@1"]
+        );
+
+        // Empty, whitespace or a declaration alone: a fresh part.
+        let (abstract_nums, nums) = bullet(1.0).into_iter().unzip();
+        let fresh = serialize_numbering_xml(&NumberingDefinitions {
+            abstract_nums,
+            nums,
+        });
+        for empty in [
+            "",
+            " \r\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "\u{feff}",
+        ] {
+            assert_eq!(
+                insert_numbering_entries(empty, &bullet(1.0)).as_deref(),
+                Some(fresh.as_str()),
+                "{empty:?}"
+            );
+        }
+
+        // Bytes it cannot read (UTF-16, read as UTF-8) are refused, not replaced.
+        let utf16: Vec<u8> = "<w:numbering/>"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let lossy = String::from_utf8_lossy(&[&[0xff, 0xfe][..], &utf16].concat()).into_owned();
+        assert_eq!(insert_numbering_entries(&lossy, &bullet(1.0)), None);
     }
 }

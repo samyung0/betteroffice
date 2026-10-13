@@ -287,8 +287,11 @@ fn toolbar_lists_keep_their_kind_across_a_publication() {
     }
 }
 
-/// The numbering part is found through the document's relationships. (The
-/// parser itself reads only `word/numbering.xml`, so this checks the XML.)
+/// The numbering part is found through the document's relationships. The
+/// parser itself reads only `word/numbering.xml`, so for this file the editor
+/// would draw no lists and its buttons would write ids 1 and 2, which the part
+/// already has; this checks only that the save writes into the part the
+/// relationship names, numbered after its own entries.
 #[test]
 fn toolbar_lists_save_into_a_numbering_part_of_another_name() {
     let base = named_package("lists.xml", Some(&word_numbering()));
@@ -310,4 +313,26 @@ fn toolbar_lists_save_into_a_numbering_part_of_another_name() {
             .count(),
         1
     );
+}
+
+/// A numbering part with a byte order mark keeps it and gains the list; an
+/// empty one is written afresh. Both reopen as bullets.
+#[test]
+fn toolbar_lists_save_into_a_numbering_part_with_a_byte_order_mark_or_none_inside() {
+    for (numbering, id) in [
+        (format!("\u{feff}{}", word_numbering()), 3.0),
+        (String::new(), 1.0),
+    ] {
+        let base = package(Some(&numbering));
+        let doc = open(&seed(Format::Docx, &base).unwrap(), 4341);
+        list_button(&doc, paragraph(&doc, 0), true, id);
+        let saved = save(&base, &doc);
+        let part = part(&saved, "word/numbering.xml");
+        assert_eq!(part.starts_with('\u{feff}'), !numbering.is_empty());
+        assert!(
+            part.contains(&format!("<w:num w:numId=\"{id}\">")),
+            "{part}"
+        );
+        assert_eq!(reopened_lists(&saved)[0], "bullet");
+    }
 }

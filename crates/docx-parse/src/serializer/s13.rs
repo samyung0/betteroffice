@@ -518,6 +518,8 @@ fn add_list_button_numbering(
                 .chain(&request.endnotes)
                 .map(|note| &note.content),
         );
+    // Two paragraphs on one undefined id with different kinds (only pasted
+    // foreign ids could do that) take the first one's, in document order.
     for blocks in stories {
         block_list_kinds(blocks, &mut |id, bullet| {
             if !defined(id) {
