@@ -65,13 +65,44 @@ const AUDIO: &str = r#"<p:pic><p:nvPicPr><p:cNvPr id="7" name="Narration"><a:hli
 /// A Fade transition as PowerPoint 2010 and later writes it.
 const TRANSITION: &str = r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" Requires="p14"><p:transition spd="slow" p14:dur="1500"><p:fade/></p:transition></mc:Choice><mc:Fallback><p:transition spd="slow"><p:fade/></p:transition></mc:Fallback></mc:AlternateContent>"#;
 
-/// The title appears on click, and the video's media node.
-const TIMING: &str = r#"<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst><p:par><p:cTn id="3" fill="hold"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="4" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="5" presetID="1" presetClass="entr" presetSubtype="0" fill="hold" grpId="0" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="6" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="2"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn><p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst><p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst></p:seq><p:video><p:cMediaNode vol="80000"><p:cTn id="7" fill="hold" display="0"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="6"/></p:tgtEl></p:cMediaNode></p:video></p:childTnLst></p:cTn></p:par></p:tnLst><p:bldLst><p:bldP spid="2" grpId="0"/></p:bldLst></p:timing>"#;
+/// One click of the main sequence: the title (2) appears.
+const CLICK_TITLE: &str = r#"<p:par><p:cTn id="3" fill="hold"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="4" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="5" presetID="1" presetClass="entr" presetSubtype="0" fill="hold" grpId="0" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="6" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="2"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>"#;
+
+/// The next click: the chart (3) fades in.
+const CLICK_CHART: &str = r#"<p:par><p:cTn id="7" fill="hold"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="8" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="9" presetID="10" presetClass="entr" presetSubtype="0" fill="hold" grpId="0" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:set><p:cBhvr><p:cTn id="10" dur="1" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="3"/></p:tgtEl><p:attrNameLst><p:attrName>style.visibility</p:attrName></p:attrNameLst></p:cBhvr><p:to><p:strVal val="visible"/></p:to></p:set><p:animEffect transition="in" filter="fade"><p:cBhvr><p:cTn id="11" dur="500"/><p:tgtEl><p:spTgt spid="3"/></p:tgtEl></p:cBhvr></p:animEffect></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par>"#;
+
+/// A trigger: clicking the title (2) plays or pauses the narration (7).
+const TITLE_TRIGGER: &str = r#"<p:seq concurrent="1" nextAc="seek"><p:cTn id="12" restart="whenNotActive" fill="hold" evtFilter="cancelBubble" nodeType="interactiveSeq"><p:stCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:stCondLst><p:endSync evt="end" delay="0"><p:rtn val="all"/></p:endSync><p:childTnLst><p:par><p:cTn id="13" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="14" fill="hold"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:par><p:cTn id="15" presetID="2" presetClass="mediacall" presetSubtype="0" fill="hold" nodeType="clickEffect"><p:stCondLst><p:cond delay="0"/></p:stCondLst><p:childTnLst><p:cmd type="call" cmd="togglePause"><p:cBhvr><p:cTn id="16" dur="1" fill="hold"/><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cBhvr></p:cmd></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn></p:par></p:childTnLst></p:cTn><p:nextCondLst><p:cond evt="onClick" delay="0"><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cond></p:nextCondLst></p:seq>"#;
+
+const VIDEO_NODE: &str = r#"<p:video><p:cMediaNode vol="80000"><p:cTn id="17" fill="hold" display="0"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="6"/></p:tgtEl></p:cMediaNode></p:video>"#;
+
+const AUDIO_NODE: &str = r#"<p:audio><p:cMediaNode vol="80000"><p:cTn id="18" fill="hold" display="0"><p:stCondLst><p:cond delay="indefinite"/></p:stCondLst></p:cTn><p:tgtEl><p:spTgt spid="7"/></p:tgtEl></p:cMediaNode></p:audio>"#;
+
+const BUILD_TITLE: &str = r#"<p:bldP spid="2" grpId="0"/>"#;
+const BUILD_CHART: &str = r#"<p:bldGraphic spid="3" grpId="0"><p:bldAsOne/></p:bldGraphic>"#;
+
+/// The slide's timing as PowerPoint writes it: the main sequence's clicks,
+/// then trigger sequences, then the media nodes, and the build list.
+fn timing(clicks: &str, triggers: &str, media: &str, builds: &str) -> String {
+    format!(
+        r#"<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>{clicks}</p:childTnLst></p:cTn><p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst><p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst></p:seq>{triggers}{media}</p:childTnLst></p:cTn></p:par></p:tnLst><p:bldLst>{builds}</p:bldLst></p:timing>"#
+    )
+}
+
+fn full_timing() -> String {
+    timing(
+        &[CLICK_TITLE, CLICK_CHART].concat(),
+        TITLE_TRIGGER,
+        &[VIDEO_NODE, AUDIO_NODE].concat(),
+        &[BUILD_TITLE, BUILD_CHART].concat(),
+    )
+}
 
 fn slide() -> String {
+    let timing = full_timing();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{R}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{TITLE}{CHART_FRAME}{SMARTART_FRAME}{EQUATION}{VIDEO}{AUDIO}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}{TIMING}</p:sld>"#
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{R}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{TITLE}{CHART_FRAME}{SMARTART_FRAME}{EQUATION}{VIDEO}{AUDIO}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}{timing}</p:sld>"#
     )
 }
 
@@ -367,7 +398,60 @@ fn an_edited_slide_keeps_its_video_audio_and_their_media_parts() {
 fn an_edited_slide_keeps_its_transition_and_animations() {
     let (_, saved) = edit_the_slide_and_save();
     let tail = format!(
-        "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}{TIMING}</p:sld>"
+        "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}{}</p:sld>",
+        full_timing()
     );
     assert!(saved_slide(&saved).ends_with(&canonical(&tail)));
+}
+
+/// Deletes the named shapes from the slide and returns the saved slide.
+fn delete_and_save(names: &[&str]) -> String {
+    let session = DeckSession::open(&deck(), 4103).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    for name in names {
+        let shape = slide
+            .shapes
+            .iter()
+            .find(|shape| shape.name == *name)
+            .unwrap();
+        session
+            .remove_shape(&EditCtx::local("kept"), &slide.id, &shape.id)
+            .unwrap();
+    }
+    let saved = parts(&session.save().unwrap());
+    canonical(&text(&saved, "ppt/slides/slide1.xml"))
+}
+
+/// Every shape id the slide's timing names, and every id on the slide.
+fn timing_targets(slide: &str) -> (Vec<String>, Vec<String>) {
+    let ids = |marker: &str, within: &str| -> Vec<String> {
+        within
+            .split(marker)
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap().to_owned())
+            .collect()
+    };
+    let (tree, timing) = slide.split_once("</p:spTree>").unwrap();
+    (ids(r#"spid=""#, timing), ids(r#"<p:cNvPr id=""#, tree))
+}
+
+#[test]
+fn deleting_animated_shapes_and_a_video_prunes_their_timing() {
+    let slide = delete_and_save(&["Title 1", "Lecture clip"]);
+    // The title's click, the trigger it was and the video's node go, with the
+    // title's build entry; the chart's click and the narration's node stay.
+    let expected = timing(CLICK_CHART, "", AUDIO_NODE, BUILD_CHART);
+    let tail = format!("{TRANSITION}{expected}</p:sld>");
+    assert!(slide.ends_with(&canonical(&tail)), "{slide}");
+    let (targets, shapes) = timing_targets(&slide);
+    assert_eq!(targets, ["3", "3", "7", "3"]);
+    assert!(targets.iter().all(|id| shapes.contains(id)), "{shapes:?}");
+}
+
+#[test]
+fn deleting_every_animated_shape_drops_the_timing() {
+    let slide = delete_and_save(&["Title 1", "Chart 2", "Lecture clip", "Narration"]);
+    let tail = format!("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>{TRANSITION}</p:sld>");
+    assert!(slide.ends_with(&canonical(&tail)), "{slide}");
 }

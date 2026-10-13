@@ -1320,7 +1320,109 @@ fn patch_slide(
         elements,
         sink,
         budget,
-    )
+    )?;
+    prune_timing(root);
+    Ok(())
+}
+
+const TIME_NODE_LISTS: [&str; 2] = ["childTnLst", "subTnLst"];
+
+/// Drops the timing that names shapes no longer on the slide, as PowerPoint
+/// does on a delete: every time node whose own target or trigger is gone, the
+/// containers this leaves empty, the shapes' build entries, and `p:timing`
+/// itself once no time node is left (also inside a top-level
+/// `mc:AlternateContent`, whose emptied wrapper goes too).
+fn prune_timing(root: &mut XmlElement) {
+    let tree = root.child("cSld").and_then(|common| common.child("spTree"));
+    let live: HashSet<String> = tree
+        .map(|tree| tree.descendants_named("cNvPr"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|shape| shape.attribute("id").map(str::to_owned))
+        .collect();
+    root.children.retain_mut(|node| match node {
+        XmlNode::Element(element) if element.local_name() == "timing" => {
+            prune_timing_element(element, &live)
+        }
+        XmlNode::Element(element) if element.local_name() == "AlternateContent" => {
+            let held_timing = !element.descendants_named("timing").is_empty();
+            for branch in element.children.iter_mut() {
+                if let XmlNode::Element(branch) = branch {
+                    branch.children.retain_mut(|node| match node {
+                        XmlNode::Element(element) if element.local_name() == "timing" => {
+                            prune_timing_element(element, &live)
+                        }
+                        _ => true,
+                    });
+                }
+            }
+            !held_timing
+                || element
+                    .child_elements()
+                    .any(|branch| branch.child_elements().next().is_some())
+        }
+        _ => true,
+    });
+}
+
+/// Prunes one `p:timing`; false when nothing of it is left to keep.
+fn prune_timing_element(timing: &mut XmlElement, live: &HashSet<String>) -> bool {
+    let mut keep = true;
+    if let Some(list) = timing.child_mut("tnLst") {
+        keep = !prune_time_list(list, live);
+    }
+    if let Some(builds) = timing.child_mut("bldLst") {
+        builds.children.retain(|node| {
+            !matches!(node, XmlNode::Element(build)
+                if build.attribute("spid").is_some_and(|id| !live.contains(id)))
+        });
+    }
+    timing.children.retain(|node| {
+        !matches!(node, XmlNode::Element(element)
+            if element.local_name() == "bldLst" && element.child_elements().next().is_none())
+    });
+    keep && timing.child("tnLst").is_some()
+}
+
+/// Prunes the time nodes of a list; true when it held some and holds none now
+/// (an empty list is invalid, so its owner goes).
+fn prune_time_list(list: &mut XmlElement, live: &HashSet<String>) -> bool {
+    let held = list.child_elements().next().is_some();
+    list.children.retain_mut(|node| match node {
+        XmlNode::Element(node) => !names_gone_shape(node, live) && !prune_own_lists(node, live),
+        XmlNode::Text(_) => true,
+    });
+    held && list.child_elements().next().is_none()
+}
+
+/// Whether a time node's own target or trigger, outside its child lists,
+/// names a shape that is gone.
+fn names_gone_shape(element: &XmlElement, live: &HashSet<String>) -> bool {
+    element.child_elements().any(|child| {
+        !TIME_NODE_LISTS.contains(&child.local_name())
+            && ((matches!(child.local_name(), "spTgt" | "inkTgt")
+                && child.attribute("spid").is_some_and(|id| !live.contains(id)))
+                || names_gone_shape(child, live))
+    })
+}
+
+/// Prunes the lists a time node owns, dropping an emptied `p:subTnLst`; true
+/// when its `p:childTnLst` emptied, so the node goes.
+fn prune_own_lists(element: &mut XmlElement, live: &HashSet<String>) -> bool {
+    let mut emptied = false;
+    element.children.retain_mut(|node| {
+        let XmlNode::Element(child) = node else {
+            return true;
+        };
+        if !TIME_NODE_LISTS.contains(&child.local_name()) {
+            emptied |= prune_own_lists(child, live);
+            return true;
+        }
+        let now_empty = prune_time_list(child, live);
+        emptied |= now_empty && child.local_name() == "childTnLst";
+        !(now_empty && child.local_name() == "subTnLst")
+    });
+    emptied
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
@@ -3480,7 +3582,7 @@ mod tests {
     use crate::ParseLimits;
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
-    use crate::xml::{ParseBudget, parse_xml};
+    use crate::xml::{ParseBudget, parse_xml, serialize_xml_fragment};
 
     #[test]
     fn a_new_gradient_outline_writes_its_stops_and_angle() {
@@ -3502,6 +3604,40 @@ mod tests {
         assert_eq!(
             crate::drawing::parse_outline_element(line).as_ref(),
             Some(outline)
+        );
+    }
+
+    #[test]
+    fn timing_wrapped_in_alternate_content_is_pruned_and_an_emptied_wrapper_goes() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let effect = |id: &str| {
+            format!(
+                r#"<p:par><p:cTn id="1" nodeType="tmRoot"><p:childTnLst><p:set><p:cBhvr><p:cTn id="2"/><p:tgtEl><p:spTgt spid="{id}"/></p:tgtEl></p:cBhvr></p:set></p:childTnLst></p:cTn></p:par>"#
+            )
+        };
+        let slide = |shape: &str| {
+            format!(
+                r#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="{shape}" name="kept"/></p:nvSpPr></p:sp></p:spTree></p:cSld><mc:AlternateContent><mc:Choice Requires="p14"><p:timing><p:tnLst>{}</p:tnLst></p:timing></mc:Choice><mc:Fallback><p:timing><p:tnLst>{}</p:tnLst></p:timing></mc:Fallback></mc:AlternateContent></p:sld>"#,
+                effect("2"),
+                effect("2")
+            )
+        };
+        let mut pruned = |shape: &str| {
+            let mut root = parse_xml(
+                slide(shape).as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut budget,
+            )
+            .unwrap();
+            prune_timing(&mut root);
+            String::from_utf8(serialize_xml_fragment(&root)).unwrap()
+        };
+
+        assert_eq!(pruned("2"), slide("2"));
+        assert_eq!(
+            pruned("9"),
+            r#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="9" name="kept"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#
         );
     }
 
