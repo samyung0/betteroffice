@@ -202,6 +202,8 @@ export interface PptxEditorProps {
   onSave?: (bytes: Uint8Array) => void;
   /** Return true for built-in saving; false or void handles/cancels the request. */
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
+  /** Turns each inserted image file into the one the deck gets (e.g. a size cap); a rejection cancels the insert and reaches onError. */
+  prepareImage?: (file: File) => Promise<File>;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
   /** A flat toolbar row of `--pptx-toolbar-height` (40px) instead of the rounded rail. */
@@ -430,6 +432,7 @@ function PptxEditorContent({
   onPendingChange,
   onSave,
   onSaveRequest,
+  prepareImage,
   readOnly = false,
   singleRowToolbar = false,
   showProposals = true,
@@ -1365,10 +1368,11 @@ function PptxEditorContent({
     }
   };
 
-  const insertPicture = async (file: File) => {
+  const insertPicture = async (picked: File) => {
     const handle = handleRef.current;
     if (!handle || !imageInsertAllowedRef.current) return;
     try {
+      const file = prepareImage ? await prepareImage(picked) : picked;
       if (file.size > MAX_INSERT_IMAGE_BYTES) {
         throw new Error(
           `image is ${file.size} bytes, exceeds the ${MAX_INSERT_IMAGE_BYTES}-byte limit`
@@ -2973,7 +2977,11 @@ function PptxEditorContent({
 
   insertImageRef.current = (bytes, name) =>
     commandEnabled['insert.image']
-      ? insertPictureFile(new File([bytes.slice()], name))
+      ? insertPictureFile(
+          new File([bytes.slice()], name, {
+            type: INSERT_IMAGE_TYPES[name.split('.').pop()?.toLowerCase() ?? ''],
+          })
+        )
       : Promise.reject(new Error('Inserting an image is unavailable'));
 
   runCommandRef.current = (id, value) => {

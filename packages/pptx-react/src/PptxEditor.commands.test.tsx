@@ -179,6 +179,45 @@ describe('PptxEditor host commands', () => {
     }
   }, 60_000);
 
+  it('inserts what prepareImage returns from the toolbar and the host, and nothing when it refuses', async () => {
+    const originalImage = useFakeImage();
+    try {
+      const picked: string[] = [];
+      let refuse = false;
+      const { api, errors, view } = await open(false, {
+        prepareImage: async (file) => {
+          picked.push(`${file.name} ${file.type}`);
+          if (refuse) throw new Error('image too large');
+          return new File([PNG], `small-${file.name}`, { type: 'image/png' });
+        },
+      });
+      const shapes = () => api.handle.snapshot().slides[0].shapes;
+      const before = shapes().length;
+      // Over the editor's own 8 MiB bound: only the prepared file can go in.
+      const photo = new File([new Uint8Array(9 * 1024 * 1024)], 'photo.png', { type: 'image/png' });
+      await act(async () => {
+        fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [photo] } });
+        await new Promise((done) => setTimeout(done, 0));
+      });
+      await waitFor(() => expect(shapes().length).toBe(before + 1));
+      await act(async () => {
+        await api.insertImage(PNG, 'chart.png');
+      });
+      expect(shapes().slice(before).map((shape) => shape.name)).toEqual(['small-photo.png', 'small-chart.png']);
+
+      refuse = true;
+      await act(async () => {
+        await expect(api.insertImage(PNG, 'big.png')).rejects.toThrow('image too large');
+      });
+      expect(shapes().length).toBe(before + 2);
+      // The host's bytes arrive typed by their name, as a picked file is.
+      expect(picked).toEqual(['photo.png image/png', 'chart.png image/png', 'big.png image/png']);
+      expect(errors.map((error) => error.message)).toEqual(['image too large']);
+    } finally {
+      globalThis.Image = originalImage;
+    }
+  }, 60_000);
+
   it('opens at the zoom it is given, and its zoom stays usable while read-only', async () => {
     const { state, view } = await open(true, { initialZoom: 1.5, singleRowToolbar: true });
     expect(state().zoom).toBe('1.5');

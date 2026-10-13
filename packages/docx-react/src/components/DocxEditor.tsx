@@ -138,6 +138,8 @@ export interface DocxEditorProps {
   onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
   downloadOnSave?: boolean;
+  /** Turns each inserted image file into the one the document gets (e.g. a size cap); a rejection cancels the insert and reaches onError. */
+  prepareImage?: (file: File) => Promise<File>;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
@@ -621,6 +623,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onSave,
     onSaveRequest,
     downloadOnSave = true,
+    prepareImage,
     collaboration,
     onOpen,
     author = 'User',
@@ -1002,6 +1005,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onDocumentNameChange,
     loadBuffer,
     focusActiveEditor,
+    prepareImage,
   });
 
   // Auto-open the sidebar once if the loaded document already has tracked changes.

@@ -114,6 +114,7 @@ export function useFileIO({
   onDocumentNameChange,
   loadBuffer,
   focusActiveEditor,
+  prepareImage,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   displayList: DisplayList | null;
@@ -128,6 +129,7 @@ export function useFileIO({
   onDocumentNameChange: ((name: string) => void) | undefined;
   loadBuffer: (buffer: DocxInput) => Promise<void>;
   focusActiveEditor: () => void;
+  prepareImage?: DocxEditorProps['prepareImage'];
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
@@ -249,9 +251,16 @@ export function useFileIO({
     imageInputRef.current?.click();
   }, []);
 
-  /** Inserts an image file at the selection, as Insert › Image does. */
+  /** Inserts an image file at the selection, as Insert › Image does, after `prepareImage`. */
   const insertImageFile = useCallback(
-    (file: File) => {
+    async (picked: File) => {
+      let file: File;
+      try {
+        file = prepareImage ? await prepareImage(picked) : picked;
+      } catch (error) {
+        onError?.(toFileIOError(error, 'Failed to prepare image'));
+        return;
+      }
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = reader.result;
@@ -285,7 +294,7 @@ export function useFileIO({
       reader.onerror = () => onError?.(reader.error ?? new Error('Failed to read image'));
       reader.readAsDataURL(file);
     },
-    [focusActiveEditor, onError, pagedEditorRef]
+    [focusActiveEditor, onError, pagedEditorRef, prepareImage]
   );
 
   const handleImageFileChange = useCallback(
@@ -293,7 +302,7 @@ export function useFileIO({
       const file = e.target.files?.[0];
       // Reset the input so the same file can be selected again
       e.target.value = '';
-      if (file) insertImageFile(file);
+      if (file) void insertImageFile(file);
     },
     [insertImageFile]
   );

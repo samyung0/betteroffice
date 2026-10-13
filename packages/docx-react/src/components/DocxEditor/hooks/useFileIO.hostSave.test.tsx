@@ -10,7 +10,7 @@ import { useKeyboardShortcuts } from './useKeyboardShortcuts';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
 let fixture: Document;
 beforeAll(async () => {
   fixture = await parseDocx(
@@ -224,4 +224,70 @@ test('the save shortcut invokes only the focused editor and ignores repeat event
     );
   });
   expect(activeRequests).toBe(1);
+});
+
+test('an inserted image is the file prepareImage returns, and its refusal inserts nothing', async () => {
+  const originalImage = globalThis.Image;
+  class FakeImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    naturalWidth = 1000;
+    naturalHeight = 500;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  globalThis.Image = FakeImage as unknown as typeof Image;
+  try {
+    const commands: { image: Record<string, unknown> }[] = [];
+    const errors: Error[] = [];
+    const picked: string[] = [];
+    let refuse = false;
+    const editor = {
+      applyYrsCommand: (command: { image: Record<string, unknown> }) => {
+        commands.push(command);
+        return true;
+      },
+    } as unknown as PagedEditorRef;
+    const { result } = renderHook(() =>
+      useFileIO({
+        pagedEditorRef: { current: editor },
+        displayList: null,
+        resolveImage: () => null,
+        documentName: 'doc',
+        onSave: undefined,
+        onError: (error) => errors.push(error),
+        onOpen: undefined,
+        onPrint: undefined,
+        onDocumentNameChange: undefined,
+        loadBuffer: async () => {},
+        focusActiveEditor: () => {},
+        prepareImage: async (file) => {
+          picked.push(file.name);
+          if (refuse) throw new Error('image too large');
+          return new File(['jpeg'], 'photo.jpg', { type: 'image/jpeg' });
+        },
+      })
+    );
+    await act(async () => {
+      await result.current.insertImageFile(new File(['png bytes'], 'photo.png', { type: 'image/png' }));
+    });
+    await waitFor(() => expect(commands).toHaveLength(1));
+    expect(commands[0].image).toMatchObject({
+      alt: 'photo.jpg',
+      src: `data:image/jpeg;base64,${btoa('jpeg')}`,
+      width: 612,
+      height: 306,
+    });
+
+    refuse = true;
+    await act(async () => {
+      await result.current.insertImageFile(new File(['png'], 'big.png', { type: 'image/png' }));
+    });
+    expect(commands).toHaveLength(1);
+    expect(picked).toEqual(['photo.png', 'big.png']);
+    expect(errors.map((error) => error.message)).toEqual(['image too large']);
+  } finally {
+    globalThis.Image = originalImage;
+  }
 });
