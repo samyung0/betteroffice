@@ -1347,16 +1347,21 @@ fn parse_drawing_owned(
             )?,
             None => None,
         };
-        return Ok(shape
-            .map(|mut shape| {
+        // The diagram saves as authored; the shape only draws it.
+        let xml = element.to_raw_inline_xml();
+        return Ok(vec![match shape {
+            Some(mut shape) => {
                 apply_shape_metadata(&mut shape, element);
                 RunContent::Shape {
                     shape: Box::new(shape),
-                    source_xml: None,
+                    source_xml: Some(xml),
                 }
-            })
-            .into_iter()
-            .collect());
+            }
+            None => RunContent::OpaqueDrawing {
+                kind: "drawing".to_owned(),
+                xml,
+            },
+        }]);
     }
     if is_shape_drawing(element) {
         if let Some(mut shape) = parse_shape_from_drawing(element) {
