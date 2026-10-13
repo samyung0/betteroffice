@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRange, CellRef, CellState, CellValue, ColStyle, DefinedName, Op,
-    Sheet, SheetId, StylePatch, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, ColStyle,
+    DefinedName, FreezePane, Op, Sheet, SheetId, StylePatch, Workbook, WorkbookModel,
 };
 fn at(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -2054,4 +2054,132 @@ fn undo_keeps_a_cell_cleared_after_a_concurrent_edit_won() {
     exchange(&mut alice, &mut bob);
     assert_eq!(value(&alice), None);
     assert_eq!(value(&bob), None);
+}
+
+fn saved_sheet(book: &Workbook) -> String {
+    let parts = ooxml_opc::unzip_parts(&book.save().unwrap()).unwrap();
+    let (_, bytes) = parts
+        .into_iter()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn a_freeze_reaches_a_peer_editing_at_once() {
+    let mut a = peer(2101);
+    let mut b = peer(2102);
+    apply(
+        &mut a,
+        Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(FreezePane::new(1, 0, at("A2"))),
+        },
+    );
+    b.edit_cell(SheetId(0), at("B2"), "typed", CalculationOptions::default())
+        .unwrap();
+    sync(&mut a, &mut b);
+    for book in [&a, &b] {
+        let info = book.sheet_info().unwrap();
+        assert_eq!((info.frozen_rows, info.frozen_cols), (1, 0));
+        assert_eq!(
+            value_at(book, 0, "B2"),
+            Some(CellValue::Text {
+                value: "typed".into()
+            })
+        );
+    }
+    let sheet = saved_sheet(&a);
+    assert_eq!(sheet, saved_sheet(&b));
+    assert!(sheet.contains(r#"ySplit="1""#) && sheet.contains(r#"state="frozen""#));
+
+    // The pane is one value: freezing rows and columns at once keeps one of
+    // the two panes on both peers, as the editor sends the whole pane.
+    let rows = FreezePane::new(2, 0, at("A3"));
+    let columns = FreezePane::new(1, 1, at("B2"));
+    apply(
+        &mut a,
+        Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(rows),
+        },
+    );
+    apply(
+        &mut b,
+        Op::SetFreezePane {
+            sheet: SheetId(0),
+            pane: Some(columns),
+        },
+    );
+    sync(&mut a, &mut b);
+    let pane = a.model().sheets[0].freeze_pane;
+    assert!(pane == Some(rows) || pane == Some(columns), "{pane:?}");
+}
+
+/// The editor pastes as one batch of cell inputs and cuts as a copy followed
+/// by clearing the range (XlsxEditor pasteSelection and cutSelection).
+#[test]
+fn concurrent_pastes_and_a_cut_converge_cell_by_cell() {
+    let input = |address: &str, input: &str| CellInput {
+        cell: at(address),
+        input: input.into(),
+    };
+    let options = CalculationOptions::default();
+    let mut a = peer(2111);
+    let mut b = peer(2112);
+    a.edit_cells(
+        SheetId(0),
+        &[
+            input("B1", "1"),
+            input("C1", "2"),
+            input("B2", "=A2*2"),
+            input("C2", "left"),
+        ],
+        options,
+    )
+    .unwrap();
+    b.edit_cells(
+        SheetId(0),
+        &[
+            input("C2", "right"),
+            input("D2", "4"),
+            input("C3", "5"),
+            input("D3", "6"),
+        ],
+        options,
+    )
+    .unwrap();
+    b.edit_cells(SheetId(0), &[input("A1", ""), input("A2", "")], options)
+        .unwrap();
+    sync(&mut a, &mut b);
+
+    let number = |value: f64| Some(CellValue::Number { value });
+    for book in [&a, &b] {
+        assert_eq!(value_at(book, 0, "A1"), None);
+        assert_eq!(value_at(book, 0, "A2"), None);
+        assert_eq!(value_at(book, 0, "B1"), number(1.0));
+        assert_eq!(value_at(book, 0, "D3"), number(6.0));
+        // the pasted formula reads the peer's cut: A2 is now empty.
+        assert_eq!(value_at(book, 0, "B2"), number(0.0));
+        assert_eq!(value_at(book, 1, "A1"), number(0.0));
+    }
+    let shared = value_at(&a, 0, "C2");
+    assert!(
+        [Some("left"), Some("right")].contains(&match &shared {
+            Some(CellValue::Text { value }) => Some(value.as_str()),
+            _ => None,
+        }),
+        "{shared:?}"
+    );
+    assert_eq!(a.save().unwrap(), b.save().unwrap());
+
+    // Undo takes back only the undoer's paste.
+    a.undo(options).unwrap();
+    relay(&a, &mut b);
+    assert_eq!(a.model(), b.model());
+    for address in ["B1", "C1", "B2"] {
+        assert_eq!(value_at(&b, 0, address), None, "{address}");
+    }
+    assert_eq!(value_at(&b, 0, "D2"), number(4.0));
+    assert_eq!(value_at(&b, 0, "C3"), number(5.0));
 }
