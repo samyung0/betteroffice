@@ -2760,6 +2760,9 @@ pub(crate) struct PageIn {
     pub(crate) parity_filler: Option<bool>,
     #[serde(default)]
     background: Option<String>,
+    /// The page's section borders (`w:pgBorders`); over `options.pageBorders`.
+    #[serde(default)]
+    page_borders: Option<PageBordersIn>,
     #[serde(default)]
     columns: Option<ColumnLayoutIn>,
     #[serde(default)]
@@ -4971,13 +4974,21 @@ fn build_display_list_selected(
         {
             emit_watermark(&mut prims, watermark, page);
         }
-        if let Some(border) = page_border_primitive(
-            &render_options,
-            page,
-            page.number.unwrap_or(page_index as u64 + 1),
-        ) {
-            page_borders.push(border);
-        }
+        let page_number = page.number.unwrap_or(page_index as u64 + 1);
+        // A section's own borders count its pages: `firstPage` is its first.
+        let border = match page.page_borders.as_ref() {
+            Some(borders) => page_border_primitive(
+                borders,
+                page,
+                page.section_page_index
+                    .map_or(page_number, |index| index + 1),
+            ),
+            None => render_options
+                .page_borders
+                .as_ref()
+                .and_then(|borders| page_border_primitive(borders, page, page_number)),
+        };
+        page_borders.extend(border);
 
         // Page coordinate frame for anchored-float resolution.
         let float_geom = PageFloatGeom {
@@ -7783,11 +7794,10 @@ fn page_border_side(border: Option<&PageBorderSpecIn>) -> Option<PageBorderSide>
 }
 
 fn page_border_primitive(
-    options: &RenderOptionsIn,
+    pb: &PageBordersIn,
     page: &PageIn,
     page_number: u64,
 ) -> Option<PageBorderPrimitive> {
-    let pb = options.page_borders.as_ref()?;
     if !page_border_should_render(page_number, pb.display.as_deref()) {
         return None;
     }
