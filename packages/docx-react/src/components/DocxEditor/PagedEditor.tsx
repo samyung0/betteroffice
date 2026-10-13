@@ -999,7 +999,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             map,
             action,
             paragraphStyleValues,
-            structuralAuthor
+            structuralAuthor,
+            yrsCore.sourceNumbering()
           );
           if (!changed) return false;
           yrsInputRef.current?.clearStoredFormatting();
@@ -1019,6 +1020,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsStyleResolver,
         yrsCore.inputPositionMap,
         yrsCore.session,
+        yrsCore.sourceNumbering,
       ]
     );
 

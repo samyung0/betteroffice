@@ -12,6 +12,7 @@ import {
   explicitParagraphAttrs,
   type ParagraphStyleValues,
 } from '@betteroffice/docx/yrs';
+import type { NumberingDefinitions } from '@betteroffice/docx/types/document';
 import type { FormattingAction } from '../Toolbar';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
@@ -132,14 +133,32 @@ export function setSelectedParagraphAttrs(
   });
 }
 
+/**
+ * The `w:num` ids the bullet and number buttons write: the two after every id
+ * the source defines, which the save defines (docx-parse `list_button_num_ids`).
+ */
+export function listButtonNumIds(numbering: NumberingDefinitions | undefined): {
+  bullet: number;
+  number: number;
+} {
+  const last = (numbering?.nums ?? []).reduce((max, num) => Math.max(max, num.numId), 0);
+  return { bullet: last + 1, number: last + 2 };
+}
+
 function setList(
   session: YrsSession,
   selection: YrsToolbarSelection,
-  numId: 1 | 2,
+  bullet: boolean,
+  numbering: NumberingDefinitions | undefined,
   suggesting?: YrsAuthor
 ): void {
-  const current = paragraphNumPr(selection.context.paragraphProperties.numPr);
-  const remove = current?.numId === numId;
+  const { paragraphProperties } = selection.context;
+  // Each button turns its own kind of list off.
+  const remove =
+    !!paragraphNumPr(paragraphProperties.numPr)?.numId &&
+    (paragraphProperties.listIsBullet === true) === bullet;
+  const ids = listButtonNumIds(numbering);
+  const numId = bullet ? ids.bullet : ids.number;
   forEachSelectedParagraph(session, selection, (range, properties) => {
     const existing = paragraphNumPr(properties.numPr);
     const attrs: YrsParagraphAttrs = remove
@@ -151,8 +170,8 @@ function setList(
         }
       : {
           numPr: { numId, ilvl: existing?.ilvl ?? 0 },
-          listIsBullet: numId === 1,
-          listNumFmt: numId === 1 ? null : 'decimal',
+          listIsBullet: bullet,
+          listNumFmt: bullet ? null : 'decimal',
           listMarker: null,
         };
     session.setParagraphAttrs(range, attrs, suggesting);
@@ -321,7 +340,8 @@ export function applyYrsToolbarFormatting(
   map: YrsInputPositionMap,
   action: FormattingAction,
   styleValues: ParagraphStyleValues,
-  suggesting?: YrsAuthor
+  suggesting?: YrsAuthor,
+  numbering?: NumberingDefinitions
 ): boolean {
   const selection = currentYrsToolbarSelection(session, map);
   if (!selection) return false;
@@ -349,7 +369,7 @@ export function applyYrsToolbarFormatting(
     return true;
   }
   if (action === 'bulletList' || action === 'numberedList') {
-    setList(session, selection, action === 'bulletList' ? 1 : 2, suggesting);
+    setList(session, selection, action === 'bulletList', numbering, suggesting);
     return true;
   }
   if (action === 'indent' || action === 'outdent') {

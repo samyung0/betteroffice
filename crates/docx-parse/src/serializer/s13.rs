@@ -17,7 +17,7 @@ use crate::header_footer::HeaderFooter;
 use crate::image::Image;
 use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
-use crate::numbering::NumberingDefinitions;
+use crate::numbering::{NumberingDefinitions, list_button_num_ids, list_button_numbering};
 use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
@@ -27,7 +27,7 @@ use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
-use super::numbering::serialize_numbering_xml;
+use super::numbering::{numbering_fragments, serialize_numbering_xml};
 use super::paragraph::{block_comment_references, serialize_paragraph};
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -36,7 +36,7 @@ use super::parts::{
 };
 use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
-use super::xml_writer::escape_xml;
+use super::xml_writer::{escape_xml, int_attr};
 
 const EMPTY_RELS_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>";
 const HEADER_CONTENT_TYPE: &str =
@@ -221,6 +221,7 @@ pub fn write_docx_s13_parts(
         }
     }
 
+    add_list_button_numbering(request.numbering.as_ref(), &mut package);
     serialize_comment_parts(&request.document, &mut package, &mut context)?;
 
     if request.options.update_modified_date || request.options.modified_by.is_some() {
@@ -484,6 +485,83 @@ fn ensure_header_footer_parts(
         package.set_text(path, updated);
     }
     Ok(())
+}
+
+/// Adds the definitions of the bullet and number buttons' ids
+/// ([`list_button_num_ids`]) that a saved story uses and the source lacks,
+/// into `word/numbering.xml`, which it creates when the package has none.
+fn add_list_button_numbering(numbering: Option<&NumberingDefinitions>, package: &mut Package) {
+    let (bullet_id, number_id) = list_button_num_ids(numbering);
+    let last_abstract = numbering
+        .into_iter()
+        .flat_map(|numbering| &numbering.abstract_nums)
+        .map(|abstract_numbering| abstract_numbering.abstract_num_id)
+        .fold(0.0, f64::max);
+    let entries = package.refs();
+    let used = |id: f64| {
+        let marker = format!("<w:numId w:val=\"{}\"/>", int_attr(Some(id)));
+        entries.iter().any(|(path, bytes)| {
+            path.starts_with("word/")
+                && path.ends_with(".xml")
+                && path != "word/numbering.xml"
+                && std::str::from_utf8(bytes).is_ok_and(|xml| xml.contains(&marker))
+        })
+    };
+    let defined = |id: f64| {
+        numbering.is_some_and(|numbering| numbering.nums.iter().any(|num| num.num_id == id))
+    };
+    let added: Vec<_> = [
+        (true, bullet_id, last_abstract + 1.0),
+        (false, number_id, last_abstract + 2.0),
+    ]
+    .into_iter()
+    .filter(|&(_, id, _)| !defined(id) && used(id))
+    .map(|(bullet, id, abstract_id)| list_button_numbering(bullet, id, abstract_id))
+    .collect();
+    drop(entries);
+    if added.is_empty() {
+        return;
+    }
+    let Some(xml) = package.text("word/numbering.xml") else {
+        if numbering.is_none_or(|numbering| numbering.nums.is_empty()) {
+            let (abstract_nums, nums) = added.into_iter().unzip();
+            ensure_numbering_part(
+                Some(&NumberingDefinitions {
+                    abstract_nums,
+                    nums,
+                }),
+                package,
+            );
+        }
+        return;
+    };
+    let Some(end) = xml.rfind("</w:numbering>") else {
+        return;
+    };
+    // CT_Numbering: abstract definitions, then instances, then numIdMacAtCleanup.
+    let tail = xml.find("<w:numIdMacAtCleanup").unwrap_or(end);
+    let first_num = [xml.find("<w:num "), xml.find("<w:num>")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(tail);
+    let (mut abstracts, mut nums) = (String::new(), String::new());
+    for (abstract_numbering, instance) in &added {
+        let (abstract_xml, num_xml) = numbering_fragments(abstract_numbering, instance);
+        abstracts.push_str(&abstract_xml);
+        nums.push_str(&num_xml);
+    }
+    package.set_text(
+        "word/numbering.xml",
+        [
+            &xml[..first_num],
+            &abstracts,
+            &xml[first_num..tail],
+            &nums,
+            &xml[tail..],
+        ]
+        .concat(),
+    );
 }
 
 fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut Package) {

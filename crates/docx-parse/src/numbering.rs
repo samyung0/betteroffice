@@ -122,6 +122,72 @@ pub struct ListRendering {
     pub hanging_indent: Option<bool>,
 }
 
+/// The `w:num` ids the editor's bullet and number buttons write: the two after
+/// every id the source defines, so the save adds their definitions
+/// ([`list_button_numbering`]) and peers of one source agree on them.
+pub fn list_button_num_ids(numbering: Option<&NumberingDefinitions>) -> (f64, f64) {
+    let last = numbering
+        .into_iter()
+        .flat_map(|numbering| &numbering.nums)
+        .map(|num| num.num_id)
+        .fold(0.0, f64::max);
+    (last + 1.0, last + 2.0)
+}
+
+/// The definition the bullet (`bullet`) or number button's `num_id` saves
+/// with: every level a "•" or the dotted counter path ("1.", "1.2."), as the
+/// editor draws them, indented half an inch a level.
+pub fn list_button_numbering(
+    bullet: bool,
+    num_id: f64,
+    abstract_num_id: f64,
+) -> (AbstractNumbering, NumberingInstance) {
+    let levels = (0..9)
+        .map(|level| ListLevel {
+            ilvl: f64::from(level),
+            start: (!bullet).then_some(1.0),
+            num_fmt: if bullet { "bullet" } else { "decimal" }.to_owned(),
+            lvl_text: if bullet {
+                "\u{2022}".to_owned()
+            } else {
+                (1..=level + 1).map(|depth| format!("%{depth}.")).collect()
+            },
+            lvl_jc: Some("left".to_owned()),
+            suffix: None,
+            p_pr: Some(crate::formatting::ParagraphFormatting {
+                indent_left: Some(f64::from(720 * (level + 1))),
+                indent_first_line: Some(360.0),
+                hanging_indent: Some(true),
+                ..Default::default()
+            }),
+            r_pr: None,
+            lvl_restart: None,
+            is_lgl: None,
+            legacy: None,
+        })
+        .collect();
+    let multi_level_type = if bullet {
+        "hybridMultilevel"
+    } else {
+        "multilevel"
+    };
+    (
+        AbstractNumbering {
+            abstract_num_id,
+            multi_level_type: Some(multi_level_type.to_owned()),
+            num_style_link: None,
+            style_link: None,
+            levels,
+            name: None,
+        },
+        NumberingInstance {
+            num_id,
+            abstract_num_id,
+            level_overrides: None,
+        },
+    )
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NumberingMap {
     pub definitions: NumberingDefinitions,

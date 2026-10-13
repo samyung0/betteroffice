@@ -29,6 +29,19 @@ pub fn serialize_numbering_xml(numbering: &NumberingDefinitions) -> String {
     writer.finish()
 }
 
+/// One `w:abstractNum` and one `w:num`, as fragments.
+pub(super) fn numbering_fragments(
+    abstract_numbering: &AbstractNumbering,
+    instance: &NumberingInstance,
+) -> (String, String) {
+    let mut writer = XmlWriter::with_capacity(1024);
+    write_abstract_numbering(&mut writer, abstract_numbering);
+    let abstract_xml = writer.finish();
+    let mut writer = XmlWriter::with_capacity(96);
+    write_numbering_instance(&mut writer, instance);
+    (abstract_xml, writer.finish())
+}
+
 fn write_level(writer: &mut XmlWriter, level: &ListLevel) {
     writer
         .start_element("w:lvl")
