@@ -13,8 +13,12 @@ use serde_json::json;
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
-/// A DOCX whose first paragraph reads "I like cats a lot, a lot" with "cats"
-/// bold, followed by an empty paragraph.
+/// The first paragraph of [`docx`]: its prefix is longer in UTF-8 than in
+/// UTF-16 (CJK, an astral emoji, a combining accent).
+const LIKED: &str = "日本😀e\u{301} I like cats a lot, a lot";
+
+/// A DOCX whose first paragraph reads [`LIKED`] with "cats" bold, followed by
+/// an empty paragraph.
 fn docx() -> Vec<u8> {
     let run = |text: &str, bold: bool| {
         let bold = if bold { "<w:rPr><w:b/></w:rPr>" } else { "" };
@@ -33,7 +37,7 @@ fn docx() -> Vec<u8> {
             "word/document.xml",
             format!(
                 r#"<w:document xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="0000000A">{}{}{}</w:p><w:p w14:paraId="0000000B"/><w:sectPr/></w:body></w:document>"#,
-                run("I like ", false),
+                run("日本😀e\u{301} I like ", false),
                 run("cats", true),
                 run(" a lot, a lot", false)
             ),
@@ -144,10 +148,7 @@ fn docx_replace_text_replaces_its_one_occurrence_keeping_the_runs_formatting() {
     let sha = sha256_hex(&base);
     let state = seed(Format::Docx, &base).unwrap();
     let entries = inspect(&base, checkpoint(Format::Docx, &sha, &state)).unwrap();
-    let liked = entries
-        .iter()
-        .find(|entry| entry.value == "I like cats a lot, a lot")
-        .unwrap();
+    let liked = entries.iter().find(|entry| entry.value == LIKED).unwrap();
     assert_refusals(&base, Format::Docx, &state, liked, "a lot");
 
     let edit = apply_commands(
@@ -158,7 +159,7 @@ fn docx_replace_text_replaces_its_one_occurrence_keeping_the_runs_formatting() {
     .unwrap();
     assert_eq!(
         value(&base, Format::Docx, &edit.state, &liked.id),
-        "I like dogs a lot, a lot"
+        LIKED.replace("cats", "dogs")
     );
     // Only "cats" was rewritten: the bold run now holds "dogs" alone.
     let saved = export(
@@ -198,7 +199,7 @@ fn docx_replace_text_replaces_its_one_occurrence_keeping_the_runs_formatting() {
 }
 
 #[test]
-fn an_empty_expected_text_fills_an_empty_paragraph_and_its_undo_empties_it() {
+fn an_empty_expected_text_fills_an_empty_paragraph_and_an_overlapping_one_counts_once() {
     let base = docx();
     let sha = sha256_hex(&base);
     let state = seed(Format::Docx, &base).unwrap();
@@ -207,10 +208,11 @@ fn an_empty_expected_text_fills_an_empty_paragraph_and_its_undo_empties_it() {
     let edit = apply_commands(
         &base,
         checkpoint(Format::Docx, &sha, &state),
-        &[replace(empty, "", "Filled")],
+        &[replace(empty, "", "aaa"), replace(empty, "aa", "b")],
     )
     .unwrap();
-    assert_eq!(value(&base, Format::Docx, &edit.state, &empty.id), "Filled");
+    // "aa" occurs once in "aaa", as note edits count it: the first two go.
+    assert_eq!(value(&base, Format::Docx, &edit.state, &empty.id), "ba");
     let undone = apply_commands(
         &base,
         checkpoint(Format::Docx, &sha, &edit.state),

@@ -1,6 +1,7 @@
 // Bun preload that records every call into shared/office-checkpoint.ts: its
 // arguments, the client ids `randomInt` handed out during it, the frozen
-// `Date.now()` and the result or error message, so replay.ts can run the same
+// `Date.now()` and the result or error message (with an edit refusal's
+// details), so replay.ts can run the same
 // calls through the native crate.
 //   PARITY_OUT=<dir> bun --preload ./crates/office-service/parity/record.ts <script>
 //   PARITY_OUT=<dir> bun test --preload ./crates/office-service/parity/record.ts ./shared
@@ -88,14 +89,18 @@ export function record<A extends unknown[], R>(name: string, fn: (...args: A) =>
         leave();
       }
     }
-    const done = (result: { value?: unknown; error?: string }) =>
+    const done = (result: { value?: unknown; error?: string; details?: unknown }) =>
       write({ method: name, args: encode(args), clients: call.clients, nowMs: now, perfMs: perf, ...result });
+    const failed = (error: { message?: string; details?: unknown }) => ({
+      error: String(error?.message ?? error),
+      ...(error?.details === undefined ? {} : { details: encode(error.details) }),
+    });
     let result: R;
     try {
       result = calls.run(call, () => fn(...args));
     } catch (error) {
       leave();
-      done({ error: String((error as Error)?.message ?? error) });
+      done(failed(error as Error));
       throw error;
     }
     if (result instanceof Promise)
@@ -107,7 +112,7 @@ export function record<A extends unknown[], R>(name: string, fn: (...args: A) =>
         },
         (error) => {
           leave();
-          done({ error: String(error?.message ?? error) });
+          done(failed(error));
           throw error;
         }
       ) as R;

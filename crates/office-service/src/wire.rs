@@ -1,6 +1,6 @@
 //! The JSON boundary: the Office worker's `{method, args}` messages with
 //! `Uint8Array`s as `{"$bytes": base64}`, answered with `{"value"}` or
-//! `{"error", "kind"}`. The parity harness and the benchmark CLI use it;
+//! `{"error", "kind"}` (and an edit refusal's `"details"`). The parity harness and the benchmark CLI use it;
 //! a server uses the typed API.
 
 use std::sync::OnceLock;
@@ -247,7 +247,17 @@ pub fn call(request: &[u8]) -> Vec<u8> {
             };
             match with_env(env, || dispatch(&request.method, &request.args)) {
                 Ok(value) => json!({ "value": value }),
-                Err(error) => json!({ "error": error.to_string(), "kind": kind(&error) }),
+                Err(error) => {
+                    let mut answer = json!({ "error": error.to_string(), "kind": kind(&error) });
+                    if let Error::Edit {
+                        details: Some(details),
+                        ..
+                    } = &error
+                    {
+                        answer["details"] = details.clone();
+                    }
+                    answer
+                }
             }
         }
     };

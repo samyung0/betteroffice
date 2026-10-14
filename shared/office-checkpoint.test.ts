@@ -792,7 +792,7 @@ test("agent replace_text rewrites only the changed DOCX span of its one occurren
     }<w:t xml:space="preserve">${text}</w:t></w:r>`;
   parts["word/document.xml"] = new TextEncoder().encode(
     `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>` +
-      `<w:p w14:paraId="0000000A">${run("I like ")}${run("cats", true)}${run(
+      `<w:p w14:paraId="0000000A">${run("日本😀e\u0301 I like ")}${run("cats", true)}${run(
         " a lot"
       )}</w:p>` +
       `<w:p w14:paraId="0000000B">${run(
@@ -805,9 +805,11 @@ test("agent replace_text rewrites only the changed DOCX span of its one occurren
   const bytes = rezipContainer(parts);
   const before = await seedOffice("docx", bytes);
   const entries = await inspectOffice(bytes, before);
-  const liked = entries.find((entry) => entry.value === "I like cats a lot")!;
+  const liked = entries.find(
+    (entry) => entry.value === "日本😀e\u0301 I like cats a lot"
+  )!;
   expect(entries.some((entry) => entry.value.includes("inserted"))).toBe(false);
-  const block = { id: liked.id, type: "paragraph", text: "I like cats a lot" };
+  const block = { id: liked.id, type: "paragraph", text: liked.value };
   for (const [expectedText, code, message] of [
     [
       "l",
@@ -845,7 +847,9 @@ test("agent replace_text rewrites only the changed DOCX span of its one occurren
   expect(runs.filter((item) => item.bold).map((item) => item.text)).toEqual([
     "dogs",
   ]);
-  expect(runs.map((item) => item.text).join("")).toContain("I like dogs a lot");
+  expect(runs.map((item) => item.text).join("")).toContain(
+    "日本😀e\u0301 I like dogs a lot"
+  );
   await expect(
     applyOfficeCommands(bytes, before, [
       {

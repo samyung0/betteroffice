@@ -1,5 +1,5 @@
 // Replays calls recorded by record.ts through the native crate and compares
-// the answers with the TS results.
+// the answers with the TS results (a refusal by its message and details).
 //   bun crates/office-service/parity/replay.ts <recording dir> <office-service binary> [--report <file>] [--only <method>]
 // Seeds and other bytes must be identical; JSON results equal ignoring key
 // order; exports that differ as zips are compared part by part. Rebased and
@@ -118,6 +118,7 @@ interface Recorded {
   perfMs?: number;
   value?: Json;
   error?: string;
+  details?: Json;
 }
 
 /** Replica memory estimates per unzipped byte (`HEAP_PER_UNZIPPED_BYTE`). */
@@ -131,10 +132,14 @@ const count = (method: string, outcome: string) => {
   counts.set(method, byOutcome);
 };
 
-function compare(call: Recorded, answer: { value?: Json; error?: string; kind?: string }): [string, string?] {
+function compare(
+  call: Recorded,
+  answer: { value?: Json; error?: string; kind?: string; details?: Json }
+): [string, string?] {
   if (call.error !== undefined || answer.error !== undefined) {
-    if (call.error === answer.error) return ["equal"];
-    return ["differ", `TS error ${JSON.stringify(call.error)}\n  native ${answer.error !== undefined ? `${answer.kind} error ${JSON.stringify(answer.error)}` : `value ${JSON.stringify(normal(answer.value!)).slice(0, 400)}`}`];
+    const details = (value?: Json) => JSON.stringify(normal(value ?? null));
+    if (call.error === answer.error && details(call.details) === details(answer.details)) return ["equal"];
+    return ["differ", `TS error ${JSON.stringify(call.error)} ${details(call.details)}\n  native ${answer.error !== undefined ? `${answer.kind} error ${JSON.stringify(answer.error)} ${details(answer.details)}` : `value ${JSON.stringify(normal(answer.value!)).slice(0, 400)}`}`];
   }
   let expected = call.value ?? null;
   let actual = answer.value ?? null;
@@ -212,7 +217,7 @@ for (const file of files) {
     };
     child.stdin.write(`${JSON.stringify(request)}\n`);
     await child.stdin.flush();
-    const answer = JSON.parse(await nextLine()) as { value?: Json; error?: string; kind?: string };
+    const answer = JSON.parse(await nextLine()) as { value?: Json; error?: string; kind?: string; details?: Json };
     const [outcome, detail] = compare(call, answer);
     count(call.method, outcome);
     if (detail) report.push(`${outcome} ${call.method} #${nth} (${file})\n  ${detail}\n`);
