@@ -1068,7 +1068,10 @@ async function open(
           )
             throw new OfficeEditError(
               "stale_target",
-              "the cell differs from expected_value"
+              "the cell differs from expected_value",
+              before && {
+                block: { id: before.id, type: "cell", text: xlsxCellValue(before) },
+              }
             );
           if (!before && !command.value)
             throw new OfficeEditError("invalid_input", "the cell is already empty");

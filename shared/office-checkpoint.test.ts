@@ -1303,6 +1303,17 @@ test("PPTX and XLSX agent edits count astral characters in UTF-16, and a cleared
     (entry) => entry.label === `${sheetName}!ZZ200`
   )!;
   expect(added.value).toBe("cell 😀 value");
+  const stale = (cell: string) =>
+    applyOfficeCommands(workbook, withCell, [
+      { type: "set_cell", sheet: sheetName, cell, expectedValue: "old", value: "new" },
+    ]);
+  await expect(stale("ZZ200")).rejects.toMatchObject({
+    code: "stale_target",
+    details: { block: { id: added.id, type: "cell", text: "cell 😀 value" } },
+  });
+  expect(
+    await stale("ZZ201").catch((error: { details?: unknown }) => error)
+  ).toMatchObject({ code: "stale_target", details: undefined });
   await expect(
     locateOfficeTargets(workbook, withCell, [added.id])
   ).resolves.toHaveLength(1);

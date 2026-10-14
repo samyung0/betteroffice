@@ -250,10 +250,16 @@ impl XlsxSession {
         if *expected_value != input
             && *expected_value != before.as_ref().map(cell_value).unwrap_or_default()
         {
-            return Err(Error::edit(
-                EditCode::StaleTarget,
-                "the cell differs from expected_value",
-            ));
+            // The cell as inspect lists it; an empty cell is not listed.
+            return Err(Error::Edit {
+                code: EditCode::StaleTarget,
+                message: "the cell differs from expected_value".into(),
+                details: before.as_ref().map(|cell| {
+                    serde_json::json!({
+                        "block": { "id": text(cell.get("id")), "type": "cell", "text": cell_value(cell) }
+                    })
+                }),
+            });
         }
         if before.is_none() && value.is_empty() {
             return Err(Error::edit(
