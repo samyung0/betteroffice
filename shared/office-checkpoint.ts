@@ -127,11 +127,15 @@ export type OfficeEditCode =
   | "stale_target"
   | "unavailable_target"
   | "unsupported_operation";
-/** The code prefixes the message so it survives worker boundaries that carry strings only. */
+/**
+ * The code prefixes the message so it survives worker boundaries that carry strings only.
+ * `details` is the target as it reads now.
+ */
 export class OfficeEditError extends Error {
   constructor(
     readonly code: OfficeEditCode,
-    message: string
+    message: string,
+    readonly details?: { block: { id: string; type: string; text: string } }
   ) {
     super(`${code}: ${message}`);
   }
@@ -602,11 +606,17 @@ function pptxEntries(doc: PptxDocument): Entry[] {
   });
   return entries;
 }
+/**
+ * `expectedText` occurs exactly once in the paragraph, counted as note edits
+ * count it (an empty one only in an empty paragraph). Returns the span of that
+ * occurrence the replacement changes, in paragraph offsets, and the
+ * paragraph's new text. A refusal of the match carries the paragraph.
+ */
 function checkReplacement(
   current: string,
   command: OfficeCommand,
   format: string
-): string {
+): { span: { start: number; end: number; text: string }; text: string } {
   if (command.type !== "replace_text")
     throw new OfficeEditError(
       "unsupported_operation",
@@ -617,12 +627,36 @@ function checkReplacement(
       "invalid_input",
       "replacement text must stay within one paragraph"
     );
-  if (command.expectedText !== current)
-    throw new OfficeEditError(
-      "stale_target",
-      "the paragraph text differs from expected_text"
+  const { expectedText: expected, targetId } = command;
+  const refuse = (code: OfficeEditCode, message: string) =>
+    new OfficeEditError(code, message, {
+      block: { id: targetId, type: "paragraph", text: current },
+    });
+  if (!expected && current)
+    throw refuse(
+      "invalid_input",
+      "expected_text must not be empty unless the paragraph is; include surrounding text"
     );
-  return command.text;
+  const count = expected ? current.split(expected).length - 1 : 1;
+  if (count === 0)
+    throw refuse(
+      "stale_target",
+      "expected text was not found in the paragraph"
+    );
+  if (count > 1)
+    throw refuse(
+      "invalid_input",
+      `expected text occurs ${count} times in the paragraph; include more context`
+    );
+  const at = current.indexOf(expected);
+  const span = changedSpan(expected, command.text);
+  return {
+    span: { start: at + span.start, end: at + span.end, text: span.text },
+    text:
+      current.slice(0, at) +
+      command.text +
+      current.slice(at + expected.length),
+  };
 }
 /** The span of `before` that `after` changes, in UTF-16 offsets, never splitting a surrogate pair. */
 function changedSpan(
@@ -942,9 +976,12 @@ async function open(
               "unavailable_target",
               "the paragraph holds objects or tracked changes"
             );
-          const text = checkReplacement(paragraph.text, command, "DOCX");
+          const { span, text } = checkReplacement(
+            paragraph.text,
+            command,
+            "DOCX"
+          );
           const paraId = paragraph.paraId;
-          const span = changedSpan(paragraph.text, text);
           if (span.start < span.end || span.text)
             session.replaceRange(
               {
@@ -1119,8 +1156,7 @@ async function open(
         storyOf(),
         command.targetId
       );
-      const text = checkReplacement(paragraph.text, command, "PPTX");
-      const span = changedSpan(paragraph.text, text);
+      const { span, text } = checkReplacement(paragraph.text, command, "PPTX");
       // A pure insertion replaces nothing; it takes the style of the character before it.
       const style = pptxStyleAt(
         paragraph.runs,

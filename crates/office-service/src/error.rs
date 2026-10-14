@@ -23,8 +23,14 @@ impl EditCode {
 /// Display strings are the TS error messages Capy matches on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// `<code>: <message>`, an agent edit the engine refused.
-    Edit { code: EditCode, message: String },
+    /// `<code>: <message>`, an agent edit the engine refused. `details` is the
+    /// target as it reads now (`{"block": {"id", "type", "text"}}`), kept out
+    /// of the message.
+    Edit {
+        code: EditCode,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
     /// `Office rebase: <message>`, a deterministic refusal.
     Rebase(String),
     /// Bad arguments (a TS `TypeError`).
@@ -40,6 +46,7 @@ impl Error {
         Error::Edit {
             code,
             message: message.into(),
+            details: None,
         }
     }
 
@@ -54,7 +61,7 @@ impl Error {
     /// The message a TS `Error` carried (what `transplant` wraps).
     pub(crate) fn message(&self) -> String {
         match self {
-            Error::Edit { code, message } => format!("{}: {message}", code.as_str()),
+            Error::Edit { code, message, .. } => format!("{}: {message}", code.as_str()),
             Error::Rebase(message) => format!("Office rebase: {message}"),
             Error::Invalid(message) | Error::Engine(message) => message.clone(),
             Error::Panic(message) => format!("Office engine panicked: {message}"),

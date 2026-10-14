@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use docx_edit::{EditCtx, EngineSession, StoryRange, UndoSession};
 
-use crate::common::{asset_from_data_url, changed_span, check_replacement};
+use crate::common::{asset_from_data_url, check_replacement};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::{V, canonical, text};
@@ -564,8 +564,7 @@ impl DocxSession {
                 "the paragraph holds objects or tracked changes",
             ));
         }
-        let text = check_replacement(&paragraph.text, command, "DOCX")?.to_owned();
-        let span = changed_span(&paragraph.text, &text);
+        let (span, text) = check_replacement(&paragraph.text, command, "DOCX")?;
         self.undo.track(self.engine.doc());
         self.undo.select_story(&story);
         if span.start < span.end || !span.text.is_empty() {

@@ -106,16 +106,20 @@ pub(crate) fn image_mime_type(part: &str) -> Result<&'static str> {
     Ok(mime)
 }
 
-/// office-checkpoint.ts `checkReplacement`.
-pub(crate) fn check_replacement<'a>(
+/// office-checkpoint.ts `checkReplacement`: `expected_text` occurs exactly
+/// once in the paragraph, counted as note edits count it (an empty one only
+/// in an empty paragraph). Returns the span of that occurrence the
+/// replacement changes, in paragraph offsets, and the paragraph's new text.
+/// A refusal of the match carries the paragraph as it reads now.
+pub(crate) fn check_replacement(
     current: &str,
-    command: &'a Command,
+    command: &Command,
     format: &str,
-) -> Result<&'a str> {
+) -> Result<(Span, String)> {
     let Command::ReplaceText {
+        target_id,
         expected_text,
         text,
-        ..
     } = command
     else {
         return Err(Error::edit(
@@ -129,13 +133,52 @@ pub(crate) fn check_replacement<'a>(
             "replacement text must stay within one paragraph",
         ));
     }
-    if expected_text != current {
-        return Err(Error::edit(
-            EditCode::StaleTarget,
-            "the paragraph text differs from expected_text",
+    let refuse = |code, message: String| Error::Edit {
+        code,
+        message,
+        details: Some(serde_json::json!({
+            "block": { "id": target_id, "type": "paragraph", "text": current }
+        })),
+    };
+    if expected_text.is_empty() && !current.is_empty() {
+        return Err(refuse(
+            EditCode::InvalidInput,
+            "expected_text must not be empty unless the paragraph is; include surrounding text"
+                .into(),
         ));
     }
-    Ok(text)
+    let found: Vec<usize> = current
+        .match_indices(expected_text.as_str())
+        .map(|(at, _)| at)
+        .collect();
+    let at = match found[..] {
+        [at] => at,
+        [] => {
+            return Err(refuse(
+                EditCode::StaleTarget,
+                "expected text was not found in the paragraph".into(),
+            ));
+        }
+        _ => {
+            return Err(refuse(
+                EditCode::InvalidInput,
+                format!(
+                    "expected text occurs {} times in the paragraph; include more context",
+                    found.len()
+                ),
+            ));
+        }
+    };
+    let offset = utf16_len(&current[..at]);
+    let mut span = changed_span(expected_text, text);
+    span.start += offset;
+    span.end += offset;
+    let after = format!(
+        "{}{text}{}",
+        &current[..at],
+        &current[at + expected_text.len()..]
+    );
+    Ok((span, after))
 }
 
 /// The span of `before` that `after` changes, in UTF-16 offsets, never
@@ -146,7 +189,7 @@ pub(crate) struct Span {
     pub text: String,
 }
 
-pub(crate) fn changed_span(before: &str, after: &str) -> Span {
+fn changed_span(before: &str, after: &str) -> Span {
     let a: Vec<u16> = before.encode_utf16().collect();
     let b: Vec<u16> = after.encode_utf16().collect();
     let limit = a.len().min(b.len());

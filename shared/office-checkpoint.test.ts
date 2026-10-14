@@ -782,7 +782,7 @@ test("agent edits replace one DOCX paragraph, locate it for guards and undo thro
   ).toBe(target.value);
 });
 
-test("agent replace_text rewrites only the changed DOCX span and refuses tracked insertions", async () => {
+test("agent replace_text rewrites only the changed DOCX span of its one occurrence and refuses tracked insertions", async () => {
   const source = await fixture("betteroffice-demo.docx");
   await seedOffice("docx", source);
   const parts = unzipContainer(source);
@@ -807,12 +807,30 @@ test("agent replace_text rewrites only the changed DOCX span and refuses tracked
   const entries = await inspectOffice(bytes, before);
   const liked = entries.find((entry) => entry.value === "I like cats a lot")!;
   expect(entries.some((entry) => entry.value.includes("inserted"))).toBe(false);
+  const block = { id: liked.id, type: "paragraph", text: "I like cats a lot" };
+  for (const [expectedText, code, message] of [
+    [
+      "l",
+      "invalid_input",
+      "expected text occurs 2 times in the paragraph; include more context",
+    ],
+    ["dogs", "stale_target", "expected text was not found in the paragraph"],
+  ])
+    await expect(
+      applyOfficeCommands(bytes, before, [
+        { type: "replace_text", targetId: liked.id, expectedText, text: "x" },
+      ])
+    ).rejects.toMatchObject({
+      code,
+      message: `${code}: ${message}`,
+      details: { block },
+    });
   const edit = await applyOfficeCommands(bytes, before, [
     {
       type: "replace_text",
       targetId: liked.id,
-      expectedText: liked.value,
-      text: "I like dogs a lot",
+      expectedText: "cats",
+      text: "dogs",
     },
   ]);
   const xml = new TextDecoder().decode(

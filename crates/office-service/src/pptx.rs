@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
 
-use crate::common::{changed_span, check_replacement, image_mime_type, len16, sha256_hex};
+use crate::common::{check_replacement, image_mime_type, len16, sha256_hex};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
@@ -279,8 +279,7 @@ impl PptxSession {
             ));
         };
         let (story_id, paragraph) = self.paragraph(target_id)?;
-        let text = check_replacement(&paragraph.text, command, "PPTX")?.to_owned();
-        let span = changed_span(&paragraph.text, &text);
+        let (span, text) = check_replacement(&paragraph.text, command, "PPTX")?;
         // A pure insertion replaces nothing; it takes the style of the character before it.
         let style = style_at(
             &paragraph.runs,

@@ -73,7 +73,12 @@ export type OfficeEditCode =
   | "unsupported_operation";
 export declare class OfficeEditError extends Error {
   readonly code: OfficeEditCode;
-  constructor(code: OfficeEditCode, message: string);
+  readonly details?: { block: { id: string; type: string; text: string } };
+  constructor(
+    code: OfficeEditCode,
+    message: string,
+    details?: { block: { id: string; type: string; text: string } }
+  );
 }
 export declare function seedOffice(
   format: OfficeFormat,
