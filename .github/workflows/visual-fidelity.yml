@@ -5,7 +5,7 @@ on:
     inputs:
       branch:
         description: Repository branch to benchmark and update
-        default: main
+        default: capy-ci
         required: true
         type: string
       samples:
