@@ -4,7 +4,7 @@ Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and genera
 
 ## Scoring
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
+SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use the pinned CDN font files, served from the checkout's font packages when the URL pins their version; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
 ## Local benchmark
 
@@ -23,7 +23,7 @@ QUALITY_OUTPUT=.source/office-quality/run \
 node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 ```
 
-The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The single [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) contains all three formats, including PPTArena. Set `QUALITY_FORMAT=docx`, `pptx`, or `xlsx` to measure one format, or `QUALITY_SAMPLES='["betteroffice-demo"]'` for explicit samples. Runs support up to 1,000 samples.
+The runner compares the latest npm releases with the checked-out source using pinned CDN fonts (served from the checkout when the URL pins its font package version). Commit source changes first and choose an empty output directory. The single [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) contains all three formats, including PPTArena. Set `QUALITY_FORMAT=docx`, `pptx`, or `xlsx` to measure one format, or `QUALITY_SAMPLES='["betteroffice-demo"]'` for explicit samples. Runs support up to 1,000 samples.
 
 DOCX references and page-bounds profiles support 1–250 pages. PPTX, XLSX, and VSDX references remain limited to 100 pages, matching their capture harness. Extra rendered DOCX pages retain their native dimensions and contribute to the page-count penalty. Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
 

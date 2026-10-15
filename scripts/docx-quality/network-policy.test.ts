@@ -1,5 +1,47 @@
-import { describe, expect, test } from 'bun:test';
-import { isAllowedFontRequest } from './network-policy.mjs';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { BUNDLED_FONTS, type BundledFontFace } from '../../packages/fonts/src/manifest';
+import { checkoutFontAsset, isAllowedFontRequest } from './network-policy.mjs';
+
+// cdn.ts builds a face's URL inside the loader it hands the provider; keep that loader to reach every face.
+let loadFace: (face: BundledFontFace) => Promise<ArrayBuffer> = async () => {
+  throw new Error('cdn.ts did not create a provider');
+};
+const { fontProvider } = await import('../../packages/fonts/src/provider');
+mock.module('../../packages/fonts/src/provider', () => ({
+  fontProvider: (load: typeof loadFace) => {
+    loadFace = load;
+    return fontProvider(load);
+  },
+}));
+const { createFontProvider } = await import('../../packages/fonts/src/cdn');
+
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+describe('checkout font assets', () => {
+  test('every manifest face cdn.ts requests is a checkout file with its byte length', async () => {
+    const requested: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      const file = checkoutFontAsset(url);
+      if (!file) throw new Error(`no checkout file for ${url}`);
+      return new Response(Bun.file(file));
+    }) as typeof fetch;
+    createFontProvider();
+    for (const face of BUNDLED_FONTS) {
+      expect((await loadFace(face)).byteLength).toBe(face.byteLength);
+    }
+    expect(requested).toHaveLength(BUNDLED_FONTS.length);
+    for (const url of requested) {
+      const other = url.replace(/@[^/@]+\/assets\//, '@0.0.1/assets/');
+      expect(other).not.toBe(url);
+      expect(checkoutFontAsset(other)).toBeUndefined();
+    }
+  });
+});
 
 function request(url, overrides = {}) {
   return {

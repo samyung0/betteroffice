@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { isAllowedFontRequest } from './network-policy.mjs';
+import { checkoutFontAsset, isAllowedFontRequest } from './network-policy.mjs';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
@@ -78,6 +78,12 @@ try {
     if (!isAllowedFontRequest(record)) {
       networkViolations.push(record);
       await route.abort();
+      return;
+    }
+    const local = checkoutFontAsset(url.href);
+    if (local) {
+      record.servedFromCheckout = true;
+      await route.fulfill({ path: local, headers: { 'access-control-allow-origin': '*' } });
       return;
     }
     await route.continue();
