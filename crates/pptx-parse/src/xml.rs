@@ -345,6 +345,8 @@ fn escape_into(value: &str, attribute: bool, output: &mut String) {
             '\n' | '\t' if attribute => {
                 output.push_str(&format!("&#x{:X};", character as u32));
             }
+            // A character XML 1.0 cannot carry would leave the part unreadable.
+            _ if !is_legal_xml_character(character) => {}
             _ => output.push(character),
         }
     }
@@ -603,6 +605,15 @@ fn is_legal_xml_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_no_character_xml_cannot_carry() {
+        let element = XmlElement::new("a:t")
+            .with_attribute("name", "x\u{1}y\u{fffe}")
+            .with_text("a\u{1}b\u{c}c\u{ffff}d\te");
+        let xml = String::from_utf8(serialize_xml_fragment(&element)).unwrap();
+        assert_eq!(xml, "<a:t name=\"xy\">abcd\te</a:t>");
+    }
 
     #[test]
     fn rejects_dtd_unknown_entities_and_depth_overflow() {

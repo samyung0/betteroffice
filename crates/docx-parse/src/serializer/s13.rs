@@ -24,7 +24,7 @@ use crate::relationships::{
 };
 use crate::table::{Table, TableCell};
 use crate::vml::Watermark;
-use crate::xml::ParseError;
+use crate::xml::{ParseError, is_legal_xml_character};
 
 use super::context::SerializerContext;
 use super::numbering::{insert_numbering_entries, serialize_numbering_xml};
@@ -322,7 +322,10 @@ impl<'a> Package<'a> {
         }
     }
 
-    fn set_text(&mut self, path: impl Into<String>, xml: String) {
+    /// Every XML part the save writes passes here, so a character XML 1.0
+    /// cannot carry never reaches the package, whatever wrote it.
+    fn set_text(&mut self, path: impl Into<String>, mut xml: String) {
+        xml.retain(is_legal_xml_character);
         self.set(path, xml.into_bytes());
     }
 
@@ -2535,6 +2538,26 @@ mod tests {
             String::from_utf8_lossy(&after["docProps/core.xml"])
                 .contains("2030-01-02T03:04:05.006Z")
         );
+    }
+
+    #[test]
+    fn a_save_writes_no_character_xml_cannot_carry() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p/></w:body></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("a\u{1}b\u{c}c\u{fffe}d", None)] },
+            "options": { "updateModifiedDate": true, "modifiedBy": "e\u{1f}f" }
+        }))
+        .expect("request");
+        let after = part_map(&write_docx_s13(request, &original).expect("save"));
+        for path in ["word/document.xml", "docProps/core.xml"] {
+            let xml = String::from_utf8(after[path].clone()).expect("utf-8");
+            assert!(xml.chars().all(is_legal_xml_character), "{path}: {xml:?}");
+        }
+        assert!(String::from_utf8_lossy(&after["word/document.xml"]).contains("<w:t>abcd</w:t>"));
+        assert!(String::from_utf8_lossy(&after["docProps/core.xml"]).contains(">ef<"));
     }
 
     #[test]

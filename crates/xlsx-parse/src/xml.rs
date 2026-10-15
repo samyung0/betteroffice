@@ -72,6 +72,24 @@ pub(crate) fn resolve_entity(name: &str) -> Result<String, ParseError> {
         .map_err(|_| ParseError::Malformed(format!("unresolvable entity &{name};")))
 }
 
+/// whether xml 1.0 can carry `ch` (its `Char` production).
+pub(crate) fn is_xml_char(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r' | ' '..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..)
+}
+
+/// a written part without the characters xml 1.0 cannot carry, so no edit,
+/// paste or import puts one in a part no reader can parse. bytes that are not
+/// utf-8 are left alone.
+pub(crate) fn xml_chars(bytes: Vec<u8>) -> Vec<u8> {
+    match String::from_utf8(bytes) {
+        Ok(mut text) => {
+            text.retain(is_xml_char);
+            text.into_bytes()
+        }
+        Err(error) => error.into_bytes(),
+    }
+}
+
 /// look up an attribute by its local name (namespace-prefix agnostic),
 /// returning the unescaped value.
 pub(crate) fn attr(e: &BytesStart, local: &[u8]) -> Result<Option<String>, ParseError> {

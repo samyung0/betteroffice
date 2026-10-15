@@ -942,7 +942,7 @@ fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
 }
 
-fn is_legal_xml_character(character: char) -> bool {
+pub(crate) fn is_legal_xml_character(character: char) -> bool {
     matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
         || matches!(character as u32, 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }

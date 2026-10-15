@@ -26,7 +26,7 @@ use crate::package::{
 };
 use crate::patch::SheetPatch;
 use crate::read::SharedStringCells;
-use crate::xml::{resolve_part_path, xml_err};
+use crate::xml::{resolve_part_path, xml_chars, xml_err};
 
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
@@ -142,7 +142,10 @@ pub fn serialize_workbook_with_active_sheet(
             ));
         }
     }
-    Ok(parts)
+    Ok(parts
+        .into_iter()
+        .map(|(path, bytes)| (path, xml_chars(bytes)))
+        .collect())
 }
 
 /// Serializes owned parts over a preserved source package, guessing each
@@ -1302,6 +1305,7 @@ impl<'a> PartStore<'a> {
     }
 
     fn set(&mut self, path: String, bytes: Vec<u8>) -> Result<(), ParseError> {
+        let bytes = xml_chars(bytes);
         self.budget = self.budget.checked_sub(bytes.len()).ok_or_else(|| {
             ParseError::UnsupportedEdit("generated parts exceeded the save budget".to_owned())
         })?;

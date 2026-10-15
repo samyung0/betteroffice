@@ -834,6 +834,59 @@ fn serialize_round_trips_inline_text_without_shared_table() {
     );
 }
 
+/// No edit, paste or import writes a character xml 1.0 cannot carry: the
+/// writer drops it from shared strings, inline text, formulas and sheet names,
+/// with or without a source package.
+#[test]
+fn a_save_writes_no_character_xml_cannot_carry() {
+    let text = |value: &str| Cell {
+        value: CellValue::Text {
+            value: value.into(),
+        },
+        ..Cell::default()
+    };
+    let assert_writable = |parts: &[(String, Vec<u8>)]| {
+        for (path, bytes) in parts {
+            let xml = std::str::from_utf8(bytes).unwrap();
+            assert!(xml.chars().all(crate::xml::is_xml_char), "{path}: {xml:?}");
+        }
+    };
+    let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
+    let mut wb = Workbook::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet\u{1}");
+    sheet.set_cell(at("A1"), text("a\u{1}b\u{c}c\u{fffe}d"));
+    sheet.set_cell(at("B1"), text("inline\u{1f}"));
+    sheet.set_cell(
+        at("C1"),
+        Cell {
+            formula: Some("\"e\u{2}f\"".into()),
+            ..text("e\u{2}f")
+        },
+    );
+    wb.sheets.push(sheet);
+    wb.shared_strings = vec!["a\u{1}b\u{c}c\u{fffe}d".into()];
+    let parts = serialize_workbook(&wb).unwrap();
+    assert_writable(&parts);
+    let reread = parse_workbook(&parts).unwrap();
+    assert_eq!(reread.sheets[0].name, "Sheet");
+    assert_eq!(cell_at(&reread, "A1").value, text("abcd").value);
+
+    let parsed = parse_workbook_with_package(&package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>"#,
+        &["old"],
+        false,
+    ))
+    .unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.sheets[0].set_cell(at("A1"), text("x\u{1}y"));
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    assert_writable(&saved);
+    assert_eq!(
+        cell_at(&parse_workbook(&saved).unwrap(), "A1").value,
+        text("xy").value
+    );
+}
+
 /// wrap a styles inner-body in `<styleSheet>` and attach it (plus an optional
 /// theme part) to a bare one-sheet package.
 fn package_styled(
@@ -4297,11 +4350,11 @@ fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
     }
 }
 
-/// The writer is the last line: a reference carrying a character xml 1.0
-/// cannot express is refused rather than written raw into a part Excel would
-/// then have to repair.
+/// The writer is the last line: a character xml 1.0 cannot express is dropped
+/// from a reference, as every other writer drops it, rather than written raw
+/// into a part Excel would then have to repair.
 #[test]
-fn refuses_to_write_a_reference_xml_cannot_carry() {
+fn drops_from_a_reference_what_xml_cannot_carry() {
     const CACHELESS: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:dLbls><c:f>Data!$C$1</c:f></c:dLbls></c:chart></c:chartSpace>"#;
     let reference = |formula: &str| {
         vec![xlsx_model::ChartRef {
@@ -4309,11 +4362,10 @@ fn refuses_to_write_a_reference_xml_cannot_carry() {
             formula: formula.to_owned(),
         }]
     };
-    let error = patch_refs(CACHELESS, &reference("Data!\u{7}$C$1")).unwrap_err();
-    assert!(
-        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("U+0007")),
-        "{error:?}"
-    );
+    let patched =
+        String::from_utf8(patch_refs(CACHELESS, &reference("Data!\u{7}$C\u{fffe}$2")).unwrap())
+            .unwrap();
+    assert!(patched.contains("<c:f>Data!$C$2</c:f>"), "{patched}");
 
     let patched =
         String::from_utf8(patch_refs(CACHELESS, &reference("Data!$C$1\r\n")).unwrap()).unwrap();
