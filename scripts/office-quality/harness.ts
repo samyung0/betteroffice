@@ -6,6 +6,13 @@ const api = window as any;
 const format = new URLSearchParams(location.search).get('format');
 let capture: (index: number) => Promise<string>;
 let printCapture: any;
+let lastFetchUrl = '';
+const pageFetch = window.fetch.bind(window);
+/** Remembers the last fetched URL so a failed font download can name it. */
+window.fetch = (input, init) => {
+  lastFetchUrl = String(input);
+  return pageFetch(input, init);
+};
 
 async function fontsFor(bytes: Uint8Array) {
   const zip = await JSZip.loadAsync(bytes);
@@ -32,7 +39,11 @@ async function fontsFor(bytes: Uint8Array) {
       const load =
         provider.resolve(family, bold, italic) ??
         provider.resolveLastResort(family, bold, italic);
-      const buffer = await load();
+      const buffer = await load().catch((error) => {
+        throw new Error(
+          `Font ${family}${bold ? ' bold' : ''}${italic ? ' italic' : ''} failed (${lastFetchUrl}): ${error}`
+        );
+      });
       const face = new FontFace(family, buffer.slice(0), {
         weight: bold ? '700' : '400',
         style: italic ? 'italic' : 'normal',
