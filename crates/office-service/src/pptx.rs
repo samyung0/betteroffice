@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
 
-use crate::common::{check_replacement, image_mime_type, len16, sha256_hex};
+use crate::common::{check_replacement, image_mime_type, len16, sha256_hex, storable_text};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
@@ -294,7 +294,7 @@ impl PptxSession {
         if span.start < span.end {
             self.deck
                 .delete_text(&ctx, &story_id, start, paragraph.start + span.end as u32)
-                .map_err(Error::engine)?;
+                .map_err(refused)?;
         }
         if !span.text.is_empty() {
             let style: TextStyle = match style {
@@ -305,14 +305,14 @@ impl PptxSession {
             };
             self.deck
                 .insert_text(&ctx, &story_id, start, &span.text, &style)
-                .map_err(Error::engine)?;
+                .map_err(refused)?;
         }
         Ok(Applied {
             id: target_id.clone(),
             inverse: Command::ReplaceText {
                 target_id: target_id.clone(),
                 expected_text: text,
-                text: paragraph.text,
+                text: storable_text(&paragraph.text),
             },
         })
     }
@@ -328,6 +328,17 @@ impl PptxSession {
 
     pub fn export(&self) -> Result<Vec<u8>> {
         self.deck.save().map_err(Error::engine)
+    }
+}
+
+/// The deck's refusal to edit an equation's text is an edit refusal with its
+/// sentence; any other failure stays the engine's.
+fn refused(error: pptx_edit::EditError) -> Error {
+    match error {
+        pptx_edit::EditError::EquationText(_) => {
+            Error::edit(EditCode::InvalidInput, error.to_string())
+        }
+        error => Error::engine(error),
     }
 }
 

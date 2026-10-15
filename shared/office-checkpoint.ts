@@ -121,6 +121,8 @@ export interface OfficeCommandResult {
   state: Uint8Array;
   inverse: OfficeCommand[];
   targets: OfficeTarget[];
+  /** The characters an Office file cannot store that the agent's text lost. */
+  notice?: string;
 }
 export type OfficeEditCode =
   | "invalid_input"
@@ -607,6 +609,49 @@ function pptxEntries(doc: PptxDocument): Entry[] {
   return entries;
 }
 /**
+ * A character an Office file cannot store: outside XML 1.0's `Char` (a
+ * control character but tab, line feed and carriage return; U+FFFE, U+FFFF).
+ */
+const UNSTORABLE = /[^\t\n\r\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
+/**
+ * `text` without the characters an Office file cannot store. An agent's text
+ * loses them before its edit applies, and an Undo's inverse restores its
+ * target without them (Epo 2026-10-15).
+ */
+const storableText = (text: string) =>
+  text.replace(new RegExp(UNSTORABLE, "gu"), "");
+/**
+ * The command with its text or value as an Office file can store it, each
+ * dropped character added to `removed`.
+ */
+function storableCommand(
+  command: OfficeCommand,
+  removed: string[]
+): OfficeCommand {
+  const text = command.type === "replace_text" ? command.text : command.value;
+  const dropped = text.match(new RegExp(UNSTORABLE, "gu"));
+  if (!dropped) return command;
+  removed.push(...dropped);
+  return command.type === "replace_text"
+    ? { ...command, text: storableText(text) }
+    : { ...command, value: storableText(text) };
+}
+/**
+ * What an edit's tool result tells the agent about the characters its text
+ * lost, each distinct one named once.
+ */
+function removedNotice(removed: string[]): string | undefined {
+  if (!removed.length) return undefined;
+  const names = new Set(
+    removed.map(
+      (character) =>
+        `U+${character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`
+    )
+  );
+  const noun = removed.length === 1 ? "character" : "characters";
+  return `Removed ${removed.length} ${noun} Office files cannot store (${[...names].join(", ")}).`;
+}
+/**
  * `expectedText` occurs exactly once in the paragraph, counted as note edits
  * count it (an empty one only in an empty paragraph). Returns the span of that
  * occurrence the replacement changes, in paragraph offsets, and the
@@ -998,7 +1043,7 @@ async function open(
               type: "replace_text",
               targetId: command.targetId,
               expectedText: text,
-              text: paragraph.text,
+              text: storableText(paragraph.text),
             },
           };
         },
@@ -1095,7 +1140,7 @@ async function open(
               sheet: sheet.id,
               cell: address,
               expectedValue: readInput(),
-              value: input,
+              value: storableText(input),
             },
           };
         },
@@ -1180,7 +1225,7 @@ async function open(
           type: "replace_text",
           targetId: command.targetId,
           expectedText: text,
-          text: paragraph.text,
+          text: storableText(paragraph.text),
         },
       };
     },
@@ -1888,15 +1933,18 @@ export async function applyOfficeCommands(
   try {
     const inverse: OfficeCommand[] = [];
     const ids = new Set<string>();
+    const removed: string[] = [];
     for (const command of commands) {
-      const applied = session.apply(command);
+      const applied = session.apply(storableCommand(command, removed));
       inverse.unshift(applied.inverse);
       ids.add(applied.id);
     }
+    const notice = removedNotice(removed);
     return {
       state: session.state(),
       inverse,
       targets: [...ids].map((id) => session.locate(id)),
+      ...(notice ? { notice } : {}),
     };
   } finally {
     session.dispose();

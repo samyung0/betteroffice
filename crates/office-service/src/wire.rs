@@ -206,11 +206,15 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
         "applyOfficeCommands" => {
             let commands: Vec<Command> = typed(arg(args, 2))?;
             let result = crate::apply_commands(&base()?, checkpoint(1)?.view(), &commands)?;
-            Ok(json!({
+            let mut answer = json!({
                 "state": to_bytes(&result.state),
                 "inverse": value(result.inverse)?,
                 "targets": value(result.targets)?,
-            }))
+            });
+            if let Some(notice) = result.notice {
+                answer["notice"] = json!(notice);
+            }
+            Ok(answer)
         }
         "locateOfficeTargets" => {
             let ids: Vec<String> = typed(arg(args, 2))?;

@@ -313,3 +313,175 @@ fn pptx_replace_text_replaces_its_one_occurrence_in_the_style_it_replaces() {
         target.value
     );
 }
+
+/// `base` with `from`, which occurs once in the part at `path`, replaced.
+fn with_part(base: &[u8], path: &str, from: &str, to: &str) -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(base)
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| {
+            if name != path {
+                return (name, bytes);
+            }
+            let xml = String::from_utf8(bytes).unwrap();
+            assert_eq!(xml.matches(from).count(), 1, "{from} in {path}");
+            (name, xml.replace(from, to).into_bytes())
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn invalid(message: &str) -> Error {
+    Error::Edit {
+        code: EditCode::InvalidInput,
+        message: message.into(),
+        details: None,
+    }
+}
+
+/// An agent's replacement holding characters an Office file cannot store
+/// applies without them, and the result names them for the tool result (Epo
+/// 2026-10-15); a line break the DOCX paragraph cannot hold is still the
+/// engine's edit refusal, naming the rule.
+#[test]
+fn replacement_text_loses_what_an_office_file_cannot_store_and_says_so() {
+    let base = docx();
+    let sha = sha256_hex(&base);
+    let state = seed(Format::Docx, &base).unwrap();
+    let entries = inspect(&base, checkpoint(Format::Docx, &sha, &state)).unwrap();
+    let liked = entries.iter().find(|entry| entry.value == LIKED).unwrap();
+    let edit = |text: &str| {
+        apply_commands(
+            &base,
+            checkpoint(Format::Docx, &sha, &state),
+            &[replace(liked, "cats", text)],
+        )
+    };
+    let applied = edit("d\u{1}o\u{c}g\u{1}s\u{fffe}").unwrap();
+    assert_eq!(
+        value(&base, Format::Docx, &applied.state, &liked.id),
+        LIKED.replace("cats", "dogs")
+    );
+    assert_eq!(
+        applied.notice.as_deref(),
+        Some("Removed 4 characters Office files cannot store (U+0001, U+000C, U+FFFE).")
+    );
+    assert_eq!(edit("dogs").unwrap().notice, None);
+    assert_eq!(
+        edit("do\rgs").unwrap_err(),
+        invalid("inserted text may not contain paragraph or line breaks")
+    );
+
+    let sha = sha256_hex(DECK);
+    let seeded = seed(Format::Pptx, DECK).unwrap();
+    let target = inspect(DECK, checkpoint(Format::Pptx, &sha, &seeded))
+        .unwrap()
+        .into_iter()
+        .find(|entry| !entry.value.is_empty())
+        .unwrap();
+    let applied = apply_commands(
+        DECK,
+        checkpoint(Format::Pptx, &sha, &seeded),
+        &[replace(&target, &target.value, "a\u{1}b")],
+    )
+    .unwrap();
+    assert_eq!(value(DECK, Format::Pptx, &applied.state, &target.id), "ab");
+    assert_eq!(
+        applied.notice.as_deref(),
+        Some("Removed 1 character Office files cannot store (U+0001).")
+    );
+}
+
+/// PowerPoint's spelling of an equation: the math in an `a14` choice, a text
+/// box picturing it as the fallback.
+const EQUATION: &str = concat!(
+    r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+    r#"<mc:Choice xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" Requires="a14">"#,
+    r#"<p:sp><p:nvSpPr><p:cNvPr id="90" name="Equation"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>"#,
+    r#"<p:spPr><a:xfrm><a:off x="457200" y="4114800"/><a:ext cx="1625600" cy="369332"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>"#,
+    r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a14:m><m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara></a14:m></a:p></p:txBody></p:sp>"#,
+    r#"</mc:Choice><mc:Fallback>"#,
+    r#"<p:sp><p:nvSpPr><p:cNvPr id="90" name="Equation"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>"#,
+    r#"<p:spPr><a:xfrm><a:off x="457200" y="4114800"/><a:ext cx="1625600" cy="369332"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>"#,
+    r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>x squared</a:t></a:r></a:p></p:txBody></p:sp>"#,
+    r#"</mc:Fallback></mc:AlternateContent>"#,
+);
+
+/// An agent edit of an equation's text is refused as the deck refuses it,
+/// as `invalid_input` naming the rule.
+#[test]
+fn pptx_replace_text_in_an_equation_is_refused_as_invalid_input() {
+    let base = with_part(
+        DECK,
+        "ppt/slides/slide1.xml",
+        "</p:spTree>",
+        &format!("{EQUATION}</p:spTree>"),
+    );
+    let sha = sha256_hex(&base);
+    let seeded = seed(Format::Pptx, &base).unwrap();
+    let target = inspect(&base, checkpoint(Format::Pptx, &sha, &seeded))
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.value == "x squared")
+        .unwrap();
+    let error = apply_commands(
+        &base,
+        checkpoint(Format::Pptx, &sha, &seeded),
+        &[replace(&target, "squared", "cubed")],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, Error::Edit { code: EditCode::InvalidInput, message, details: None }
+            if message.ends_with("is an equation: its math can only be changed in PowerPoint")),
+        "{error:?}"
+    );
+}
+
+/// The Undo of an agent edit restores the paragraph as the file can store it:
+/// a character the file cannot hold, there before the edit (a paste or an
+/// import), is dropped instead of refusing the Undo.
+#[test]
+fn undo_restores_a_paragraph_without_a_character_the_file_cannot_store() {
+    for (format, base, path, from, to, expected, text) in [
+        (
+            Format::Docx,
+            docx(),
+            "word/document.xml",
+            "I like ",
+            "I\u{1} like ",
+            "cats",
+            "dogs",
+        ),
+        (
+            Format::Pptx,
+            DECK.to_vec(),
+            "ppt/slides/slide1.xml",
+            "<a:t>Office files,</a:t>",
+            "<a:t>Office\u{1} files,</a:t>",
+            "files",
+            "docs",
+        ),
+    ] {
+        let base = with_part(&base, path, from, to);
+        let sha = sha256_hex(&base);
+        let state = seed(format, &base).unwrap();
+        let target = inspect(&base, checkpoint(format, &sha, &state))
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.value.contains('\u{1}'))
+            .unwrap();
+        let edit = apply_commands(
+            &base,
+            checkpoint(format, &sha, &state),
+            &[replace(&target, expected, text)],
+        )
+        .unwrap();
+        let undone =
+            apply_commands(&base, checkpoint(format, &sha, &edit.state), &edit.inverse).unwrap();
+        assert_eq!(
+            value(&base, format, &undone.state, &target.id),
+            target.value.replace('\u{1}', ""),
+            "{path}"
+        );
+    }
+}

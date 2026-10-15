@@ -65,6 +65,8 @@ export interface OfficeCommandResult {
   state: Uint8Array;
   inverse: OfficeCommand[];
   targets: OfficeTarget[];
+  /** The characters an Office file cannot store that the agent's text lost. */
+  notice?: string;
 }
 export type OfficeEditCode =
   | "invalid_input"

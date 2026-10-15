@@ -13,6 +13,7 @@ import {
   resolveAsset,
   xlsxPendingEffects,
 } from "./office-checkpoint";
+import type { OfficeCommand } from "./office-checkpoint";
 import { createYrsSession } from "../packages/docx/src/yrs";
 import { XlsxDocument } from "../packages/xlsx/src/wasm/generated/xlsx_wasm.js";
 import { PptxDocument } from "../packages/pptx/src/wasm/generated/pptx_wasm.js";
@@ -1083,6 +1084,95 @@ test("agent edits set XLSX cells by sheet name and address and clear them throug
       { type: "set_cell", sheet: "Nope", cell: "A1", expectedValue: "", value: "x" },
     ])
   ).rejects.toThrow("unavailable_target");
+});
+
+test("agent text loses the characters an Office file cannot store and the result says so", async () => {
+  const docx = await fixture("betteroffice-demo.docx");
+  const docxState = await seedOffice("docx", docx);
+  const paragraph = (await inspectOffice(docx, docxState)).find(
+    (entry) => entry.value.length > 0
+  )!;
+  const edited = await applyOfficeCommands(docx, docxState, [
+    {
+      type: "replace_text",
+      targetId: paragraph.id,
+      expectedText: paragraph.value,
+      text: "a\u0001b\u0001",
+    },
+  ]);
+  expect(edited.notice).toBe(
+    "Removed 2 characters Office files cannot store (U+0001)."
+  );
+  expect(
+    (await inspectOffice(docx, { ...docxState, state: edited.state })).find(
+      (entry) => entry.id === paragraph.id
+    )?.value
+  ).toBe("ab");
+  const xlsx = await fixture("sample.xlsx");
+  const xlsxState = await seedOffice("xlsx", xlsx);
+  const sheet = (await inspectOffice(xlsx, xlsxState))[0].label.split("!")[0];
+  const set = await applyOfficeCommands(xlsx, xlsxState, [
+    { type: "set_cell", sheet, cell: "ZZ100", expectedValue: "", value: "a\uFFFEb" },
+  ]);
+  expect(set.notice).toBe(
+    "Removed 1 character Office files cannot store (U+FFFE)."
+  );
+  expect(
+    (await inspectOffice(xlsx, { ...xlsxState, state: set.state })).find(
+      (entry) => entry.label === `${sheet}!ZZ100`
+    )?.value
+  ).toBe("ab");
+});
+
+test("an agent edit's Undo restores text without characters an Office file cannot store", async () => {
+  const restored = async (
+    bytes: Uint8Array,
+    format: "docx" | "xlsx",
+    edit: (entry: { id: string; value: string; position: string }) => OfficeCommand
+  ) => {
+    const before = await seedOffice(format, bytes);
+    const target = (await inspectOffice(bytes, before)).find((entry) =>
+      entry.value.includes("\u0001")
+    )!;
+    const applied = await applyOfficeCommands(bytes, before, [edit(target)]);
+    const undone = await applyOfficeCommands(
+      bytes,
+      { ...before, state: applied.state },
+      applied.inverse
+    );
+    const after = await inspectOffice(bytes, { ...before, state: undone.state });
+    return [after.find((entry) => entry.id === target.id)?.value, target.value];
+  };
+  const docx = unzipContainer(await fixture("betteroffice-demo.docx"));
+  docx["word/document.xml"] = new TextEncoder().encode(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>` +
+      `<w:p w14:paraId="0000000A"><w:r><w:t xml:space="preserve">I\u0001 like cats</w:t></w:r></w:p>` +
+      `<w:sectPr/></w:body></w:document>`
+  );
+  const [paragraph, before] = await restored(rezipContainer(docx), "docx", (entry) => ({
+    type: "replace_text",
+    targetId: entry.id,
+    expectedText: "cats",
+    text: "dogs",
+  }));
+  expect(paragraph).toBe(before.replace("\u0001", ""));
+  const xlsx = unzipContainer(await fixture("sample.xlsx"));
+  xlsx["xl/sharedStrings.xml"] = new TextEncoder().encode(
+    new TextDecoder()
+      .decode(xlsx["xl/sharedStrings.xml"])
+      .replace(">Item</t>", ">It\u0001em</t>")
+  );
+  const [cell] = await restored(rezipContainer(xlsx), "xlsx", (entry) => {
+    const at = entry.position.lastIndexOf(":");
+    return {
+      type: "set_cell",
+      sheet: entry.position.slice(0, at),
+      cell: entry.position.slice(at + 1),
+      expectedValue: entry.value,
+      value: "Line",
+    };
+  });
+  expect(cell).toBe("Item");
 });
 
 test("agent edits replace one PPTX paragraph and keep the paragraph identity for guards", async () => {

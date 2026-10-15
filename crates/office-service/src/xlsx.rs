@@ -4,7 +4,7 @@
 use betteroffice_xlsx::{CalculationOptions, CellRef, SheetId, Workbook};
 use serde::Serialize;
 
-use crate::common::{assert_checkpoint, image_mime_type, sha256_hex};
+use crate::common::{assert_checkpoint, image_mime_type, sha256_hex, storable_text};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, canonical};
@@ -243,7 +243,7 @@ impl XlsxSession {
             workbook
                 .cell(SheetId(index as u32), at)
                 .map(|cell| cell.input)
-                .map_err(Error::engine)
+                .map_err(refused)
         };
         let before = self.cell_at(index, &address)?;
         let input = read_input(&self.workbook)?;
@@ -270,7 +270,7 @@ impl XlsxSession {
         let result = self
             .workbook
             .edit_cell(SheetId(index as u32), at, value, now_options())
-            .map_err(Error::engine)?;
+            .map_err(refused)?;
         self.workbook.sheet_info().map_err(Error::engine)?;
         if !result.applied {
             return Err(Error::edit(
@@ -293,7 +293,7 @@ impl XlsxSession {
                 sheet: sheet_id,
                 cell: address,
                 expected_value: read_input(&self.workbook)?,
-                value: input,
+                value: storable_text(&input),
             },
         })
     }
@@ -452,6 +452,19 @@ fn cell_value(cell: &J) -> String {
         None => String::new(),
         Some(J::Str(text)) => text.clone(),
         Some(other) => canonical(other),
+    }
+}
+
+/// The workbook's refusal of a cell or value the agent chose (outside the
+/// grid, over Excel's limits, not a worksheet) is an edit refusal with its
+/// sentence; any other failure stays the engine's.
+fn refused(error: betteroffice_xlsx::Error) -> Error {
+    match error {
+        betteroffice_xlsx::Error::CellOutOfRange(_)
+        | betteroffice_xlsx::Error::InvalidOperation(_) => {
+            Error::edit(EditCode::InvalidInput, error.to_string())
+        }
+        error => Error::engine(error),
     }
 }
 

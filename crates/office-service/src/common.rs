@@ -181,6 +181,59 @@ pub(crate) fn check_replacement(
     Ok((span, after))
 }
 
+/// Whether an Office file can store `ch`: XML 1.0's `Char` (no control
+/// character but tab, line feed and carriage return; no U+FFFE or U+FFFF).
+fn storable(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r')
+        || matches!(ch, ' '..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..)
+}
+
+/// office-checkpoint.ts `storableText`: `text` without the characters an
+/// Office file cannot store. An agent's text loses them before its edit
+/// applies, and an Undo's inverse restores its target without them (Epo
+/// 2026-10-15).
+pub(crate) fn storable_text(text: &str) -> String {
+    text.chars().filter(|&ch| storable(ch)).collect()
+}
+
+/// office-checkpoint.ts `storableCommand`: the command with its text or value
+/// as an Office file can store it, each dropped character added to `removed`.
+pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Command {
+    let mut command = command.clone();
+    let (Command::ReplaceText { text, .. } | Command::SetCell { value: text, .. }) = &mut command;
+    let before = removed.len();
+    removed.extend(text.chars().filter(|&ch| !storable(ch)));
+    if removed.len() > before {
+        *text = storable_text(text);
+    }
+    command
+}
+
+/// office-checkpoint.ts `removedNotice`: what an edit's tool result tells the
+/// agent about the characters its text lost, each distinct one named once.
+pub(crate) fn removed_notice(removed: &[char]) -> Option<String> {
+    if removed.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for ch in removed {
+        let name = format!("U+{:04X}", *ch as u32);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let count = removed.len();
+    let noun = if count == 1 {
+        "character"
+    } else {
+        "characters"
+    };
+    Some(format!(
+        "Removed {count} {noun} Office files cannot store ({}).",
+        names.join(", ")
+    ))
+}
+
 /// The span of `before` that `after` changes, in UTF-16 offsets, never
 /// splitting a surrogate pair (office-checkpoint.ts `changedSpan`).
 pub(crate) struct Span {

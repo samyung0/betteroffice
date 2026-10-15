@@ -32,7 +32,7 @@ pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxRepli
 pub use session::{compare_baselines, unshifted_effects};
 pub use types::*;
 
-use common::assert_checkpoint;
+use common::{assert_checkpoint, removed_notice, storable_command};
 use docx::DocxSession;
 use pptx::PptxSession;
 use session::{Applied, Item};
@@ -294,7 +294,8 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 }
 
 /// Applies content commands in order; the inverse list is in undo order and
-/// the targets describe the post-edit state.
+/// the targets describe the post-edit state. Characters an Office file cannot
+/// store leave the commands' text first and the result's notice names them.
 pub fn apply_commands(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -307,8 +308,9 @@ pub fn apply_commands(
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
         let mut inverse = Vec::with_capacity(commands.len());
         let mut ids: Vec<String> = Vec::new();
+        let mut removed = Vec::new();
         for command in commands {
-            let applied = session.apply(command)?;
+            let applied = session.apply(&storable_command(command, &mut removed))?;
             inverse.insert(0, applied.inverse);
             if !ids.contains(&applied.id) {
                 ids.push(applied.id);
@@ -323,6 +325,7 @@ pub fn apply_commands(
             state,
             inverse,
             targets,
+            notice: removed_notice(&removed),
         })
     })
 }

@@ -146,6 +146,9 @@ pub struct CommandResult {
     pub state: Vec<u8>,
     pub inverse: Vec<Command>,
     pub targets: Vec<Target>,
+    /// For the edit's tool result: the characters an Office file cannot store
+    /// that the agent's text lost before the edit applied (Epo 2026-10-15).
+    pub notice: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

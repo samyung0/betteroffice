@@ -14,9 +14,9 @@ mod styles;
 
 use std::collections::HashMap;
 
-use docx_edit::{EditCtx, EngineSession, StoryRange, UndoSession};
+use docx_edit::{EditCtx, EngineSession, OpError, StoryRange, UndoSession};
 
-use crate::common::{asset_from_data_url, check_replacement};
+use crate::common::{asset_from_data_url, check_replacement, storable_text};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::{V, canonical, text};
@@ -580,7 +580,13 @@ impl DocxSession {
                     range,
                     &span.text,
                 )
-                .map_err(Error::engine)?;
+                .map_err(|error| match error {
+                    // A line break (CR, U+2028, U+2029) the paragraph cannot hold.
+                    OpError::TextContainsBreak => {
+                        Error::edit(EditCode::InvalidInput, error.to_string())
+                    }
+                    error => Error::engine(error),
+                })?;
         }
         self.projected = None;
         Ok(Applied {
@@ -588,7 +594,7 @@ impl DocxSession {
             inverse: Command::ReplaceText {
                 target_id: target_id.clone(),
                 expected_text: text,
-                text: paragraph.text,
+                text: storable_text(&paragraph.text),
             },
         })
     }
