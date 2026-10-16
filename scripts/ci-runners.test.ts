@@ -169,7 +169,7 @@ const kyoraJobs = jobs.filter(({ runners }) =>
 );
 
 describe('CI runner routing', () => {
-  test('every CI and End-to-end Linux job but the two shortest and the timings upload runs on its kyora class', () => {
+  test('every CI and End-to-end Linux job but the shortest and the timings upload runs on its kyora class', () => {
     expect(Object.fromEntries(kyoraJobs.map(({ name, runners }) => [name, runners['push to main'].unset]))).toEqual({
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
@@ -178,7 +178,7 @@ describe('CI runner routing', () => {
       'e2e.yml scenarios': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
-    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);
+    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'e2e.yml publish']);
     for (const { name, runners } of kyoraJobs) {
       for (const event of TRUSTED) {
         expect(runners[event].unset, `${name}: ${event}`).toEqual(runners['push to main'].unset);

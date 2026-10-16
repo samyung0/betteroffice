@@ -9,7 +9,6 @@ export const RUST_CRATES = [
   { name: 'betteroffice-wasm-alloc', dependency: 'wasm-alloc' },
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
-  { name: 'betteroffice-ooxml-diff', dependency: 'ooxml-diff' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-metafile', dependency: 'ooxml-metafile' },
   { name: 'betteroffice-xlsx-model', dependency: 'xlsx-model' },

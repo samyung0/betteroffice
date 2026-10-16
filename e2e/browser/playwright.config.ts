@@ -9,7 +9,6 @@ const output =
 export default defineConfig({
   testDir: import.meta.dirname,
   testMatch: '**/*.browser.ts',
-  testIgnore: 'plugin-host/**',
   outputDir: resolve(output, 'results'),
   reporter: [
     ['list'],
