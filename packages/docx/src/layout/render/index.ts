@@ -44,7 +44,6 @@ export {
 export {
   applyInteractiveSdtFocus,
   buildInteractiveOverlayPage,
-  interactiveOverlayHasTabStops,
   type BuildInteractiveOverlayOptions,
   type InteractiveOverlayLabels,
 } from './interactiveOverlay';
@@ -113,7 +112,6 @@ export {
 
 export {
   createDisplayListQueries,
-  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,
@@ -126,7 +124,6 @@ export {
   type DisplayListRegionHit,
   type DisplayListVerticalMove,
   type DisplayListVisualLine,
-  type VisualLineExtent,
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 
@@ -162,7 +159,6 @@ export {
 export {
   computeAnchorPositionsFromDisplayList,
   computeAnchorPositionsFromYrs,
-  anchorPositionsFromPoints,
   mergeHfAnchorPositionsFromDisplayList,
   visitAnchorKeys,
   type AnchorEditorView,
@@ -175,7 +171,6 @@ export {
   yrsIdToNumericId,
   type YrsSidebarDisplayPoint,
   type YrsSidebarProjection,
-  type YrsStorySegmentSource,
 } from './yrsSidebarProjection';
 
 export { extractTrackedChangesFromYrs, type TrackedChangesResult } from './yrsTrackedChanges';

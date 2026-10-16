@@ -8,7 +8,6 @@ import type { FieldInlineContent } from './link';
 import type { BlockContent } from './section';
 import type { TextFormatting } from '../formatting';
 import type { ColorValue } from '../colors';
-import type { TrackedRunChange } from './trackedChange';
 
 /** Glyph/font pair used by checkbox states (`w14:*State`). */
 export interface SdtCheckboxGlyph {
