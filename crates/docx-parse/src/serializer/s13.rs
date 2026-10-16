@@ -1921,6 +1921,7 @@ fn process_image_part<'a>(
                             part,
                             crate::media::media_mime_type(&path),
                             &path,
+                            &mut crate::media::DisplayBudget::default(),
                         )
                         .0
                         .as_ref()

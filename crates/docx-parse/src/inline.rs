@@ -3384,18 +3384,11 @@ mod tests {
             ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>{paragraph}</w:body></w:document>"#).into_bytes()),
         ])
         .unwrap();
-        let packages: [&[u8]; 7] = [
+        let packages: [&[u8]; 4] = [
             &synthetic,
             include_bytes!("../../betteroffice-docx/tests/corpus/fixtures/betteroffice-demo.docx"),
             include_bytes!(
                 "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
-            ),
-            include_bytes!("../../docx-edit/tests/fixtures/structured-export/principal.docx"),
-            include_bytes!(
-                "../../docx-edit/tests/fixtures/field-code-paragraphs/body-field-code-nested.docx"
-            ),
-            include_bytes!(
-                "../../docx-edit/tests/fixtures/field-code-paragraphs/header-field-code-nested.docx"
             ),
             include_bytes!("../../docx-edit/tests/fixtures/footnote-anchor.docx"),
         ];

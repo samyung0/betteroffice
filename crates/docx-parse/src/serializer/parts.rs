@@ -708,6 +708,9 @@ mod tests {
         BlockContent::Paragraph(Arc::new(Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: None,
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
             extra_attributes: Vec::new(),
             formatting: None,
@@ -822,6 +825,7 @@ mod tests {
                 content: vec![paragraph("safe <&>")],
                 custom_root_bindings: Vec::new(),
                 verbatim_xml: None,
+                source_ordinal: None,
             }],
             &mut context(),
         )
@@ -847,6 +851,7 @@ mod tests {
             verbatim_xml: Some(
                 "<w:endnote w:id=\"4\"><w:customXml><w:p/></w:customXml></w:endnote>".to_owned(),
             ),
+            source_ordinal: None,
         };
         let xml = serialize_endnotes_part(&[valid.clone()], &mut context()).unwrap();
         assert!(xml.contains(valid.verbatim_xml.as_deref().unwrap()));

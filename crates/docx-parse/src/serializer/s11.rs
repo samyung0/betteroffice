@@ -168,7 +168,6 @@ fn parse_run_back(xml: &str) -> Result<Run, ParseError> {
         None,
         &mut budget,
         Some(&mut drawing),
-        false,
     )
 }
 

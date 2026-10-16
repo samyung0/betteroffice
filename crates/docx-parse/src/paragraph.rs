@@ -151,6 +151,15 @@ pub struct Paragraph {
     pub node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub para_id: Option<String>,
+    /// Upstream's paragraph identity fields (#830). Capy keeps its own
+    /// `w14:paraId` model, so its parse leaves them unset; `repeated_para_id`
+    /// is only marked by the package scan in `s9`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeated_para_id: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para_id_attribute: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ordinal: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_id: Option<String>,
     /// Attributes the model does not type, kept in authored form so a save
@@ -256,6 +265,9 @@ pub fn parse_paragraph(
                 .or_else(|| element.attribute(Some("w"), "paraId")),
             ids,
         ),
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: normalize_hex_id(
             element
                 .attribute(Some("w14"), "textId")
@@ -344,6 +356,8 @@ pub fn parse_document_paragraph_properties(
             name: "w:r".to_owned(),
             attributes: Default::default(),
             children: vec![XmlNode::Element(run_properties.clone())],
+            paragraph_ordinal: None,
+            para_id_attribute: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -414,7 +428,7 @@ fn parse_paragraph_mark_change(element: &XmlElement) -> Option<TrackedChangeInfo
     })
 }
 
-fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
+pub(crate) fn parse_tracked_change_info(element: &XmlElement) -> TrackedChangeInfo {
     let parsed = element
         .attribute(Some("w"), "id")
         .and_then(parse_javascript_integer_prefix)
@@ -984,12 +998,15 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
             name: element.name.clone(),
             attributes: element.attributes.clone(),
             children,
+            paragraph_ordinal: element.paragraph_ordinal,
+            para_id_attribute: element.para_id_attribute.clone(),
         }
     }
     InlineNode::RawXml(Box::new(RawInlineXml {
         node_type: RawInlineXmlType::RawXml,
         xml: without_comment_ranges(element).to_raw_inline_xml(),
         shown,
+        source_ordinal: None,
     }))
 }
 
@@ -1058,6 +1075,8 @@ pub fn resolve_raw_inline(
                         node => vec![node.clone()],
                     })
                     .collect(),
+                paragraph_ordinal: element.paragraph_ordinal,
+                para_id_attribute: element.para_id_attribute.clone(),
             }],
         }
     }
@@ -1069,6 +1088,8 @@ pub fn resolve_raw_inline(
             .into_iter()
             .map(XmlNode::Element)
             .collect(),
+        paragraph_ordinal: None,
+        para_id_attribute: None,
     };
     let limits = ParseLimits::default();
     let content = parse_paragraph_contents(
@@ -1103,6 +1124,8 @@ pub fn parse_raw_inline(xml: &str) -> Option<Vec<InlineNode>> {
         name: "w:p".to_owned(),
         attributes: Default::default(),
         children: vec![XmlNode::Element(parse_raw_root(xml)?)],
+        paragraph_ordinal: None,
+        para_id_attribute: None,
     };
     let limits = ParseLimits::default();
     parse_paragraph_contents(
@@ -1132,7 +1155,7 @@ fn filter_field_inline(content: Vec<ParagraphContent>) -> Vec<InlineNode> {
         .collect()
 }
 
-fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
+pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     let local = element.local_name();
     let mapped = match local {
         "delText" => Some("t"),
@@ -1149,6 +1172,8 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     XmlElement {
         name,
         attributes: element.attributes.clone(),
+        paragraph_ordinal: element.paragraph_ordinal,
+        para_id_attribute: element.para_id_attribute.clone(),
         children: element
             .children
             .iter()
@@ -1341,6 +1366,7 @@ fn parse_drawing_owned(
                 kind: "drawing".to_owned(),
                 xml: element.to_raw_inline_xml(),
                 text: None,
+                preview: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1369,6 +1395,7 @@ fn parse_drawing_owned(
                 kind: "drawing".to_owned(),
                 xml,
                 text: None,
+                preview: None,
             },
         }]);
     }

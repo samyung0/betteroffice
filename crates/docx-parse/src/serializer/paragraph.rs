@@ -1079,6 +1079,9 @@ mod tests {
         let paragraph = Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: Some("AA&BB\"CC".to_owned()),
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
             extra_attributes: Vec::new(),
             formatting: Some(ParagraphFormatting {

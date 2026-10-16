@@ -222,7 +222,7 @@ impl StoryParser<'_, '_> {
                         }
                         if typed_block(child) {
                             let events = scan_field_block_events(child);
-                            cut.finish_block(events.external_ends, events.unmatched_modes.len());
+                            cut.finish_block(events.external_ends, events.unmatched_fields.len());
                         }
                     }
                     false
@@ -252,7 +252,7 @@ impl StoryParser<'_, '_> {
             }
             let events = scan_field_block_events(child);
             if let Some(cut) = &mut legacy_cut {
-                cut.finish_block(events.external_ends, events.unmatched_modes.len());
+                cut.finish_block(events.external_ends, events.unmatched_fields.len());
             }
             if events.external_separates > 0
                 && let Some(open) = open_fields.last_mut()
