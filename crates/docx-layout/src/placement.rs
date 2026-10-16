@@ -950,6 +950,7 @@ mod tests {
             header_row_count: None,
             clip_top,
             clip_bottom,
+            column_widths: Vec::new(),
             cell_clips: None,
         }
     }

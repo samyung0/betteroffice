@@ -305,6 +305,74 @@ pub fn build_resident_display_list_partial_observed(
     })
 }
 
+/// Builds display pages `pages` from typed pagination state, a few pages at a
+/// time (see [`display_list::build_resident_display_pages_with_fonts_observed`]).
+pub fn build_resident_display_pages_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    extras: &str,
+    pages: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<display_list::DisplayList, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &store.borrow(),
+            pages,
+            observe_phase,
+        )
+    })
+}
+
+/// [`build_resident_display_pages_observed`] with the extras parsed once
+/// (see [`display_list::ResidentDisplayInput::new`]).
+pub fn build_resident_display_pages_from_observed(
+    input: &mut display_list::ResidentDisplayInput,
+    pagination: &types::Input,
+    layout: &types::Layout,
+    pages: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<display_list::DisplayList, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_from_with_fonts_observed(
+            input,
+            pagination,
+            layout,
+            &store.borrow(),
+            pages,
+            observe_phase,
+        )
+    })
+}
+
+/// Rebuilds the pagination-dirtied pages of an engine-owned list in place and
+/// shifts the converged suffix's body positions by stable block-id deltas.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_pages_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    extras: &str,
+    previous: &mut display_list::DisplayList,
+    rebuilt_pages: std::ops::Range<usize>,
+    position_deltas: &std::collections::HashMap<String, i64>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<bool, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_pages_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &store.borrow(),
+            previous,
+            rebuilt_pages,
+            position_deltas,
+            observe_phase,
+        )
+    })
+}
+
 pub use display_list::release_resident_display_pages;
 
 /// Build unbuilt pages of an engine-owned display list; returns the pages built.
@@ -779,7 +847,8 @@ impl Drop for MeasureFontsScope {
 /// Register a font for measurement from raw sfnt bytes; returns the font id
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
-/// error at this boundary, mirroring `FontStore::register`.
+/// error at this boundary, mirroring `FontStore::register`. Bytes identical to
+/// an earlier registration answer its id.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
@@ -878,11 +947,16 @@ pub fn with_private_measure_fonts<T>(run: impl FnOnce() -> T) -> T {
     run()
 }
 
-/// Registers raw sfnt bytes in the current measurement font store.
+/// Registers raw sfnt bytes in the current measurement font store; bytes
+/// identical to an earlier registration answer its id.
 pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
     with_measure_fonts(|store| {
+        let mut store = store.borrow_mut();
+        // A face loaded again arrives as a new copy of the same bytes.
+        if let Some(id) = store.find(bytes) {
+            return Ok(id.to_u32());
+        }
         store
-            .borrow_mut()
             .register(bytes.to_vec())
             .map(|id| id.to_u32())
             .map_err(|error| error.to_string())

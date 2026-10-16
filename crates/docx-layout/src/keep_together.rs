@@ -496,15 +496,26 @@ mod tests {
                 make_paragraph_block("Heading", true),
                 page_break_before("Chapter", false),
                 make_paragraph_block("Heading", true),
-                paragraph(
-                    vec![text_run("Chapter")],
-                    Some(ParagraphAttrs {
-                        page_break_before_run: Some(true),
-                        ..Default::default()
-                    }),
-                ),
+                // a page-break unit opening the next paragraph
+                LayoutBlock::PageBreak(crate::types::PageBreakBlock {
+                    sdt_groups: None,
+                    id: BlockId::Str("break".into()),
+                    pm_start: None,
+                    pm_end: None,
+                    keeps_leading_spacing: Some(true),
+                }),
+                make_paragraph_block("Chapter", false),
             ],
-            vec![line(), line(), line(), line(), line(), line(), line()],
+            vec![
+                line(),
+                line(),
+                line(),
+                line(),
+                line(),
+                line(),
+                BlockExtent::PageBreak,
+                line(),
+            ],
         );
 
         let scan = analyze_keep_with_next(&measured);
