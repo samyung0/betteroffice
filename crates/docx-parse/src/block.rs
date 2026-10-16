@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::chart::ChartPartsMap;
 use crate::inline::{
     ComplexField, InlineNode, MathEquation, MathType, RunContent, SdtProperties,
-    StructuredFieldContent, StructuredFieldTree, inline_holds_field, parse_sdt_properties,
+    StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
@@ -933,16 +933,6 @@ fn complex_field_mut<'a>(
             descend(change.content.get_mut(*index)?, rest)
         }
         _ => None,
-    }
-}
-
-fn default_field_tree() -> StructuredFieldTree {
-    StructuredFieldTree {
-        version: Some(1.0),
-        code: None,
-        result: None,
-        children: None,
-        display_mode: Some("result".to_owned()),
     }
 }
 

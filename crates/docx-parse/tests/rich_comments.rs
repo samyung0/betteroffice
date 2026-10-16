@@ -2,9 +2,6 @@ use docx_parse::document::DocumentBody;
 use docx_parse::paragraph_identity::{
     paragraph_ids_by_part, paragraph_occurrences, parse_paragraph_id,
 };
-use docx_parse::relationships::{
-    RelationshipTarget, parse_relationships, resolve_relationship_target,
-};
 use docx_parse::s9::{S9ParseOptions, parse_docx_s9_wire};
 use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism,
@@ -119,17 +116,6 @@ fn part(bytes: &[u8], name: &str) -> Vec<u8> {
         .1
 }
 
-fn assert_rich_comment(bytes: &[u8]) {
-    let xml = String::from_utf8(part(bytes, "word/comments.xml")).unwrap();
-    let start = xml.find("<w:comment w:author='Rich reviewer'").unwrap();
-    let end = start + xml[start..].find("</w:comment>").unwrap() + "</w:comment>".len();
-    assert_eq!(&xml.as_bytes()[start..end], RICH_COMMENT.as_bytes());
-    assert_eq!(
-        part(bytes, "word/_rels/comments.xml.rels"),
-        COMMENT_RELS.as_bytes()
-    );
-}
-
 fn assert_comment_text(bytes: &[u8], id: f64, text: &str) {
     let comments = save_request(bytes).document.comments.unwrap();
     let comment = comments.iter().find(|comment| comment.id == id).unwrap();
@@ -167,67 +153,6 @@ fn assert_comment_companion_ids(bytes: &[u8]) {
             }
         }
     }
-}
-
-#[test]
-fn parse_serialize_preserves_rich_comment_xml_and_relationship_bytes() {
-    let source = fixture();
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_rich_comment(&saved);
-    assert_eq!(
-        part(&saved, "word/comments.xml"),
-        part(&source, "word/comments.xml")
-    );
-    assert_eq!(
-        part(&saved, "word/media/pixel.png"),
-        part(&source, "word/media/pixel.png")
-    );
-}
-
-#[test]
-fn assigning_a_comment_paragraph_id_saves_the_identity_without_collisions() {
-    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
-    let (_, bytes) = parts
-        .iter_mut()
-        .find(|(path, _)| path == "word/document.xml")
-        .unwrap();
-    *bytes = std::str::from_utf8(bytes)
-        .unwrap()
-        .replace("00000001", "10000001")
-        .into_bytes();
-    let source = ooxml_opc::rezip_parts(&parts).unwrap();
-    let mut request = save_request(&source);
-    request.document.comments = parse_docx_s9_wire(
-        &source,
-        S9ParseOptions {
-            source_ordinals: true,
-            ..S9ParseOptions::default()
-        },
-    )
-    .unwrap()
-    .document
-    .package
-    .document
-    .comments;
-    request.paragraph_ids = Some(
-        serde_json::from_value(json!({
-            "assignments": [{
-                "part": "word/comments.xml", "ordinal": 0, "paraId": "10000007"
-            }]
-        }))
-        .unwrap(),
-    );
-    let saved = write_docx_s13(request, &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_comment_text(&saved, 0.0, " colorful");
-    assert_comment_text(&saved, 1.0, "Plain");
-    let ids = paragraph_ids_by_part(&saved).unwrap();
-    let body_ids = &ids["/word/document.xml"];
-    let comment_ids = &ids["/word/comments.xml"];
-    assert_eq!(body_ids, &["10000001".to_owned()]);
-    assert!(comment_ids.contains(&"10000007".to_owned()));
-    assert!(comment_ids.iter().all(|id| !body_ids.contains(id)));
 }
 
 #[test]
@@ -282,77 +207,6 @@ fn resolving_a_rich_comment_saves_its_done_flag() {
     );
 }
 
-#[test]
-fn adding_a_comment_saves_the_new_comment() {
-    let source = fixture();
-    let mut request = save_request(&source);
-    request.document.comments.as_mut().unwrap().push(
-        serde_json::from_value(json!({
-            "id": 2, "author": "New reviewer", "content": [{
-                "type": "paragraph", "content": [{
-                    "type": "run", "content": [{ "type": "text", "text": "Added comment" }]
-                }]
-            }]
-        }))
-        .unwrap(),
-    );
-    let saved = write_docx_s13(request, &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_comment_text(&saved, 0.0, " colorful");
-    assert_comment_text(&saved, 1.0, "Plain");
-    assert_comment_text(&saved, 2.0, "Added comment");
-    assert_rich_comment(&saved);
-    let original = String::from_utf8(part(&source, "word/comments.xml")).unwrap();
-    let written = String::from_utf8(part(&saved, "word/comments.xml")).unwrap();
-    let close = original.rfind("</w:comments>").unwrap();
-    assert!(written.starts_with(&original[..close]));
-    assert!(written.ends_with(&original[close..]));
-    assert!(written[close..].starts_with("<w:comment w:id=\"2\""));
-}
-
-#[test]
-fn adding_a_comment_where_its_prefixes_are_unbound_writes_the_part_whole() {
-    let plain = "<w:comment w:id=\"1\" w:author=\"Plain reviewer\"><w:p><w:r><w:t>Plain</w:t></w:r></w:p></w:comment>";
-    let mut parts = ooxml_opc::unzip_parts(&fixture_with_comment_parts(plain, &[])).unwrap();
-    let (_, bytes) = parts
-        .iter_mut()
-        .find(|(path, _)| path == "word/comments.xml")
-        .unwrap();
-    *bytes = std::str::from_utf8(bytes)
-        .unwrap()
-        .replace(
-            " xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\"",
-            "",
-        )
-        .into_bytes();
-    let source = ooxml_opc::rezip_parts(&parts).unwrap();
-    let unchanged = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_eq!(
-        part(&unchanged, "word/comments.xml"),
-        part(&source, "word/comments.xml")
-    );
-    let mut request = save_request(&source);
-    request.document.comments.as_mut().unwrap().push(
-        serde_json::from_value(json!({
-            "id": 2, "author": "New reviewer", "content": [{
-                "type": "paragraph", "content": [{
-                    "type": "run", "content": [{ "type": "text", "text": "Added comment" }]
-                }]
-            }]
-        }))
-        .unwrap(),
-    );
-    let expected = serialize_comments_part(
-        request.document.comments.as_ref().unwrap(),
-        &mut SerializerContext::new(&request.determinism).unwrap(),
-    );
-    let saved = write_docx_s13(request, &source).unwrap();
-    assert_eq!(part(&saved, "word/comments.xml"), expected.as_bytes());
-    assert_comment_companion_ids(&saved);
-    assert_comment_text(&saved, 1.0, "Plain");
-    assert_comment_text(&saved, 2.0, "Added comment");
-}
-
 fn without_rich_paragraph_ids(xml: &str) -> String {
     let mut xml = xml.to_owned();
     for id in ["10000001", "10000002", "10000003", "10000005", "10000006"] {
@@ -385,21 +239,6 @@ fn fixture_with_comment_parts(comments: &str, companions: &[(&str, &str)]) -> Ve
         parts.push(((*path).to_owned(), xml.as_bytes().to_vec()));
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
-}
-
-#[test]
-fn comments_without_paragraph_ids_keep_their_source_bytes() {
-    let source = fixture_without_rich_paragraph_ids();
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_eq!(
-        part(&saved, "word/comments.xml"),
-        part(&source, "word/comments.xml")
-    );
-    assert_eq!(
-        part(&saved, "word/_rels/comments.xml.rels"),
-        part(&source, "word/_rels/comments.xml.rels")
-    );
 }
 
 #[test]
@@ -679,77 +518,6 @@ fn adding_a_comment_with_a_non_utf8_source_declaration_saves_its_text() {
 }
 
 #[test]
-fn invalid_source_comment_paragraph_id_uses_the_writer_part() {
-    let invalid = PLAIN_COMMENT.replace("10000004", "1000000&quot;");
-    let source = fixture_with_comment_parts(&invalid, &[]);
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    let limits = ParseLimits::default();
-    for path in ["word/commentsExtended.xml", "word/commentsIds.xml"] {
-        let document =
-            parse_xml(&part(&saved, path), path, &mut ParseBudget::new(&limits)).unwrap();
-        let root = document.root().unwrap();
-        assert!(root.child_elements().next().is_some());
-        for child in root.child_elements() {
-            let id = child
-                .attribute_any(&["w15:paraId", "w16cid:paraId"])
-                .unwrap();
-            assert!(parse_paragraph_id(id).is_some());
-        }
-    }
-    let comments = save_request(&saved).document.comments.unwrap();
-    assert!(parse_paragraph_id(comments[0].para_id.as_deref().unwrap()).is_some());
-}
-
-#[test]
-fn comments_without_source_ids_register_only_existing_parts() {
-    let comment = PLAIN_COMMENT.replace(" w14:paraId=\"10000004\"", "");
-    let source = fixture_with_comment_parts(&comment, &[]);
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_eq!(
-        part(&saved, "word/comments.xml"),
-        part(&source, "word/comments.xml")
-    );
-    assert_eq!(
-        part(&saved, "word/_rels/comments.xml.rels"),
-        part(&source, "word/_rels/comments.xml.rels")
-    );
-    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    let limits = ParseLimits::default();
-    for (path, bytes) in parts.iter().filter(|(path, _)| path.ends_with(".rels")) {
-        let relationships =
-            parse_relationships(bytes, path, &mut ParseBudget::new(&limits)).unwrap();
-        for relationship in relationships.values() {
-            if let RelationshipTarget::Internal(target) =
-                resolve_relationship_target(path, relationship).unwrap()
-            {
-                assert!(parts.iter().any(|(path, _)| path == &target), "{target}");
-            }
-        }
-    }
-    let content_types = parse_xml(
-        &part(&saved, "[Content_Types].xml"),
-        "[Content_Types].xml",
-        &mut ParseBudget::new(&limits),
-    )
-    .unwrap();
-    for entry in content_types
-        .root()
-        .unwrap()
-        .children_by_local_name("Override")
-    {
-        let target = entry.attribute(None, "PartName").unwrap();
-        assert!(
-            parts
-                .iter()
-                .any(|(path, _)| path == target.trim_start_matches('/')),
-            "{target}"
-        );
-    }
-}
-
-#[test]
 fn malformed_comment_root_attribute_uses_the_writer_part() {
     let mut parts =
         ooxml_opc::unzip_parts(&fixture_with_comment_parts(PLAIN_COMMENT, &[])).unwrap();
@@ -904,31 +672,6 @@ fn resolving_a_comment_with_a_trailing_unidentified_paragraph_saves_its_done_fla
 }
 
 #[test]
-fn editing_a_model_comment_paragraph_id_updates_all_comment_parts() {
-    let source = fixture();
-    let mut request = save_request(&source);
-    request.document.comments.as_mut().unwrap()[1].content[0].para_id = Some("10000009".to_owned());
-    let saved = write_docx_s13(request, &source).unwrap();
-    assert_comment_companion_ids(&saved);
-    assert_comment_text(&saved, 0.0, " colorful");
-    assert_comment_text(&saved, 1.0, "Plain");
-    for path in [
-        "word/comments.xml",
-        "word/commentsExtended.xml",
-        "word/commentsIds.xml",
-    ] {
-        let xml = String::from_utf8(part(&saved, path)).unwrap();
-        assert!(xml.contains("paraId=\"10000009\""), "{path}");
-        assert!(!xml.contains("10000004"), "{path}");
-    }
-    let comments = save_request(&saved).document.comments.unwrap();
-    assert_eq!(comments.len(), 2);
-    let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
-    assert_eq!(comment.content[0].para_id.as_deref(), Some("10000009"));
-    assert_eq!(comment.para_id.as_deref(), Some("10000009"));
-}
-
-#[test]
 fn invalid_earlier_comment_paragraph_ids_use_the_writer_part() {
     for id in ["10000001", "10000003"] {
         let rich = RICH_COMMENT.replace(id, "1000000&quot;");
@@ -1015,38 +758,4 @@ fn setting_a_comment_paragraph_id_without_source_ids_saves_it_in_all_comment_par
     assert_eq!(comment.para_id.as_deref(), Some("10000009"));
     assert_comment_text(&saved, 0.0, " colorful");
     assert_comment_text(&saved, 1.0, "Plain");
-}
-
-#[test]
-fn changing_only_comment_metadata_writes_the_whole_comments_part() {
-    for change in ["done", "durable_id", "para_id", "explicit_done"] {
-        let source = fixture();
-        let mut request = save_request(&source);
-        let comment = &mut request.document.comments.as_mut().unwrap()[1];
-        match change {
-            "done" => comment.done = Some(true),
-            "durable_id" => comment.durable_id = Some("20000009".to_owned()),
-            "para_id" => comment.content[0].para_id = Some("10000009".to_owned()),
-            "explicit_done" => comment.done = Some(false),
-            _ => unreachable!(),
-        }
-        let saved = write_docx_s13(request, &source).unwrap();
-        assert_ne!(
-            part(&saved, "word/comments.xml"),
-            part(&source, "word/comments.xml"),
-            "{change}"
-        );
-        assert_comment_companion_ids(&saved);
-        assert_comment_text(&saved, 0.0, " colorful");
-        assert_comment_text(&saved, 1.0, "Plain");
-        let comments = save_request(&saved).document.comments.unwrap();
-        let comment = comments.iter().find(|comment| comment.id == 1.0).unwrap();
-        match change {
-            "done" => assert_eq!(comment.done, Some(true)),
-            "durable_id" => assert_eq!(comment.durable_id.as_deref(), Some("20000009")),
-            "para_id" => assert_eq!(comment.para_id.as_deref(), Some("10000009")),
-            "explicit_done" => assert_ne!(comment.done, Some(true)),
-            _ => unreachable!(),
-        }
-    }
 }

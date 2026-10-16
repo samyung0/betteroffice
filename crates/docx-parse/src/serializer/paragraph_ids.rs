@@ -2,15 +2,12 @@
 //! the edited stories, applied by occurrence to serialized parts, and parts
 //! written as their source bytes with only paragraph IDs patched in place.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::paragraph_identity::{
-    paragraph_id_attributes, paragraph_occurrences, parse_paragraph_id,
-    patch_paragraph_id_references, patch_paragraph_ids,
-};
+use crate::paragraph_identity::{paragraph_occurrences, parse_paragraph_id, patch_paragraph_ids};
 use crate::xml::ParseError;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -87,7 +84,6 @@ pub struct S13PatchedPart {
 }
 
 pub(crate) const COMMENTS_PART: &str = "word/comments.xml";
-const COMMENT_COMPANIONS: [&str; 2] = ["word/commentsExtended.xml", "word/commentsIds.xml"];
 
 impl S13ParagraphIds {
     pub(crate) fn validate(&self) -> Result<(), ParseError> {
@@ -182,98 +178,9 @@ fn patch_fragment(xml: &mut String, base: u32, ids: &BTreeMap<u32, String>) {
     }
 }
 
-/// Every valid paragraph ID a model subtree carries, raw XML included.
-pub(crate) fn model_paragraph_ids<T: Serialize>(node: &T, ids: &mut BTreeSet<u32>) {
-    if let Ok(value) = serde_json::to_value(node) {
-        collect(&value, ids);
-    }
-}
-
-fn collect(value: &Value, ids: &mut BTreeSet<u32>) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object {
-                match (key.as_str(), child) {
-                    ("paraId", Value::String(id)) => ids.extend(parse_paragraph_id(id)),
-                    ("xml" | "verbatimXml", Value::String(xml)) => {
-                        ids.extend(
-                            paragraph_occurrences(xml)
-                                .unwrap_or_default()
-                                .iter()
-                                .filter_map(|occurrence| occurrence.para_id.as_deref())
-                                .filter_map(parse_paragraph_id),
-                        );
-                    }
-                    _ => collect(child, ids),
-                }
-            }
-        }
-        Value::Array(items) => items.iter().for_each(|item| collect(item, ids)),
-        _ => {}
-    }
-}
-
 /// The source part with only the planned paragraph IDs patched in place.
 pub(crate) fn patch_part(original: &[u8], ids: &[(u32, String)]) -> Option<Vec<u8>> {
     let xml = std::str::from_utf8(original).ok()?;
     let patches: BTreeMap<u32, String> = ids.iter().cloned().collect();
     patch_paragraph_ids(xml, &patches, true).map(String::into_bytes)
-}
-
-/// The comment parts with patched paragraph IDs, the companion references to
-/// a changed ID renamed alongside. `None` when a changed ID the companions
-/// reference is not unique among the comment paragraphs, so the reference
-/// would be ambiguous.
-pub(crate) fn patch_comment_parts(
-    comments: &[u8],
-    companions: &[(&'static str, Option<&[u8]>)],
-    ids: &[(u32, String)],
-) -> Option<Vec<(&'static str, Vec<u8>)>> {
-    let xml = std::str::from_utf8(comments).ok()?;
-    let occurrences = paragraph_occurrences(xml)?;
-    let mut counts: HashMap<u32, usize> = HashMap::new();
-    for id in occurrences
-        .iter()
-        .filter_map(|occurrence| occurrence.para_id.as_deref())
-        .filter_map(parse_paragraph_id)
-    {
-        *counts.entry(id).or_default() += 1;
-    }
-    let referenced: BTreeSet<u32> = companions
-        .iter()
-        .filter_map(|(_, bytes)| *bytes)
-        .flat_map(paragraph_id_attributes)
-        .collect();
-    let mut renames = HashMap::new();
-    for (ordinal, id) in ids {
-        let old = occurrences
-            .get(*ordinal as usize)?
-            .para_id
-            .as_deref()
-            .and_then(parse_paragraph_id);
-        if let Some(old) = old
-            && parse_paragraph_id(id) != Some(old)
-            && referenced.contains(&old)
-        {
-            if counts.get(&old) != Some(&1) {
-                return None;
-            }
-            renames.insert(old, id.clone());
-        }
-    }
-    let mut parts = vec![(COMMENTS_PART, patch_part(comments, ids)?)];
-    for (path, bytes) in companions {
-        if let Some(bytes) = bytes {
-            let patched =
-                patch_paragraph_id_references(std::str::from_utf8(bytes).ok()?, &renames)?;
-            if patched.as_bytes() != *bytes {
-                parts.push((*path, patched.into_bytes()));
-            }
-        }
-    }
-    Some(parts)
-}
-
-pub(crate) fn comment_companions() -> [&'static str; 2] {
-    COMMENT_COMPANIONS
 }

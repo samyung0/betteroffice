@@ -1051,34 +1051,6 @@ fn decode_typed_inline(node_type: &str, value: &serde_json::Value) -> Option<Inl
 }
 
 impl InlineNode {
-    pub(crate) fn has_tracked_control(&self, control: bool, revision: bool) -> bool {
-        let (children, control, revision) = match self {
-            Self::InlineSdt(sdt) => (&sdt.content, true, revision),
-            Self::Tracked(change) => (&change.content, control, true),
-            Self::Hyperlink(link) => (
-                link.structured_children.as_ref().unwrap_or(&link.children),
-                control,
-                revision,
-            ),
-            Self::ComplexField(field) => {
-                return field
-                    .structured_result
-                    .as_ref()
-                    .and_then(|result| result.inline.as_ref())
-                    .is_some_and(|children| {
-                        children
-                            .iter()
-                            .any(|child| child.has_tracked_control(control, revision))
-                    });
-            }
-            _ => return false,
-        };
-        control && revision
-            || children
-                .iter()
-                .any(|child| child.has_tracked_control(control, revision))
-    }
-
     pub fn node_type(&self) -> &'static str {
         match self {
             Self::Run(_) => "run",
@@ -2317,6 +2289,7 @@ impl OpenComplexField {
             field_tree: Some(field_tree),
             continuation: None,
         };
+        field.project_leaf_tree();
         field
     }
 }
@@ -2806,39 +2779,6 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .map(|text| text.encode_utf16().count())
             .unwrap_or(0),
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) | InlineNode::RawXml(_) => 0,
-    }
-}
-
-/// Story width of one run atom: text in UTF-16 units, every live embed one.
-pub(crate) fn run_content_length(content: &RunContent) -> usize {
-    match content {
-        RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-            text.encode_utf16().count()
-        }
-        RunContent::Tab
-        | RunContent::PositionalTab { .. }
-        | RunContent::SoftHyphen
-        | RunContent::NoBreakHyphen
-        | RunContent::Symbol { .. }
-        | RunContent::FootnoteRef { .. }
-        | RunContent::EndnoteRef { .. }
-        | RunContent::CommentReference { .. }
-        | RunContent::Drawing { .. }
-        | RunContent::Shape { .. }
-        | RunContent::HorizontalRule { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => 1,
-        RunContent::Break { break_type, .. } => {
-            if break_type
-                .as_deref()
-                .is_none_or(|kind| kind == "textWrapping")
-            {
-                1
-            } else {
-                0
-            }
-        }
-        _ => 0,
     }
 }
 

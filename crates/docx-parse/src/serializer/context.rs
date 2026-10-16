@@ -20,14 +20,9 @@ pub struct SerializerContext {
     comments: Option<HashSet<u64>>,
     /// Comments whose reference mark is written, so none is generated for them.
     references: HashSet<u64>,
-    chart_drawings: HashMap<String, String>,
     warnings: Vec<String>,
     paragraph_ids: BTreeSet<u32>,
-    pub(crate) deletion: bool,
-    pub(crate) in_control: bool,
-    pub(crate) in_revision: bool,
     splice: Option<SpliceRecorder>,
-    document_root: Option<String>,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -63,14 +58,9 @@ impl SerializerContext {
             rendered_page_breaks: Vec::new(),
             comments: None,
             references: HashSet::new(),
-            chart_drawings: HashMap::new(),
             warnings: Vec::new(),
             paragraph_ids: BTreeSet::new(),
-            deletion: false,
-            in_control: false,
-            in_revision: false,
             splice: None,
-            document_root: None,
         })
     }
 
@@ -94,16 +84,6 @@ impl SerializerContext {
         self.references.contains(&id.to_bits())
     }
 
-    pub(crate) fn set_document_source(&mut self, source: Option<&str>) {
-        self.document_root = source.and_then(|xml| {
-            super::splice::root_tag(xml).map(|root| xml[..root.range.end].to_owned())
-        });
-    }
-
-    pub(crate) fn document_root(&self) -> Option<&str> {
-        self.document_root.as_deref()
-    }
-
     /// Paragraph IDs the output already uses, which [`Self::allocate_paragraph_id`] avoids.
     pub fn reserve_paragraph_ids(&mut self, ids: impl IntoIterator<Item = u32>) {
         self.paragraph_ids.extend(ids);
@@ -115,17 +95,6 @@ impl SerializerContext {
             .expect("parse budgets keep packages far below 2^31 paragraphs");
         self.paragraph_ids.insert(id);
         format_paragraph_id(id)
-    }
-
-    /// Authored `w:drawing` placements for one story part, keyed by chart
-    /// relationship id. Sessions seeded before drawings were replayed carry
-    /// chart runs without one; the source part still names their placement.
-    pub fn set_chart_drawings(&mut self, drawings: HashMap<String, String>) {
-        self.chart_drawings = drawings;
-    }
-
-    pub(crate) fn chart_drawing(&self, relationship_id: &str) -> Option<&str> {
-        self.chart_drawings.get(relationship_id).map(String::as_str)
     }
 
     /// Records a non-fatal save diagnostic for the caller to report.

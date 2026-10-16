@@ -41,6 +41,10 @@ pub fn serialize_paragraph(
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let result = serialize_paragraph_inner(paragraph, context);
     context.leave_paragraph();
+    // Only a splice save (upstream's, which Capy never requests) records paragraphs.
+    if let Ok(xml) = &result {
+        context.record_paragraph(paragraph.source_ordinal, xml);
+    }
     result
 }
 
@@ -469,7 +473,11 @@ pub fn synthesize_sdt_properties(properties: &SdtProperties) -> String {
     }
     match properties.sdt_type.as_str() {
         "plainText" => {
-            body.start_element("w:text").end_element();
+            body.start_element("w:text");
+            if properties.multi_line == Some(true) {
+                body.attribute("w:multiLine", "1");
+            }
+            body.end_element();
         }
         "date" => {
             body.start_element("w:date");
