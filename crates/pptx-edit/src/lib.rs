@@ -339,6 +339,10 @@ impl DeckSession {
 pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
+    // No formatting cleanup after a remote update, as in docx-edit: it deletes
+    // redundant format items on this replica only, and hosts relay local
+    // updates only, so replicas would read differently.
+    options.cleanup_formatting = false;
     Doc::with_options(options)
 }
 

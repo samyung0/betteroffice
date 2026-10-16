@@ -652,3 +652,113 @@ fn undo_of_a_concurrent_move_keeps_the_shape_placed() {
     sync(&right, &left);
     assert_eq!((at(&left), at(&right)), ((300, 400), (300, 400)));
 }
+
+/// Hosts relay only local updates (Capy's runtime forwards `origin ===
+/// 'local'`), so applying a peer's update must not change a replica's own
+/// document. With yrs's formatting cleanup on, each replica deleted redundant
+/// format items for itself during remote applies: two peers typing, deleting
+/// and toggling bold and italic read different runs in 13 of 20 seeded runs
+/// of 150 steps. These three seeds already differ within 12 steps.
+#[test]
+fn peers_relaying_only_local_updates_read_the_same_text() {
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: u32) -> u32 {
+            // xorshift64*
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            let value = self.0.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            if n == 0 {
+                0
+            } else {
+                (value % u64::from(n)) as u32
+            }
+        }
+    }
+    let seed = DeckSession::open(FIXTURE, 77)
+        .unwrap()
+        .encode_state_as_update_v1();
+    let context = EditCtx::local("local");
+    let mut diverged = Vec::new();
+    for run in [48u64, 72, 100] {
+        let peers = [1001, 2002].map(|client| {
+            let session =
+                DeckSession::open_from_update_with_source(&seed, FIXTURE, client).unwrap();
+            let outbox = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&outbox);
+            let subscription = session
+                .observe_update_v1(move |event| {
+                    if event.origin == UpdateOrigin::Local {
+                        sink.lock().unwrap().push(event.update);
+                    }
+                })
+                .unwrap();
+            (session, outbox, subscription)
+        });
+        let story = first_text_story(&peers[0].0);
+        let mut rng = Rng((run * 7919) | 1);
+        for step in 0..12 {
+            for (session, _, _) in &peers {
+                let length = session.story(&story).unwrap().length.saturating_sub(1);
+                match rng.below(4) {
+                    0 => {
+                        let at = rng.below(length + 1);
+                        let style = TextStyle {
+                            bold: (rng.below(2) == 0).then_some(true),
+                            italic: (rng.below(3) == 0).then_some(true),
+                            ..TextStyle::default()
+                        };
+                        let text = format!("x{step}");
+                        let _ = session.insert_text(&context, &story, at, &text, &style);
+                    }
+                    1 if length > 2 => {
+                        let start = rng.below(length - 1);
+                        let end = (start + 1 + rng.below(3)).min(length);
+                        let _ = session.delete_text(&context, &story, start, end);
+                    }
+                    _ if length > 1 => {
+                        let start = rng.below(length - 1);
+                        let end = (start + 1 + rng.below(8)).min(length);
+                        let patch = if rng.below(2) == 0 {
+                            let bold = Some(rng.below(2) == 0);
+                            TextStylePatch {
+                                bold,
+                                ..TextStylePatch::default()
+                            }
+                        } else {
+                            let italic = Some(rng.below(2) == 0);
+                            TextStylePatch {
+                                italic,
+                                ..TextStylePatch::default()
+                            }
+                        };
+                        let _ = session.format_text(&context, &story, start, end, &patch);
+                    }
+                    _ => {}
+                }
+            }
+            let outgoing = peers
+                .each_ref()
+                .map(|(_, outbox, _)| std::mem::take(&mut *outbox.lock().unwrap()));
+            for update in &outgoing[0] {
+                peers[1].0.apply_update_v1(update).unwrap();
+            }
+            for update in &outgoing[1] {
+                peers[0].0.apply_update_v1(update).unwrap();
+            }
+        }
+        let (left, right) = (&peers[0].0, &peers[1].0);
+        assert_eq!(
+            left.encode_state_vector_v1(),
+            right.encode_state_vector_v1()
+        );
+        if left.story(&story).unwrap() != right.story(&story).unwrap() {
+            diverged.push(run);
+        }
+    }
+    assert!(
+        diverged.is_empty(),
+        "runs whose peers read different text: {diverged:?}"
+    );
+}
