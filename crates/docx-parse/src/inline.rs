@@ -376,6 +376,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 kind: "ruby".to_owned(),
                 xml: child.to_raw_inline_xml(),
                 text: Some(ruby_base_text(child)),
+                preview: None,
             }),
             "cr" => output.push(RunContent::Break {
                 break_type: Some("textWrapping".to_owned()),
@@ -2282,7 +2283,6 @@ impl OpenComplexField {
         if let Some(tree) = tree {
             self.children.push(tree);
         }
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
     }
 
     pub(crate) fn finish(self) -> ComplexField {

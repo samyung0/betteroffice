@@ -1297,17 +1297,13 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
-    let lookup = if FLOAT_PASS.with(Cell::get) {
-        extent_cache_lookup(
-            paragraph,
-            content_width,
-            config,
-            floating_zones,
-            cumulative_y,
-        )
-    } else {
-        ExtentLookup::Miss(None)
-    };
+    let lookup = extent_cache_lookup(
+        paragraph,
+        content_width,
+        config,
+        floating_zones,
+        cumulative_y,
+    );
     if let ExtentLookup::Hit(extent) = lookup {
         return Ok(extent);
     }
@@ -1447,11 +1443,8 @@ impl ExtentCacheGeneration {
     }
 }
 
-/// Measured paragraph extents reused across passes that measure around floating
-/// zones: those re-measure every block on every edit (an extent depends on its
-/// flow position there), while every other pass reuses its own retained
-/// measurements and keeps no copy here. Same two-generation aging as
-/// `ooxml_text`'s shape cache.
+/// Measured paragraph extents reused across pagination passes; same
+/// two-generation aging as `ooxml_text`'s shape cache.
 #[derive(Default)]
 struct ExtentCache {
     hot: ExtentCacheGeneration,
@@ -1491,10 +1484,6 @@ impl ExtentCache {
 }
 
 thread_local! {
-    /// Set while `measure_blocks_with_shape_offsets` measures around floating zones.
-    static FLOAT_PASS: Cell<bool> = const { Cell::new(false) };
-    /// Paragraphs measured (cache misses included, hits not), for tests.
-    static PARAGRAPH_MEASURES: Cell<u64> = const { Cell::new(0) };
     static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
     #[cfg(test)]
     static EXTENT_MEASURE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1515,26 +1504,6 @@ fn extent_cache_stats() -> (usize, usize) {
     });
     let scratch_capacity = EXTENT_KEY_BUF.with(|scratch| scratch.borrow().capacity());
     (entries, scratch_capacity)
-}
-
-/// Paragraphs this thread has measured rather than answered from the cache.
-pub fn paragraph_measure_count() -> u64 {
-    PARAGRAPH_MEASURES.with(Cell::get)
-}
-
-/// Marks a pass that measures around floating zones; restores the flag on drop.
-struct FloatPass(bool);
-
-impl FloatPass {
-    fn enter() -> Self {
-        Self(FLOAT_PASS.with(|flag| flag.replace(true)))
-    }
-}
-
-impl Drop for FloatPass {
-    fn drop(&mut self) {
-        FLOAT_PASS.with(|flag| flag.set(self.0));
-    }
 }
 
 enum ExtentLookup {
@@ -1838,11 +1807,11 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
             Run::Image(image) => line_width += synthetic_inline_image_width(image),
             Run::Field(field) => {
                 font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
-                let fallback = match field.fallback.as_deref() {
-                    Some(text) if !text.is_empty() => text,
-                    _ if matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") => "1",
-                    _ => "",
-                };
+                let fallback = field
+                    .fallback
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("1");
                 line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
             }
             // an authored break is exact, so it splits the fallback rows even
@@ -4548,68 +4517,6 @@ mod tests {
             assert_eq!(lines, 1);
             assert!(height > 0.0);
         }
-    }
-
-    #[test]
-    fn an_auto_fitted_cell_with_a_floating_picture_keeps_the_grid() {
-        let table = |image: serde_json::Value, text: &str| {
-            let auto = json!({"widthType": "auto", "widthValue": 0});
-            let mut first = json!({"id": "c0", "blocks": [{"kind": "paragraph", "id": "p0",
-                "runs": [image, {"kind": "text", "text": text}]}]});
-            let mut second = json!({"id": "c1", "blocks": [{"kind": "paragraph", "id": "p1",
-                "runs": [{"kind": "text", "text": "x"}]}]});
-            for cell in [&mut first, &mut second] {
-                cell.as_object_mut()
-                    .unwrap()
-                    .extend(auto.as_object().unwrap().clone());
-            }
-            serde_json::from_value::<LayoutBlock>(json!({
-                "kind": "table", "id": "t", "columnWidths": [312, 312],
-                "rows": [{"id": "r", "cells": [first, second]}]
-            }))
-            .unwrap()
-        };
-        let widths = |mut block: LayoutBlock| {
-            let BlockExtent::Table(extent) =
-                measure_block(&mut block, 624.0, &MeasurementConfig::default()).unwrap()
-            else {
-                panic!("expected a table extent")
-            };
-            extent
-                .column_widths
-                .iter()
-                .map(|width| width.round())
-                .collect::<Vec<_>>()
-        };
-        let picture = |extra: serde_json::Value| {
-            let mut image = json!({"kind": "image", "src": "pic", "width": 250, "height": 100});
-            image
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            image
-        };
-        // An anchored picture adds nothing to its cell's line, so the table
-        // keeps its grid rather than drawing the picture over the next column.
-        for floating in [
-            json!({"wrapType": "square", "position": {"horizontal": {"relativeTo": "column", "posOffset": 0}}}),
-            json!({"wrapType": "inFront"}),
-            json!({"displayMode": "float"}),
-        ] {
-            assert_eq!(
-                widths(table(picture(floating.clone()), "")),
-                vec![312.0, 312.0],
-                "{floating}"
-            );
-            assert_eq!(
-                widths(table(picture(floating.clone()), "Pic")),
-                vec![312.0, 312.0],
-                "{floating}"
-            );
-        }
-        // An inline picture is measured, so its column fits it.
-        let inline = widths(table(picture(json!({})), ""));
-        assert!(inline[0] >= 250.0 && inline[1] < 312.0, "{inline:?}");
     }
 
     #[test]

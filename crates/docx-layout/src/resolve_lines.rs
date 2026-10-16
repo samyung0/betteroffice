@@ -1,4 +1,18 @@
-//! UTF-16 code-unit lengths.
+//! Run slicing with UTF-16 code-unit offsets.
+
+use crate::types::{Run, TypesetRow};
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedSegment {
+    pub run: Run,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedLine {
+    pub segments: Vec<ResolvedSegment>,
+}
 
 /// Returns a string's UTF-16 code-unit length.
 pub fn utf16_len(s: &str) -> usize {

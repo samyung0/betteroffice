@@ -24,7 +24,7 @@ use xlsx_ops::{
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    autofit_relevant, build_display_list_on, build_print_display_list_with_charts, chart_at_point,
+    autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
     chart_regions_with_geometry, display_text, moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
@@ -2277,13 +2277,13 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_on(
+        build_display_list_with_geometry(
             &self.model,
             sheet,
             viewport,
             &ghosts,
-            |chart| self.resolve_chart_space(&owner, chart),
             &geometry,
+            |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
     }

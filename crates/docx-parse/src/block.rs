@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::chart::ChartPartsMap;
 use crate::inline::{
     ComplexField, InlineNode, MathEquation, MathType, RunContent, SdtProperties,
-    StructuredFieldContent, inline_holds_field, parse_sdt_properties,
+    StructuredFieldContent, StructuredFieldTree, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;

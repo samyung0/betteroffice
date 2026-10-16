@@ -563,24 +563,7 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(wb, sheet, viewport, ghosts, resolver, None, None)
-}
-
-/// [`build_display_list_with_charts_and_ghosts`] on a sheet geometry the caller
-/// already holds: building one walks every cell of the sheet.
-pub fn build_display_list_on<F, R>(
-    wb: &Workbook,
-    sheet: SheetId,
-    viewport: &Viewport,
-    ghosts: &[GhostEdit],
-    resolver: F,
-    geometry: &GridGeometry,
-) -> Result<DisplayList, RenderError>
-where
-    F: FnMut(&SheetChart) -> Result<R, RenderError>,
-    R: Into<Arc<ChartSpace>>,
-{
-    build_frame(wb, sheet, viewport, ghosts, resolver, None, Some(geometry))
+    build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
 
 #[doc(hidden)]
@@ -618,7 +601,6 @@ where
         &[],
         resolver,
         Some((metrics, gridlines)),
-        None,
     )
 }
 

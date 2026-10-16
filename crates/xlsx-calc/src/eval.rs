@@ -35,7 +35,6 @@ thread_local! {
 }
 
 pub(crate) struct EvaluationBudget {
-    limit: u64,
     remaining: Cell<u64>,
     text: Cell<u64>,
 }

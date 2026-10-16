@@ -2804,7 +2804,7 @@ fn rebuild_paragraphs(
     let templates: HashMap<usize, XmlElement> = paragraphs
         .iter()
         .filter_map(|paragraph| paragraph.template_index)
-        .filter_map(|index| Some((index, originals.get(index)?.clone()?)))
+        .filter_map(|index| Some((index, originals.get(index)?.clone())))
         .collect();
     let mut children = preamble;
     let limits = ParseLimits::default();

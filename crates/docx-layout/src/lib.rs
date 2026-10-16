@@ -236,13 +236,10 @@ pub fn build_display_list_value_from_resident(
     })
 }
 
-/// Builds display pages `pages` from typed pagination state (see
-/// [`display_list::build_resident_display_pages_with_fonts_observed`]).
-pub fn build_resident_display_pages_observed(
+pub fn build_display_list_value_from_resident_observed(
     pagination: &types::Input,
     layout: &types::Layout,
     extras: &str,
-    pages: std::ops::Range<usize>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<display_list::DisplayList, String> {
     with_measure_fonts(|store| {
@@ -251,19 +248,17 @@ pub fn build_resident_display_pages_observed(
             layout,
             extras,
             &store.borrow(),
-            pages,
             observe_phase,
         )
     })
 }
 
-/// [`build_resident_display_pages_observed`] with the extras parsed once
-/// (see [`display_list::ResidentDisplayInput`]).
-pub fn build_resident_display_pages_from_observed(
-    input: &mut display_list::ResidentDisplayInput,
+/// Build a display list while retaining its parsed compatibility input for
+/// page-scoped refreshes on subsequent resident edits.
+pub fn build_resident_display_list_observed(
     pagination: &types::Input,
     layout: &types::Layout,
-    pages: std::ops::Range<usize>,
+    extras: &str,
     observe_phase: &mut impl FnMut(),
 ) -> Result<
     (
@@ -348,6 +343,7 @@ pub fn build_display_list_value_from_resident_incremental(
         display_list::build_display_list_value_from_resident_incremental_with_fonts(
             pagination,
             layout,
+            extras,
             &store.borrow(),
             previous,
             rebuilt_page_start,
@@ -411,7 +407,7 @@ pub fn update_display_list_value_from_resident_incremental_observed(
 pub fn update_resident_display_list_incremental_observed(
     pagination: &types::Input,
     layout: &types::Layout,
-    extras: &str,
+    resident: &mut display_list::ResidentDisplayInput,
     previous: &mut display_list::DisplayList,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
@@ -423,8 +419,8 @@ pub fn update_resident_display_list_incremental_observed(
         display_list::update_resident_display_list_incremental_with_fonts_observed(
             pagination,
             layout,
-            extras,
             &store.borrow(),
+            resident,
             previous,
             rebuilt_page_start,
             rebuilt_page_end,
@@ -783,8 +779,7 @@ impl Drop for MeasureFontsScope {
 /// Register a font for measurement from raw sfnt bytes; returns the font id
 /// that `measure_paragraph_json` inputs reference in their `fontChains`.
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
-/// error at this boundary, mirroring `FontStore::register`. Bytes identical to
-/// an earlier registration answer its id.
+/// error at this boundary, mirroring `FontStore::register`.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;

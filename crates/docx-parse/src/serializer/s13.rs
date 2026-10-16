@@ -329,7 +329,7 @@ fn write_docx_s13_parts_with_warnings(
         context.keep_comments(comments.iter().map(|comment| comment.id));
     }
     // A comment gets a generated reference mark only when no part holds one.
-    let stories = std::iter::once(&request.document.content)
+    let comment_stories = std::iter::once(&request.document.content)
         .chain(
             request
                 .header_entries
@@ -344,7 +344,7 @@ fn write_docx_s13_parts_with_warnings(
                 .chain(&request.endnotes)
                 .map(|note| &note.content),
         );
-    for blocks in stories {
+    for blocks in comment_stories {
         block_comment_references(blocks, &mut |id| context.note_comment_reference(id));
     }
     context.set_chart_drawings(chart_drawings_in_part(

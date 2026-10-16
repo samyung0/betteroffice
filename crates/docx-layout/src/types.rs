@@ -2086,9 +2086,11 @@ pub struct Input {
 // fragments and pages (output)
 // ---------------------------------------------------------------------------
 
+use crate::resolve_lines::ResolvedLine;
+
 /// One page's slice of a paragraph: the measured line window
-/// `[from_line, to_line)` and its own document range.
-/// `carried_from_prev` / `carried_to_next` mark a split.
+/// `[from_line, to_line)`, its own document range, and the run slices those
+/// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
@@ -2107,6 +2109,8 @@ pub struct ParagraphFragment {
     pub carried_from_prev: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried_to_next: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

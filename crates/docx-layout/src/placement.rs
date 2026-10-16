@@ -497,6 +497,7 @@ fn whole_items<'a>(
                     header_row_count: None,
                     clip_top: None,
                     clip_bottom: None,
+                    column_widths: Vec::new(),
                     cell_clips: None,
                 };
                 let at = items.len();
