@@ -5,6 +5,8 @@ export interface RawXml {
   xml: string;
   /** The runs it shows in a field that keeps it in place of a tracked change. */
   shown?: Run[];
+  /** The source occurrence of its first `w:p`, on documents parsed for an editing session. */
+  sourceOrdinal?: number;
 }
 
 export function isRawXml(value: { type: string }): value is RawXml {

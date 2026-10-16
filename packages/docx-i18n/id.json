@@ -483,6 +483,8 @@
       "shortcuts": {
         "save": "Simpan",
         "saveDescription": "Simpan dokumen",
+        "open": null,
+        "openDescription": null,
         "print": "Cetak",
         "printDescription": "Cetak dokumen",
         "undo": "Urungkan",

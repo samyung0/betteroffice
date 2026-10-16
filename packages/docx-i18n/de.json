@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "Speichern",
         "saveDescription": "Dokument speichern",
+        "open": null,
+        "openDescription": null,
         "print": "Drucken",
         "printDescription": "Dokument drucken",
         "undo": "Rückgängig",

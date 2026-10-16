@@ -29,6 +29,7 @@ export type {
   DrawingContent,
   ShapeContent,
   ChartContent,
+  OpaqueDrawingContent,
   RunContent,
   Run,
 } from './content/run';

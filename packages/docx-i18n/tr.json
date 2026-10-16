@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "Kaydet",
         "saveDescription": "Belgeyi kaydet",
+        "open": null,
+        "openDescription": null,
         "print": "Yazdır",
         "printDescription": "Belgeyi yazdır",
         "undo": "Geri al",

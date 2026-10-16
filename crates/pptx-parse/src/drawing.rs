@@ -20,9 +20,9 @@ const MAX_TEXT_SPACING_HUNDREDTHS: i32 = 400_000;
 const MAX_TAB_STOPS: usize = 64;
 
 #[derive(Clone, Copy)]
-struct GuideValue {
-    value: f64,
-    extent_power: f64,
+pub(crate) struct GuideValue {
+    pub(crate) value: f64,
+    pub(crate) extent_power: f64,
 }
 
 impl GuideValue {
@@ -56,6 +56,24 @@ pub(crate) fn common_slide_data(
     budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
 ) -> Result<CommonSlideData, PptxError> {
+    common_slide_data_with_vml(
+        root,
+        relationships,
+        part,
+        budget,
+        elements,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn common_slide_data_with_vml(
+    root: &XmlElement,
+    relationships: &[Relationship],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+    elements: ShapeElements,
+    previews: &BTreeMap<String, PictureFill>,
+) -> Result<CommonSlideData, PptxError> {
     let common = root.child("cSld");
     let name = common
         .and_then(|value| value.attribute("name"))
@@ -76,7 +94,7 @@ pub(crate) fn common_slide_data(
             color: parse_color_container(reference),
         });
     let mut shapes = if let Some(tree) = common.and_then(|value| value.child("spTree")) {
-        parse_shape_children(tree, relationships, part, budget, elements)?
+        parse_shape_children(tree, relationships, part, budget, elements, previews)?
     } else {
         Vec::new()
     };
@@ -101,7 +119,7 @@ pub(crate) fn parse_text_styles(root: &XmlElement) -> TextStyleSet {
     }
 }
 
-fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> {
+pub(crate) fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> {
     let Some(element) = element else {
         return Vec::new();
     };
@@ -124,19 +142,49 @@ fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> 
     if found { levels } else { Vec::new() }
 }
 
+/// The shapes of a `ppt/diagrams/drawing#.xml`. Its `dsp:spTree` carries the
+/// same elements a slide's does, in the same coordinates as the graphic frame
+/// that names it, so it parses and draws like a group.
+pub(crate) fn parse_diagram_drawing(
+    root: &XmlElement,
+    relationships: &[Relationship],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+    elements: ShapeElements,
+) -> Result<Vec<ShapeNode>, PptxError> {
+    let Some(tree) = root.descendants_named("spTree").first().copied() else {
+        return Ok(Vec::new());
+    };
+    parse_shape_children(
+        tree,
+        relationships,
+        part,
+        budget,
+        elements,
+        &BTreeMap::new(),
+    )
+}
+
 fn parse_shape_children(
     parent: &XmlElement,
     relationships: &[Relationship],
     part: &str,
     budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
+    previews: &BTreeMap<String, PictureFill>,
 ) -> Result<Vec<ShapeNode>, PptxError> {
     let mut shapes = Vec::new();
     for child in parent.child_elements() {
         if child.local_name() == "AlternateContent" {
             if let Some(branch) = alternate_content_branch(child) {
-                let mut parsed =
-                    parse_shape_children(branch, relationships, part, budget, elements)?;
+                let mut parsed = parse_shape_children(
+                    branch,
+                    relationships,
+                    part,
+                    budget,
+                    elements,
+                    previews,
+                )?;
                 if branch.local_name() == "Fallback" {
                     flag_equations(&mut parsed, &math_shape_ids(child));
                 }
@@ -163,6 +211,7 @@ fn parse_shape_children(
                 relationships,
                 part,
                 budget,
+                previews,
             )?)),
             "grpSp" => Some(ShapeNode::Group(parse_group(
                 child,
@@ -170,6 +219,7 @@ fn parse_shape_children(
                 part,
                 budget,
                 elements,
+                previews,
             )?)),
             _ => None,
         };
@@ -222,7 +272,7 @@ fn parse_shape(
         paths: properties
             .filter(|value| value.child("prstGeom").is_none())
             .and_then(|value| value.child("custGeom"))
-            .and_then(|custom| parse_custom_geometry(custom, parse_shape_extent(transform)))
+            .and_then(|custom| parse_custom_geometry(custom, parse_custom_shape_extent(transform)))
             .unwrap_or_default(),
         base: parse_base(
             element
@@ -259,11 +309,7 @@ fn parse_picture(
     let blip_fill = element.child("blipFill");
     let relationship_id = blip_fill
         .and_then(|value| value.child("blip"))
-        .and_then(|value| {
-            value
-                .attribute("r:embed")
-                .or_else(|| value.attribute_local("embed"))
-        })
+        .and_then(|blip| blip_relationship_id(blip, relationships))
         .map(str::to_owned);
     let media_part_path = relationship_id
         .as_deref()
@@ -284,6 +330,43 @@ fn parse_picture(
     })
 }
 
+/// The `a:ext` uri Office writes a blip's SVG relationship under.
+const SVG_BLIP_EXTENSION_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+
+/// The image one `a:blip` embeds: its own relationship, else the one its SVG
+/// extension carries.
+fn blip_relationship_id<'a>(
+    blip: &'a XmlElement,
+    relationships: &[Relationship],
+) -> Option<&'a str> {
+    let own = embed_relationship_id(blip);
+    let svg = svg_blip(blip).and_then(embed_relationship_id);
+    [own, svg]
+        .into_iter()
+        .flatten()
+        .find(|id| relationship_target(relationships, id).is_some())
+        .or(own)
+        .or(svg)
+}
+
+fn embed_relationship_id(element: &XmlElement) -> Option<&str> {
+    element
+        .attribute("r:embed")
+        .or_else(|| element.attribute_local("embed"))
+        .filter(|id| !id.is_empty())
+}
+
+fn svg_blip(blip: &XmlElement) -> Option<&XmlElement> {
+    blip.child("extLst")?
+        .children_named("ext")
+        .filter(|extension| {
+            extension
+                .attribute("uri")
+                .is_some_and(|uri| uri.eq_ignore_ascii_case(SVG_BLIP_EXTENSION_URI))
+        })
+        .find_map(|extension| extension.child("svgBlip"))
+}
+
 /// Reads supported bitmap effects in document order.
 fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
     let Some(blip) = blip else {
@@ -295,6 +378,9 @@ fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
                 threshold: percentage_attribute(child, "thresh").unwrap_or(0.5),
             }),
             "grayscl" => Some(BlipEffect::Grayscale),
+            "alphaModFix" => Some(BlipEffect::Alpha {
+                amount: percentage_attribute(child, "amt").unwrap_or(1.0),
+            }),
             "lum" => Some(BlipEffect::Luminance {
                 brightness: fixed_percentage_attribute(child, "bright").unwrap_or(0.0),
                 contrast: fixed_percentage_attribute(child, "contrast").unwrap_or(0.0),
@@ -321,8 +407,10 @@ fn parse_graphic_frame(
     relationships: &[Relationship],
     part: &str,
     budget: &mut ParseBudget<'_>,
+    previews: &BTreeMap<String, PictureFill>,
 ) -> Result<GraphicFrame, PptxError> {
     budget.charge_shape(part)?;
+    let base = parse_base(element.child("nvGraphicFramePr"), element.child("xfrm"));
     let data = element
         .child("graphic")
         .and_then(|value| value.child("graphicData"));
@@ -349,10 +437,17 @@ fn parse_graphic_frame(
             .filter(|(key, _)| key.starts_with("r:"))
             .map(|(_, value)| value.clone())
             .collect();
-        GraphicFrameData::Diagram { relationship_ids }
+        let data_id = ids
+            .attribute("r:dm")
+            .or_else(|| ids.attribute_local("dm"))
+            .unwrap_or_default();
+        GraphicFrameData::Diagram {
+            drawing_part_path: diagram_drawing_target(relationships, data_id),
+            relationship_ids,
+        }
     } else {
         let uri = data.and_then(|value| value.attribute("uri"));
-        let picture = data
+        let object = data
             .filter(|_| uri == Some("http://schemas.openxmlformats.org/presentationml/2006/ole"))
             .and_then(|value| {
                 value
@@ -360,10 +455,29 @@ fn parse_graphic_frame(
                     .and_then(|alternate| alternate.child("Fallback"))
                     .unwrap_or(value)
                     .child("oleObj")
-            })
+            });
+        let picture = object
             .and_then(|object| object.child("pic"))
             .map(|picture| parse_picture(picture, relationships, part, budget))
             .transpose()?
+            .or_else(|| {
+                let preview = object
+                    .and_then(|object| object.attribute("spid"))
+                    .and_then(|spid| previews.get(spid))?;
+                Some(Picture {
+                    base: base.clone(),
+                    relationship_id: None,
+                    media_part_path: preview.media_part_path.clone(),
+                    crop: PictureCrop::default(),
+                    effects: Vec::new(),
+                    geometry: "rect".to_owned(),
+                    adjust_values: BTreeMap::new(),
+                    fill: None,
+                    outline: None,
+                    shape_effects: None,
+                    style: None,
+                })
+            })
             .map(Box::new);
         GraphicFrameData::Unknown {
             uri: uri.map(str::to_owned),
@@ -371,7 +485,7 @@ fn parse_graphic_frame(
         }
     };
     Ok(GraphicFrame {
-        base: parse_base(element.child("nvGraphicFramePr"), element.child("xfrm")),
+        base,
         data: frame_data,
     })
 }
@@ -498,10 +612,12 @@ fn parse_group(
     part: &str,
     budget: &mut ParseBudget<'_>,
     elements: ShapeElements,
+    previews: &BTreeMap<String, PictureFill>,
 ) -> Result<GroupShape, PptxError> {
     budget.charge_shape(part)?;
     let own_fill = element.child("grpSpPr").and_then(parse_fill);
-    let mut children = parse_shape_children(element, relationships, part, budget, elements)?;
+    let mut children =
+        parse_shape_children(element, relationships, part, budget, elements, previews)?;
     if let Some(fill) = own_fill
         .as_ref()
         .filter(|fill| fill.fill_type != GROUP_FILL)
@@ -604,6 +720,13 @@ fn parse_shape_extent(transform: Option<&XmlElement>) -> Option<(f64, f64)> {
     (width > 0 && height > 0).then_some((width as f64, height as f64))
 }
 
+fn parse_custom_shape_extent(transform: Option<&XmlElement>) -> Option<(f64, f64)> {
+    let extent = transform?.child("ext")?;
+    let width = numeric_attribute(Some(extent), "cx")?;
+    let height = numeric_attribute(Some(extent), "cy")?;
+    (width >= 0 && height >= 0).then_some((width as f64, height as f64))
+}
+
 fn parse_adjust_values(
     properties: Option<&XmlElement>,
     extent: Option<(f64, f64)>,
@@ -643,7 +766,7 @@ fn parse_adjust_values(
     adjustments
 }
 
-fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideValue> {
+pub(crate) fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideValue> {
     let short = width.min(height);
     let long = width.max(height);
     let mut values = BTreeMap::from([
@@ -694,7 +817,7 @@ fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideV
     values
 }
 
-fn evaluate_guide_formula(
+pub(crate) fn evaluate_guide_formula(
     formula: &str,
     values: &BTreeMap<String, GuideValue>,
 ) -> Option<GuideValue> {
@@ -794,7 +917,10 @@ fn additive_extent_power(values: &[GuideValue]) -> f64 {
         .unwrap_or_default()
 }
 
-fn guide_operand(token: &str, values: &BTreeMap<String, GuideValue>) -> Option<GuideValue> {
+pub(crate) fn guide_operand(
+    token: &str,
+    values: &BTreeMap<String, GuideValue>,
+) -> Option<GuideValue> {
     token
         .parse::<f64>()
         .ok()
@@ -891,20 +1017,17 @@ fn parse_picture_fill(element: &XmlElement, relationships: &[Relationship]) -> O
     picture_fill_element(fill, relationships)
 }
 
-/// Resolves one stretched `a:blipFill`, wherever it is declared.
+/// Resolves one `a:blipFill`, stretched or tiled, wherever it is declared.
 pub(crate) fn picture_fill_element(
     fill: &XmlElement,
     relationships: &[Relationship],
 ) -> Option<PictureFill> {
-    if fill.local_name() != "blipFill" || fill.child("tile").is_some() {
+    if fill.local_name() != "blipFill" {
         return None;
     }
     let relationship_id = fill
         .child("blip")
-        .and_then(|blip| {
-            blip.attribute("r:embed")
-                .or_else(|| blip.attribute_local("embed"))
-        })
+        .and_then(|blip| blip_relationship_id(blip, relationships))
         .map(str::to_owned)?;
     Some(PictureFill {
         media_part_path: relationship_target(relationships, &relationship_id),
@@ -914,6 +1037,10 @@ pub(crate) fn picture_fill_element(
             fill.child("stretch")
                 .and_then(|value| value.child("fillRect")),
         ),
+        tile: fill.child("tile").map(|tile| PictureTile {
+            scale_x: tile_scale(tile, "sx"),
+            scale_y: tile_scale(tile, "sy"),
+        }),
     })
 }
 
@@ -1213,7 +1340,13 @@ pub(crate) fn parse_text_body(
         compat_line_spacing: body_properties
             .and_then(|value| value.attribute("compatLnSpc"))
             .map(parse_bool),
+        space_first_last_para: body_properties
+            .and_then(|value| value.attribute("spcFirstLastPara"))
+            .map(parse_bool),
         autofit: body_properties.and_then(parse_text_autofit),
+        wrap: body_properties
+            .and_then(|value| value.attribute("wrap"))
+            .map(|value| value != "none"),
         vertical_overflow: parse_text_overflow(body_properties, "vertOverflow"),
         horizontal_overflow: parse_text_overflow(body_properties, "horzOverflow"),
         inset_left: numeric_attribute(body_properties, "lIns"),
@@ -1306,7 +1439,7 @@ fn parse_text_paragraph(
     })
 }
 
-fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
+pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
     let Some(element) = element else {
         return ParagraphProperties::default();
     };
@@ -1368,6 +1501,11 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
         },
         default_tab_size: numeric_attribute(Some(element), "defTabSz").filter(|size| *size > 0),
         tab_stops: element.child("tabLst").map(parse_tab_stops),
+        rtl: match element.attribute("rtl") {
+            Some("1" | "true") => Some(true),
+            Some("0" | "false") => Some(false),
+            _ => None,
+        },
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
@@ -1450,6 +1588,11 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .attribute("baseline")
             .and_then(|value| value.parse::<i32>().ok())
             .map(|value| f64::from(value) / 1000.0),
+        kern_pt: element
+            .attribute("kern")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| (0..=400_000).contains(value))
+            .map(|value| f64::from(value) / 100.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
@@ -1473,7 +1616,42 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
                     .or_else(|| value.attribute_local("id"))
             })
             .map(str::to_owned),
+        effects: parse_effects(element),
     }
+}
+
+/// The `ppt/diagrams/drawing#.xml` beside the data part a SmartArt frame names.
+/// A slide can hold several diagrams and the drawing is not referenced from the
+/// frame at all, so the two are paired by the number Office gives both parts.
+fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Option<String> {
+    let data = relationship_target(relationships, data_id)?;
+    let stem = data
+        .rsplit_once('/')
+        .map_or(data.as_str(), |(_, name)| name)
+        .trim_start_matches("data")
+        .to_owned();
+    relationships
+        .iter()
+        .filter(|relationship| relationship.has_type("/diagramDrawing"))
+        .find_map(|relationship| {
+            let target = relationship.resolved_target.clone()?;
+            let name = target
+                .rsplit_once('/')
+                .map_or(target.as_str(), |(_, name)| name);
+            name.trim_start_matches("drawing")
+                .eq(&stem)
+                .then_some(target)
+        })
+}
+
+/// `a:tile/@sx` as a fraction; an absent or unusable one leaves the picture at
+/// its own size.
+fn tile_scale(tile: &XmlElement, name: &str) -> f64 {
+    tile.attribute(name)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0)
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 100.0)
+        .unwrap_or(1.0)
 }
 
 fn relationship_target(relationships: &[Relationship], id: &str) -> Option<String> {
@@ -1502,6 +1680,27 @@ mod tests {
     use crate::ParseLimits;
     use crate::xml::parse_xml;
     use ooxml_drawingml::GeometryPathCommand;
+
+    #[test]
+    fn a_kern_threshold_reads_in_points_within_the_schema_range() {
+        let limits = ParseLimits::default();
+        let kern = |attribute: &str| {
+            let xml = format!(r#"<a:rPr {attribute}/>"#);
+            let root = parse_xml(
+                xml.as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            parse_run_properties(Some(&root)).kern_pt
+        };
+        assert_eq!(kern(r#"kern="1200""#), Some(12.0));
+        assert_eq!(kern(r#"kern="0""#), Some(0.0));
+        assert_eq!(kern(r#"kern="-100""#), None);
+        assert_eq!(kern(r#"kern="400000""#), Some(4_000.0));
+        assert_eq!(kern(r#"kern="400001""#), None);
+        assert_eq!(kern(r#"sz="1100""#), None);
+    }
 
     #[test]
     fn a_custom_geometry_becomes_a_path_normalised_to_the_shape() {
@@ -1549,7 +1748,13 @@ mod tests {
         let ShapeNode::Shape(guided) = &data.shapes[1] else {
             panic!("expected a shape");
         };
-        assert!(guided.paths.is_empty());
+        assert_eq!(
+            guided.paths[0].commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 1.0 },
+            ]
+        );
     }
 
     #[test]
@@ -1600,12 +1805,60 @@ mod tests {
         let ShapeNode::Shape(tiled) = &data.shapes[1] else {
             panic!("expected a shape");
         };
-        assert!(tiled.picture_fill.is_none());
+        let tiled = tiled.picture_fill.as_ref().expect("a tile resolves too");
+        assert_eq!(
+            tiled.tile,
+            Some(PictureTile {
+                scale_x: 1.0,
+                scale_y: 1.0
+            })
+        );
 
         let ShapeNode::Shape(solid) = &data.shapes[2] else {
             panic!("expected a shape");
         };
         assert!(solid.picture_fill.is_none());
+    }
+
+    fn image_relationship(id: &str, file: &str) -> Relationship {
+        Relationship {
+            id: id.to_owned(),
+            relationship_type:
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+                    .to_owned(),
+            target: format!("../media/{file}"),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some(format!("ppt/media/{file}")),
+        }
+    }
+
+    #[test]
+    fn a_blip_fill_on_a_shape_resolves_its_svg_extension_image() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Filled"/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId8"/></a:ext></a:extLst></a:blip><a:stretch><a:fillRect/></a:stretch></a:blipFill></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[image_relationship("rId8", "vector.svg")],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(filled) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        let picture = filled.picture_fill.as_ref().expect("blip resolves");
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId8"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/vector.svg")
+        );
     }
 
     #[test]
@@ -1871,11 +2124,57 @@ mod tests {
     }
 
     #[test]
+    fn a_smart_art_frame_finds_the_drawing_beside_its_data_part() {
+        let relationship = |id: &str, kind: &str, target: &str| Relationship {
+            id: id.to_owned(),
+            relationship_type: format!("http://example/{kind}"),
+            target: format!("../diagrams/{target}"),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some(format!("ppt/diagrams/{target}")),
+        };
+        let relationships = [
+            relationship("rId3", "diagramData", "data4.xml"),
+            relationship("rId8", "diagramData", "data9.xml"),
+            relationship("rId7", "diagramDrawing", "drawing4.xml"),
+            relationship("rId9", "diagramDrawing", "drawing9.xml"),
+        ];
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:graphicFrame><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rId8" r:lo="rId4" r:qs="rId5" r:cs="rId6"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &relationships,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::GraphicFrame(frame) = &data.shapes[0] else {
+            panic!("expected a graphic frame");
+        };
+        let GraphicFrameData::Diagram {
+            drawing_part_path, ..
+        } = &frame.data
+        else {
+            panic!("expected a diagram");
+        };
+        assert_eq!(
+            drawing_part_path.as_deref(),
+            Some("ppt/diagrams/drawing9.xml")
+        );
+    }
+
+    #[test]
     fn keeps_blip_colour_effects_in_document_order() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange><a:duotone><a:schemeClr val="bg2"><a:shade val="45000"/></a:schemeClr><a:prstClr val="white"/></a:duotone><a:biLevel thresh="25000"/><a:extLst/></a:blip><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange><a:duotone><a:schemeClr val="bg2"><a:shade val="45000"/></a:schemeClr><a:prstClr val="white"/></a:duotone><a:biLevel thresh="25000"/><a:alphaModFix amt="20000"/><a:extLst/></a:blip><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -1919,6 +2218,7 @@ mod tests {
                     }),
                 },
                 BlipEffect::BiLevel { threshold: 0.25 },
+                BlipEffect::Alpha { amount: 0.2 },
             ]
         );
     }
@@ -2399,6 +2699,86 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_embedded_through_the_svg_extension_resolves_its_media_part() {
+        let picture = svg_extension_picture(
+            br#"<a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        );
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId4"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/vector.svg")
+        );
+    }
+
+    #[test]
+    fn an_unusable_blip_relationship_resolves_through_the_svg_extension() {
+        for blip in [
+            br#"<a:blip r:embed=""><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#.as_slice(),
+            br#"<a:blip r:embed="rId99"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        ] {
+            let picture = svg_extension_picture(blip);
+            assert_eq!(picture.relationship_id.as_deref(), Some("rId4"));
+            assert_eq!(
+                picture.media_part_path.as_deref(),
+                Some("ppt/media/vector.svg")
+            );
+        }
+    }
+
+    #[test]
+    fn a_blip_with_both_relationships_keeps_the_raster_one() {
+        let picture = svg_extension_picture(
+            br#"<a:blip r:embed="rId2"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+        );
+        assert_eq!(picture.relationship_id.as_deref(), Some("rId2"));
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/image1.png")
+        );
+    }
+
+    #[test]
+    fn a_blip_extension_this_parser_does_not_know_leaves_the_picture_unembedded() {
+        for blip in [
+            br#"<a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip>"#.as_slice(),
+            br#"<a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:ext></a:extLst></a:blip>"#,
+            br#"<a:blip><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main"/></a:ext></a:extLst></a:blip>"#,
+            br#"<a:blip><a:extLst><a:ext/></a:extLst></a:blip>"#,
+            br#"<a:blip><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId4"/></a:blip>"#,
+        ] {
+            let picture = svg_extension_picture(blip);
+            assert_eq!(picture.relationship_id, None);
+            assert_eq!(picture.media_part_path, None);
+        }
+    }
+
+    fn svg_extension_picture(blip: &[u8]) -> Picture {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut slide = br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Vector"/><p:nvPr/></p:nvPicPr><p:blipFill>"#.to_vec();
+        slide.extend_from_slice(blip);
+        slide.extend_from_slice(
+            br#"<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr/></p:pic></p:spTree></p:cSld></p:sld>"#,
+        );
+        let root = parse_xml(&slide, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let data = common_slide_data(
+            &root,
+            &[
+                image_relationship("rId2", "image1.png"),
+                image_relationship("rId4", "vector.svg"),
+            ],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Picture(picture) = &data.shapes[0] else {
+            panic!("expected picture");
+        };
+        picture.clone()
+    }
+
+    #[test]
     fn a_picture_without_a_preset_geometry_reads_as_a_rectangle() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
@@ -2460,7 +2840,14 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(br#"<p:graphicFrame><a:graphic><a:graphicData uri="custom:graphic"><p:oleObj><p:pic><p:blipFill><a:blip r:embed="rId1"/></p:blipFill></p:pic></p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"#, "ppt/slides/slide1.xml", &mut budget).unwrap();
-        let frame = parse_graphic_frame(&root, &[], "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let frame = parse_graphic_frame(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let json = serde_json::to_string(&frame.data).unwrap();
         assert_eq!(json, r#"{"type":"unknown","uri":"custom:graphic"}"#);
         assert_eq!(

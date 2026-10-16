@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "שמור",
         "saveDescription": "שמור מסמך",
+        "open": null,
+        "openDescription": null,
         "print": "הדפס",
         "printDescription": "הדפס מסמך",
         "undo": "בטל",

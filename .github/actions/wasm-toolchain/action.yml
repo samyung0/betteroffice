@@ -16,7 +16,7 @@ runs:
   using: composite
   steps:
     # Both caches hold native executables, so the key has to carry the arch.
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       id: binaryen
       with:
         path: ~/.cache/binaryen/${{ inputs.binaryen }}
@@ -41,7 +41,7 @@ runs:
       run: echo "$HOME/.cache/binaryen/${{ inputs.binaryen }}/bin" >> "$GITHUB_PATH"
 
     # wasm-pack's own tool cache: uncached, it recompiles the wasm-bindgen CLI every run.
-    - uses: actions/cache@v4
+    - uses: actions/cache@v6
       with:
         path: ~/.cache/.wasm-pack
         key: wasm-pack-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}

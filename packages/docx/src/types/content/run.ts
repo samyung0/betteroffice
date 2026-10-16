@@ -220,6 +220,7 @@ export interface OpaqueDrawingContent {
   xml: string;
   /** A phonetic guide's base text, shown in its place. */
   text?: string;
+  preview?: Image;
 }
 
 /**

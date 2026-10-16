@@ -54,6 +54,7 @@ pub mod auto_space;
 pub mod bidi;
 pub mod caps;
 pub mod embedded_font;
+pub mod echo;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
@@ -71,11 +72,15 @@ pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use embedded_font::{EmbeddedFontError, decode_embedded_font, decode_embedded_font_within};
+pub use echo::{EchoGlyphSet, echo_glyph_set};
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
-pub use line_break::{BreakOpportunity, break_opportunities};
+pub use line_break::{
+    BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
+};
 pub use measure::{
-    FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,
-    measure_paragraph, measure_paragraph_json, measure_paragraph_typed,
+    FontChains, FontSlotUse, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut,
+    TypesetRowOut, font_slot_use, measure_paragraph, measure_paragraph_json,
+    measure_paragraph_typed, min_content_width_typed,
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};

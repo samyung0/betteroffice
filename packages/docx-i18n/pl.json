@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "Zapisz",
         "saveDescription": "Zapisz dokument",
+        "open": null,
+        "openDescription": null,
         "print": "Drukuj",
         "printDescription": "Drukuj dokument",
         "undo": "Cofnij",

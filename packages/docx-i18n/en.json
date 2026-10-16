@@ -566,7 +566,9 @@
         "keyboardShortcuts": "Keyboard Shortcuts",
         "keyboardShortcutsDescription": "Show this help dialog",
         "insertLink": "Insert Link",
-        "insertLinkDescription": "Insert or edit hyperlink"
+        "insertLinkDescription": "Insert or edit hyperlink",
+        "open": "Open",
+        "openDescription": "Open a document"
       },
       "noResults": "No shortcuts found matching \"{query}\"",
       "pressEscToClose": "Press {key} to close",
@@ -751,7 +753,9 @@
     "alignTableCenter": "Align table center",
     "alignTableRight": "Align table right",
     "tableOptionsMenu": "Table options menu",
-    "tableOptions": "Table options"
+    "tableOptions": "Table options",
+    "toggleNoWrap": "Toggle no-wrap",
+    "toggleHeaderRow": "Toggle header row"
   },
   "imageTransform": {
     "tooltip": "Transform",
@@ -805,7 +809,13 @@
     "failedToParse": "Failed to parse document",
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
-    "failedToSave": "Failed to save document"
+    "failedToSave": "Failed to save document",
+    "editing": "Editing",
+    "editingDescription": "Edit document directly",
+    "suggesting": "Suggesting",
+    "suggestingDescription": "Edits become suggestions",
+    "viewing": "Viewing",
+    "viewingDescription": "Read-only, no edits"
   },
   "hyperlinkPopup": {
     "displayTextPlaceholder": "Display text",

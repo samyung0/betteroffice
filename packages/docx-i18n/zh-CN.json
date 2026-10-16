@@ -545,7 +545,9 @@
         "keyboardShortcuts": "键盘快捷方式",
         "keyboardShortcutsDescription": "显示键盘快捷方式",
         "insertLink": "插入链接",
-        "insertLinkDescription": "插入或编辑超链接"
+        "insertLinkDescription": "插入或编辑超链接",
+        "open": null,
+        "openDescription": null
       },
       "noResults": "未找到与 \"{query}\" 匹配的快捷方式",
       "pressEscToClose": "按 {key} 关闭",
@@ -732,7 +734,9 @@
     "alignTableCenter": "表格居中对齐",
     "alignTableRight": "表格右对齐",
     "tableOptionsMenu": "表格选项菜单",
-    "tableOptions": "表格选项"
+    "tableOptions": "表格选项",
+    "toggleNoWrap": "切换文本换行",
+    "toggleHeaderRow": "切换标题行"
   },
   "imageTransform": {
     "tooltip": "变换",
@@ -786,7 +790,13 @@
     "failedToParse": "解析文档失败",
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",
-    "failedToSave": "保存文档失败"
+    "failedToSave": "保存文档失败",
+    "editing": "编辑",
+    "editingDescription": "直接编辑文档",
+    "suggesting": "修订",
+    "suggestingDescription": "编辑内容将显示为修订建议",
+    "viewing": "查看",
+    "viewingDescription": "只读，不可编辑"
   },
   "hyperlinkPopup": {
     "displayTextPlaceholder": "显示文本",

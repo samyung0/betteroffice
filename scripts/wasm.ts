@@ -141,23 +141,32 @@ async function intact(dir: string, expected: Record<string, string> | undefined)
   return true;
 }
 
-/** Sorts wasm-bindgen's raw export lists (`InitOutput`, the `_bg.wasm.d.ts` consts): they
- * follow the linker's export order, which differs between Windows and Linux builds. */
-export function sortRawExports(declarations: string): string {
-  const out: string[] = [];
-  let run: string[] = [];
-  let initOutput = false;
-  for (const line of declarations.split('\n')) {
-    if (initOutput && line === '}') initOutput = false;
-    if (initOutput || line.startsWith('export const ')) {
-      run.push(line);
-      continue;
-    }
-    out.push(...run.sort(), line);
-    run = [];
-    if (line === 'export interface InitOutput {') initOutput = true;
+const EXPORT_DECLARATION = /^\s*(?:readonly|export const) ([\w$]+): .*;$/;
+
+/**
+ * Sorts the raw wasm exports a wasm-bindgen declaration file lists (the
+ * `InitOutput` members, or the consts of a `_bg.wasm.d.ts`) by name. wasm-bindgen
+ * lists them in the compiler's symbol order, which shifts between toolchains.
+ */
+export function sortWasmExportDeclarations(text: string): string {
+  const lines = text.split('\n');
+  const open = lines.indexOf('export interface InitOutput {');
+  const start = open >= 0 ? open + 1 : lines.findIndex((line) => EXPORT_DECLARATION.test(line));
+  let end = Math.max(start, 0);
+  while (end < lines.length && EXPORT_DECLARATION.test(lines[end])) end += 1;
+  const rest = lines.slice(end);
+  if (
+    start < 0 ||
+    end === start ||
+    (open >= 0 ? rest[0] !== '}' : rest.some((line) => EXPORT_DECLARATION.test(line)))
+  ) {
+    throw new Error('unexpected wasm-bindgen declaration layout');
   }
-  return [...out, ...run.sort()].join('\n');
+  const name = (line: string): string => EXPORT_DECLARATION.exec(line)?.[1] ?? '';
+  const sorted = lines
+    .slice(start, end)
+    .sort((a, b) => (name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : 0));
+  return [...lines.slice(0, start), ...sorted, ...rest].join('\n');
 }
 
 /** Builds every module whose inputs or vendored output changed. */
@@ -220,7 +229,8 @@ export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
     );
     await copyFile(resolve(output, `${name}_bg.wasm`), resolve(dest, `${name}_bg.wasm`));
     for (const file of [`${name}.d.ts`, `${name}_bg.wasm.d.ts`]) {
-      await writeFile(resolve(dest, file), sortRawExports(await readFile(resolve(output, file), 'utf8')));
+      const declarations = await readFile(resolve(output, file), 'utf8');
+      await writeFile(resolve(dest, file), sortWasmExportDeclarations(declarations));
     }
 
     await mkdir(dirname(stamp), { recursive: true });

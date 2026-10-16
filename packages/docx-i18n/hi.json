@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "सहेजें",
         "saveDescription": "दस्तावेज़ सहेजें",
+        "open": null,
+        "openDescription": null,
         "print": "प्रिंट करें",
         "printDescription": "दस्तावेज़ प्रिंट करें",
         "undo": "पूर्ववत करें",

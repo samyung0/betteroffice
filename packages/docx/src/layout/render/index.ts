@@ -44,12 +44,14 @@ export {
 export {
   applyInteractiveSdtFocus,
   buildInteractiveOverlayPage,
+  interactiveOverlayHasTabStops,
   type BuildInteractiveOverlayOptions,
   type InteractiveOverlayLabels,
 } from './interactiveOverlay';
 
 export {
   drawDisplayPage,
+  drawGlyphRunPrimitive,
   drawPrimitive,
   presentDisplayPageBackBuffer,
   presentOffscreenPageBackBuffer,
@@ -75,6 +77,7 @@ export {
   buildRustDisplayList,
   buildRustDisplayFrame,
   loadRustDisplayListQueryEngine,
+  loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
   type DisplayListHeadersFooters,
   type DisplayListHfVariant,
@@ -93,6 +96,9 @@ export {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  decodeFrameDeltaSteps,
+  displayPageIsShiftOf,
+  displayPageNoteAnchorRevision,
   displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,
   FRAME_DELTA_PAGE_OP_BYTES,
@@ -107,6 +113,7 @@ export {
 
 export {
   createDisplayListQueries,
+  endDisplayListQueriesLine,
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,
@@ -119,12 +126,19 @@ export {
   type DisplayListRegionHit,
   type DisplayListVerticalMove,
   type DisplayListVisualLine,
+  type VisualLineExtent,
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 
 export { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX, canvasPageTops } from './canvasPageMetrics';
 
 export {
+  bindDisplayPageRegistry,
+  displayPageCanvas,
+  displayPageCanvases,
+  DisplayPageRegistry,
+  effectiveZoom,
+  materializeDisplayPages,
   resolveCanvasPoint,
   resolveDisplayPageClientRect,
   type CanvasPointHit,
@@ -132,7 +146,10 @@ export {
   type DisplayPageHostOptions,
 } from './canvasPointer';
 
-export { createCanvasImageResolver } from './canvasImageResolver';
+export {
+  createCanvasImageResolver,
+  type CanvasImageResolverOptions,
+} from './canvasImageResolver';
 
 export {
   computeA11yAnnouncements,
@@ -145,6 +162,7 @@ export {
 export {
   computeAnchorPositionsFromDisplayList,
   computeAnchorPositionsFromYrs,
+  anchorPositionsFromPoints,
   mergeHfAnchorPositionsFromDisplayList,
   visitAnchorKeys,
   type AnchorEditorView,
@@ -157,6 +175,7 @@ export {
   yrsIdToNumericId,
   type YrsSidebarDisplayPoint,
   type YrsSidebarProjection,
+  type YrsStorySegmentSource,
 } from './yrsSidebarProjection';
 
 export { extractTrackedChangesFromYrs, type TrackedChangesResult } from './yrsTrackedChanges';
@@ -179,6 +198,7 @@ export {
   detectDisplayListTableInsertHover,
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragments,
+  deriveDisplayListTableFragmentsOnPages,
   type DisplayListTableInsertHoverHit,
   type DisplayListTableInsertHoverInput,
   type DisplayListSelectedCellRect,

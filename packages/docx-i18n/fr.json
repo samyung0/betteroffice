@@ -462,6 +462,8 @@
       "shortcuts": {
         "save": "Enregistrer",
         "saveDescription": "Enregistrer le document",
+        "open": null,
+        "openDescription": null,
         "print": "Imprimer",
         "printDescription": "Imprimer le document",
         "undo": "Annuler",

@@ -8,6 +8,7 @@ mod comments;
 mod custom_geometry;
 mod drawing;
 mod error;
+mod inventory;
 mod model;
 mod notes;
 mod package;
@@ -24,6 +25,9 @@ pub use comments::{
     CommentsWrite,
 };
 pub use error::PptxError;
+pub use inventory::{
+    MediaKind, NotesSource, OmittedElement, OmittedInline, SlideSource, SourceShape,
+};
 pub use model::*;
 pub use package::{
     effective_color_map, master_for_layout, parse_pptx, parse_pptx_with_limits,
@@ -33,6 +37,6 @@ pub use relationships::{Relationship, TargetMode, relationship_types};
 pub use write::{
     DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, RunWrite, ShapeAdd,
     ShapePatch, ShapeWrite, SlideWrite, TextTarget, TextWrite, is_supported_image_content_type,
-    write_pptx_with_edits,
+    text_paragraph_xml, write_pptx_with_edits,
 };
 pub use xml::ParseLimits;

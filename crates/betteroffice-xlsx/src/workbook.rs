@@ -25,7 +25,7 @@ use xlsx_ops::{
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     autofit_relevant, build_display_list_on, build_print_display_list_with_charts, chart_at_point,
-    chart_regions_on, display_text, moved_chart_anchor, resolve_chart_anchor,
+    chart_regions_with_geometry, display_text, moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -2308,7 +2308,7 @@ impl Workbook {
         y: f32,
     ) -> Result<Option<ChartRegion>> {
         let geometry = self.sheet_geometry(sheet)?;
-        let regions = chart_regions_on(self.sheet(sheet)?, &geometry, viewport)?;
+        let regions = chart_regions_with_geometry(self.sheet(sheet)?, &geometry, viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
