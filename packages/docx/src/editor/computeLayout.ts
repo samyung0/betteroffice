@@ -106,6 +106,7 @@ export function buildResidentRegionLayoutRequest(
     },
     notes: { contents },
     renderEnv: {
+      compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
       tocStyleIds: [...new Set([
