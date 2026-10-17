@@ -3382,11 +3382,6 @@ class SaveContext {
  * while preserving every package part the editor does not own.
  */
 export interface YrsToDocumentOptions {
-  /**
-   * Root stories to project. Omit to rebuild every editable story. A `body`
-   * projection includes its nested table/content-control stories.
-   */
-  storyIds?: ReadonlySet<string>;
   /** Stories whose projected blocks remain reachable in the authored output. */
   onStory?: (storyId: string) => void;
   /** Current serializer-facing content for a native embed at a UTF-16 offset. */
@@ -3413,60 +3408,33 @@ export function yrsToDocument(
   return projectDocument(context, base, options);
 }
 
+/** Every editable story rebuilt from the session (Epo 2026-10-17: no partial exports). */
 function projectDocument(context: SaveContext, base: Document, options: YrsToDocumentOptions): Document {
-  const shouldProject = (storyId: string): boolean =>
-    options.storyIds === undefined || options.storyIds.has(storyId);
-  const bodyContent = context.storyIds.has('body') && shouldProject('body')
+  const bodyContent = context.storyIds.has('body')
     ? context.storyToBlocks('body')
     : base.package.document.content;
 
-  let headers = base.package.headers;
-  if (
-    headers &&
-    (options.storyIds === undefined || [...headers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    headers = new Map(
-      [...headers].map(([rId, part]) => {
+  const projectParts = (parts: typeof base.package.headers) =>
+    parts &&
+    new Map(
+      [...parts].map(([rId, part]) => {
         const storyId = `hf:${rId}`;
         return [
           rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
+          context.storyIds.has(storyId) ? { ...part, content: context.storyToBlocks(storyId) } : part,
         ];
       })
     );
-  }
-
-  let footers = base.package.footers;
-  if (
-    footers &&
-    (options.storyIds === undefined || [...footers.keys()].some((rId) => shouldProject(`hf:${rId}`)))
-  ) {
-    footers = new Map(
-      [...footers].map(([rId, part]) => {
-        const storyId = `hf:${rId}`;
-        return [
-          rId,
-          context.storyIds.has(storyId) && shouldProject(storyId)
-            ? { ...part, content: context.storyToBlocks(storyId) }
-            : part,
-        ];
-      })
-    );
-  }
+  const headers = projectParts(base.package.headers);
+  const footers = projectParts(base.package.footers);
 
   const projectNotes = <T extends Footnote | Endnote>(
     notes: T[] | undefined,
     prefix: string
   ): T[] | undefined => {
-    const shouldProjectNotes =
-      options.storyIds === undefined ||
-      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
-    if (!shouldProjectNotes) return notes;
     return notes?.map((note) => {
       const storyId = `${prefix}${note.id}`;
-      return context.storyIds.has(storyId) && shouldProject(storyId)
+      return context.storyIds.has(storyId)
         ? {
             ...note,
             content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
