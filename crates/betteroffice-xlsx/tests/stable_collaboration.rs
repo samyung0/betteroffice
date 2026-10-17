@@ -1314,6 +1314,11 @@ fn a_batch_sets_a_cell_to_a_style_an_earlier_op_of_the_batch_interned() {
 }
 
 fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
+    entries(book, sheet, "contents")
+}
+
+/// The overrides one map of a sheet holds, `contents` or `styles`.
+fn entries(book: &Workbook, sheet: &str, overrides: &str) -> Vec<(String, String)> {
     use yrs::updates::decoder::Decode;
     use yrs::{Doc, Map, MapRef, ReadTxn, Transact};
     let doc = Doc::new();
@@ -1329,7 +1334,7 @@ fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
         .cast::<MapRef>()
         .unwrap();
     let contents = sheet
-        .get(&txn, "contents")
+        .get(&txn, overrides)
         .unwrap()
         .cast::<MapRef>()
         .unwrap();
@@ -2182,4 +2187,148 @@ fn concurrent_pastes_and_a_cut_converge_cell_by_cell() {
     }
     assert_eq!(value_at(&b, 0, "D2"), number(4.0));
     assert_eq!(value_at(&b, 0, "C3"), number(5.0));
+}
+
+fn sample_peer(client_id: u64) -> Workbook {
+    let source = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
+    Workbook::open_collaborative(source, client_id).unwrap()
+}
+
+fn input_at(book: &Workbook, address: &str) -> String {
+    book.cell(SheetId(0), at(address)).unwrap().input
+}
+
+/// Types each input in turn, returning the update each edit emitted.
+fn typed(book: &mut Workbook, edits: &[(&str, &str)]) -> Vec<Vec<u8>> {
+    let updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&updates);
+    let _subscription = book
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    for (address, input) in edits {
+        book.edit_cell(
+            SheetId(0),
+            at(address),
+            input,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    }
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), edits.len());
+    updates
+}
+
+/// Applies `updates` in order on another thread, failing if they hang.
+fn deliver(book: Workbook, updates: &[&Vec<u8>]) -> Workbook {
+    let updates = updates
+        .iter()
+        .map(|update| update.to_vec())
+        .collect::<Vec<_>>();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut book = book;
+        for update in &updates {
+            book.apply_update_v1(update, CalculationOptions::default())
+                .unwrap();
+        }
+        sender.send(book).unwrap();
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("remote updates must apply within 10 s")
+}
+
+fn assert_projects_its_state(book: &Workbook, mirror_id: u64) {
+    let mirror = deliver(sample_peer(mirror_id), &[&book.encode_state_as_update_v1()]);
+    assert_eq!(mirror.model(), book.model());
+}
+
+#[test]
+fn an_overwrite_that_overtakes_a_cleared_edit_settles_and_converges() {
+    let mut source = sample_peer(821);
+    let mut other = sample_peer(822);
+    let updates = typed(
+        &mut source,
+        &[("D1", "one"), ("H20", "two"), ("H20", ""), ("D1", "three")],
+    );
+    let unrelated = typed(&mut other, &[("B30", "other")]);
+    source
+        .apply_update_v1(&unrelated[0], CalculationOptions::default())
+        .unwrap();
+
+    let target = deliver(sample_peer(823), &[&updates[0], &updates[3], &unrelated[0]]);
+    assert_eq!(input_at(&target, "B30"), "other");
+    assert_projects_its_state(&target, 824);
+
+    let target = deliver(target, &[&updates[1], &updates[2]]);
+    assert_eq!(input_at(&target, "D1"), "three");
+    assert_eq!(input_at(&target, "H20"), "");
+    assert_eq!(target.model(), source.model());
+}
+
+#[test]
+fn an_overwrite_that_overtakes_an_edit_waits_for_it_and_converges() {
+    let mut source = sample_peer(831);
+    let updates = typed(
+        &mut source,
+        &[("D1", "one"), ("H20", "two"), ("D1", "three")],
+    );
+
+    let target = deliver(sample_peer(832), &[&updates[0], &updates[2]]);
+    assert_projects_its_state(&target, 833);
+
+    let target = deliver(target, &[&updates[1]]);
+    assert_eq!(input_at(&target, "D1"), "three");
+    assert_eq!(input_at(&target, "H20"), "two");
+    assert_eq!(target.model(), source.model());
+}
+
+/// Epo 2026-10-17: a value typed into an empty cell of a formatted row or
+/// column shows and saves with that format, as in Excel, and schema 8 treats
+/// the inherited format as no change: no format override, no formatting
+/// effect, and the same cell on a peer the update reached cell by cell and
+/// on one that took the whole state.
+#[test]
+fn a_value_typed_into_a_formatted_row_or_column_takes_its_format_without_an_override() {
+    let options = CalculationOptions::default();
+    let mut model = base();
+    let mut bold = xlsx_model::CellFormat::default();
+    bold.font.bold = true;
+    let bold = model.styles.intern_cell_format(&bold).unwrap().unwrap();
+    model.sheets[0].col_styles = vec![ColStyle {
+        first: 2,
+        last: 2,
+        xf: bold,
+    }];
+    model.sheets[0].row_styles.insert(5, bold);
+    let source = Workbook::from_model(model).unwrap().save().unwrap();
+    let open =
+        |client| Workbook::open_collaborative_recalculated(&source, client, options).unwrap();
+    let (mut author, mut peer) = (open(3101), open(3102));
+    for update in typed(&mut author, &[("C3", "7"), ("E6", "8")]) {
+        peer.apply_update_v1(&update, options).unwrap();
+    }
+    let whole = deliver(open(3103), &[&author.encode_state_as_update_v1()]);
+    let shows_bold = |book: &Workbook, address: &str| {
+        let cell = book.model().sheets[0].cell(at(address)).unwrap();
+        book.model().styles.cell_format(cell.style).font.bold
+    };
+    for book in [&author, &peer, &whole] {
+        assert_eq!(book.model(), author.model());
+        let saved = Workbook::open(&book.save().unwrap()).unwrap();
+        for address in ["C3", "E6"] {
+            assert!(shows_bold(book, address), "{address}");
+            assert!(shows_bold(&saved, address), "saved {address}");
+        }
+    }
+    assert!(entries(&author, "sheet:0", "styles").is_empty());
+    let effects: Vec<serde_json::Value> =
+        serde_json::from_str(&author.pending_effects_json().unwrap()).unwrap();
+    let mut labels = effects
+        .iter()
+        .map(|effect| effect["label"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    labels.sort();
+    assert_eq!(labels, ["Data!C3", "Data!E6"]);
 }

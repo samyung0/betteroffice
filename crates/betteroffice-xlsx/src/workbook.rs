@@ -3,6 +3,7 @@ pub(crate) mod rebase;
 mod remote_equivalence;
 
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -24,8 +25,9 @@ use xlsx_ops::{
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
-    chart_regions_with_geometry, display_text, moved_chart_anchor, resolve_chart_anchor,
+    autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
+    chart_at_point, chart_regions_with_geometry, display_text, moved_chart_anchor,
+    resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -392,7 +394,7 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
-        workbook.recalculate_all(options);
+        workbook.recalculate_at_open(options);
         Ok(workbook)
     }
 
@@ -403,9 +405,16 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
-        workbook.recalculate_all(options);
+        workbook.recalculate_at_open(options);
         workbook.mark_exact();
         Ok(workbook)
+    }
+
+    /// The recalculation at open shows current values without counting as an
+    /// edit, so a save without edits keeps the file's cached values.
+    fn recalculate_at_open(&mut self, options: CalculationOptions) {
+        self.rebuild_and_recalculate(options);
+        self.edited_since_open = false;
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
@@ -465,6 +474,23 @@ impl Workbook {
         let mut projected = authority.materialize().map_err(authority_error)?;
         if !authority.supports_structure() {
             retain_array_formulas(&model, &mut projected);
+            // The standalone document folds equal formats into one index and
+            // keeps no row styles or hidden sizes; the save compares against
+            // the source's own.
+            for (sheet, source) in projected.sheets.iter_mut().zip(&model.sheets) {
+                for (at, cell) in source.iter_cells() {
+                    if let Some(projected) = sheet.cell_mut(at) {
+                        projected.style = cell.style;
+                    }
+                }
+                sheet.row_styles.clone_from(&source.row_styles);
+                sheet
+                    .hidden_row_heights
+                    .clone_from(&source.hidden_row_heights);
+                sheet
+                    .hidden_col_widths
+                    .clone_from(&source.hidden_col_widths);
+            }
         }
         let model = projected;
         validate_model(&model)?;
@@ -1115,6 +1141,14 @@ impl Workbook {
                     },
                     active_sheet,
                 )?;
+                if parts
+                    .iter()
+                    .all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
+                    && let Some(source) = &self.source_container
+                    && source.holds_exactly(parts.iter().map(|(name, _)| name.as_str()))
+                {
+                    return Ok(source.as_bytes().to_vec());
+                }
                 self.rezip(&parts)
             }
             None => self.rezip(&xlsx_parse::serialize_workbook_with_active_sheet(
@@ -1510,11 +1544,14 @@ impl Workbook {
             })),
             fill_color: uniform(formats.iter().map(|(_, format)| {
                 match &format.fill {
-                    Fill::Solid(color) => styles
+                    Fill::Solid(color)
+                    | Fill::Pattern {
+                        fg: Some(color), ..
+                    } => styles
                         .resolve_color(color)
                         .unwrap_or_else(|| "#ffffff".into())
                         .to_ascii_lowercase(),
-                    Fill::None => "#ffffff".into(),
+                    Fill::None | Fill::Pattern { fg: None, .. } => "#ffffff".into(),
                 }
             })),
             border_preset: detect_border_preset(&formats, range),
@@ -1558,14 +1595,25 @@ impl Workbook {
 
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
+        let formats = self.range_formats(sheet, range)?;
+        let source_styles: Vec<_> = formats
+            .iter()
+            .map(|(at, _)| {
+                self.model.sheets[sheet.0 as usize]
+                    .cell(*at)
+                    .and_then(|cell| cell.style)
+            })
+            .collect();
         Ok(CapturedFormat {
             rows: rows as u32,
             columns: columns as u32,
-            formats: self
-                .range_formats(sheet, range)?
-                .into_iter()
-                .map(|(_, format)| format)
+            source_formats: source_styles
+                .iter()
+                .map(|style| xlsx_ops::PreservedCellFormat::from_style(&self.model.styles, *style))
                 .collect(),
+            source_styles,
+            formats: formats.into_iter().map(|(_, format)| format).collect(),
+            kept: Vec::new(),
         })
     }
 
@@ -2470,12 +2518,13 @@ impl Workbook {
         range: CellRange,
     ) -> Result<Vec<(CellRef, CellFormat)>> {
         let sheet_ref = self.sheet(sheet)?;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         let mut formats = Vec::new();
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let style = sheet_ref.cell(at).and_then(|cell| cell.style);
-                formats.push((at, self.model.styles.cell_format(style)));
+                let style = defaults.effective_style(at);
+                formats.push((at, self.model.styles.cell_format(Some(style.unwrap_or(0)))));
             }
         }
         Ok(formats)
@@ -2838,6 +2887,7 @@ impl Workbook {
             match op {
                 Op::AddSheet { .. }
                 | Op::RemoveSheet { .. }
+                | Op::MoveSheet { .. }
                 | Op::RenameSheet { .. }
                 | Op::RestoreSheet { .. } => {
                     *slot = None;
@@ -2848,10 +2898,15 @@ impl Workbook {
                 | Op::InsertCols { sheet, .. }
                 | Op::DeleteCols { sheet, .. }
                 | Op::SetColWidth { sheet, .. }
+                | Op::SetColVisibility { sheet, .. }
+                | Op::RestoreColDimension { sheet, .. }
                 | Op::SetRowHeight { sheet, .. }
+                | Op::SetRowVisibility { sheet, .. }
+                | Op::RestoreRowDimension { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
+                | Op::RestoreRowStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -3067,7 +3122,13 @@ fn uniform_border_value<T: PartialEq + Clone>(
 
 fn border_line_style(style: BorderStyle) -> BorderLineStyle {
     match style {
-        BorderStyle::Dashed => BorderLineStyle::Dashed,
+        BorderStyle::Dashed
+        | BorderStyle::MediumDashed
+        | BorderStyle::DashDot
+        | BorderStyle::MediumDashDot
+        | BorderStyle::DashDotDot
+        | BorderStyle::MediumDashDotDot
+        | BorderStyle::SlantDashDot => BorderLineStyle::Dashed,
         BorderStyle::Dotted | BorderStyle::Hair => BorderLineStyle::Dotted,
         BorderStyle::Double => BorderLineStyle::Double,
         BorderStyle::Thin | BorderStyle::Medium | BorderStyle::Thick => BorderLineStyle::Solid,
@@ -3625,6 +3686,11 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
+        | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3634,6 +3700,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::ApplyRangeFormat { sheet, .. } => Some(*sheet),
         Op::AddSheet { .. }
         | Op::RemoveSheet { .. }
+        | Op::MoveSheet { .. }
         | Op::RenameSheet { .. }
         | Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. } => None,
@@ -3770,9 +3837,17 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetCharts { .. }
-        | Op::RestoreColStyles { .. } => {
+        | Op::RestoreColStyles { .. }
+        | Op::RestoreRowStyles { .. }
+        | Op::RestoreColDimension { .. }
+        | Op::RestoreRowDimension { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
+            ));
+        }
+        Op::SetColVisibility { .. } | Op::SetRowVisibility { .. } | Op::MoveSheet { .. } => {
+            return Err(Error::InvalidOperation(
+                "hiding rows or columns and moving sheets are not supported".to_string(),
             ));
         }
     }
@@ -4173,6 +4248,27 @@ fn validate_cell_state(state: &CellState) -> Result<()> {
     Ok(())
 }
 
+/// The style a write leaves on `cell`: its own, or for a missing cell its row's or column's
+/// default. A clear leaves a missing cell missing and pins an unstyled cell to the default
+/// style where a row or column default would otherwise take over.
+fn written_cell_style(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    clears: bool,
+) -> Option<u32> {
+    let sheet = workbook.sheet(sheet);
+    let inherited = sheet.and_then(|sheet| sheet.inherited_style(cell));
+    match sheet.and_then(|sheet| sheet.cell(cell)) {
+        None if clears => None,
+        None => inherited,
+        Some(existing) if clears && existing.style.is_none() => inherited
+            .is_some_and(|inherited| inherited != 0)
+            .then_some(0),
+        Some(existing) => existing.style,
+    }
+}
+
 fn edit_cell_state(
     workbook: &WorkbookModel,
     sheet: SheetId,
@@ -4181,9 +4277,11 @@ fn edit_cell_state(
 ) -> CellState {
     let style = workbook
         .sheet(sheet)
-        .and_then(|sheet| sheet.cell(cell))
-        .and_then(|cell| cell.style);
-    let number_format = workbook.styles.resolved_format(style).number_format;
+        .and_then(|sheet| sheet.effective_style(cell));
+    let number_format = workbook
+        .styles
+        .resolved_format(Some(style.unwrap_or(0)))
+        .number_format;
     let mut state = if !input.is_empty()
         && matches!(
             number_format,
@@ -4198,7 +4296,7 @@ fn edit_cell_state(
     } else {
         cell_state_for_input_no_eval(input)
     };
-    state.style = style;
+    state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     state
 }
 
@@ -4493,11 +4591,6 @@ fn validate_display_region(
     viewport: &Viewport,
 ) -> Result<()> {
     validate_viewport(viewport)?;
-    let right = viewport.x + viewport.width;
-    let bottom = viewport.y + viewport.height;
-    if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
-        return Err(Error::InvalidViewport);
-    }
     let (rows, columns) = geometry.viewport_range(viewport);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane

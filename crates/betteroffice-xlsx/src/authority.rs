@@ -1384,10 +1384,16 @@ impl WorkbookAuthority {
                         }
                         authored_cells.insert((key, *at));
                     }
-                    (Op::SetColWidth { col, .. }, Some(key)) => {
+                    (
+                        Op::SetColWidth { col, .. } | Op::RestoreColDimension { col, .. },
+                        Some(key),
+                    ) => {
                         col_widths.insert((key, *col));
                     }
-                    (Op::SetRowHeight { row, .. }, Some(key)) => {
+                    (
+                        Op::SetRowHeight { row, .. } | Op::RestoreRowDimension { row, .. },
+                        Some(key),
+                    ) => {
                         row_heights.insert((key, *row));
                     }
                     (Op::MergeCells { .. } | Op::UnmergeCells { .. }, Some(key)) => {
@@ -1662,6 +1668,7 @@ fn is_structural_op(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::MergeCells { .. }
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
@@ -2481,6 +2488,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::RestoreColStyles { .. }
+            | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
@@ -2571,10 +2579,15 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
+        | Op::SetColVisibility { sheet, .. }
+        | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetRowVisibility { sheet, .. }
+        | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
+        | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -2584,7 +2597,10 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
-        Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::SetDefinedNames { .. } => None,
+        Op::AddSheet { .. }
+        | Op::RemoveSheet { .. }
+        | Op::MoveSheet { .. }
+        | Op::SetDefinedNames { .. } => None,
     }
 }
 

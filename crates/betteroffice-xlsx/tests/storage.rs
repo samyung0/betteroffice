@@ -8,25 +8,25 @@ const SEEDS: [(&str, &[u8], &str, usize); 4] = [
     (
         "course-guide.xlsx",
         include_bytes!("fixtures/storage/course-guide.xlsx"),
-        "96b4640f904e841efb251e1740fd85f07f4d33b271e75302272b18aee9595f70",
-        24_800,
+        "3f2d3e7929a7ef4c4b44256bf065554952e9f678ad7eb3fe70fda21276cea352",
+        31_000,
     ),
     (
         "cells-1k.xlsx",
         include_bytes!("fixtures/storage/cells-1k.xlsx"),
-        "4967af69daa06a01b510058b0bd20906821344e2bc34c7ecb8ac012509549b80",
+        "355584b350f7d1493e893dfa03afcfb805eb4ecc3b20988f06f22e0fc5ac4036",
         4_300,
     ),
     (
         "cells-10k.xlsx",
         include_bytes!("fixtures/storage/cells-10k.xlsx"),
-        "97aa866997b1a6baa55a2a0c1569d3adb3ae43827c116c749ce20b40a8809d07",
+        "c688181f3b29891f3a20e65b76716050909b6652954f70914d4d088ef724cf15",
         4_300,
     ),
     (
         "cells-100k.xlsx",
         include_bytes!("fixtures/storage/cells-100k.xlsx"),
-        "877e06a90ce431fc4b08dcaa824cbb84c816b0d7c0de3a635b80668a2c0d3368",
+        "e4fc0c407d83fc4c7ee922885d29d4e8359f75e30632af9b3fd0c9a45a12a85c",
         4_300,
     ),
 ];

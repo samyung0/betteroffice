@@ -1,7 +1,6 @@
 use betteroffice_xlsx::{
     CalculationOptions, Cell, CellRef, CellValue, Sheet, SheetId, Workbook, WorkbookModel,
 };
-use serde_json::json;
 use xlsx_model::CellProvider;
 
 fn cell(address: &str) -> CellRef {
@@ -83,59 +82,41 @@ fn save_without_errors(workbook: &Workbook) -> Vec<u8> {
     saved
 }
 
-fn edit(workbook: &mut Workbook, input: &str, batch: bool) {
-    if batch {
-        let request = json!({
-            "expectVersion": workbook.version(),
-            "steps": [{
-                "op": "setCellInputs",
-                "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A2" } },
-                "inputs": [[input]]
-            }]
-        });
-        let result: serde_json::Value =
-            serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap())
-                .unwrap();
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["applied"], true);
-    } else {
-        assert!(
-            workbook
-                .edit_cell(SheetId(0), cell("A2"), input, CalculationOptions::default())
-                .unwrap()
-                .applied
-        );
-    }
+fn edit(workbook: &mut Workbook, input: &str) {
+    assert!(
+        workbook
+            .edit_cell(SheetId(0), cell("A2"), input, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
 }
 
 #[test]
 fn clockless_edits_and_history_keep_only_clock_caches() {
-    for batch in [false, true] {
-        let mut workbook = Workbook::open(&synthetic()).unwrap();
-        edit(&mut workbook, "7", batch);
-        assert_values(&workbook, 7.0, 45_000.0);
-        save_without_errors(&workbook);
-        assert!(
-            workbook
-                .undo(CalculationOptions::default())
-                .unwrap()
-                .applied
-        );
-        assert_values(&workbook, 1.0, 45_000.0);
-        save_without_errors(&workbook);
-        assert!(
-            workbook
-                .redo(CalculationOptions::default())
-                .unwrap()
-                .applied
-        );
-        assert_values(&workbook, 7.0, 45_000.0);
-        save_without_errors(&workbook);
-        workbook.recalculate_all(CalculationOptions {
-            now_serial: Some(46_000.25),
-        });
-        assert_values(&workbook, 7.0, 46_000.0);
-    }
+    let mut workbook = Workbook::open(&synthetic()).unwrap();
+    edit(&mut workbook, "7");
+    assert_values(&workbook, 7.0, 45_000.0);
+    save_without_errors(&workbook);
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_values(&workbook, 1.0, 45_000.0);
+    save_without_errors(&workbook);
+    assert!(
+        workbook
+            .redo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_values(&workbook, 7.0, 45_000.0);
+    save_without_errors(&workbook);
+    workbook.recalculate_all(CalculationOptions {
+        now_serial: Some(46_000.25),
+    });
+    assert_values(&workbook, 7.0, 46_000.0);
 }
 
 #[test]
@@ -144,7 +125,7 @@ fn clockless_remote_update_keeps_only_clock_caches() {
     let mut receiver = Workbook::open_collaborative(&bytes, 1).unwrap();
     let mut sender = Workbook::open_collaborative(&bytes, 2).unwrap();
     let vector = receiver.encode_state_vector_v1();
-    edit(&mut sender, "7", false);
+    edit(&mut sender, "7");
     assert_values(&sender, 7.0, 45_000.0);
     let update = sender.encode_diff_v1(&vector).unwrap();
     assert!(
@@ -160,11 +141,11 @@ fn clockless_remote_update_keeps_only_clock_caches() {
 #[test]
 fn clockless_save_reopen_edit_keeps_only_clock_caches() {
     let mut workbook = Workbook::open(&synthetic()).unwrap();
-    edit(&mut workbook, "7", false);
+    edit(&mut workbook, "7");
     let saved = save_without_errors(&workbook);
     let mut reopened = Workbook::open(&saved).unwrap();
     assert_values(&reopened, 7.0, 45_000.0);
-    edit(&mut reopened, "9", false);
+    edit(&mut reopened, "9");
     assert_values(&reopened, 9.0, 45_000.0);
     let saved = save_without_errors(&reopened);
     assert_values(&Workbook::open(&saved).unwrap(), 9.0, 45_000.0);

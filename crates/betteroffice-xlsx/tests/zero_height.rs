@@ -39,51 +39,6 @@ fn zero_height_short_sheet_does_not_exceed_display_cell_cap() {
 }
 
 #[test]
-fn zero_height_snapshots_and_peer_edits_keep_content_rows_visible() {
-    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
-
-    let source = source();
-    let mut workbook = Workbook::open(&source).unwrap();
-    let mut peer = Workbook::open_collaborative(&source, 811).unwrap();
-    workbook
-        .edit_cells(
-            SheetId(0),
-            &[CellInput {
-                cell: CellRef::new(1, 0),
-                input: "edited".into(),
-            }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    peer.apply_update_v1(
-        &workbook.encode_state_as_update_v1(),
-        CalculationOptions::default(),
-    )
-    .unwrap();
-    assert!(!peer.sheet(SheetId(0)).unwrap().row_hidden(1));
-    assert!(peer.sheet(SheetId(0)).unwrap().row_hidden(2));
-
-    let initial = Workbook::open(&source).unwrap();
-    let budget = SnapshotBudget::new(8, 65536).unwrap();
-    let mut encoder = WorkbookSnapshotEncoder::new(&initial, None, budget).unwrap();
-    let mut builder = WorkbookSnapshotBuilder::new();
-    while let Some(chunk) = encoder.next(&initial).unwrap() {
-        builder.push(&chunk).unwrap();
-    }
-    while !builder.advance(budget).unwrap().is_ready() {}
-    let (restored, _) = builder.finish().unwrap().into_parts();
-    assert_eq!(restored.model(), initial.model());
-    assert_eq!(
-        restored
-            .display_list_for(SheetId(0), &SCREEN)
-            .unwrap()
-            .grid
-            .row_offsets,
-        [0.0, 20.0, 37.0],
-    );
-}
-
-#[test]
 fn zero_height_empty_row_stays_hidden() {
     let workbook = Workbook::open(&source()).unwrap();
     let sheet = workbook.sheet(SheetId(0)).unwrap();

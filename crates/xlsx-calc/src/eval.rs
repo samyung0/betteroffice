@@ -35,6 +35,7 @@ thread_local! {
 }
 
 pub(crate) struct EvaluationBudget {
+    limit: u64,
     remaining: Cell<u64>,
     text: Cell<u64>,
 }
@@ -46,9 +47,15 @@ impl EvaluationBudget {
 
     pub(crate) fn with_text(cells: u64, bytes: u64) -> Self {
         Self {
+            limit: cells,
             remaining: Cell::new(cells),
             text: Cell::new(bytes),
         }
+    }
+
+    /// cell visits taken so far.
+    pub(crate) fn spent(&self) -> u64 {
+        self.limit - self.remaining.get()
     }
 
     pub(crate) fn consume(&self, count: u64) -> bool {
