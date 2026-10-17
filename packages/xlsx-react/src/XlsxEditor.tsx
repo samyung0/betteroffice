@@ -36,6 +36,7 @@ import type {
   CellBounds,
   CellEdit,
   CellInputEdit,
+  CellRange,
   CapturedFormat,
   ChartRegion,
   DisplayList,
@@ -336,8 +337,7 @@ function revealOffset(scroll: number, start: number, end: number, body: number):
 }
 
 // median of the gaps between consecutive offsets, or a fallback when the window
-// has no tracks. the median ignores outliers like a single very wide column, so
-// the extent-to-count estimate below is not skewed by one atypical track.
+// has no tracks. the median ignores outliers like a single very tall row.
 function medianTrack(offsets: number[] | undefined, fallback: number): number {
   if (!offsets || offsets.length < 2) return fallback;
   const gaps: number[] = [];
@@ -348,20 +348,32 @@ function medianTrack(offsets: number[] | undefined, fallback: number): number {
 }
 
 // nav bounds: moves cover the whole sheet, as in Excel (the scroll area grows to
-// a revealed cell); the used extent, where Ctrl/Cmd+arrows, End and select all
-// stop, is estimated from the scrollable extent over a representative (median)
-// track size, with a slack of one past the used edge. rowsPerPage from the viewport.
+// a revealed cell); Ctrl/Cmd+arrows, End, Ctrl/Cmd+End and select all stop at
+// the engine's used range (A1 on an empty sheet). rowsPerPage from the viewport
+// over a representative (median) row height.
 function deriveLimits(
   dl: DisplayList | null,
   info: SheetInfo,
   viewportHeight: number
 ): SelectionLimits {
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
-  const colW = medianTrack(dl?.grid?.colOffsets, COL_W);
-  const usedRows = Math.max(1, Math.round(info.contentHeight / rowH)) + 1;
-  const usedCols = Math.max(1, Math.round(info.contentWidth / colW)) + 1;
+  const usedRows = (info.usedRange?.end.row ?? 0) + 1;
+  const usedCols = (info.usedRange?.end.col ?? 0) + 1;
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
   return { rows: XLSX_MAX_ROWS, cols: XLSX_MAX_COLUMNS, usedRows, usedCols, rowsPerPage };
+}
+
+// the part of `range` inside the sheet's used range, or null when they miss:
+// clear, cut and copy cost no more than the data a selection covers.
+function inUsedRange(range: CellRange, used: SheetInfo['usedRange']): CellRange | null {
+  if (!used) return null;
+  const part = {
+    top: Math.max(range.top, used.start.row),
+    left: Math.max(range.left, used.start.col),
+    bottom: Math.min(range.bottom, used.end.row),
+    right: Math.min(range.right, used.end.col),
+  };
+  return part.top <= part.bottom && part.left <= part.right ? part : null;
 }
 
 // trigger a browser download of a byte blob under the given name and mime type.
@@ -1523,26 +1535,49 @@ function XlsxEditorContent({
     focusContainer();
   }, [focusContainer]);
 
+  // the selection's part inside the used range on screen, which inputs
+  // committed but not drawn yet extend.
+  const usedSelection = useCallback(
+    (target: Selection): CellRange | null => {
+      let used = shownHere?.sheetInfo.usedRange ?? null;
+      for (const { sheetId, row, col } of optimistic) {
+        if (sheetId !== activeSheetId) continue;
+        const { start, end } = used ?? { start: { row, col }, end: { row, col } };
+        used = {
+          start: { row: Math.min(row, start.row), col: Math.min(col, start.col) },
+          end: { row: Math.max(row, end.row), col: Math.max(col, end.col) },
+        };
+      }
+      return inUsedRange(normalizeRange(target), used);
+    },
+    [shownHere, optimistic, activeSheetId]
+  );
+
   const clearCells = useCallback(() => {
     if (!handleRef.current || !selection || readOnly) return;
-    const r = normalizeRange(selection);
+    const r = usedSelection(selection);
+    if (!r) return;
     const edits: CellInputEdit[] = [];
     for (let row = r.top; row <= r.bottom; row++) {
       for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
     }
     onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportError);
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError]);
+  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError, usedSelection]);
 
   const copySelection = useCallback(async () => {
     const handle = handleRef.current;
     if (!handle || !selection) return;
+    const r = usedSelection(selection);
     try {
-      const cells = await handle.onSheet(
-        activeSheetId,
-        'rangeCells',
-        activeSheet,
-        selectedRangeA1(selection)
-      );
+      // a selection of empty cells copies nothing (and asks the worker nothing).
+      const cells = r
+        ? await handle.onSheet(
+            activeSheetId,
+            'rangeCells',
+            activeSheet,
+            `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
+          )
+        : [];
       const tsv = toTsv(
         cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
       );
@@ -1550,7 +1585,7 @@ function XlsxEditorContent({
     } catch {
       // clipboard denied or read failed — nothing to paste, leave state as-is.
     }
-  }, [selection, activeSheet, activeSheetId, selectedRangeA1]);
+  }, [selection, activeSheet, activeSheetId, usedSelection]);
 
   const cutSelection = useCallback(async () => {
     await copySelection();

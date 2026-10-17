@@ -48,6 +48,8 @@ export interface SheetInfo {
   frozenCols: number;
   initialScrollX: number;
   initialScrollY: number;
+  /** The active sheet's used range (its cells and hyperlinks), `null` when it is empty. */
+  usedRange: { start: CellPoint; end: CellPoint } | null;
 }
 
 export interface CellPosition {

@@ -213,6 +213,7 @@ impl SheetInfoCache {
         self.info.frozen_cols = content.frozen_cols;
         self.info.initial_scroll_x = content.initial_scroll_x;
         self.info.initial_scroll_y = content.initial_scroll_y;
+        self.info.used_range = self.bounds;
     }
 }
 
@@ -1304,6 +1305,7 @@ impl Workbook {
             frozen_cols: content.frozen_cols,
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
+            used_range: bounds,
         };
         *slot = Some(SheetInfoCache {
             info: info.clone(),

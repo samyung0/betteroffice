@@ -74,6 +74,46 @@ fn text_search_uses_formatted_values_and_stable_cell_order() {
 }
 
 #[test]
+fn sheet_info_reports_the_used_range_as_edits_grow_and_shrink_it() {
+    let mut sheet = Sheet::new("Data");
+    for address in ["A1", "B2"] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let used = |workbook: &Workbook| workbook.sheet_info().unwrap().used_range;
+    assert_eq!(
+        used(&workbook),
+        Some(CellRange::new(cell("A1"), cell("B2")))
+    );
+    // the memoized info grows with a cell past the edge, then shrinks when it is cleared.
+    let options = CalculationOptions::default();
+    workbook
+        .edit_cell(SheetId(0), cell("D5"), "7", options)
+        .unwrap();
+    assert_eq!(
+        used(&workbook),
+        Some(CellRange::new(cell("A1"), cell("D5")))
+    );
+    workbook
+        .edit_cell(SheetId(0), cell("D5"), "", options)
+        .unwrap();
+    assert_eq!(
+        used(&workbook),
+        Some(CellRange::new(cell("A1"), cell("B2")))
+    );
+}
+
+#[test]
 fn text_search_has_a_bounded_default_that_callers_can_override() {
     let mut sheet = Sheet::new("Data");
     for row in 0..=DEFAULT_TEXT_SEARCH_LIMIT as u32 {

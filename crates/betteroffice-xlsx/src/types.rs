@@ -59,6 +59,8 @@ pub struct SheetInfo {
     pub frozen_cols: u32,
     pub initial_scroll_x: f32,
     pub initial_scroll_y: f32,
+    /// The active sheet's used range (its cells and hyperlinks), `None` when empty.
+    pub used_range: Option<CellRange>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

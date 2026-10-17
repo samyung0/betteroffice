@@ -23,7 +23,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
-import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
+import type { CellAddr, CellInputEdit, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
+import { XLSX_MAX_ROWS } from '@betteroffice/xlsx/collaboration';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
 import { useState } from 'react';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
@@ -308,6 +309,7 @@ async function mountEditor(
     editor,
     idle,
     workbook: () => ready.handle!,
+    api: () => ready.api!,
     /** A cell's editable text on sheet 0, once every change posted landed. */
     input: async (row: number, col: number) => {
       await idle();
@@ -624,6 +626,59 @@ describe('XlsxEditor keyboard', () => {
       fireEvent.mouseUp(window, pointAt(small, { row: 20, col: 4 }));
     });
     expect(view.nameBox().value).toBe('E21');
+  }, MANY_KEYS_MS);
+
+  // sample.xlsx's Budget sheet uses A1:D62.
+  it('lands Ctrl+End on the last used cell', async () => {
+    const view = await mountEditor(plain);
+    await view.click({ row: 0, col: 0 });
+    await press(view.surface, 'End', { ctrlKey: true });
+    expect(view.nameBox().value).toBe('D62');
+  }, MANY_KEYS_MS);
+
+  it('copies and clears only the used part of a whole-column selection', async () => {
+    const view = await mountEditor(plain);
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    const sent: Array<{ method: string; args: unknown[] }> = [];
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+      sent.push({ method, args });
+      // a whole column, recorded but kept from the worker.
+      if (method === 'editCells' && (args[1] as CellInputEdit[]).length > 10_000)
+        return Promise.resolve(undefined);
+      if (method === 'rangeCells' && /\d{5,}$/.test(String(args[1]))) return Promise.resolve([]);
+      return forward(sheetId, method, ...args);
+    }) as WorkbookProxy['onSheet']);
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => void written.push(text) },
+    });
+    try {
+      const filled = await view.input(1, 1);
+      expect(filled).not.toBe('');
+      const column = { anchor: { row: 0, col: 1 }, focus: { row: XLSX_MAX_ROWS - 1, col: 1 } };
+      await act(async () => {
+        expect(await view.api().selectCells(0, column)).toBe(true);
+      });
+      await view.idle();
+      await press(view.surface, 'c', { ctrlKey: true });
+      await view.idle();
+      expect(sent.filter((call) => call.method === 'rangeCells').map((call) => call.args[1])).toEqual(['B1:B62']);
+      expect(written).toHaveLength(1);
+      expect(written[0].split(/\r?\n/)).toHaveLength(62);
+
+      await press(view.surface, 'Delete');
+      const cleared = sent.filter((call) => call.method === 'editCells').map((call) => call.args[1] as CellInputEdit[]);
+      expect(cleared.map((edits) => edits.length)).toEqual([62]);
+      expect(cleared[0].every((edit, row) => edit.row === row && edit.col === 1 && edit.input === '')).toBe(true);
+      expect(await view.input(1, 1)).toBe('');
+    } finally {
+      spy.mockRestore();
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
   }, MANY_KEYS_MS);
 
   it('selects the cell an address typed into the name box names', async () => {

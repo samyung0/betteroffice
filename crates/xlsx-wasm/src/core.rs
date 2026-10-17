@@ -95,6 +95,7 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+    used_range: Option<CellRange>,
 }
 
 #[derive(Deserialize)]
@@ -957,6 +958,7 @@ impl Session {
                 frozen_cols: info.frozen_cols,
                 initial_scroll_x: info.initial_scroll_x,
                 initial_scroll_y: info.initial_scroll_y,
+                used_range: info.used_range,
             })
             .map_err(|error| error.to_string())
     }
