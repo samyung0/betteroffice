@@ -45,6 +45,64 @@ pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
     pub limited_cells: Vec<(SheetId, CellRef)>,
+    /// cell visits the recalc spent of its `MAX_RECALCULATION_CELL_VISITS`.
+    pub visits: u64,
+}
+
+/// what a reversible recalc overwrote, so [`RecalcJournal::undo`] can put the
+/// workbook back.
+#[derive(Default)]
+pub struct RecalcJournal {
+    enabled: bool,
+    values: Vec<(Key, Option<Cell>)>,
+    arrays: Vec<(SheetId, CellRef, Option<CellRange>)>,
+    /// whether spills stopped moving before the round limit.
+    pub settled: bool,
+}
+
+impl RecalcJournal {
+    fn value(&mut self, wb: &Workbook, u: Key) {
+        if self.enabled {
+            let cell = wb
+                .sheet(u.0)
+                .and_then(|sheet| sheet.cell(cell_of(u)))
+                .cloned();
+            self.values.push((u, cell));
+        }
+    }
+
+    fn array(&mut self, wb: &Workbook, sheet: SheetId, anchor: CellRef) {
+        if self.enabled {
+            let range = wb.sheet(sheet).and_then(|s| s.array_formula(anchor));
+            self.arrays.push((sheet, anchor, range));
+        }
+    }
+
+    /// each cell the recalc wrote, with what it held before its first write.
+    pub fn written(&self) -> impl Iterator<Item = ((SheetId, CellRef), Option<&Cell>)> {
+        let mut seen = HashSet::new();
+        self.values
+            .iter()
+            .filter(move |(u, _)| seen.insert(*u))
+            .map(|(u, cell)| ((u.0, cell_of(*u)), cell.as_ref()))
+    }
+
+    /// restores every value and spill rectangle the recalc wrote.
+    pub fn undo(self, wb: &mut Workbook) {
+        for (sheet, anchor, range) in self.arrays.into_iter().rev() {
+            if let Some(sheet) = wb.sheet_mut(sheet) {
+                match range {
+                    Some(range) => sheet.set_array_formula(anchor, range),
+                    None => sheet.clear_array_formula(anchor),
+                }
+            }
+        }
+        for (u, cell) in self.values.into_iter().rev() {
+            if let Some(sheet) = wb.sheet_mut(u.0) {
+                sheet.set_cell(cell_of(u), cell.unwrap_or_default());
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -119,9 +177,37 @@ fn recalc_seeded(
     recomputed: Option<&mut HashSet<Key>>,
 ) -> RecalcResult {
     let recompute = collect_recompute(graph, dirty_seeds);
-    let result = run_recalc(wb, graph, recompute, context, recomputed);
+    let (result, _) = run_recalc(
+        wb,
+        graph,
+        recompute,
+        context,
+        recomputed,
+        RecalcJournal::default(),
+    );
     graph.refresh_spills(wb);
     result
+}
+
+/// [`recalc_after`] that also returns a journal of everything it wrote. The
+/// graph's spill index is left to the caller: refresh it on keeping the result,
+/// or rebuild the graph on undoing it.
+pub fn recalc_after_reversible(
+    wb: &mut Workbook,
+    graph: &DepGraph,
+    dirty_seeds: &[(SheetId, CellRef)],
+    now_serial: Option<f64>,
+) -> (RecalcResult, RecalcJournal) {
+    let recompute = collect_recompute(graph, dirty_seeds);
+    let context = RecalcContext {
+        now_serial,
+        rand_seed: None,
+    };
+    let journal = RecalcJournal {
+        enabled: true,
+        ..RecalcJournal::default()
+    };
+    run_recalc(wb, graph, recompute, context, None, journal)
 }
 
 /// rebuild the graph from scratch and recalc every formula in dependency order.
@@ -143,7 +229,14 @@ pub fn rebuild_and_recalc_all_with_seed(
         now_serial,
         rand_seed,
     };
-    let result = run_recalc(wb, &graph, recompute, context, None);
+    let (result, _) = run_recalc(
+        wb,
+        &graph,
+        recompute,
+        context,
+        None,
+        RecalcJournal::default(),
+    );
     graph.refresh_spills(wb);
     (graph, result)
 }
@@ -195,7 +288,8 @@ fn run_recalc(
     recompute: HashSet<Key>,
     context: RecalcContext,
     mut recomputed: Option<&mut HashSet<Key>>,
-) -> RecalcResult {
+    journal: RecalcJournal,
+) -> (RecalcResult, RecalcJournal) {
     let mut pass = Pass {
         graph,
         context,
@@ -204,6 +298,7 @@ fn run_recalc(
         cycle_cells: Vec::new(),
         limited_cells: Vec::new(),
         spilled: Vec::new(),
+        journal,
     };
     let mut pending = recompute;
 
@@ -218,29 +313,35 @@ fn run_recalc(
             }
         }
         if pass.spilled.is_empty() {
+            pass.journal.settled = true;
             break;
         }
         pending = dependents_closure(graph, &std::mem::take(&mut pass.spilled));
         if pending.is_empty() {
+            pass.journal.settled = true;
             break;
         }
     }
 
+    let visits = pass.budget.spent();
     let Pass {
         mut changed,
         mut cycle_cells,
         limited_cells,
+        journal,
         ..
     } = pass;
     changed.sort_by(sort_key);
     changed.dedup();
     cycle_cells.sort_by(sort_key);
     cycle_cells.dedup();
-    RecalcResult {
+    let result = RecalcResult {
         changed,
         cycle_cells,
         limited_cells,
-    }
+        visits,
+    };
+    (result, journal)
 }
 
 /// formula cells that transitively read any of `seeds`.
@@ -298,6 +399,7 @@ struct Pass<'g> {
     limited_cells: Vec<(SheetId, CellRef)>,
     /// spilled cells whose value moved; the next round runs their readers.
     spilled: Vec<(SheetId, CellRef)>,
+    journal: RecalcJournal,
 }
 
 impl Pass<'_> {
@@ -365,7 +467,7 @@ impl Pass<'_> {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
-                    if write_if_changed(wb, u, circular_value(wb, u)) {
+                    if write_if_changed(wb, u, circular_value(wb, u), &mut self.journal) {
                         self.changed.push((u.0, cell_of(u)));
                     }
                     self.cycle_cells.push((u.0, cell_of(u)));
@@ -383,22 +485,29 @@ impl Pass<'_> {
         }
         match value {
             Some(NodeValue::Scalar(value)) => {
-                if write_if_changed(wb, u, value) {
+                if write_if_changed(wb, u, value, &mut self.journal) {
                     self.changed.push(at);
                 }
             }
             Some(NodeValue::Spill(spill)) => {
-                match write_spill(wb, u, spill, &self.budget, &mut self.changed) {
+                match write_spill(
+                    wb,
+                    u,
+                    spill,
+                    &self.budget,
+                    &mut self.changed,
+                    &mut self.journal,
+                ) {
                     Some(moved) => self.spilled.extend(moved),
                     None => {
                         if !limited {
                             self.limited_cells.push(at);
                         }
-                        refuse(wb, u, &mut self.changed);
+                        refuse(wb, u, &mut self.changed, &mut self.journal);
                     }
                 }
             }
-            Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed),
+            Some(NodeValue::Refused) => refuse(wb, u, &mut self.changed, &mut self.journal),
             None => {}
         }
     }
@@ -607,9 +716,17 @@ fn eval_node_with(
     ctx.rand_seed = context.rand_seed.map(|seed| cell_random_seed(seed, u));
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
-    let value = match authored {
-        Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
-        None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
+    // the evaluation itself is a visit, so no formula, however it reads,
+    // escapes the budget; a refused one shows as any budget refusal does.
+    let value = if !ctx.consume_cells(1) {
+        NodeValue::Scalar(CellValue::Error {
+            value: ErrorValue::Num,
+        })
+    } else {
+        match authored {
+            Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
+            None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
+        }
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
@@ -662,12 +779,17 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
 
 /// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
 /// and a cached one, like the rest of its rectangle, keeps what it had.
-fn refuse(wb: &mut Workbook, u: Key, changed: &mut Vec<(SheetId, CellRef)>) {
+fn refuse(
+    wb: &mut Workbook,
+    u: Key,
+    changed: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
+) {
     let refused = CellValue::Error {
         value: ErrorValue::Num,
     };
     if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
-        && write_if_changed(wb, u, refused)
+        && write_if_changed(wb, u, refused, journal)
     {
         changed.push((u.0, cell_of(u)));
     }
@@ -683,6 +805,7 @@ fn write_spill(
     spill: Spill,
     budget: &EvaluationBudget,
     changed: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
 ) -> Option<Vec<(SheetId, CellRef)>> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
@@ -708,17 +831,19 @@ fn write_spill(
             CellValue::Empty,
             changed,
             &mut moved,
+            journal,
         );
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value) {
+            if write_if_changed(wb, (u.0, row, col), value, journal) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
+        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved, journal);
     }
+    journal.array(wb, u.0, anchor);
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
     }
@@ -800,11 +925,12 @@ fn write_spilled_cell(
     value: CellValue,
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
+    journal: &mut RecalcJournal,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value) {
+    if write_if_changed(wb, u, value, journal) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
     }
@@ -817,10 +943,16 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
-fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
+fn write_if_changed(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    journal: &mut RecalcJournal,
+) -> bool {
     if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
+    journal.value(wb, u);
     if let Some(sheet) = wb.sheet_mut(u.0) {
         let at = cell_of(u);
         if let Some(cell) = sheet.cell_mut(at) {
@@ -981,9 +1113,11 @@ mod tests {
 
     /// formulas ahead of every other in the recalculation order that spend its
     /// whole budget.
+    /// ten formulas of 999,999 cells and their own visits take the whole
+    /// recalculation budget.
     fn spend_the_budget(wb: &mut Workbook, s: SheetId) {
         for row in 1..=11 {
-            put_formula(wb, s, &format!("A{row}"), "ROWS(_xlfn.SEQUENCE(1000000))");
+            put_formula(wb, s, &format!("A{row}"), "ROWS(_xlfn.SEQUENCE(999999))");
         }
     }
 
@@ -2509,5 +2643,126 @@ mod tests {
         assert_eq!(wb.value(s, CellRef::new(N - 1, 0)), num(N as f64));
         assert_eq!(r.changed.len(), (N - 1) as usize);
         assert!(elapsed.as_secs_f64() < 1.0, "recalc took {elapsed:?}");
+    }
+
+    /// only the cells on a cycle are circular; a cell that reads one, directly
+    /// or through a spill, evaluates as Excel does, and an edit recalculated
+    /// from its cells agrees with a whole recalculation.
+    #[test]
+    fn dependents_of_a_cycle_evaluate_normally() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "B1+1");
+        put_formula(&mut wb, s, "B1", "A1+1");
+        put_num(&mut wb, s, "E1", 1.0);
+        put_formula(&mut wb, s, "C1", "A1+E1+5");
+        put_formula(&mut wb, s, "D1", "C1*2");
+        put_formula(&mut wb, s, "F1", "A1:B1+1");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("F1"), xlsx_model::CellRange::parse_a1("F1:G1").unwrap());
+        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+        assert_eq!(value(&wb, s, "A1"), num(0.0));
+        assert_eq!(value(&wb, s, "C1"), num(6.0));
+        assert_eq!(value(&wb, s, "D1"), num(12.0));
+        assert_eq!(value(&wb, s, "F1"), num(1.0));
+        assert_eq!(value(&wb, s, "G1"), num(1.0));
+
+        put_num(&mut wb, s, "E1", 3.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("E1"))], None);
+        assert!(r.cycle_cells.is_empty());
+        let mut whole = wb.clone();
+        rebuild_and_recalc_all(&mut whole, None);
+        assert_eq!(value(&wb, s, "D1"), num(16.0));
+        assert_eq!(wb, whole);
+    }
+
+    /// a chain hanging off a cycle, each cell reading the one below it, settles
+    /// in one pass of its read order whatever its length.
+    #[test]
+    fn a_long_chain_reading_a_cycle_settles_in_read_order() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "B1+1");
+        put_formula(&mut wb, s, "B1", "A1+1");
+        let rows = 6_000;
+        for row in 1..rows {
+            put_formula(&mut wb, s, &format!("C{row}"), &format!("C{}+1", row + 1));
+        }
+        put_formula(&mut wb, s, &format!("C{rows}"), "$A$1+1");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+        assert!(r.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "C1"), num(f64::from(rows)));
+    }
+
+    /// cells whose reads change once a cell below a cycle settles (each
+    /// reads only D1 at first, then the next cell) still settle in a few
+    /// evaluations each, whether their reads are metered or not.
+    #[test]
+    fn reads_that_change_while_settling_cost_linear_work() {
+        let rows: u32 = 6_000;
+        for anchored in [false, true] {
+            let (mut wb, s) = one_sheet();
+            let read = |at: &str| {
+                if anchored {
+                    format!("ANCHORARRAY({at})")
+                } else {
+                    at.to_owned()
+                }
+            };
+            put_formula(&mut wb, s, "A1", "B1+1");
+            put_formula(&mut wb, s, "B1", "A1+1");
+            put_formula(&mut wb, s, "D1", "A1+1");
+            for row in 1..rows {
+                put_formula(
+                    &mut wb,
+                    s,
+                    &format!("E{row}"),
+                    &format!(
+                        "IF({}=1,{}+1,0)",
+                        read("$D$1"),
+                        read(&format!("E{}", row + 1))
+                    ),
+                );
+            }
+            put_formula(
+                &mut wb,
+                s,
+                &format!("E{rows}"),
+                &format!("IF({}=1,7,0)", read("$D$1")),
+            );
+            let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+            assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+            assert!(r.limited_cells.is_empty());
+            assert_eq!(value(&wb, s, "E1"), num(f64::from(7 + rows - 1)));
+            assert!(r.visits < 20 * u64::from(rows), "{} visits", r.visits);
+        }
+    }
+
+    /// Security regression (xlsx-editor FIXES3, 00f1ccfe): finding the
+    /// formulas that read a cell scanned every read on its sheet, once per
+    /// recomputed cell, so an edit read by n formulas examined n x n reads
+    /// (200,000 readers took 270 s per edit). A lookup now examines the reads
+    /// filed near the cell.
+    #[test]
+    fn an_edit_read_by_many_formulas_examines_reads_near_each_cell() {
+        let (mut wb, s) = one_sheet();
+        let readers: u32 = 4_000;
+        put_num(&mut wb, s, "A1", 1.0);
+        // below A1's block of 64 rows, so each reader's own lookup is local
+        for row in 65..65 + readers {
+            put_formula(&mut wb, s, &format!("B{row}"), &format!("$A$1+{row}"));
+        }
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        put_num(&mut wb, s, "A1", 2.0);
+        let before = crate::graph::examined();
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        let examined = crate::graph::examined() - before;
+        assert!(r.limited_cells.is_empty());
+        assert_eq!(value(&wb, s, "B65"), num(67.0));
+        assert!(
+            examined <= 2 * u64::from(readers),
+            "{examined} reads examined"
+        );
     }
 }

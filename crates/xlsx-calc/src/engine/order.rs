@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use xlsx_model::{CellRange, SheetId};
+use xlsx_model::{CellRange, CellRef, SheetId};
 
 use super::{Key, key};
 use crate::graph::DepGraph;
@@ -55,16 +55,18 @@ impl Network {
                 columns: None,
                 trees: HashMap::new(),
             };
-            for (sheet, range, reader_sheet, reader_cell) in graph.edges() {
-                let Some(reader) = lines.id(key(reader_sheet, reader_cell)) else {
-                    continue;
-                };
-                lines.link(reader, sheet, range, &mut edges);
-                for (anchor_sheet, anchor) in graph.spill_sources(sheet, range) {
-                    if let Some(source) = lines.id(key(anchor_sheet, anchor))
-                        && source != reader
-                    {
-                        edges.push(reader, source);
+            // each formula links to what its own reads cover: the work follows
+            // the recompute set, not every edge of the workbook.
+            for (reader, &(reader_sheet, row, col)) in keys.iter().enumerate() {
+                let reader = reader as u32;
+                for &(sheet, range) in graph.precedents(reader_sheet, CellRef::new(row, col)) {
+                    lines.link(reader, sheet, range, &mut edges);
+                    for (anchor_sheet, anchor) in graph.spill_sources(sheet, range) {
+                        if let Some(source) = lines.id(key(anchor_sheet, anchor))
+                            && source != reader
+                        {
+                            edges.push(reader, source);
+                        }
                     }
                 }
             }
