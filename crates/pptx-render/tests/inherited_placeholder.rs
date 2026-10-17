@@ -265,4 +265,3 @@ fn a_slide_number_and_date_draw_at_the_masters_rect() {
         );
     }
 }
-
