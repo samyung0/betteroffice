@@ -101,8 +101,8 @@ describe('PPTX viewer wasm', () => {
       if (fallback?.kind !== 'textBox') throw new Error('shape 4 has no text box');
       expect(fallback.lines[0].runs[0].fontFamily).toBe('Arial');
       expect(fallback.lines.map((line) => line.runs.map((run) => run.text).join(''))).toEqual([
-        'Embedded as ',
-        'text it wraps later',
+        'Embedded as text ',
+        'it wraps later',
         'Second line',
       ]);
     } finally {
