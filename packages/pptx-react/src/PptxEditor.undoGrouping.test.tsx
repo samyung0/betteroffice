@@ -115,3 +115,28 @@ it('a click or an arrow key between keystrokes starts a new undo step', async ()
   }
   expect(errors).toEqual([]);
 }, 60_000);
+
+it('a paste between keystrokes is its own undo step', async () => {
+  const { api, input, errors } = await editTitle();
+  const before = api.handle.story(STORY);
+  // The clock stands still, so only the paste can split the typing.
+  const clock = spyOn(Date, 'now').mockReturnValue(Date.now());
+  try {
+    for (const key of ' a') fireEvent.input(input, { target: { value: key } });
+    const typed = api.handle.story(STORY);
+    fireEvent.paste(input, { clipboardData: { getData: () => 'XY' } });
+    const pasted = api.handle.story(STORY);
+    fireEvent.input(input, { target: { value: 'b' } });
+    expect(plain(api.handle.story(STORY))).toBe('Office aXYb files,\nwithout the office.');
+
+    fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    expect(api.handle.story(STORY)).toEqual(pasted);
+    fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    expect(api.handle.story(STORY)).toEqual(typed);
+    fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    expect(api.handle.story(STORY)).toEqual(before);
+  } finally {
+    clock.mockRestore();
+  }
+  expect(errors).toEqual([]);
+}, 60_000);

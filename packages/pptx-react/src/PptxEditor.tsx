@@ -1886,12 +1886,17 @@ function PptxEditorContent({
     refreshAt(undefined, true);
   };
 
+  /** Ends the engine's typing run: the next edit is a new undo step. */
+  const endTypingRun = (handle: PresentationHandle) => {
+    if (handle.undoCaptureMode() === 'auto') handle.addUndoBoundary();
+  };
+
   /** The engine groups typing in one story by time alone, so text typed after
    *  a caret move ends the typing run first and is its own undo step. */
   const endTypingRunIfMoved = (handle: PresentationHandle) => {
     if (selectionRef.current === editedSelectionRef.current) return;
     editedSelectionRef.current = selectionRef.current;
-    if (handle.undoCaptureMode() === 'auto') handle.addUndoBoundary();
+    endTypingRun(handle);
   };
 
   const insertSlideText = (text: string) => {
@@ -3357,7 +3362,12 @@ function PptxEditorContent({
                   }}
                   onPaste={(event) => {
                     event.preventDefault();
-                    if (!compositionRef.current) insertSlideText(event.clipboardData.getData('text/plain'));
+                    const handle = handleRef.current;
+                    if (compositionRef.current || !handle) return;
+                    // A paste is its own undo step, apart from the typing around it.
+                    endTypingRun(handle);
+                    insertSlideText(event.clipboardData.getData('text/plain'));
+                    endTypingRun(handle);
                   }}
                   onCopy={(event) => {
                     const copied = clipboardText();
