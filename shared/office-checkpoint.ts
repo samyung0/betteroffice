@@ -217,7 +217,7 @@ function canonical(value: unknown): string {
   });
 }
 function assetFromDataUrl(src: unknown): OfficeAsset | undefined {
-  if (typeof src !== "string") return undefined;
+  if (typeof src !== "string" || src === "") return undefined;
   const match =
     /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(src);
   if (!match)
@@ -286,7 +286,7 @@ function authoredText(value: unknown): string {
       return "";
   }
 }
-/** A seeded source image names its package part (`media:<part>`); an inserted one carries its bytes. */
+/** A seeded source image names its package part (`media:<part>`); an inserted one carries its bytes; a link-only picture (`r:link`) has an empty `src` and no bytes. */
 function docxImageAsset(
   src: unknown,
   media: ReadonlyMap<string, { dataUrl?: string }> | undefined
@@ -355,7 +355,7 @@ function docxEntries(
       } else if (segment.embedKind === "image" && !segment.attributes.del) {
         const id = `${storyId}:image:${stableId}`;
         const asset = docxImageAsset(segment.payload.src, media);
-        const assetRef: OfficeObjectRef = {
+        const assetRef: OfficeObjectRef | undefined = asset && {
           format: "docx",
           kind: "image",
           id: stableId,
