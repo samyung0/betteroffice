@@ -606,8 +606,10 @@ function nestedSequenceNames(field: Attrs): string[] {
       for (const item of value) pending.push([item, scannedHyperlink]);
     } else if (value !== null && typeof value === 'object') {
       const node = value as Attrs;
-      const name = fieldSequenceName(node);
-      if (name !== undefined) names.push(name);
+      if ((node.type === 'complexField' || node.type === 'simpleField') && typeof node.instruction === 'string') {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.push(name);
+      }
       // Fields nested past the parser's limit stay raw runs of their parent field.
       if (node.type === 'complexField') {
         for (const runs of [node.fieldCode, node.fieldResult]) {
@@ -635,8 +637,10 @@ function hyperlinkSequenceNames(hyperlink: Attrs): string[] {
     } else if (node.type === 'inlineSdt') {
       pending.push(...asNodes(node.content).reverse());
     } else if (node.type === 'simpleField' || node.type === 'complexField') {
-      const name = fieldSequenceName(node);
-      if (name !== undefined) names.push(name);
+      if (typeof node.instruction === 'string') {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.push(name);
+      }
       const tree = node.fieldTree as Attrs | undefined;
       const inline = (content: unknown): unknown => (content as Attrs | undefined)?.inline;
       const result = defined(
@@ -652,31 +656,6 @@ function hyperlinkSequenceNames(hyperlink: Attrs): string[] {
     }
   }
   return names;
-}
-
-/**
- * The sequence a simple or complex field counts. A complex field's `instruction` leaves out code
- * text a content control holds, so the code's own `instrText`, controls included, is read as well
- * (`field_sequence_name` in seed.rs).
- */
-function fieldSequenceName(node: Attrs): string | undefined {
-  if (node.type !== 'simpleField' && node.type !== 'complexField') return undefined;
-  const own = typeof node.instruction === 'string' ? sequenceName(node.instruction) : undefined;
-  if (own !== undefined || node.type !== 'complexField') return own;
-  let text = '';
-  const codeText = (nodes: Attrs[]): void => {
-    for (const child of nodes) {
-      if (child.type === 'run') {
-        for (const content of asNodes(child.content)) {
-          if (content.type === 'instrText' && typeof content.text === 'string') text += content.text;
-        }
-      } else if (child.type !== 'simpleField' && child.type !== 'complexField') {
-        codeText(asNodes(child.content));
-      }
-    }
-  };
-  codeText(asNodes((node.structuredCode as Attrs | undefined)?.inline));
-  return sequenceName(text);
 }
 
 /** SEQ names of the fields a run opens as raw `fldChar` and `instrText` content. */

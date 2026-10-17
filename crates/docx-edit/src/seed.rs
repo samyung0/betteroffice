@@ -1413,7 +1413,11 @@ pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
     while let Some((value, scanned_hyperlink)) = pending.pop() {
         match value {
             Value::Object(map) => {
-                if let Some(name) = field_sequence_name(value)
+                if matches!(
+                    string(map.get("type")),
+                    Some("complexField" | "simpleField")
+                ) && let Some(name) = string(map.get("instruction"))
+                    .and_then(docx_layout::sequence_fields::sequence_name)
                     && seen.insert(name.clone())
                 {
                     names.push(name);
@@ -1466,7 +1470,10 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
                 pending.extend(array(field(Some(node), "content")).iter().rev());
             }
             Some("simpleField" | "complexField") => {
-                names.extend(field_sequence_name(node));
+                names.extend(
+                    string(field(Some(node), "instruction"))
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
                 let tree = field(Some(node), "fieldTree");
                 let result = field(field(Some(node), "structuredResult"), "inline")
                     .or_else(|| field(field(tree, "result"), "inline"))
@@ -1493,43 +1500,6 @@ pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
         }
     }
     names
-}
-
-/// The sequence a simple or complex field counts. A complex field's
-/// `instruction` leaves out code text a content control holds, so the code's
-/// own `instrText`, controls included, is read as well.
-fn field_sequence_name(node: &Value) -> Option<String> {
-    fn code_text(nodes: &[Value], text: &mut String) {
-        for node in nodes {
-            match string(field(Some(node), "type")) {
-                Some("run") => {
-                    for content in array(field(Some(node), "content")) {
-                        if string(field(Some(content), "type")) == Some("instrText") {
-                            text.push_str(string(field(Some(content), "text")).unwrap_or_default());
-                        }
-                    }
-                }
-                Some("simpleField" | "complexField") => {}
-                _ => code_text(array(field(Some(node), "content")), text),
-            }
-        }
-    }
-    let kind = string(field(Some(node), "type"))?;
-    if !matches!(kind, "simpleField" | "complexField") {
-        return None;
-    }
-    string(field(Some(node), "instruction"))
-        .and_then(docx_layout::sequence_fields::sequence_name)
-        .or_else(|| {
-            let mut text = String::new();
-            if kind == "complexField" {
-                code_text(
-                    array(field(field(Some(node), "structuredCode"), "inline")),
-                    &mut text,
-                );
-            }
-            docx_layout::sequence_fields::sequence_name(&text)
-        })
 }
 
 /// SEQ names of the fields a run opens as raw `fldChar` and `instrText` content.
