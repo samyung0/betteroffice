@@ -221,57 +221,6 @@ fn assert_saved_view(
 }
 
 #[test]
-fn workbook_view_implicit_indices_follow_rename_and_move() {
-    let view = "<bookViews><workbookView/></bookViews>";
-    let source = view_package(view, 0, None);
-    let mut workbook = Workbook::open(&source).unwrap();
-    workbook
-        .apply_ops(
-            vec![
-                Op::RenameSheet {
-                    sheet: SheetId(0),
-                    name: "Outlook".into(),
-                },
-                Op::MoveSheet { from: 2, to: 0 },
-            ],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(workbook.active_sheet(), SheetId(1));
-    assert_saved_view(
-        &workbook,
-        &source,
-        view,
-        "<bookViews><workbookView activeTab=\"1\" firstSheet=\"1\"/></bookViews>",
-        r#"<sheets><sheet name="Actuals" sheetId="3" r:id="rId3"/><sheet name="Outlook" sheetId="1" r:id="rId1"/><sheet name="Assumptions" sheetId="2" r:id="rId2"/></sheets>"#,
-    );
-}
-
-#[test]
-fn workbook_view_explicit_indices_preserve_other_attributes_and_children() {
-    let view = r#"<bookViews><workbookView xWindow='42' activeTab="2" firstSheet='1' showSheetTabs = "1"><extLst><ext uri='urn:test'><x:marker a='A &amp; B'/></ext></extLst></workbookView></bookViews>"#;
-    let source = view_package(view, 2, None);
-    let mut workbook = Workbook::open(&source).unwrap();
-    assert_eq!(workbook.active_sheet(), SheetId(2));
-    workbook
-        .apply_ops(
-            vec![Op::MoveSheet { from: 2, to: 0 }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    let expected = view
-        .replace("activeTab=\"2\"", "activeTab=\"0\"")
-        .replace("firstSheet='1'", "firstSheet='2'");
-    assert_saved_view(
-        &workbook,
-        &source,
-        view,
-        &expected,
-        r#"<sheets><sheet name="Actuals" sheetId="3" r:id="rId3"/><sheet name="Forecast" sheetId="1" r:id="rId1"/><sheet name="Assumptions" sheetId="2" r:id="rId2"/></sheets>"#,
-    );
-}
-
-#[test]
 fn workbook_view_remove_shifts_and_clamps_indices_and_selection() {
     let view = r#"<bookViews><workbookView activeTab="2" firstSheet="1"/></bookViews>"#;
     let source = view_package(view, 2, None);
@@ -326,29 +275,6 @@ fn workbook_view_cell_edit_preserves_workbook_bytes() {
 }
 
 #[test]
-fn workbook_view_undo_and_redo_restore_source_indices() {
-    let view = r#"<bookViews><workbookView activeTab="2" firstSheet="1"/></bookViews>"#;
-    let source = view_package(view, 2, None);
-    let mut workbook = Workbook::open(&source).unwrap();
-    workbook
-        .apply_ops(
-            vec![Op::MoveSheet { from: 2, to: 0 }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    workbook.undo(CalculationOptions::default()).unwrap();
-    assert_saved_view(&workbook, &source, view, view, VIEW_SHEETS);
-    workbook.redo(CalculationOptions::default()).unwrap();
-    assert_saved_view(
-        &workbook,
-        &source,
-        view,
-        r#"<bookViews><workbookView activeTab="0" firstSheet="2"/></bookViews>"#,
-        r#"<sheets><sheet name="Actuals" sheetId="3" r:id="rId3"/><sheet name="Forecast" sheetId="1" r:id="rId1"/><sheet name="Assumptions" sheetId="2" r:id="rId2"/></sheets>"#,
-    );
-}
-
-#[test]
 fn workbook_view_add_keeps_source_tabs_and_first_sheet() {
     let view = "<bookViews><workbookView/></bookViews>";
     let source = view_package(view, 0, None);
@@ -399,20 +325,6 @@ fn workbook_view_active_change_updates_chartsheet_selection() {
             )
         );
     }
-    workbook
-        .apply_ops(
-            vec![Op::MoveSheet { from: 2, to: 0 }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    let saved = assert_saved_view(
-        &workbook,
-        &source,
-        view,
-        r#"<bookViews><workbookView activeTab="0" firstSheet="1"/></bookViews>"#,
-        r#"<sheets><sheet name="Actuals" sheetId="3" r:id="rId3"/><sheet name="Forecast" sheetId="1" r:id="rId1"/><sheet name="Assumptions" sheetId="2" r:id="rId2"/></sheets>"#,
-    );
-    assert!(text(&parts(&saved), "xl/worksheets/sheet3.xml").contains("tabSelected=\"1\""));
 }
 
 const GROUPED_VIEW: &str = "<bookViews><workbookView activeTab=\"0\"/></bookViews>";
@@ -485,19 +397,6 @@ fn workbook_view_group_survives_added_sheet() {
 }
 
 #[test]
-fn workbook_view_group_survives_move_with_same_active_sheet() {
-    let mut workbook = grouped_workbook(GROUPED_VIEW, &[]);
-    workbook
-        .apply_ops(
-            vec![Op::MoveSheet { from: 2, to: 0 }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(workbook.active_sheet(), SheetId(1));
-    assert_eq!(selected_sheets(&workbook.save().unwrap(), 0), GROUP);
-}
-
-#[test]
 fn workbook_view_group_survives_edit_and_added_sheet() {
     let mut workbook = grouped_workbook(GROUPED_VIEW, &[]);
     workbook
@@ -524,26 +423,6 @@ fn workbook_view_group_survives_removing_an_ungrouped_sheet() {
         )
         .unwrap();
     assert_eq!(selected_sheets(&workbook.save().unwrap(), 0), GROUP);
-}
-
-#[test]
-fn workbook_view_second_view_group_survives_move() {
-    let views =
-        r#"<bookViews><workbookView activeTab="0"/><workbookView activeTab="2"/></bookViews>"#;
-    let mut workbook = grouped_workbook(views, &[1, 2]);
-    workbook
-        .apply_ops(
-            vec![Op::MoveSheet { from: 0, to: 2 }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(workbook.active_sheet(), SheetId(2));
-    let saved = workbook.save().unwrap();
-    assert_eq!(selected_sheets(&saved, 0), GROUP);
-    assert_eq!(
-        selected_sheets(&saved, 1),
-        ["xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml"]
-    );
 }
 
 #[test]

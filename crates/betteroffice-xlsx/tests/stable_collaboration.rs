@@ -2183,3 +2183,98 @@ fn concurrent_pastes_and_a_cut_converge_cell_by_cell() {
     assert_eq!(value_at(&b, 0, "D2"), number(4.0));
     assert_eq!(value_at(&b, 0, "C3"), number(5.0));
 }
+
+fn sample_peer(client_id: u64) -> Workbook {
+    let source = include_bytes!("../../../packages/xlsx/test-fixtures/sample.xlsx");
+    Workbook::open_collaborative(source, client_id).unwrap()
+}
+
+fn input_at(book: &Workbook, address: &str) -> String {
+    book.cell(SheetId(0), at(address)).unwrap().input
+}
+
+/// Types each input in turn, returning the update each edit emitted.
+fn typed(book: &mut Workbook, edits: &[(&str, &str)]) -> Vec<Vec<u8>> {
+    let updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = std::sync::Arc::clone(&updates);
+    let _subscription = book
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    for (address, input) in edits {
+        book.edit_cell(
+            SheetId(0),
+            at(address),
+            input,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    }
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(updates.len(), edits.len());
+    updates
+}
+
+/// Applies `updates` in order on another thread, failing if they hang.
+fn deliver(book: Workbook, updates: &[&Vec<u8>]) -> Workbook {
+    let updates = updates
+        .iter()
+        .map(|update| update.to_vec())
+        .collect::<Vec<_>>();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut book = book;
+        for update in &updates {
+            book.apply_update_v1(update, CalculationOptions::default())
+                .unwrap();
+        }
+        sender.send(book).unwrap();
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("remote updates must apply within 10 s")
+}
+
+fn assert_projects_its_state(book: &Workbook, mirror_id: u64) {
+    let mirror = deliver(sample_peer(mirror_id), &[&book.encode_state_as_update_v1()]);
+    assert_eq!(mirror.model(), book.model());
+}
+
+#[test]
+fn an_overwrite_that_overtakes_a_cleared_edit_settles_and_converges() {
+    let mut source = sample_peer(821);
+    let mut other = sample_peer(822);
+    let updates = typed(
+        &mut source,
+        &[("D1", "one"), ("H20", "two"), ("H20", ""), ("D1", "three")],
+    );
+    let unrelated = typed(&mut other, &[("B30", "other")]);
+    source
+        .apply_update_v1(&unrelated[0], CalculationOptions::default())
+        .unwrap();
+
+    let target = deliver(sample_peer(823), &[&updates[0], &updates[3], &unrelated[0]]);
+    assert_eq!(input_at(&target, "B30"), "other");
+    assert_projects_its_state(&target, 824);
+
+    let target = deliver(target, &[&updates[1], &updates[2]]);
+    assert_eq!(input_at(&target, "D1"), "three");
+    assert_eq!(input_at(&target, "H20"), "");
+    assert_eq!(target.model(), source.model());
+}
+
+#[test]
+fn an_overwrite_that_overtakes_an_edit_waits_for_it_and_converges() {
+    let mut source = sample_peer(831);
+    let updates = typed(
+        &mut source,
+        &[("D1", "one"), ("H20", "two"), ("D1", "three")],
+    );
+
+    let target = deliver(sample_peer(832), &[&updates[0], &updates[2]]);
+    assert_projects_its_state(&target, 833);
+
+    let target = deliver(target, &[&updates[1]]);
+    assert_eq!(input_at(&target, "D1"), "three");
+    assert_eq!(input_at(&target, "H20"), "two");
+    assert_eq!(target.model(), source.model());
+}
