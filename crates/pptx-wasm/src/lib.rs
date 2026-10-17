@@ -6,10 +6,8 @@ use wasm_alloc as _;
 
 use serde::{Serialize, ser};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
-use pptx_edit::structured;
 pub use pptx_edit::wasm::PptxDocument;
 
 #[wasm_bindgen]
@@ -48,16 +46,18 @@ const LAYOUT_CACHE_CAPACITY: usize = 8;
 
 struct CachedSlide {
     key: String,
+    /// The editor caret the slide was laid out with: (story id, paragraph).
+    caret: Option<(String, usize)>,
     rendered: pptx_render::RenderedSlide,
     used: u64,
-    validated_at: (Rc<pptx_edit::DocumentVersion>, u64),
+    validated_at: (u64, u64),
 }
 
 struct LayoutKeyRecord {
     scope: pptx_edit::SlideScope,
     font_epoch: u64,
     generation: u64,
-    validated_version: Rc<pptx_edit::DocumentVersion>,
+    validated_version: u64,
     token: u64,
 }
 
@@ -95,10 +95,7 @@ impl PptxRenderer {
             .renderer
             .register_font(family, bold, italic, bytes)
             .map_err(js_error)?;
-        self.font_epoch += 1;
-        self.layout_keys.clear();
-        self.rendered.clear();
-        self.last_slide = None;
+        self.fonts_changed();
         Ok(id)
     }
 
@@ -114,10 +111,7 @@ impl PptxRenderer {
             .renderer
             .register_fallback_font(family, bold, italic, bytes)
             .map_err(js_error)?;
-        self.font_epoch += 1;
-        self.layout_keys.clear();
-        self.rendered.clear();
-        self.last_slide = None;
+        self.fonts_changed();
         Ok(id)
     }
 
@@ -131,6 +125,7 @@ impl PptxRenderer {
         let faces = self
             .renderer
             .register_embedded_fonts(document.session().package());
+        self.fonts_changed();
         serde_json::to_string(&faces).map_err(js_error)
     }
 
@@ -138,6 +133,7 @@ impl PptxRenderer {
     #[wasm_bindgen(js_name = refuseEmbeddedFont)]
     pub fn refuse_embedded_font(&mut self, font_id: u32) {
         self.renderer.refuse_embedded_font(font_id);
+        self.fonts_changed();
     }
 
     #[wasm_bindgen(js_name = fontBytes)]
@@ -211,12 +207,12 @@ impl PptxRenderer {
     pub fn set_active_slide(&mut self, document: &PptxDocument, id: &str, key: &str) -> bool {
         let session = document.session();
         self.sync_package(session);
-        let version = session.version();
+        let version = session.epoch();
         self.active_slide = Some(id.to_owned());
         let current = self.layout_keys.get(id).is_some_and(|record| {
             record.generation == self.generation
                 && record.font_epoch == self.font_epoch
-                && record.validated_version.as_ref() == &version
+                && record.validated_version == version
                 && record.token.to_string() == key
         }) && self
             .rendered
@@ -233,12 +229,12 @@ impl PptxRenderer {
     ) -> Result<String, JsValue> {
         let session = document.session();
         let snapshot = session.snapshot().map_err(js_error)?;
-        let version = Rc::new(session.version());
+        let version = session.epoch();
         self.sync_package(session);
         let mut keys = BTreeMap::new();
         for (index, slide) in snapshot.slides.iter().enumerate() {
             let key = self.slide_key(
-                &version,
+                version,
                 slide,
                 index,
                 snapshot.width_emu,
@@ -268,10 +264,10 @@ impl PptxRenderer {
     ) -> Result<String, JsValue> {
         let session = document.session();
         let scope = slide_scope(session, slide_index)?;
-        let version = Rc::new(session.version());
+        let version = session.epoch();
         self.sync_package(session);
         let key = self.slide_key(
-            &version,
+            version,
             &scope.slide,
             scope.index,
             scope.width_emu,
@@ -290,7 +286,7 @@ impl PptxRenderer {
         y: f32,
     ) -> Result<String, JsValue> {
         let session = document.session();
-        let version = Rc::new(session.version());
+        let version = session.epoch();
         self.sync_package(session);
         let current = self.rendered.get(id).is_some_and(|cached| {
             cached.validated_at.0 == version && cached.validated_at.1 == self.font_epoch
@@ -305,7 +301,7 @@ impl PptxRenderer {
                 return Ok("null".to_owned());
             };
             let scope = slide_scope(session, index as u32)?;
-            self.cache_slide(session, &scope, &version)?;
+            self.cache_slide(session, &scope, version, None)?;
         }
         self.clock += 1;
         self.last_slide = Some(id.to_owned());
@@ -366,6 +362,14 @@ impl PptxRenderer {
 }
 
 impl PptxRenderer {
+    /// Fonts decide every layout: tokens and frames start over.
+    fn fonts_changed(&mut self) {
+        self.font_epoch += 1;
+        self.layout_keys.clear();
+        self.rendered.clear();
+        self.last_slide = None;
+    }
+
     fn prune_layout_keys(&mut self, session: &pptx_edit::DeckSession) -> Result<(), JsValue> {
         if self.layout_keys.len() > 256 {
             let ids = session.slide_ids().map_err(js_error)?;
@@ -395,7 +399,7 @@ impl PptxRenderer {
 
     fn slide_key(
         &mut self,
-        version: &Rc<pptx_edit::DocumentVersion>,
+        version: u64,
         slide: &pptx_edit::SlideSnapshot,
         index: usize,
         width: i64,
@@ -404,7 +408,7 @@ impl PptxRenderer {
         if let Some(record) = self.layout_keys.get_mut(&slide.id)
             && record.generation == self.generation
             && record.font_epoch == self.font_epoch
-            && (record.validated_version == *version
+            && (record.validated_version == version
                 || (record.scope.slide == *slide
                     && record.scope.index == index
                     && record.scope.width_emu == width
@@ -412,14 +416,14 @@ impl PptxRenderer {
                     && float_bits(&record.scope.slide)
                         .is_some_and(|bits| Some(bits) == float_bits(slide))))
         {
-            if record.validated_version != *version {
-                record.validated_version = Rc::clone(version);
+            if record.validated_version != version {
+                record.validated_version = version;
             }
             let key = record.token.to_string();
             if let Some(cached) = self.rendered.get_mut(&slide.id)
                 && cached.key == key
             {
-                cached.validated_at = (Rc::clone(version), self.font_epoch);
+                cached.validated_at = (version, self.font_epoch);
             }
             return key;
         }
@@ -442,7 +446,7 @@ impl PptxRenderer {
                 },
                 font_epoch: self.font_epoch,
                 generation: self.generation,
-                validated_version: Rc::clone(version),
+                validated_version: version,
                 token: self.next_token,
             },
         );
@@ -453,7 +457,8 @@ impl PptxRenderer {
         &mut self,
         session: &pptx_edit::DeckSession,
         scope: &pptx_edit::SlideScope,
-        version: &Rc<pptx_edit::DocumentVersion>,
+        version: u64,
+        caret: Option<(&str, usize)>,
     ) -> Result<(), JsValue> {
         let key = self.slide_key(
             version,
@@ -465,10 +470,15 @@ impl PptxRenderer {
         self.prune_layout_keys(session)?;
         let id = &scope.slide.id;
         self.clock += 1;
-        if self.rendered.get(id).is_none_or(|cached| cached.key != key) {
+        let caret_key = caret.map(|(story, paragraph)| (story.to_owned(), paragraph));
+        if self
+            .rendered
+            .get(id)
+            .is_none_or(|cached| cached.key != key || cached.caret != caret_key)
+        {
             let rendered = self
                 .renderer
-                .layout_scoped_slide(session.package(), scope)
+                .layout_scoped_slide_at_caret(session.package(), scope, caret)
                 .map_err(js_error)?;
             #[cfg(test)]
             {
@@ -478,15 +488,16 @@ impl PptxRenderer {
                 id.clone(),
                 CachedSlide {
                     key,
+                    caret: caret_key,
                     rendered,
                     used: self.clock,
-                    validated_at: (Rc::clone(version), self.font_epoch),
+                    validated_at: (version, self.font_epoch),
                 },
             );
         }
         let cached = self.rendered.get_mut(id).unwrap();
         cached.used = self.clock;
-        cached.validated_at = (Rc::clone(version), self.font_epoch);
+        cached.validated_at = (version, self.font_epoch);
         self.last_slide = Some(id.clone());
         while self.rendered.len() > LAYOUT_CACHE_CAPACITY {
             let oldest = self
@@ -514,9 +525,9 @@ impl PptxRenderer {
         let session = document.session();
         let scope = slide_scope(session, slide_index)?;
         let scoped = now();
-        let version = Rc::new(session.version());
+        let version = session.epoch();
         self.sync_package(session);
-        self.cache_slide(session, &scope, &version)?;
+        self.cache_slide(session, &scope, version, caret)?;
         let laid_out = now();
         let json = serde_json::to_string(&self.rendered[&scope.slide.id].rendered.display_list)
             .map_err(js_error)?;
@@ -740,101 +751,6 @@ pub fn parse_pptx_json(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&package).map_err(js_error)
 }
 
-#[wasm_bindgen(js_name = parsePptxJsonWithoutMedia)]
-pub fn parse_pptx_json_without_media(data: &[u8]) -> Result<String, JsValue> {
-    let package = pptx_parse::parse_pptx(data).map_err(js_error)?;
-    let metadata = PptxPackageWithoutMedia {
-        presentation: &package.presentation,
-        slides: &package.slides,
-        layouts: &package.layouts,
-        masters: &package.masters,
-        themes: &package.themes,
-        charts: &package.charts,
-        diagram_drawings: &package.diagram_drawings,
-        media: package
-            .media
-            .iter()
-            .map(|part| MediaSummary {
-                part_path: &part.part_path,
-                content_type: &part.content_type,
-                byte_length: part.bytes.len(),
-            })
-            .collect(),
-        table_styles: &package.table_styles,
-        comment_authors: &package.comment_authors,
-        comments: &package.comments,
-        comment_flavor: &package.comment_flavor,
-        relationships: &package.relationships,
-        shape_elements: package.models_connectors().then_some("withConnectors"),
-    };
-    serde_json::to_string(&metadata).map_err(js_error)
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PptxPackageWithoutMedia<'a> {
-    presentation: &'a pptx_parse::Presentation,
-    slides: &'a [pptx_parse::Slide],
-    layouts: &'a [pptx_parse::SlideLayout],
-    masters: &'a [pptx_parse::SlideMaster],
-    themes: &'a [pptx_parse::ThemePart],
-    charts: &'a [pptx_parse::ChartPart],
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    diagram_drawings: &'a Vec<pptx_parse::DiagramDrawing>,
-    media: Vec<MediaSummary<'a>>,
-    #[serde(skip_serializing_if = "ooxml_drawingml::TableStyleList::is_empty")]
-    table_styles: &'a ooxml_drawingml::TableStyleList,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    comment_authors: &'a Vec<pptx_parse::CommentAuthor>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    comments: &'a Vec<pptx_parse::Comment>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    comment_flavor: &'a Option<pptx_parse::CommentFlavor>,
-    relationships: &'a BTreeMap<String, Vec<pptx_parse::Relationship>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shape_elements: Option<&'static str>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MediaSummary<'a> {
-    part_path: &'a str,
-    content_type: &'a str,
-    byte_length: usize,
-}
-
-/// Structured export of PPTX bytes as a snapshot, with the options of
-/// `PptxDocument.exportStructuredJson`: `{"ok":true,"content"}` or `{"ok":false,"failure"}`.
-/// Bytes that are not a readable PPTX throw.
-#[wasm_bindgen(js_name = exportPptxStructuredJson)]
-pub fn export_pptx_structured_json(data: &[u8], options: &str) -> Result<String, JsValue> {
-    let options = serde_json::from_str(options).map_err(js_error)?;
-    structured::snapshot_outcome_json(structured::export_pptx_structured(data, &options))
-        .map_err(|message| JsValue::from_str(&message))
-}
-
-/// `exportPptxStructuredJson` rendered as Markdown.
-#[wasm_bindgen(js_name = exportPptxMarkdownJson)]
-pub fn export_pptx_markdown_json(data: &[u8], options: &str) -> Result<String, JsValue> {
-    let options = serde_json::from_str(options).map_err(js_error)?;
-    structured::snapshot_outcome_json(structured::export_pptx_markdown(data, &options))
-        .map_err(|message| JsValue::from_str(&message))
-}
-
-/// Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
-#[wasm_bindgen(js_name = renderPptxMarkdownJson)]
-pub fn render_pptx_markdown_json(content: &str, options: &str) -> Result<String, JsValue> {
-    let content: structured::PptxStructuredContent =
-        serde_json::from_str(content).map_err(js_error)?;
-    let options: structured::PptxMarkdownOptions =
-        serde_json::from_str(options).map_err(js_error)?;
-    structured::snapshot_outcome_json(
-        structured::render_pptx_markdown(&content, &options)
-            .map_err(structured::ExportError::Refused),
-    )
-    .map_err(|message| JsValue::from_str(&message))
-}
-
 #[wasm_bindgen(js_name = compileSlideJson)]
 pub fn compile_slide_json(slide_json: &str) -> Result<String, JsValue> {
     pptx_render::compile_json(slide_json).map_err(|error| JsValue::from_str(&error))
@@ -871,7 +787,7 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pptx_edit::{EditCtx, SlideScope, TextStyle};
+    use pptx_edit::{Bullet, EditCtx, SlideScope, TextStyle};
     use yrs::{Map, ReadTxn, Transact};
 
     const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
@@ -884,7 +800,7 @@ mod tests {
     ) -> String {
         renderer.sync_package(session);
         renderer.slide_key(
-            &Rc::new(session.version()),
+            session.epoch(),
             &scope.slide,
             scope.index,
             scope.width_emu,
@@ -943,7 +859,7 @@ mod tests {
             assert!(renderer.layout_keys.len() <= bound);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
             let record = &renderer.layout_keys[&receipt.slide_id];
-            assert_eq!(record.validated_version.as_ref(), &session.version());
+            assert_eq!(record.validated_version, session.epoch());
             assert_eq!(record.font_epoch, renderer.font_epoch);
             assert_eq!(record.generation, renderer.generation);
             session.delete_slide(&context, &receipt.slide_id).unwrap();
@@ -963,7 +879,7 @@ mod tests {
                 assert!(!renderer.rendered.contains_key(&receipt.slide_id));
                 assert_eq!(renderer.layout_keys.len(), live);
                 assert!(renderer.layout_keys.values().all(|record| {
-                    record.validated_version.as_ref() == &session.version()
+                    record.validated_version == session.epoch()
                         && record.font_epoch == renderer.font_epoch
                         && record.generation == renderer.generation
                 }));
@@ -1026,7 +942,7 @@ mod tests {
         assert_eq!(renderer.layout_keys.len(), 1);
         assert_eq!(renderer.key_count, computed + 1);
         assert!(renderer.layout_keys.values().all(|record| {
-            record.validated_version.as_ref() == &session.version()
+            record.validated_version == session.epoch()
                 && record.font_epoch == renderer.font_epoch
                 && record.generation == renderer.generation
         }));
@@ -1682,5 +1598,91 @@ mod tests {
             renderer.hit_test_json(10.0, 10.0).unwrap(),
             serde_json::to_string(&fresh.hit_test(10.0, 10.0)).unwrap()
         );
+    }
+
+    #[test]
+    fn a_cached_slide_is_reused_only_at_the_caret_it_was_laid_out_with() {
+        let document = PptxDocument::open_collaborative(DECK, 915.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
+        let mut renderer = PptxRenderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        let scope = session.slide_scope(0).unwrap();
+        let title = scope
+            .slide
+            .shapes
+            .iter()
+            .find(|shape| shape.name == "Title");
+        let story = title.unwrap().text_stories[0].id.clone();
+        let length = session.story(&story).unwrap().length;
+        let numbers = [Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 1,
+            restart: false,
+        }];
+        session
+            .set_paragraph_list(&context, &story, 0, length, Some(&numbers), &[])
+            .unwrap();
+        let first_end = session.story(&story).unwrap().paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| run.text.encode_utf16().count() as u32)
+            .sum::<u32>();
+        session
+            .replace_text(
+                &context,
+                &story,
+                first_end,
+                first_end,
+                "\n",
+                &TextStyle::default(),
+            )
+            .unwrap();
+
+        let plain = renderer.layout_slide_json(&document, 0).unwrap();
+        assert_eq!(renderer.layout_slide_json(&document, 0).unwrap(), plain);
+        assert_eq!(renderer.layout_count, 1);
+        let at_caret = renderer
+            .layout_slide_at_caret_json(&document, 0, &story, 1)
+            .unwrap();
+        assert_ne!(at_caret, plain);
+        let fresh = renderer
+            .renderer
+            .layout_scoped_slide_at_caret(
+                session.package(),
+                &session.slide_scope(0).unwrap(),
+                Some((&story, 1)),
+            )
+            .unwrap();
+        assert_eq!(
+            at_caret,
+            serde_json::to_string(&fresh.display_list).unwrap()
+        );
+        assert_eq!(
+            renderer
+                .layout_slide_at_caret_json(&document, 0, &story, 1)
+                .unwrap(),
+            at_caret
+        );
+        assert_eq!(renderer.layout_count, 2);
+        assert_eq!(renderer.layout_slide_json(&document, 0).unwrap(), plain);
+        assert_eq!(renderer.layout_count, 3);
+    }
+
+    #[test]
+    fn embedded_font_changes_lay_slides_out_again() {
+        let document = PptxDocument::open_collaborative(DECK, 916.0).unwrap();
+        let mut renderer = PptxRenderer::new();
+        renderer
+            .register_font("Liberation Sans", false, false, FONT)
+            .unwrap();
+        renderer.layout_slide_json(&document, 0).unwrap();
+        renderer.register_embedded_fonts_json(&document).unwrap();
+        renderer.layout_slide_json(&document, 0).unwrap();
+        renderer.refuse_embedded_font(0);
+        renderer.layout_slide_json(&document, 0).unwrap();
+        assert_eq!(renderer.layout_count, 3);
     }
 }

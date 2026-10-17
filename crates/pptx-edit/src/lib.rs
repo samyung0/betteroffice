@@ -228,7 +228,9 @@ impl DeckSession {
         update
     }
 
-    pub(crate) fn epoch(&self) -> u64 {
+    /// Changes with every committed transaction, local or remote, undo and
+    /// redo included; scoped to this session.
+    pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
     }
 
