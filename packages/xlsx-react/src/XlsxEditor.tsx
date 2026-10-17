@@ -51,10 +51,12 @@ import type {
   WorkbookFrame,
   WorkbookProxy,
 } from '@betteroffice/xlsx';
-import type {
-  AwarenessPeer,
-  CollaborationAwareness,
-  CollaborationReplica,
+import {
+  type AwarenessPeer,
+  type CollaborationAwareness,
+  type CollaborationReplica,
+  XLSX_MAX_COLUMNS,
+  XLSX_MAX_ROWS,
 } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
@@ -345,9 +347,10 @@ function medianTrack(offsets: number[] | undefined, fallback: number): number {
   return mid > 0 ? mid : fallback;
 }
 
-// derive nav bounds from the scrollable extent: rows/cols estimated from the
-// content size over a representative (median) track size, rowsPerPage from the
-// viewport. a slack of one keeps the row/col just past the used edge reachable.
+// nav bounds: moves cover the whole sheet, as in Excel (the scroll area grows to
+// a revealed cell); the used extent, where Ctrl/Cmd+arrows, End and select all
+// stop, is estimated from the scrollable extent over a representative (median)
+// track size, with a slack of one past the used edge. rowsPerPage from the viewport.
 function deriveLimits(
   dl: DisplayList | null,
   info: SheetInfo,
@@ -355,10 +358,10 @@ function deriveLimits(
 ): SelectionLimits {
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
   const colW = medianTrack(dl?.grid?.colOffsets, COL_W);
-  const rows = Math.max(1, Math.round(info.contentHeight / rowH)) + 1;
-  const cols = Math.max(1, Math.round(info.contentWidth / colW)) + 1;
+  const usedRows = Math.max(1, Math.round(info.contentHeight / rowH)) + 1;
+  const usedCols = Math.max(1, Math.round(info.contentWidth / colW)) + 1;
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
-  return { rows, cols, rowsPerPage };
+  return { rows: XLSX_MAX_ROWS, cols: XLSX_MAX_COLUMNS, usedRows, usedCols, rowsPerPage };
 }
 
 // trigger a browser download of a byte blob under the given name and mime type.
@@ -2126,26 +2129,30 @@ function XlsxEditorContent({
     [pointToCell, pointToChart, limits, readOnly]
   );
 
-  const activateHyperlink = useCallback(
-    (addr: CellAddr): boolean => {
+  // selects the cell a location names (`B7`, `$B$7`, `'Sheet 2'!B7`; a range's
+  // first cell): a hyperlink's target or what was typed into the name box.
+  const goToLocation = useCallback(
+    (location: string): boolean => {
       const handle = handleRef.current;
-      const currentFrame = frameRef.current;
-      if (!handle || !currentFrame || !sheetInfo) return false;
-      const hyperlink = hyperlinkAtCell(currentFrame, addr.row, addr.col);
-      if (!hyperlink) return false;
-      const href = safeExternalHyperlink(hyperlink);
-      if (href) {
-        window.open(href, '_blank', 'noopener,noreferrer');
-        return true;
-      }
-      if (!hyperlink.location) return true;
+      if (!handle || !sheetInfo) return false;
       const currentName = sheetInfo.sheetNames[activeSheet] ?? '';
-      const destination = parseHyperlinkLocation(hyperlink.location, currentName);
-      if (!destination) return true;
+      const destination = parseHyperlinkLocation(location, currentName);
+      if (!destination) return false;
       const targetSheet = sheetInfo.sheetNames.findIndex(
         (name) => name.toLowerCase() === destination.sheetName.toLowerCase()
       );
-      if (targetSheet < 0) return true;
+      if (targetSheet < 0) return false;
+      setEditing(null);
+      setFormulaDraft(null);
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
+      setError(null);
+      if (targetSheet === activeSheet) {
+        // the reveal grows the scroll area to a cell past the used range.
+        setSelection(selectionAt({ row: destination.row, col: destination.col }));
+        requestReveal();
+        return true;
+      }
       track(handle, handle.onSheet(sheetInfo.sheetIds[targetSheet], 'setActiveSheet', targetSheet))
         .then(() => handle.cellPosition(targetSheet, destination.row, destination.col))
         .then((position) => {
@@ -2156,15 +2163,30 @@ function XlsxEditorContent({
         }, reportError);
       setPendingSheet({ index: targetSheet, seq: lastMutationRef.current });
       setSelection(selectionAt({ row: destination.row, col: destination.col }));
-      setEditing(null);
-      setFormulaDraft(null);
-      setCapturedFormat(null);
-      paintSourceRef.current = null;
-      setError(null);
       return true;
     },
-    [activeSheet, sheetInfo, reportError, track]
+    [activeSheet, sheetInfo, reportError, requestReveal, track]
   );
+
+  const activateHyperlink = useCallback(
+    (addr: CellAddr): boolean => {
+      const currentFrame = frameRef.current;
+      if (!handleRef.current || !currentFrame || !sheetInfo) return false;
+      const hyperlink = hyperlinkAtCell(currentFrame, addr.row, addr.col);
+      if (!hyperlink) return false;
+      const href = safeExternalHyperlink(hyperlink);
+      if (href) {
+        window.open(href, '_blank', 'noopener,noreferrer');
+        return true;
+      }
+      if (hyperlink.location) goToLocation(hyperlink.location);
+      return true;
+    },
+    [sheetInfo, goToLocation]
+  );
+
+  // what is typed into the name box until Enter goes there or Escape or blur drops it.
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
 
 
   const onClick = useCallback(
@@ -2453,10 +2475,10 @@ function XlsxEditorContent({
     }
     if (command === 'selectAll') {
       if (!sheetInfo) return;
-      const { rows: lastRows, cols: lastCols } = limits();
+      const { usedRows, usedCols } = limits();
       setSelection({
         anchor: { row: 0, col: 0 },
-        focus: { row: lastRows - 1, col: lastCols - 1 },
+        focus: { row: usedRows - 1, col: usedCols - 1 },
       });
       // The grid takes the keys next, Ctrl/Cmd+C first.
       focusContainer();
@@ -2636,11 +2658,23 @@ function XlsxEditorContent({
             >
               <input
                 data-testid="xlsx-name-box"
-                readOnly
-                value={focusedCell?.a1 ?? ''}
+                value={nameDraft ?? focusedCell?.a1 ?? ''}
+                disabled={!sheetInfo}
                 placeholder={t('toolbar.nameBoxPlaceholder')}
                 aria-label={t('toolbar.nameBoxPlaceholder')}
                 style={xlsxToolbarStyles.nameBox}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={() => setNameDraft(null)}
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter' && e.key !== 'Escape') return;
+                  e.preventDefault();
+                  // an address that names no cell keeps the box open on it, as Excel does.
+                  if (e.key === 'Enter' && nameDraft !== null && !goToLocation(nameDraft.trim()))
+                    return;
+                  setNameDraft(null);
+                  focusContainer();
+                }}
               />
               <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
                 fx

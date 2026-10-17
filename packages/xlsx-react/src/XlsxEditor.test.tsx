@@ -587,6 +587,41 @@ describe('XlsxEditor keyboard', () => {
     expect(view.nameBox().value).toBe('Q35');
   }, MANY_KEYS_MS);
 
+  // Excel moves over the whole sheet (A1:XFD1048576) and Google Sheets over the
+  // sheet's grid (1,000 rows by 26 columns new); sample.xlsx uses A1:D62.
+  it('moves the selection past the used range', async () => {
+    const view = await mountEditor(plain);
+    await view.click({ row: 0, col: 0 });
+    for (let step = 0; step < 70; step += 1) await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('A71');
+    for (let step = 0; step < 12; step += 1) await press(view.surface, 'ArrowRight');
+    expect(view.nameBox().value).toBe('M71');
+  }, MANY_KEYS_MS);
+
+  it('selects the cell an address typed into the name box names', async () => {
+    const view = await mountEditor(plain);
+    await view.click({ row: 0, col: 0 });
+    const box = view.nameBox();
+    expect(box.readOnly).toBe(false);
+    fireEvent.change(box, { target: { value: 'c200' } });
+    await press(box, 'Enter');
+    expect(view.nameBox().value).toBe('C200');
+    await press(view.surface, '7');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(199, 2)).toBe('7');
+
+    // another sheet's address opens that sheet; a range goes to its first cell.
+    fireEvent.change(view.nameBox(), { target: { value: "'Summary'!b3:c4" } });
+    await press(view.nameBox(), 'Enter');
+    await view.idle();
+    expect((await view.workbook().sheetInfo()).activeSheet).toBe(1);
+    expect(view.nameBox().value).toBe('B3');
+    // text that names no cell stays in the box.
+    fireEvent.change(view.nameBox(), { target: { value: 'nowhere' } });
+    await press(view.nameBox(), 'Enter');
+    expect(view.nameBox().value).toBe('nowhere');
+  }, MANY_KEYS_MS);
+
   it('keeps a revealed cell clear of the frozen panes', async () => {
     const view = await mountEditor(wideFrozen);
     const pane = cellRect(wideFrozen.grid, 2, 2)!;
@@ -1626,7 +1661,8 @@ describe('XlsxEditor host integration', () => {
     await idle();
 
     // The toolbar and formula bar stay, disabled, so the grid keeps its place;
-    // the zoom box and its list button stay usable, as zoom edits nothing.
+    // the zoom box and its list button and the name box stay usable, as zoom
+    // and going to a cell edit nothing.
     const toolbar = view.getByTestId('xlsx-toolbar');
     const live = toolbar.querySelectorAll('button:not(:disabled), input:not(:disabled):not([readonly])');
     expect(Array.from(live, (node) => node.getAttribute('data-testid'))).toEqual([
@@ -1635,6 +1671,7 @@ describe('XlsxEditor host integration', () => {
       null,
       'xlsx-toolbar-more',
       'xlsx-export-png',
+      'xlsx-name-box',
     ]);
     const formula = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
     expect([formula.disabled, formula.readOnly]).toEqual([false, true]);

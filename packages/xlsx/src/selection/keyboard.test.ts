@@ -2,7 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { selectionAt, selectionKeyReducer } from './index';
 import type { KeyInput, Selection, SelectionAction, SelectionLimits } from './index';
 
-const limits: SelectionLimits = { rows: 100, cols: 26, rowsPerPage: 10 };
+// a sheet of 100 × 26 cells whose used range is 60 × 20.
+const limits: SelectionLimits = { rows: 100, cols: 26, usedRows: 60, usedCols: 20, rowsPerPage: 10 };
 
 function press(state: Selection, key: Partial<KeyInput> & { key: string }): SelectionAction {
   return selectionKeyReducer(state, key, limits);
@@ -29,7 +30,7 @@ describe('arrow navigation', () => {
 
   it('jumps to the used-range edge with ctrl/cmd+arrow', () => {
     expect(moved(press(sel, { key: 'ArrowDown', metaKey: true }))).toEqual(
-      selectionAt({ row: 99, col: 5 })
+      selectionAt({ row: 59, col: 5 })
     );
     expect(moved(press(sel, { key: 'ArrowLeft', ctrlKey: true }))).toEqual(
       selectionAt({ row: 5, col: 0 })
@@ -38,23 +39,41 @@ describe('arrow navigation', () => {
 
   it('extends to the edge with shift+ctrl+arrow', () => {
     const out = moved(press(sel, { key: 'ArrowRight', metaKey: true, shiftKey: true }));
-    expect(out).toEqual({ anchor: { row: 5, col: 5 }, focus: { row: 5, col: 25 } });
+    expect(out).toEqual({ anchor: { row: 5, col: 5 }, focus: { row: 5, col: 19 } });
+  });
+
+  it('moves past the used range to the sheet edge, where ctrl/cmd+arrow stays put', () => {
+    const edge = selectionAt({ row: 59, col: 19 });
+    expect(moved(press(edge, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 60, col: 19 }));
+    expect(moved(press(edge, { key: 'ArrowRight' }))).toEqual(selectionAt({ row: 59, col: 20 }));
+    const past = selectionAt({ row: 70, col: 22 });
+    expect(moved(press(past, { key: 'ArrowDown', ctrlKey: true }))).toEqual(past);
+    expect(moved(press(past, { key: 'ArrowRight', ctrlKey: true }))).toEqual(past);
+    const corner = selectionAt({ row: 99, col: 25 });
+    expect(moved(press(corner, { key: 'ArrowDown' }))).toEqual(corner);
+    expect(moved(press(corner, { key: 'ArrowRight' }))).toEqual(corner);
   });
 });
 
 describe('tab and enter', () => {
-  it('tab moves right and wraps to the next row start at the edge', () => {
+  it('tab moves right past the used range and stops at the sheet edge', () => {
     expect(moved(press(selectionAt({ row: 2, col: 3 }), { key: 'Tab' }))).toEqual(
       selectionAt({ row: 2, col: 4 })
     );
+    expect(moved(press(selectionAt({ row: 2, col: 19 }), { key: 'Tab' }))).toEqual(
+      selectionAt({ row: 2, col: 20 })
+    );
     expect(moved(press(selectionAt({ row: 2, col: 25 }), { key: 'Tab' }))).toEqual(
-      selectionAt({ row: 3, col: 0 })
+      selectionAt({ row: 2, col: 25 })
     );
   });
 
-  it('shift+tab moves left and wraps to the previous row end', () => {
+  it('shift+tab moves left and stops at the first column', () => {
+    expect(moved(press(selectionAt({ row: 2, col: 3 }), { key: 'Tab', shiftKey: true }))).toEqual(
+      selectionAt({ row: 2, col: 2 })
+    );
     expect(moved(press(selectionAt({ row: 2, col: 0 }), { key: 'Tab', shiftKey: true }))).toEqual(
-      selectionAt({ row: 1, col: 25 })
+      selectionAt({ row: 2, col: 0 })
     );
   });
 
@@ -79,9 +98,9 @@ describe('home/end and paging', () => {
   });
 
   it('end goes to the row end, ctrl+end to the last used cell', () => {
-    expect(moved(press(sel, { key: 'End' }))).toEqual(selectionAt({ row: 40, col: 25 }));
+    expect(moved(press(sel, { key: 'End' }))).toEqual(selectionAt({ row: 40, col: 19 }));
     expect(moved(press(sel, { key: 'End', ctrlKey: true }))).toEqual(
-      selectionAt({ row: 99, col: 25 })
+      selectionAt({ row: 59, col: 19 })
     );
   });
 
@@ -102,11 +121,11 @@ describe('select-all, edit, and clear', () => {
   it('cmd/ctrl+A selects the whole used range', () => {
     expect(moved(press(sel, { key: 'a', metaKey: true }))).toEqual({
       anchor: { row: 0, col: 0 },
-      focus: { row: 99, col: 25 },
+      focus: { row: 59, col: 19 },
     });
     expect(moved(press(sel, { key: 'A', ctrlKey: true }))).toEqual({
       anchor: { row: 0, col: 0 },
-      focus: { row: 99, col: 25 },
+      focus: { row: 59, col: 19 },
     });
   });
 

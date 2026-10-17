@@ -9,7 +9,7 @@ import {
 } from './index';
 import type { Selection, SelectionLimits } from './index';
 
-const limits: SelectionLimits = { rows: 100, cols: 26, rowsPerPage: 20 };
+const limits: SelectionLimits = { rows: 100, cols: 26, usedRows: 100, usedCols: 26, rowsPerPage: 20 };
 
 describe('selectionAt', () => {
   it('collapses anchor and focus onto one cell', () => {

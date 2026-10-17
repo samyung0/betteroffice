@@ -40,13 +40,16 @@ export interface CellRange {
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
 /**
- * Grid bounds a move must stay inside: the used range is `[0, rows)` × `[0,
- * cols)`, and `rowsPerPage` is the viewport height in whole rows for
- * PageUp/PageDown steps.
+ * Grid bounds: a move stays inside `[0, rows)` × `[0, cols)` (the whole sheet in
+ * the editor, as in Excel), Ctrl/Cmd+arrows, End, Ctrl/Cmd+End and select all
+ * stop at the used range `[0, usedRows)` × `[0, usedCols)`, and `rowsPerPage`
+ * is the viewport height in whole rows for PageUp/PageDown steps.
  */
 export interface SelectionLimits {
   rows: number;
   cols: number;
+  usedRows: number;
+  usedCols: number;
   rowsPerPage: number;
 }
 
