@@ -234,7 +234,9 @@ impl SourceContainer {
         let mut files = HashSet::with_capacity(members.len());
         for (index, (name, header)) in members.iter().enumerate() {
             match archive.by_index_raw(index) {
-                Ok(file) if file.name() == name && file.header_start() == *header => {}
+                Ok(file)
+                    if file.name().is_ok_and(|entry| entry == name.as_str())
+                        && file.header_start() == *header => {}
                 _ => return false,
             }
             if !files.insert(name.as_str()) {
