@@ -215,9 +215,11 @@ share the normal operations and add stage timing. See the
 and operation types until `handle.addUndoBoundary()`. The getter
 `handle.undoCaptureMode()` returns `'auto'` or `'manual'`. Changing modes closes
 the current group and preserves history; setting the same mode is a no-op.
-Auto preserves the existing policy (500 ms capture on native targets, separate
-transactions in the browser). Remote and agent origins remain outside local
-undo. These controls group history; they do not make edits atomic.
+Auto groups typing into one text story inside a 500 ms capture window (native
+targets read the system clock, the browser `Date.now`); every other local edit
+is its own step, and undo, redo and `handle.addUndoBoundary()` end a typing run.
+Remote and agent origins remain outside local undo. These controls group
+history; they do not make edits atomic.
 
 `handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
 comment on its current slide, preserving identity, author, text, replies, and

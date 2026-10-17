@@ -65,6 +65,8 @@ impl Clock for CaptureClock {
 pub struct DeckUndoManager {
     clock: Arc<CaptureClock>,
     inner: yrs::undo::UndoManager<()>,
+    /// The story the current typing run edits; any other local edit ends the run.
+    typing: Option<String>,
 }
 
 impl DeckUndoManager {
@@ -105,7 +107,11 @@ impl DeckUndoManager {
         inner.expand_scope(doc, &stories);
         inner.expand_scope(doc, &comments);
         inner.expand_scope(doc, &meta);
-        Ok(Self { inner, clock })
+        Ok(Self {
+            inner,
+            clock,
+            typing: None,
+        })
     }
 
     pub fn capture_mode(&self) -> UndoCaptureMode {
@@ -120,11 +126,31 @@ impl DeckUndoManager {
     }
 
     pub fn undo(&mut self) -> bool {
-        self.inner.undo_blocking()
+        let applied = self.inner.undo_blocking();
+        self.add_undo_barrier();
+        applied
     }
 
     pub fn redo(&mut self) -> bool {
-        self.inner.redo_blocking()
+        let applied = self.inner.redo_blocking();
+        self.add_undo_barrier();
+        applied
+    }
+
+    /// In automatic capture a local edit other than typing is its own step.
+    pub(crate) fn begin_edit(&mut self) {
+        if self.capture_mode() == UndoCaptureMode::Auto {
+            self.add_undo_barrier();
+        }
+    }
+
+    /// Typing in one story inside the capture window is one step.
+    pub(crate) fn begin_typing(&mut self, story_id: &str) {
+        if self.capture_mode() == UndoCaptureMode::Auto && self.typing.as_deref() != Some(story_id)
+        {
+            self.add_undo_barrier();
+            self.typing = Some(story_id.to_owned());
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -137,9 +163,13 @@ impl DeckUndoManager {
 
     pub fn add_undo_barrier(&mut self) {
         self.inner.reset();
+        self.typing = None;
     }
 }
 
+/// System clock on native targets and `Date.now` in the browser build, so keystrokes inside
+/// the capture window form one Undo step. A wasm build without the `wasm` feature has no
+/// clock: its counter advances a full window per reading, so every transaction is a step.
 fn default_clock() -> Arc<dyn Clock> {
     #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     {
@@ -150,7 +180,11 @@ fn default_clock() -> Arc<dyn Clock> {
                 .unwrap_or_default()
         })
     }
-    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    #[cfg(all(target_family = "wasm", target_os = "unknown", feature = "wasm"))]
+    {
+        Arc::new(|| js_sys::Date::now() as u64)
+    }
+    #[cfg(all(target_family = "wasm", target_os = "unknown", not(feature = "wasm")))]
     {
         use std::sync::atomic::{AtomicU64, Ordering};
         let ticks = AtomicU64::new(0);

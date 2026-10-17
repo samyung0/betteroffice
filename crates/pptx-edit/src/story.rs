@@ -338,7 +338,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
         validate_text_style(style)?;
-        let mut txn = self.transact_for(context);
+        let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
@@ -366,7 +366,7 @@ impl DeckSession {
         start: u32,
         end: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
+        let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         check_text_range(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
@@ -397,7 +397,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_xml_text(text)?;
         validate_text_style(style)?;
-        let mut txn = self.transact_for(context);
+        let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if start > end || end > final_pilcrow {
@@ -782,7 +782,7 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
+        let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
@@ -808,7 +808,7 @@ impl DeckSession {
         story_id: &str,
         index: u32,
     ) -> EditResult<TextReceipt> {
-        let mut txn = self.transact_for(context);
+        let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index >= final_pilcrow {
