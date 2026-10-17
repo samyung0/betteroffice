@@ -1398,14 +1398,14 @@ pub(crate) fn without_breaks(content: &[V], tokens: &[FlowToken]) -> Vec<V> {
                     }
                     let tree = item.get("fieldTree");
                     if tree.truthy() {
-                        let copy = o(&tree).unwrap_or_default().spread();
-                        if let Some(result) = &result {
-                            copy.set("result", result.clone());
-                        }
-                        if let Some(code) = &code {
-                            copy.set("code", code.clone());
-                        }
-                        kept.set("fieldTree", V::Obj(copy));
+                        kept.set(
+                            "fieldTree",
+                            super::item::leaf_tree(
+                                &tree,
+                                result.as_ref().unwrap_or(&V::Undef),
+                                code.as_ref().unwrap_or(&V::Undef),
+                            ),
+                        );
                     }
                     if simple {
                         kept.set(

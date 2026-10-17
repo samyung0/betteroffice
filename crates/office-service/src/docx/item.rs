@@ -757,7 +757,7 @@ fn image_run_from_payload(payload: &V) -> Result<V> {
         ("effectExtentLeft", "left"),
         ("effectExtentRight", "right"),
     ] {
-        if get(from).truthy() {
+        if !get(from).nullish() {
             padding.set(to, V::Num(px_to_emu(get(from).to_number())));
         }
     }
@@ -1483,21 +1483,15 @@ pub(crate) fn restore_projected_field_results(items: Vec<V>) -> Result<Vec<V>> {
             stored_object.set("structuredCode", V::Obj(structured));
         }
         let tree = stored.get("fieldTree");
-        if tree.truthy()
-            && let Some(tree) = tree.obj()
-        {
-            let result = o(&tree.get("result"))
-                .map(|object| object.spread())
-                .unwrap_or_default();
-            result.set("inline", inline.clone());
-            tree.set("result", V::Obj(result));
-            if let Some(code) = &code {
-                let code_tree = o(&tree.get("code"))
-                    .map(|object| object.spread())
-                    .unwrap_or_default();
-                code_tree.set("inline", code.clone());
-                tree.set("code", V::Obj(code_tree));
-            }
+        if tree.truthy() {
+            stored_object.set(
+                "fieldTree",
+                leaf_tree(
+                    &tree,
+                    &stored_object.get("structuredResult"),
+                    &stored_object.get("structuredCode"),
+                ),
+            );
         }
         stored_object.set("fieldResult", V::array(shown_runs(&inline.items())));
         if let Some(owner_object) = owner.obj() {
@@ -1508,6 +1502,65 @@ pub(crate) fn restore_projected_field_results(items: Vec<V>) -> Result<Vec<V>> {
         }
     }
     Ok(remaining)
+}
+
+/// `tree` repeating the field's code and result only when no other field nests in either, as
+/// the parser writes a field's tree (`project_leaf_tree` in docx-parse, `leafTree`).
+pub(crate) fn leaf_tree(tree: &V, result: &V, code: &V) -> V {
+    let leaf = !(code.truthy() && content_holds_field(code))
+        && !(result.truthy() && content_holds_field(result));
+    let next = o(tree).unwrap_or_default().spread();
+    for (key, content) in [("code", code), ("result", result)] {
+        if leaf && content.truthy() {
+            next.set(key, content.clone());
+        } else {
+            next.delete(key);
+        }
+    }
+    V::Obj(next)
+}
+
+fn content_holds_field(content: &V) -> bool {
+    inline_holds_field(&content.get("inline").items())
+        || blocks_hold_field(&content.get("blocks").items())
+}
+
+fn inline_holds_field(nodes: &[V]) -> bool {
+    nodes.iter().any(|node| match &*ty(node) {
+        "complexField" | "simpleField" => true,
+        "run" => node.get("content").items().iter().any(|content| {
+            is(content, "fieldChar") && content.get("charType").as_str().as_deref() == Some("begin")
+        }),
+        "hyperlink" => {
+            let structured = node.get("structuredChildren");
+            inline_holds_field(
+                &if structured.nullish() {
+                    node.get("children")
+                } else {
+                    structured
+                }
+                .items(),
+            )
+        }
+        "inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+            inline_holds_field(&node.get("content").items())
+        }
+        _ => false,
+    })
+}
+
+fn blocks_hold_field(blocks: &[V]) -> bool {
+    blocks.iter().any(|block| match &*ty(block) {
+        "paragraph" => inline_holds_field(&block.get("content").items()),
+        "table" => block.get("rows").items().iter().any(|row| {
+            row.get("cells")
+                .items()
+                .iter()
+                .any(|cell| blocks_hold_field(&cell.get("content").items()))
+        }),
+        "blockSdt" => blocks_hold_field(&block.get("content").items()),
+        _ => false,
+    })
 }
 
 /// The runs field result `nodes` show, as the parser reads them (`shownRuns`).

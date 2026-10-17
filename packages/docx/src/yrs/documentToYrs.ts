@@ -9,6 +9,7 @@ import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {
   BlockContent,
+  CellMargins,
   Chart,
   ComplexField,
   Document,
@@ -482,10 +483,10 @@ function imagePayload(image: Image): Attrs {
     cropLeft: image.crop?.left ?? null,
     shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
-    effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
-    effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
-    effectExtentLeft: image.padding?.left ? emuToPixels(image.padding.left) : null,
-    effectExtentRight: image.padding?.right ? emuToPixels(image.padding.right) : null,
+    effectExtentTop: image.padding?.top != null ? emuToPixels(image.padding.top) : null,
+    effectExtentBottom: image.padding?.bottom != null ? emuToPixels(image.padding.bottom) : null,
+    effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
+    effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     allowOverlap: image.allowOverlap ?? null,
   }) as Attrs;
@@ -1768,20 +1769,33 @@ function projectTable(
   const tableStyle = effectiveStyleId ? styleResolver?.getStyle(effectiveStyleId) : undefined;
   const borders =
     table.formatting?.borders ?? tableStyle?.tblPr?.borders ?? defaultStyle?.tblPr?.borders;
-  const margins =
-    table.formatting?.cellMargins ??
-    tableStyle?.tblPr?.cellMargins ??
-    defaultStyle?.tblPr?.cellMargins;
-  const logicalLeft = table.formatting?.bidi ? margins?.end : margins?.start;
-  const logicalRight = table.formatting?.bidi ? margins?.start : margins?.end;
-  const defaultMargins = margins
-    ? {
-        top: margins.top?.value,
-        bottom: margins.bottom?.value,
-        left: margins.left?.value ?? logicalLeft?.value,
-        right: margins.right?.value ?? logicalRight?.value,
+  // Each side on its own (#1101): direct formatting, then the table style's margins or else the
+  // default table style's.
+  const marginLayers = [
+    table.formatting?.cellMargins,
+    tableStyle?.tblPr?.cellMargins ?? defaultStyle?.tblPr?.cellMargins,
+  ].filter((margins): margins is CellMargins => margins != null);
+  const marginSide = (...keys: (keyof CellMargins)[]) => {
+    for (const margins of marginLayers) {
+      for (const key of keys) {
+        const value = margins[key]?.value;
+        if (value != null) return value;
       }
-    : undefined;
+    }
+    return undefined;
+  };
+  const [logicalLeft, logicalRight]: (keyof CellMargins)[] = table.formatting?.bidi
+    ? ['end', 'start']
+    : ['start', 'end'];
+  const defaultMargins =
+    marginLayers.length > 0
+      ? {
+          top: marginSide('top'),
+          bottom: marginSide('bottom'),
+          left: marginSide('left', logicalLeft),
+          right: marginSide('right', logicalRight),
+        }
+      : undefined;
   const basedOnStyleIds: string[] = [];
   const visited = new Set<string>();
   let inherited = tableStyle;

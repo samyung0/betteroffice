@@ -308,6 +308,11 @@ export function useFileIO({
             rId,
             wrapType: 'inline',
             displayMode: 'inline',
+            // Explicit zeros: the save writes only the distances a picture holds.
+            distTop: 0,
+            distBottom: 0,
+            distLeft: 0,
+            distRight: 0,
           },
         });
         // A slow prepareImage: focus stays wherever the user went meanwhile.

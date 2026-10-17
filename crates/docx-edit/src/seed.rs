@@ -1314,16 +1314,12 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
         "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentBottom": number(field(field(Some(image), "padding"), "bottom"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentLeft": number(field(field(Some(image), "padding"), "left"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "allowOverlap": nullish(field(Some(image), "allowOverlap"))
@@ -3783,37 +3779,36 @@ fn project_table(
     let borders = field(formatting, "borders")
         .or_else(|| field(field(table_style, "tblPr"), "borders"))
         .or_else(|| field(field(default_style, "tblPr"), "borders"));
-    let margins = field(formatting, "cellMargins")
-        .or_else(|| field(field(table_style, "tblPr"), "cellMargins"))
-        .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
-    let logical_left = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "end"
-        } else {
-            "start"
-        },
-    );
-    let logical_right = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "start"
-        } else {
-            "end"
-        },
-    );
-    let default_margins = margins.map(|margins| {
+    // Each side on its own (#1101): direct formatting, then the table style's
+    // margins or else the default table style's.
+    let margin_layers: Vec<&Value> = [
+        field(formatting, "cellMargins"),
+        field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|margins| !margins.is_null())
+    .collect();
+    let margin_side = |keys: &[&str]| {
+        margin_layers.iter().find_map(|margins| {
+            keys.iter().find_map(|key| {
+                field(field(Some(*margins), key), "value").filter(|value| !value.is_null())
+            })
+        })
+    };
+    let (logical_left, logical_right) = if truthy(field(formatting, "bidi")) {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let default_margins = (!margin_layers.is_empty()).then(|| {
         drop_nulls(json!({
-            "top": nullish(field(field(Some(margins), "top"), "value")),
-            "bottom": nullish(field(field(Some(margins), "bottom"), "value")),
-            "left": nullish(
-                field(field(Some(margins), "left"), "value")
-                    .or_else(|| field(logical_left, "value"))
-            ),
-            "right": nullish(
-                field(field(Some(margins), "right"), "value")
-                    .or_else(|| field(logical_right, "value"))
-            )
+            "top": nullish(margin_side(&["top"])),
+            "bottom": nullish(margin_side(&["bottom"])),
+            "left": nullish(margin_side(&["left", logical_left])),
+            "right": nullish(margin_side(&["right", logical_right]))
         }))
     });
     let mut based_on = Vec::new();

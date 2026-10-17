@@ -40,6 +40,7 @@ import type {
   TableBorders,
   SimpleField,
   ComplexField,
+  StructuredFieldContent,
   FieldType,
   MathEquation,
   Image,
@@ -765,10 +766,10 @@ function imageRunFromPayload(payload: Attrs): Run {
   if (attrs.allowOverlap != null) image.allowOverlap = attrs.allowOverlap;
 
   const padding: NonNullable<Image['padding']> = {};
-  if (attrs.effectExtentTop) padding.top = pixelsToEmu(attrs.effectExtentTop);
-  if (attrs.effectExtentBottom) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
-  if (attrs.effectExtentLeft) padding.left = pixelsToEmu(attrs.effectExtentLeft);
-  if (attrs.effectExtentRight) padding.right = pixelsToEmu(attrs.effectExtentRight);
+  if (attrs.effectExtentTop != null) padding.top = pixelsToEmu(attrs.effectExtentTop);
+  if (attrs.effectExtentBottom != null) padding.bottom = pixelsToEmu(attrs.effectExtentBottom);
+  if (attrs.effectExtentLeft != null) padding.left = pixelsToEmu(attrs.effectExtentLeft);
+  if (attrs.effectExtentRight != null) padding.right = pixelsToEmu(attrs.effectExtentRight);
   if (Object.keys(padding).length > 0) image.padding = padding;
 
   return { type: 'run', content: [{ type: 'drawing', image, ...sourceXml(payload) }] };
@@ -1159,13 +1160,70 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
     stored.structuredResult = { ...stored.structuredResult, inline };
     if (code) stored.structuredCode = { ...stored.structuredCode, inline: code };
     if (stored.fieldTree) {
-      stored.fieldTree.result = { ...stored.fieldTree.result, inline };
-      if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
+      stored.fieldTree = leafTree(stored.fieldTree, stored.structuredResult, stored.structuredCode);
     }
     stored.fieldResult = shownRuns(inline);
     owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
   }
   return remaining;
+}
+
+type FieldTree = NonNullable<ComplexField['fieldTree']>;
+
+/**
+ * `tree` repeating the field's code and result only when no other field nests in either, as the
+ * parser writes a field's tree (`project_leaf_tree` in docx-parse).
+ */
+function leafTree(
+  tree: FieldTree,
+  result: StructuredFieldContent | undefined,
+  code: StructuredFieldContent | undefined
+): FieldTree {
+  const leaf = !(code && fieldContentHoldsField(code)) && !(result && fieldContentHoldsField(result));
+  const next = { ...tree };
+  if (leaf && code) next.code = code;
+  else delete next.code;
+  if (leaf && result) next.result = result;
+  else delete next.result;
+  return next;
+}
+
+function fieldContentHoldsField(content: StructuredFieldContent): boolean {
+  return inlineHoldsField(content.inline ?? []) || blocksHoldField(content.blocks ?? []);
+}
+
+function inlineHoldsField(nodes: readonly { type: string }[]): boolean {
+  return nodes.some((node) => {
+    switch (node.type) {
+      case 'complexField':
+      case 'simpleField':
+        return true;
+      case 'run':
+        return (node as Run).content.some((content) => content.type === 'fieldChar' && content.charType === 'begin');
+      case 'hyperlink': {
+        const link = node as Hyperlink;
+        return inlineHoldsField(link.structuredChildren ?? link.children);
+      }
+      case 'inlineSdt':
+        return inlineHoldsField((node as InlineSdt).content);
+      case 'insertion':
+      case 'deletion':
+      case 'moveFrom':
+      case 'moveTo':
+        return inlineHoldsField((node as TrackedRunChange).content);
+      default:
+        return false;
+    }
+  });
+}
+
+function blocksHoldField(blocks: readonly BlockContent[]): boolean {
+  return blocks.some((block) => {
+    if (block.type === 'paragraph') return inlineHoldsField(block.content);
+    if (block.type === 'table') return block.rows.some((row) => row.cells.some((cell) => blocksHoldField(cell.content)));
+    if (block.type === 'blockSdt') return blocksHoldField(block.content);
+    return false;
+  });
 }
 
 /** The runs field result `nodes` show, as the parser reads them (`shown_runs` in docx-parse). */
@@ -2299,7 +2357,7 @@ function withoutBreaks(
           ...item,
           ...(result && { structuredResult: result }),
           ...(code && { structuredCode: code }),
-          ...(item.fieldTree && { fieldTree: { ...item.fieldTree, ...(result && { result }), ...(code && { code }) } }),
+          ...(item.fieldTree && { fieldTree: leafTree(item.fieldTree, result, code) }),
         };
         return [(item.type === 'simpleField'
           ? { ...kept, content: result ? shownRuns(result.inline) : runs(item.content) }
@@ -2511,6 +2569,8 @@ interface SessionProjectionMemo {
   clean: Set<string>;
   dirty: Set<string>;
   stories: Map<string, ProjectedStory>;
+  /** The story each nested story was last projected inside. */
+  parents: Map<string, string>;
 }
 
 const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
@@ -2519,7 +2579,13 @@ const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
 function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
   let memo = sessionProjectionMemos.get(session);
   if (!memo) {
-    memo = { wholesale: true, clean: new Set(), dirty: new Set(), stories: new Map() };
+    memo = {
+      wholesale: true,
+      clean: new Set(),
+      dirty: new Set(),
+      stories: new Map(),
+      parents: new Map(),
+    };
     sessionProjectionMemos.set(session, memo);
   }
   return memo;
@@ -2554,16 +2620,23 @@ export function noteYrsStoriesDirty(
     memo.clean.clear();
     memo.dirty.clear();
     memo.stories.clear();
+    memo.parents.clear();
     return;
   }
   const queue = typeof stories === 'string' ? [stories] : [...stories];
+  const queued = new Set(queue);
   for (let index = 0; index < queue.length; index += 1) {
     const story = queue[index]!;
     memo.dirty.add(story);
     memo.clean.delete(story);
     memo.stories.delete(story);
-    const parent = NESTED_STORY_ID.exec(story)?.[1];
-    if (parent) queue.push(parent);
+    // A merge moves nested stories, so the story they were projected inside counts, not the one
+    // their id names.
+    const parent = memo.parents.get(story) ?? NESTED_STORY_ID.exec(story)?.[1];
+    if (parent && !queued.has(parent)) {
+      queued.add(parent);
+      queue.push(parent);
+    }
   }
 }
 
@@ -2756,10 +2829,11 @@ class SaveContext {
     return this.referencedComments.has(id);
   };
 
-  private cellContents(payload: TablePayload): BlockContent[][] {
+  private cellContents(payload: TablePayload, parent: string): BlockContent[][] {
     const contents: BlockContent[][] = [];
     for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
       for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        if (cell.story !== undefined) this.memo.parents.set(cell.story, parent);
         contents.push(
           cell.story !== undefined && this.storyIds.has(cell.story)
             ? this.storyToBlocks(cell.story)
@@ -3143,7 +3217,7 @@ class SaveContext {
         const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
         const key = `T${firstCell?.story ?? ''}`;
         const contents =
-          candidatesFor(key).length > 0 ? this.cellContents(payload) : undefined;
+          candidatesFor(key).length > 0 ? this.cellContents(payload, storyId) : undefined;
         const reused =
           contents !== undefined
             ? (reuseContainer(key, inputs, contents) as Table | undefined)
@@ -3157,7 +3231,7 @@ class SaveContext {
             projectedBlocks.set(table, {
               key,
               inputs,
-              children: contents ?? this.cellContents(payload),
+              children: contents ?? this.cellContents(payload, storyId),
             });
           }
         }
@@ -3166,6 +3240,7 @@ class SaveContext {
         blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
+        if (childStory) this.memo.parents.set(childStory, storyId);
         openBlock();
         const childContent =
           childStory && this.storyIds.has(childStory)
