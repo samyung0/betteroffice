@@ -363,17 +363,32 @@ function deriveLimits(
   return { rows: XLSX_MAX_ROWS, cols: XLSX_MAX_COLUMNS, usedRows, usedCols, rowsPerPage };
 }
 
-// the part of `range` inside the sheet's used range, or null when they miss:
-// clear, cut and copy cost no more than the data a selection covers.
+// what clear and cut act on: the part of `range` inside the sheet's used
+// range, or null when they miss, so they cost no more than the data covered.
 function inUsedRange(range: CellRange, used: SheetInfo['usedRange']): CellRange | null {
   if (!used) return null;
-  const part = {
+  return nonEmpty({
     top: Math.max(range.top, used.start.row),
     left: Math.max(range.left, used.start.col),
     bottom: Math.min(range.bottom, used.end.row),
     right: Math.min(range.right, used.end.col),
-  };
-  return part.top <= part.bottom && part.left <= part.right ? part : null;
+  });
+}
+
+// what copy takes: `range` from its own top-left corner (a paste keeps the
+// leading blanks) up to the used range's last row and column, or null when
+// it lies wholly past them.
+function upToUsedEnd(range: CellRange, used: SheetInfo['usedRange']): CellRange | null {
+  if (!used) return null;
+  return nonEmpty({
+    ...range,
+    bottom: Math.min(range.bottom, used.end.row),
+    right: Math.min(range.right, used.end.col),
+  });
+}
+
+function nonEmpty(range: CellRange): CellRange | null {
+  return range.top <= range.bottom && range.left <= range.right ? range : null;
 }
 
 // trigger a browser download of a byte blob under the given name and mime type.
@@ -1535,41 +1550,37 @@ function XlsxEditorContent({
     focusContainer();
   }, [focusContainer]);
 
-  // the selection's part inside the used range on screen, which inputs
-  // committed but not drawn yet extend.
-  const usedSelection = useCallback(
-    (target: Selection): CellRange | null => {
-      let used = shownHere?.sheetInfo.usedRange ?? null;
-      for (const { sheetId, row, col } of optimistic) {
-        if (sheetId !== activeSheetId) continue;
-        const { start, end } = used ?? { start: { row, col }, end: { row, col } };
-        used = {
-          start: { row: Math.min(row, start.row), col: Math.min(col, start.col) },
-          end: { row: Math.max(row, end.row), col: Math.max(col, end.col) },
-        };
-      }
-      return inUsedRange(normalizeRange(target), used);
-    },
-    [shownHere, optimistic, activeSheetId]
-  );
+  // the used range on screen, which inputs committed but not drawn yet extend.
+  const usedRange = useCallback((): SheetInfo['usedRange'] => {
+    let used = shownHere?.sheetInfo.usedRange ?? null;
+    for (const { sheetId, row, col } of optimistic) {
+      if (sheetId !== activeSheetId) continue;
+      const { start, end } = used ?? { start: { row, col }, end: { row, col } };
+      used = {
+        start: { row: Math.min(row, start.row), col: Math.min(col, start.col) },
+        end: { row: Math.max(row, end.row), col: Math.max(col, end.col) },
+      };
+    }
+    return used;
+  }, [shownHere, optimistic, activeSheetId]);
 
   const clearCells = useCallback(() => {
     if (!handleRef.current || !selection || readOnly) return;
-    const r = usedSelection(selection);
+    const r = inUsedRange(normalizeRange(selection), usedRange());
     if (!r) return;
     const edits: CellInputEdit[] = [];
     for (let row = r.top; row <= r.bottom; row++) {
       for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
     }
     onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportError);
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError, usedSelection]);
+  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError, usedRange]);
 
   const copySelection = useCallback(async () => {
     const handle = handleRef.current;
     if (!handle || !selection) return;
-    const r = usedSelection(selection);
+    const r = upToUsedEnd(normalizeRange(selection), usedRange());
     try {
-      // a selection of empty cells copies nothing (and asks the worker nothing).
+      // a selection wholly past the used range copies nothing (and asks the worker nothing).
       const cells = r
         ? await handle.onSheet(
             activeSheetId,
@@ -1585,7 +1596,7 @@ function XlsxEditorContent({
     } catch {
       // clipboard denied or read failed — nothing to paste, leave state as-is.
     }
-  }, [selection, activeSheet, activeSheetId, usedSelection]);
+  }, [selection, activeSheet, activeSheetId, usedRange]);
 
   const cutSelection = useCallback(async () => {
     await copySelection();
