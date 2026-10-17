@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -11,9 +11,10 @@ use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
     grow_content_sized_columns, has_unknown_content_widths, legacy_preferred_width_px,
-    preferred_width_px, resolve_cell_grid,
-    resolve_content_fitted_column_widths_with_percentage_basis, table_percentage_basis,
-    widen_columns_to_minimums,
+    paragraphs_only, preferred_width_px, resolve_cell_grid,
+    resolve_content_fitted_column_widths_with_percentage_basis, resolve_table_column_widths,
+    sized_by_content, table_percentage_basis, table_width_budget, unbreakable_cell,
+    widen_columns_to_minimums, widen_unbreakable_columns,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -736,6 +737,7 @@ pub fn measure_blocks_with_table_frames(
         shape_offsets,
         false,
     )?;
+    let _float_pass = (!extracted.is_empty()).then(FloatPass::enter);
     let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
     let marks = section_break_marks(blocks);
     measure_float_flow(
@@ -1297,16 +1299,21 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
-    let lookup = extent_cache_lookup(
-        paragraph,
-        content_width,
-        config,
-        floating_zones,
-        cumulative_y,
-    );
+    let lookup = if FLOAT_PASS.with(Cell::get) {
+        extent_cache_lookup(
+            paragraph,
+            content_width,
+            config,
+            floating_zones,
+            cumulative_y,
+        )
+    } else {
+        ExtentLookup::Miss(None)
+    };
     if let ExtentLookup::Hit(extent) = lookup {
         return Ok(extent);
     }
+    PARAGRAPH_MEASURES.with(|count| count.set(count.get() + 1));
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
@@ -1443,8 +1450,11 @@ impl ExtentCacheGeneration {
     }
 }
 
-/// Measured paragraph extents reused across pagination passes; same
-/// two-generation aging as `ooxml_text`'s shape cache.
+/// Measured paragraph extents reused across passes that measure around floating
+/// zones: those re-measure every block on every edit (an extent depends on its
+/// flow position there), while every other pass reuses its own retained
+/// measurements and keeps no copy here. Same two-generation aging as
+/// `ooxml_text`'s shape cache.
 #[derive(Default)]
 struct ExtentCache {
     hot: ExtentCacheGeneration,
@@ -1484,6 +1494,10 @@ impl ExtentCache {
 }
 
 thread_local! {
+    /// Set while `measure_blocks_with_table_frames` measures around floating zones.
+    static FLOAT_PASS: Cell<bool> = const { Cell::new(false) };
+    /// Paragraphs measured (cache misses included, hits not), for tests.
+    static PARAGRAPH_MEASURES: Cell<u64> = const { Cell::new(0) };
     static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
     #[cfg(test)]
     static EXTENT_MEASURE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1504,6 +1518,26 @@ fn extent_cache_stats() -> (usize, usize) {
     });
     let scratch_capacity = EXTENT_KEY_BUF.with(|scratch| scratch.borrow().capacity());
     (entries, scratch_capacity)
+}
+
+/// Paragraphs this thread has measured rather than answered from the cache.
+pub fn paragraph_measure_count() -> u64 {
+    PARAGRAPH_MEASURES.with(Cell::get)
+}
+
+/// Marks a pass that measures around floating zones; restores the flag on drop.
+struct FloatPass(bool);
+
+impl FloatPass {
+    fn enter() -> Self {
+        Self(FLOAT_PASS.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for FloatPass {
+    fn drop(&mut self) {
+        FLOAT_PASS.with(|flag| flag.set(self.0));
+    }
 }
 
 enum ExtentLookup {
@@ -1807,11 +1841,11 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
             Run::Image(image) => line_width += synthetic_inline_image_width(image),
             Run::Field(field) => {
                 font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
-                let fallback = field
-                    .fallback
-                    .as_deref()
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or("1");
+                let fallback = match field.fallback.as_deref() {
+                    Some(text) if !text.is_empty() => text,
+                    _ if matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES") => "1",
+                    _ => "",
+                };
                 line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
             }
             // an authored break is exact, so it splits the fallback rows even
@@ -2611,6 +2645,89 @@ fn column_content_maximums(
     Ok(maximums)
 }
 
+/// A cell's widest unwrapped line plus its side padding.
+fn cell_content_width(
+    cell: &crate::types::TableCell,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<f64, String> {
+    let left = cell
+        .padding
+        .as_ref()
+        .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.left);
+    let right = cell
+        .padding
+        .as_ref()
+        .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
+    let budget = (content_width - left - right).max(1.0);
+    let mut widest = 0.0_f64;
+    for block in &cell.blocks {
+        if let LayoutBlock::Paragraph(paragraph) = block {
+            widest = widest.max(paragraph_content_width(paragraph, budget, config)?);
+        }
+    }
+    Ok(widest + left + right)
+}
+
+/// Columns of a table [`sized_by_content`]: the autofit algorithm over each
+/// cell's widest unwrapped line, inside the room left of the page.
+fn content_fitted_column_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<f64>, String> {
+    let mut fitted = table.clone();
+    fitted.width_algorithm = Some("autofit".to_owned());
+    for cell in fitted.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+        cell.max_content_width = Some(cell_content_width(cell, content_width, config)?);
+    }
+    Ok(resolve_table_column_widths(
+        &fitted,
+        table_width_budget(table, content_width),
+    ))
+}
+
+/// Widens the columns of `w:noWrap` cells that must stay on one line
+/// ([`unbreakable_cell`]) with [`widen_unbreakable_columns`].
+fn widen_for_unbreakable_cells(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    widths: &mut [f64],
+) -> Result<(), String> {
+    let grid: Vec<_> = resolve_cell_grid(table)
+        .into_iter()
+        .filter(|entry| entry.col_span == 1 && entry.column_index < widths.len())
+        .collect();
+    let cell_at =
+        |row: usize, index: usize| table.rows.get(row).and_then(|row| row.cells.get(index));
+    if !grid.iter().any(|entry| {
+        cell_at(entry.row_index, entry.cell_index).is_some_and(|cell| unbreakable_cell(table, cell))
+    }) {
+        return Ok(());
+    }
+    let mut needs = vec![0.0_f64; widths.len()];
+    let mut maximums = vec![0.0_f64; widths.len()];
+    for entry in grid {
+        let Some(cell) = cell_at(entry.row_index, entry.cell_index) else {
+            continue;
+        };
+        if !paragraphs_only(cell) {
+            maximums[entry.column_index] = f64::INFINITY;
+            continue;
+        }
+        let width = cell_content_width(cell, content_width, config)?;
+        let slot = if unbreakable_cell(table, cell) {
+            &mut needs[entry.column_index]
+        } else {
+            &mut maximums[entry.column_index]
+        };
+        *slot = slot.max(width);
+    }
+    widen_unbreakable_columns(table, content_width, &needs, &maximums, widths);
+    Ok(())
+}
+
 fn cell_content_widths(
     cell: &crate::types::TableCell,
     content_width: f64,
@@ -3149,13 +3266,19 @@ fn measure_table_with_compat_shift(
             None,
         )
     };
-    let (mut column_widths, content_fitted) =
+    let (mut column_widths, mut content_fitted) =
         resolve_content_fitted_column_widths_with_percentage_basis(
             table,
             content_width,
             percentage_basis,
             content_widths.as_deref(),
         );
+    // A table left on its grid takes AutoFit to contents when every cell's
+    // width is explicitly auto, and widens no-wrap cells into empty room.
+    if !content_fitted && sized_by_content(table, content_width) {
+        column_widths = content_fitted_column_widths(table, content_width, config)?;
+        content_fitted = true;
+    }
     let content_sized = if content_fitted {
         Vec::new()
     } else {
@@ -3164,6 +3287,9 @@ fn measure_table_with_compat_shift(
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
         grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
+    }
+    if !content_fitted {
+        widen_for_unbreakable_cells(table, content_width, config, &mut column_widths)?;
     }
     let resolved_total: f64 = column_widths.iter().sum();
     let target_width = if unknown {
@@ -3564,6 +3690,7 @@ mod tests {
 
     #[test]
     fn distinct_paragraphs_reuse_cached_extents() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let fonts = crate::MeasureFonts::default();
         let _fonts = fonts.enter();
@@ -3618,6 +3745,7 @@ mod tests {
 
     #[test]
     fn appended_fonts_only_invalidate_dependent_extents() {
+        let _float_pass = FloatPass::enter();
         let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         let appended = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
         for (label, run, initial, final_chain, expected_calls) in [
@@ -3714,6 +3842,7 @@ mod tests {
 
     #[test]
     fn first_font_invalidates_extents_without_a_matching_chain() {
+        let _float_pass = FloatPass::enter();
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
         let mut config = MeasurementConfig {
@@ -3765,6 +3894,7 @@ mod tests {
 
     #[test]
     fn registered_chain_font_invalidates_synthetic_extents() {
+        let _float_pass = FloatPass::enter();
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
         let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -3812,7 +3942,8 @@ mod tests {
             serde_json::to_vec(&warm).unwrap(),
             serde_json::to_vec(&cold).unwrap()
         );
-        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 2);
+        // A face loaded again keeps its first id and the cached extent.
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
         let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
         assert_eq!(measure_paragraph(&paragraph, 300.0, &config).unwrap(), warm);
         assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before);
@@ -3938,6 +4069,7 @@ mod tests {
 
     #[test]
     fn dropping_last_measure_fonts_releases_extent_cache_and_scratch() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let fonts = crate::MeasureFonts::default();
         cache_paragraph(&fonts);
@@ -3951,6 +4083,7 @@ mod tests {
 
     #[test]
     fn dropping_measure_fonts_keeps_extent_cache_while_another_is_alive() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let (a, b) = (
             crate::MeasureFonts::default(),
@@ -4517,6 +4650,68 @@ mod tests {
             assert_eq!(lines, 1);
             assert!(height > 0.0);
         }
+    }
+
+    #[test]
+    fn an_auto_fitted_cell_with_a_floating_picture_keeps_the_grid() {
+        let table = |image: serde_json::Value, text: &str| {
+            let auto = json!({"widthType": "auto", "widthValue": 0});
+            let mut first = json!({"id": "c0", "blocks": [{"kind": "paragraph", "id": "p0",
+                "runs": [image, {"kind": "text", "text": text}]}]});
+            let mut second = json!({"id": "c1", "blocks": [{"kind": "paragraph", "id": "p1",
+                "runs": [{"kind": "text", "text": "x"}]}]});
+            for cell in [&mut first, &mut second] {
+                cell.as_object_mut()
+                    .unwrap()
+                    .extend(auto.as_object().unwrap().clone());
+            }
+            serde_json::from_value::<LayoutBlock>(json!({
+                "kind": "table", "id": "t", "columnWidths": [312, 312],
+                "rows": [{"id": "r", "cells": [first, second]}]
+            }))
+            .unwrap()
+        };
+        let widths = |mut block: LayoutBlock| {
+            let BlockExtent::Table(extent) =
+                measure_block(&mut block, 624.0, &MeasurementConfig::default()).unwrap()
+            else {
+                panic!("expected a table extent")
+            };
+            extent
+                .column_widths
+                .iter()
+                .map(|width| width.round())
+                .collect::<Vec<_>>()
+        };
+        let picture = |extra: serde_json::Value| {
+            let mut image = json!({"kind": "image", "src": "pic", "width": 250, "height": 100});
+            image
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            image
+        };
+        // An anchored picture adds nothing to its cell's line, so the table
+        // keeps its grid rather than drawing the picture over the next column.
+        for floating in [
+            json!({"wrapType": "square", "position": {"horizontal": {"relativeTo": "column", "posOffset": 0}}}),
+            json!({"wrapType": "inFront"}),
+            json!({"displayMode": "float"}),
+        ] {
+            assert_eq!(
+                widths(table(picture(floating.clone()), "")),
+                vec![312.0, 312.0],
+                "{floating}"
+            );
+            assert_eq!(
+                widths(table(picture(floating.clone()), "Pic")),
+                vec![312.0, 312.0],
+                "{floating}"
+            );
+        }
+        // An inline picture is measured, so its column fits it.
+        let inline = widths(table(picture(json!({})), ""));
+        assert!(inline[0] >= 250.0 && inline[1] < 312.0, "{inline:?}");
     }
 
     #[test]

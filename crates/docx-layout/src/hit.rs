@@ -1527,9 +1527,18 @@ fn collect_range_rects(
 ) {
     #[cfg(test)]
     RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().push(page_index));
-    let pending: Vec<(RectOwner<'_>, RangeRect)> = text_hits(prims)
+    // Build hits only for runs the range touches: a hit computes glyph bounds,
+    // so building one per primitive made every caret lookup O(document glyphs).
+    let touches = |primitive: &&Primitive| match text_doc_range(primitive) {
+        Some((start, end)) if start == end => start >= from && start < to,
+        Some((start, end)) => end > from && start < to,
+        None => false,
+    };
+    let pending: Vec<(RectOwner<'_>, RangeRect)> = prims
         .iter()
-        .filter_map(|hit| hit_rect(hit, page_index, from, to))
+        .filter(touches)
+        .filter_map(text_hit)
+        .filter_map(|hit| hit_rect(&hit, page_index, from, to))
         .collect();
     merge_line_rects(pending, out);
     out.extend(

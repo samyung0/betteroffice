@@ -806,6 +806,7 @@ fn matching_cell_boundaries_keep_the_exact_legacy_fragments() {
         assert_eq!(one_page, two_page);
         let mut expected = one.clone();
         expected["width"] = json!(200);
+        expected["columnWidths"] = json!([100, 100]);
         assert_eq!(
             serde_json::to_string(two).unwrap(),
             serde_json::to_string(&expected).unwrap()
