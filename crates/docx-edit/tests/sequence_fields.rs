@@ -826,4 +826,3 @@ fn a_text_box_anchored_at_a_paragraph_start_counts_before_the_paragraph() {
             .map(|(boxed, result)| (boxed, result.to_owned()))
     );
 }
-
