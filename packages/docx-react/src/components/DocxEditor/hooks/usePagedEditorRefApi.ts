@@ -27,9 +27,7 @@ interface RefApiInputs {
   documentFromYrsRef: React.MutableRefObject<() => Document | null>;
   yrsSessionRef: React.MutableRefObject<YrsSession | null>;
   yrsLocToDisplayPositionRef: React.MutableRefObject<(loc: YrsLoc) => number | null>;
-  syncYrsInputStateRef: React.MutableRefObject<
-    (docChanged: boolean, dirtyStory?: string) => boolean
-  >;
+  syncYrsInputStateRef: React.MutableRefObject<(docChanged: boolean) => boolean>;
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
   getYrsPositionProjectionRef: React.MutableRefObject<() => YrsPositionProjection | null>;
@@ -112,19 +110,15 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     isFocused: () => yrsInputRef.current?.isFocused() ?? false,
     undo: () => {
       const session = yrsSessionRef.current;
-      const result = session
-        ? performYrsHistoryAction(session, false)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
-      return result.changed;
+      const changed = session ? performYrsHistoryAction(session, false) : false;
+      if (changed) syncYrsInputStateRef.current(true);
+      return changed;
     },
     redo: () => {
       const session = yrsSessionRef.current;
-      const result = session
-        ? performYrsHistoryAction(session, true)
-        : { changed: false, story: null };
-      if (result.changed) syncYrsInputStateRef.current(true, result.story ?? undefined);
-      return result.changed;
+      const changed = session ? performYrsHistoryAction(session, true) : false;
+      if (changed) syncYrsInputStateRef.current(true);
+      return changed;
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
     canRedo: () => yrsSessionRef.current?.canRedo() ?? false,
@@ -216,7 +210,7 @@ export interface UsePagedEditorRefApiOptions {
   documentFromYrs: () => Document | null;
   yrsSession: YrsSession | null;
   yrsLocToDisplayPosition: (loc: YrsLoc) => number | null;
-  syncYrsInputState: (docChanged: boolean, dirtyStory?: string) => boolean;
+  syncYrsInputState: (docChanged: boolean) => boolean;
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;

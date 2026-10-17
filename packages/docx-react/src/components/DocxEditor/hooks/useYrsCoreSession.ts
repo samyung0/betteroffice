@@ -32,7 +32,8 @@ export interface YrsCoreSession {
   sourceNumbering(): NumberingDefinitions | undefined;
   /** The materialized source package, as the session seeded from it (save projections do not replace it). */
   sourceDocument(): Document | undefined;
-  publishDirectInput(storyId?: string): void;
+  /** A local edit or a peer's update landed: the cached input position maps are stale. */
+  publishDirectInput(): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -160,13 +161,6 @@ export function warmCompatibilityBase(
   }
 }
 
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
-}
-
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -192,7 +186,6 @@ export function useYrsCoreSession(
     sourceDocumentRef.current ??= compatibilityBaseRef.current;
   };
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
@@ -202,7 +195,6 @@ export function useYrsCoreSession(
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     inputPositionMapsRef.current.clear();
-    projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
     sourceDocumentRef.current = null;
 
@@ -245,7 +237,6 @@ export function useYrsCoreSession(
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
-      projectionStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -340,12 +331,11 @@ export function useYrsCoreSession(
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
-      const dirtyStories = projectionStoriesRef.current;
+      // Every story, so peers' and earlier sessions' edits reach the export;
+      // the session's projection memo reuses stories nothing touched.
       const projected = facade.yrsToDocument(live, base, {
-        ...(dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : {}),
         source: sourceDocumentRef.current ?? undefined,
       });
-      dirtyStories.clear();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
@@ -354,12 +344,8 @@ export function useYrsCoreSession(
     }
   }, []);
 
-  const publishDirectInput = useCallback((storyId?: string): void => {
-    const live = sessionRef.current;
-    if (!live || !live.storyIds().includes('body')) return;
+  const publishDirectInput = useCallback((): void => {
     inputPositionMapsRef.current.clear();
-    const activeStory = storyId ?? live.selection()?.head.story ?? 'body';
-    projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
   }, []);
 
   const sourceNumbering = useCallback((): NumberingDefinitions | undefined => {
