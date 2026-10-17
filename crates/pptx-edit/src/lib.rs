@@ -17,6 +17,7 @@ use yrs::{
 mod comments;
 mod deck;
 mod model;
+pub mod paragraph;
 mod proposal_diff;
 mod proposals;
 mod save;
