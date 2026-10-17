@@ -1314,6 +1314,11 @@ fn a_batch_sets_a_cell_to_a_style_an_earlier_op_of_the_batch_interned() {
 }
 
 fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
+    entries(book, sheet, "contents")
+}
+
+/// The overrides one map of a sheet holds, `contents` or `styles`.
+fn entries(book: &Workbook, sheet: &str, overrides: &str) -> Vec<(String, String)> {
     use yrs::updates::decoder::Decode;
     use yrs::{Doc, Map, MapRef, ReadTxn, Transact};
     let doc = Doc::new();
@@ -1329,7 +1334,7 @@ fn overrides(book: &Workbook, sheet: &str) -> Vec<(String, String)> {
         .cast::<MapRef>()
         .unwrap();
     let contents = sheet
-        .get(&txn, "contents")
+        .get(&txn, overrides)
         .unwrap()
         .cast::<MapRef>()
         .unwrap();
@@ -2277,4 +2282,53 @@ fn an_overwrite_that_overtakes_an_edit_waits_for_it_and_converges() {
     assert_eq!(input_at(&target, "D1"), "three");
     assert_eq!(input_at(&target, "H20"), "two");
     assert_eq!(target.model(), source.model());
+}
+
+/// Epo 2026-10-17: a value typed into an empty cell of a formatted row or
+/// column shows and saves with that format, as in Excel, and schema 8 treats
+/// the inherited format as no change: no format override, no formatting
+/// effect, and the same cell on a peer the update reached cell by cell and
+/// on one that took the whole state.
+#[test]
+fn a_value_typed_into_a_formatted_row_or_column_takes_its_format_without_an_override() {
+    let options = CalculationOptions::default();
+    let mut model = base();
+    let mut bold = xlsx_model::CellFormat::default();
+    bold.font.bold = true;
+    let bold = model.styles.intern_cell_format(&bold).unwrap().unwrap();
+    model.sheets[0].col_styles = vec![ColStyle {
+        first: 2,
+        last: 2,
+        xf: bold,
+    }];
+    model.sheets[0].row_styles.insert(5, bold);
+    let source = Workbook::from_model(model).unwrap().save().unwrap();
+    let open =
+        |client| Workbook::open_collaborative_recalculated(&source, client, options).unwrap();
+    let (mut author, mut peer) = (open(3101), open(3102));
+    for update in typed(&mut author, &[("C3", "7"), ("E6", "8")]) {
+        peer.apply_update_v1(&update, options).unwrap();
+    }
+    let whole = deliver(open(3103), &[&author.encode_state_as_update_v1()]);
+    let shows_bold = |book: &Workbook, address: &str| {
+        let cell = book.model().sheets[0].cell(at(address)).unwrap();
+        book.model().styles.cell_format(cell.style).font.bold
+    };
+    for book in [&author, &peer, &whole] {
+        assert_eq!(book.model(), author.model());
+        let saved = Workbook::open(&book.save().unwrap()).unwrap();
+        for address in ["C3", "E6"] {
+            assert!(shows_bold(book, address), "{address}");
+            assert!(shows_bold(&saved, address), "saved {address}");
+        }
+    }
+    assert!(entries(&author, "sheet:0", "styles").is_empty());
+    let effects: Vec<serde_json::Value> =
+        serde_json::from_str(&author.pending_effects_json().unwrap()).unwrap();
+    let mut labels = effects
+        .iter()
+        .map(|effect| effect["label"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    labels.sort();
+    assert_eq!(labels, ["Data!C3", "Data!E6"]);
 }

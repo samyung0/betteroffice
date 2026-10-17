@@ -158,6 +158,28 @@ fn base_cell<'a>(
     })
 }
 
+/// The row's or column's default a cell the source lacks takes while it
+/// holds no format of its own; `None` where the source has the cell.
+fn inherited_style(base: &WorkbookBase, key: &str, cell_key: &str) -> Result<Option<u32>, String> {
+    let Some(sheet) = base_sheet_index(key).and_then(|index| base.sheets.get(index)) else {
+        return Ok(None);
+    };
+    let (row, col): (Point, Point) = serde_json::from_str(cell_key)
+        .map_err(|error| format!("invalid stable cell key: {error}"))?;
+    let source = |point: &Point, limit: u32| {
+        (point.run == "base" && point.offset < u64::from(limit)).then_some(point.offset as u32)
+    };
+    let (row, col) = (source(&row, MAX_ROWS), source(&col, MAX_COLS));
+    if let (Some(row), Some(col)) = (row, col)
+        && sheet.cell(CellRef::new(row, col)).is_some()
+    {
+        return Ok(None);
+    }
+    Ok(row
+        .and_then(|row| sheet.row_styles.get(&row).copied())
+        .or_else(|| col.and_then(|col| sheet.col_style(col))))
+}
+
 #[derive(Clone)]
 struct Context {
     keys: Vec<String>,
@@ -773,10 +795,12 @@ fn write_cell(
             .style
             .map(|style| style_key(styles, style))
             .transpose()?;
-        let original = source
-            .and_then(|source| source.style)
-            .map(|style| style_key(&base.styles, style))
-            .transpose()?;
+        let original = match source {
+            Some(source) => source.style,
+            None => inherited_style(base, key, &cell_key)?,
+        }
+        .map(|style| style_key(&base.styles, style))
+        .transpose()?;
         if desired == original {
             formats.remove(txn, &cell_key);
         } else {
@@ -1206,6 +1230,9 @@ pub(super) fn materialize<T: ReadTxn>(
                 continue;
             };
             let mut cell = sheet.cell(at).cloned().unwrap_or_default();
+            if let Some(style) = inherited_style(base, key, cell_key)? {
+                cell.style = Some(style);
+            }
             cell.value = content.value;
             cell.formula = content
                 .formula
@@ -1487,6 +1514,9 @@ pub(super) fn project_cells<T: ReadTxn>(
                 }
             }
             if let Some(content) = content {
+                if let Some(style) = inherited_style(base, key, cell_key)? {
+                    out.style = Some(style);
+                }
                 out.value = content.value;
                 out.formula = content
                     .formula
