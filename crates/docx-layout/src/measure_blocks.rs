@@ -3690,6 +3690,7 @@ mod tests {
 
     #[test]
     fn distinct_paragraphs_reuse_cached_extents() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let fonts = crate::MeasureFonts::default();
         let _fonts = fonts.enter();
@@ -3744,6 +3745,7 @@ mod tests {
 
     #[test]
     fn appended_fonts_only_invalidate_dependent_extents() {
+        let _float_pass = FloatPass::enter();
         let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
         let appended = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
         for (label, run, initial, final_chain, expected_calls) in [
@@ -3840,6 +3842,7 @@ mod tests {
 
     #[test]
     fn first_font_invalidates_extents_without_a_matching_chain() {
+        let _float_pass = FloatPass::enter();
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
         let mut config = MeasurementConfig {
@@ -3891,6 +3894,7 @@ mod tests {
 
     #[test]
     fn registered_chain_font_invalidates_synthetic_extents() {
+        let _float_pass = FloatPass::enter();
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
         let regular = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -3938,7 +3942,8 @@ mod tests {
             serde_json::to_vec(&warm).unwrap(),
             serde_json::to_vec(&cold).unwrap()
         );
-        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 2);
+        // A face loaded again keeps its first id and the cached extent.
+        assert_eq!(crate::register_measure_font_bytes(regular).unwrap(), 0);
         let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
         assert_eq!(measure_paragraph(&paragraph, 300.0, &config).unwrap(), warm);
         assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()), before);
@@ -4064,6 +4069,7 @@ mod tests {
 
     #[test]
     fn dropping_last_measure_fonts_releases_extent_cache_and_scratch() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let fonts = crate::MeasureFonts::default();
         cache_paragraph(&fonts);
@@ -4077,6 +4083,7 @@ mod tests {
 
     #[test]
     fn dropping_measure_fonts_keeps_extent_cache_while_another_is_alive() {
+        let _float_pass = FloatPass::enter();
         clear_extent_cache();
         let (a, b) = (
             crate::MeasureFonts::default(),

@@ -1098,7 +1098,12 @@ mod tests {
         let holds = |id| with_measure_face(id, |_, _| ()).is_some();
         clear_measure_fonts();
         register_measure_font_bytes(LIBERATION_SANS).unwrap();
-        register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        register_measure_font_bytes(include_bytes!(
+            "../../docx-raster/tests/assets/Carlito-Regular.ttf"
+        ))
+        .unwrap();
+        // A face loaded again keeps its first id.
+        assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(0));
         {
             let (a, b) = (MeasureFonts::default(), MeasureFonts::default());
             let _a = a.enter();
