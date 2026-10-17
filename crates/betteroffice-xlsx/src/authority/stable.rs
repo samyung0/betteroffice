@@ -1158,6 +1158,32 @@ pub(super) fn materialize<T: ReadTxn>(
                     .unwrap_or_default(),
                 cols,
             );
+            // Row styles and the sizes hidden rows and columns had are source
+            // facts the save compares against, so they follow the live axes.
+            let original = &base.sheets[source_index];
+            for (&row, &style) in &original.row_styles {
+                if let Some(row) = rows.index_in("base", row.into()) {
+                    sheet.row_styles.insert(row, style);
+                }
+            }
+            for (axis, from, to) in [
+                (
+                    rows,
+                    &original.hidden_row_heights,
+                    &mut sheet.hidden_row_heights,
+                ),
+                (
+                    cols,
+                    &original.hidden_col_widths,
+                    &mut sheet.hidden_col_widths,
+                ),
+            ] {
+                for (&at, &size) in from {
+                    if let Some(at) = axis.index_in("base", at.into()) {
+                        to.insert(at, size);
+                    }
+                }
+            }
             // Deliberate stopgap (record 2026-09-25): an array formula keeps its
             // range only while its anchor has no content override; otherwise it
             // saves as a single-cell formula.

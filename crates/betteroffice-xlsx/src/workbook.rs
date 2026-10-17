@@ -466,6 +466,23 @@ impl Workbook {
         let mut projected = authority.materialize().map_err(authority_error)?;
         if !authority.supports_structure() {
             retain_array_formulas(&model, &mut projected);
+            // The standalone document folds equal formats into one index and
+            // keeps no row styles or hidden sizes; the save compares against
+            // the source's own.
+            for (sheet, source) in projected.sheets.iter_mut().zip(&model.sheets) {
+                for (at, cell) in source.iter_cells() {
+                    if let Some(projected) = sheet.cell_mut(at) {
+                        projected.style = cell.style;
+                    }
+                }
+                sheet.row_styles.clone_from(&source.row_styles);
+                sheet
+                    .hidden_row_heights
+                    .clone_from(&source.hidden_row_heights);
+                sheet
+                    .hidden_col_widths
+                    .clone_from(&source.hidden_col_widths);
+            }
         }
         let model = projected;
         validate_model(&model)?;
@@ -2485,12 +2502,13 @@ impl Workbook {
         range: CellRange,
     ) -> Result<Vec<(CellRef, CellFormat)>> {
         let sheet_ref = self.sheet(sheet)?;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(sheet_ref);
         let mut formats = Vec::new();
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let at = CellRef::new(row, col);
-                let style = sheet_ref.cell(at).and_then(|cell| cell.style);
-                formats.push((at, self.model.styles.cell_format(style)));
+                let style = defaults.effective_style(at);
+                formats.push((at, self.model.styles.cell_format(Some(style.unwrap_or(0)))));
             }
         }
         Ok(formats)
@@ -4534,11 +4552,6 @@ fn validate_display_region(
     viewport: &Viewport,
 ) -> Result<()> {
     validate_viewport(viewport)?;
-    let right = viewport.x + viewport.width;
-    let bottom = viewport.y + viewport.height;
-    if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
-        return Err(Error::InvalidViewport);
-    }
     let (rows, columns) = geometry.viewport_range(viewport);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
