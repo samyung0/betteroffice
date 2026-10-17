@@ -114,6 +114,7 @@ import {
 import { DEFAULT_FONT_SIZES, LINE_SPACINGS, nextFontSize } from './components/Toolbar';
 import { shapeFormattingFromShape } from './shapeFormatting';
 import { joinedClipboard, shapeClipboard, storyClipboard, type ClipboardText } from './clipboard';
+import { imageCache } from './imageCache';
 import {
   caretGoalX,
   caretLineIndex,
@@ -525,7 +526,7 @@ function PptxEditorContent({
   const [resizeDelta, setResizeDelta] = useState<SlidePoint | null>(null);
   const pointerGestureRef = useRef<PointerGesture | null>(null);
   const recentClickRef = useRef<RecentCanvasClick | null>(null);
-  const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
+  const imageCacheRef = useRef(imageCache());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
@@ -583,8 +584,8 @@ function PptxEditorContent({
     model?.slideIndex ?? 0
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
-  const resolveDeckImage = useCallback((assetId: string) =>
-    resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
+  const resolveDeckImage = useMemo(() => imageCacheRef.current.resolver(
+    (assetId) => handleRef.current?.mediaBytes(assetId), decodeImageError), [decodeImageError]);
 
   useEffect(() => {
     if (!canvasReview.reviewing) return;
@@ -1013,10 +1014,7 @@ function PptxEditorContent({
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
-    void paintSlide(ctx, frame, dpr, scale, {
-      resolveImage: (assetId) =>
-        resolveImage(assetId, handleRef, imageCacheRef, decodeImageError),
-    }).then(
+    void paintSlide(ctx, frame, dpr, scale, { resolveImage: resolveDeckImage }).then(
       () => {
         const snapshot = modelRef.current?.snapshot;
         if (cancelled || !firstPaintPendingRef.current || !snapshot) return;
@@ -1030,7 +1028,7 @@ function PptxEditorContent({
     return () => {
       cancelled = true;
     };
-  }, [decodeImageError, model?.frame, reportError, scale]);
+  }, [model?.frame, reportError, resolveDeckImage, scale]);
 
   const selectedShape = useMemo(() => {
     if (!model?.frame || !shapeSelection) return null;
@@ -2698,11 +2696,10 @@ function PptxEditorContent({
     // Pin the handle the frame came from, behind its own decode cache, rather
     // than reading whichever deck `handleRef` holds by the time an asset
     // resolves.
-    const pinned = { current: handle };
-    const cache = { current: new Map<string, Promise<CanvasImageSource | null>>() };
+    const images = imageCache();
     void slideToPng(frame, {
       scale: window.devicePixelRatio || 1,
-      resolveImage: (assetId) => resolveImage(assetId, pinned, cache, decodeImageError),
+      resolveImage: images.resolver((assetId) => handle.mediaBytes(assetId), decodeImageError),
     })
       .then(async (blob) => {
         const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -2711,7 +2708,8 @@ function PptxEditorContent({
       })
       .catch((value: unknown) => {
         if (handleRef.current === handle) reportError(value);
-      });
+      })
+      .finally(() => images.clear());
   };
 
   const textActive =
@@ -3554,7 +3552,7 @@ function PptxEditorContent({
         </div>
         {!readOnly && showProposals && proposalsOpen && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
-            resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
+            resolveImage={resolveDeckImage}
             onAccept={acceptProposal} onReject={rejectProposal}
             onNavigate={navigateProposalTarget}
             onClose={() => { setProposalsOpen(false); proposalButtonRef.current?.focus(); }} />
@@ -3586,9 +3584,7 @@ function PptxEditorContent({
           handle={handleRef.current}
           slideCount={slideCount}
           startIndex={presenting}
-          resolveImage={(assetId) =>
-            resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
-          }
+          resolveImage={resolveDeckImage}
           notesWindow={notesWindow}
           notesFor={(index) => model?.snapshot.slides[index]?.notes ?? ''}
           defaultNotesSize={defaultPresenterNotesSize}
@@ -3929,39 +3925,6 @@ async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<
 function removeBrowserFonts(fonts: FontFace[]): void {
   if (typeof document === 'undefined') return;
   for (const font of fonts) document.fonts.delete(font);
-}
-
-function resolveImage(
-  assetId: string,
-  handleRef: { current: PresentationHandle | null },
-  cacheRef: { current: Map<string, Promise<CanvasImageSource | null>> },
-  errorMessage: string
-): Promise<CanvasImageSource | null> {
-  const cached = cacheRef.current.get(assetId);
-  if (cached) return cached;
-  const pending = decodeImage(handleRef.current?.mediaBytes(assetId), errorMessage);
-  cacheRef.current.set(assetId, pending);
-  return pending;
-}
-
-async function decodeImage(
-  bytes: Uint8Array | undefined,
-  errorMessage: string
-): Promise<CanvasImageSource | null> {
-  if (!bytes) return null;
-  const blob = presentationImageBlob(bytes);
-  if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
-  const url = URL.createObjectURL(blob);
-  try {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error(errorMessage));
-      image.src = url;
-    });
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 function caretLinesFor(
