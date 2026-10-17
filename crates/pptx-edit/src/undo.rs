@@ -125,16 +125,14 @@ impl DeckUndoManager {
         }
     }
 
+    /// yrs closes the open step after an undo (and so before a redo): typing
+    /// that follows is a new step.
     pub fn undo(&mut self) -> bool {
-        let applied = self.inner.undo_blocking();
-        self.add_undo_barrier();
-        applied
+        self.inner.undo_blocking()
     }
 
     pub fn redo(&mut self) -> bool {
-        let applied = self.inner.redo_blocking();
-        self.add_undo_barrier();
-        applied
+        self.inner.redo_blocking()
     }
 
     /// In automatic capture a local edit other than typing is its own step.

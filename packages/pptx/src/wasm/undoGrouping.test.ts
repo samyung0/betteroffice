@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { PresentationHandle } from '../index';
@@ -57,5 +57,55 @@ test('a pause longer than the capture window starts a new Undo step', async () =
     expect(deck.story(storyId)).toEqual(before);
   } finally {
     deck.dispose();
+  }
+});
+
+// The clock stands still in these, so only the engine's own boundaries split typing.
+const stillClock = () => spyOn(Date, 'now').mockReturnValue(Date.now());
+
+test('typing after an Undo or a Redo is its own step, even inside the capture window', () => {
+  const clock = stillClock();
+  const deck = openPresentation(fixture, { clientId: 9993 });
+  try {
+    const storyId = firstStory(deck);
+    let at = type(deck, storyId, 0, 'ab');
+    const ab = deck.story(storyId);
+    deck.addUndoBoundary();
+    at = type(deck, storyId, at, 'cd');
+    expect(deck.undo().applied).toBe(true);
+    expect(deck.story(storyId)).toEqual(ab);
+    type(deck, storyId, 2, 'e');
+    const abe = deck.story(storyId);
+    expect(deck.undo().applied).toBe(true);
+    expect(deck.story(storyId)).toEqual(ab);
+    expect(deck.redo().applied).toBe(true);
+    expect(deck.story(storyId)).toEqual(abe);
+    type(deck, storyId, 3, 'f');
+    expect(deck.undo().applied).toBe(true);
+    expect(deck.story(storyId)).toEqual(abe);
+  } finally {
+    deck.dispose();
+    clock.mockRestore();
+  }
+});
+
+test('typing into another text box is its own step, even inside the capture window', () => {
+  const clock = stillClock();
+  const deck = openPresentation(fixture, { clientId: 9994 });
+  try {
+    const [first, second] = deck
+      .snapshot()
+      .slides[0].shapes.flatMap((shape) => shape.textStories.map((story) => story.id));
+    const before = [deck.story(first), deck.story(second)];
+    type(deck, first, 0, 'ab');
+    const typed = deck.story(first);
+    type(deck, second, 0, 'cd');
+    expect(deck.undo().applied).toBe(true);
+    expect([deck.story(first), deck.story(second)]).toEqual([typed, before[1]]);
+    expect(deck.undo().applied).toBe(true);
+    expect([deck.story(first), deck.story(second)]).toEqual(before);
+  } finally {
+    deck.dispose();
+    clock.mockRestore();
   }
 });

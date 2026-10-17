@@ -212,7 +212,7 @@ share the normal operations and add stage timing. See the
 ## Host undo and comment controls
 
 `handle.setUndoCaptureMode('manual')` groups tracked local edits across pauses
-and operation types until `handle.addUndoBoundary()`. The getter
+and operation types until `handle.addUndoBoundary()`, an undo or a redo. The getter
 `handle.undoCaptureMode()` returns `'auto'` or `'manual'`. Changing modes closes
 the current group and preserves history; setting the same mode is a no-op.
 Auto groups typing into one text story inside a 500 ms capture window (native
