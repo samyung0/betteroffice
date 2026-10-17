@@ -299,10 +299,16 @@ fn refresh_field(field: &mut serde_json::Map<String, Value>) {
         }
     }
     if let Some(Value::Object(mut tree)) = field.get("fieldTree").cloned() {
+        // Code and result repeat only when no other field nests in either
+        // (docx-parse's `project_leaf_tree`).
+        let leaf = !["structuredCode", "structuredResult"]
+            .into_iter()
+            .any(|key| field.get(key).is_some_and(content_holds_field));
         for (content, key) in [("structuredCode", "code"), ("structuredResult", "result")] {
-            if let Some(value) = field.get(content) {
-                tree.insert(key.to_owned(), value.clone());
-            }
+            match field.get(content).filter(|_| leaf) {
+                Some(value) => tree.insert(key.to_owned(), value.clone()),
+                None => tree.remove(key),
+            };
         }
         if field["type"] == "complexField" {
             let children: Vec<Value> = code
@@ -319,6 +325,49 @@ fn refresh_field(field: &mut serde_json::Map<String, Value>) {
         }
         field.insert("fieldTree".to_owned(), Value::Object(tree));
     }
+}
+
+/// Whether structured field content nests another field (docx-parse's `holds_field`).
+fn content_holds_field(content: &Value) -> bool {
+    fn inline(nodes: &Value) -> bool {
+        nodes.as_array().into_iter().flatten().any(|node| {
+            match node["type"].as_str().unwrap_or_default() {
+                "complexField" | "simpleField" => true,
+                "run" => node["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|content| {
+                        content["type"] == "fieldChar" && content["charType"] == "begin"
+                    }),
+                "hyperlink" => inline(match &node["structuredChildren"] {
+                    Value::Null => &node["children"],
+                    children => children,
+                }),
+                "inlineSdt" | "insertion" | "deletion" | "moveFrom" | "moveTo" => {
+                    inline(&node["content"])
+                }
+                _ => false,
+            }
+        })
+    }
+    fn blocks(nodes: &Value) -> bool {
+        nodes.as_array().into_iter().flatten().any(|block| {
+            match block["type"].as_str().unwrap_or_default() {
+                "paragraph" => inline(&block["content"]),
+                "table" => block["rows"].as_array().into_iter().flatten().any(|row| {
+                    row["cells"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|cell| blocks(&cell["content"]))
+                }),
+                "blockSdt" => blocks(&block["content"]),
+                _ => false,
+            }
+        })
+    }
+    inline(&content["inline"]) || blocks(&content["blocks"])
 }
 
 fn any_value(value: &Any) -> Value {

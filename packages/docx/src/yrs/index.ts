@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { CompatibilityFlags } from '../docx/settingsParser';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
@@ -447,6 +448,8 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  /** The document's `w:compat` flags; the bridge reads the spacing ones. */
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -727,6 +730,8 @@ export interface YrsTableReceipt {
   columns: number;
   createdStoryIds: string[];
   deletedStoryIds: string[];
+  /** Existing stories whose content changed: the table's story, plus a merge's surviving cell. */
+  changedStoryIds: string[];
   newParaIds: string[];
   deletedTable: boolean;
   revisionIds: string[];
@@ -1071,6 +1076,8 @@ export interface YrsSession extends CollaborationReplica {
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Applies seed raw operations with deterministic item ordering. */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
+  /** Unions seeded opaque SEQ sequence names into document state (byte seeder parity). */
+  seedOpaqueSequences(names: readonly string[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
   /** Adds a sticky-anchored comment over one or more ranges. */
@@ -1311,6 +1318,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
     markDirty(receipt.createdStoryIds);
     markDirty(receipt.deletedStoryIds);
+    markDirty(receipt.changedStoryIds);
     return receipt;
   };
 
@@ -2062,6 +2070,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     applySeedRawOps: (story, ops) => {
       markDirty(story);
       mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops)));
+    },
+    seedOpaqueSequences: (names) => {
+      mutate(() => session.seed_opaque_sequences(JSON.stringify(names)));
     },
     setParagraphAttr: (paraId, key, value) => {
       markDirty('all');

@@ -1,16 +1,125 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
-use yrs::Any;
 use yrs::types::Attrs;
+use yrs::{Any, Array as _, Map as _, Out, ReadTxn, Text as _};
 
 use crate::{EditCtx, EditingDoc, RawOp};
 
 pub(crate) type JsonObject = BTreeMap<String, Value>;
+
+/// The root map holding document-wide seeded metadata.
+pub(crate) const SESSION: &str = "session";
+
+/// Names (lower case) of the SEQ sequences that keep their cached results
+/// (upstream #970). State without this key keeps every cached SEQ result.
+pub(crate) const OPAQUE_SEQUENCES: &str = "opaqueSequences";
+
+/// Writes the first opaque set, outside the seed client and the random client
+/// range, so a document without SEQ fields seeds exactly as before and every
+/// other seeded operation keeps its id.
+const SEQUENCE_METADATA_CLIENT: u64 = 0x1_0000_05e9;
+
+/// The opaque set `document` holds once `names` join it, or `None` when it
+/// stays as it is: a document whose stories name no SEQ field gets none.
+fn merged_opaque_sequences<T: ReadTxn>(txn: &T, names: &[String]) -> Option<(Any, bool)> {
+    let previous = txn
+        .get_map(SESSION)
+        .and_then(|session| session.get(txn, OPAQUE_SEQUENCES));
+    if previous.is_none() && names.is_empty() && !holds_sequence_fields(txn) {
+        return None;
+    }
+    let mut merged: BTreeSet<String> = names.iter().cloned().collect();
+    if let Some(Out::Any(Any::Array(previous))) = &previous {
+        merged.extend(previous.iter().filter_map(|value| match value {
+            Any::String(name) => Some(name.to_string()),
+            _ => None,
+        }));
+    }
+    let merged = Any::Array(merged.into_iter().map(Any::from).collect::<Vec<_>>().into());
+    (previous.as_ref() != Some(&Out::Any(merged.clone()))).then(|| (merged, previous.is_some()))
+}
+
+/// Unions `names` into the stored opaque set; its first write comes from
+/// [`SEQUENCE_METADATA_CLIENT`].
+pub(crate) fn seed_opaque_sequences(document: &EditingDoc, names: &[String]) {
+    use yrs::Transact;
+    use yrs::updates::decoder::Decode;
+    let Some((merged, existed)) = merged_opaque_sequences(&document.yrs_doc().transact(), names)
+    else {
+        return;
+    };
+    if existed {
+        let session = document.yrs_doc().get_or_insert_map(SESSION);
+        let mut txn = document.transact_for(&EditCtx::system(""));
+        session.insert(&mut txn, OPAQUE_SEQUENCES, merged);
+        return;
+    }
+    let marker = yrs::Doc::with_client_id(SEQUENCE_METADATA_CLIENT);
+    let root = marker.get_or_insert_map(SESSION);
+    let update = {
+        let mut txn = marker.transact_mut();
+        root.insert(&mut txn, OPAQUE_SEQUENCES, merged);
+        txn.encode_update_v1()
+    };
+    let update = yrs::Update::decode_v1(&update).expect("a one-entry session update decodes");
+    document
+        .transact_for(&EditCtx::system(""))
+        .apply_update(update)
+        .expect("a one-entry session update applies");
+}
+
+/// [`seed_opaque_sequences`] for a view that never stores its state: written
+/// under the view's own client, keeping update decoding out of its build.
+fn view_opaque_sequences(document: &EditingDoc, names: &[String]) {
+    use yrs::Transact;
+    let Some((merged, _)) = merged_opaque_sequences(&document.yrs_doc().transact(), names) else {
+        return;
+    };
+    let session = document.yrs_doc().get_or_insert_map(SESSION);
+    let mut txn = document.transact_for(&EditCtx::system(""));
+    session.insert(&mut txn, OPAQUE_SEQUENCES, merged);
+}
+
+/// Whether a story embeds anything that names a SEQ field (a field
+/// instruction, field data, shape text).
+fn holds_sequence_fields<T: ReadTxn>(txn: &T) -> bool {
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    let mut pending: Vec<Out> = stories.iter(txn).map(|(_, value)| value).collect();
+    let mut anys: Vec<Any> = Vec::new();
+    while let Some(value) = pending.pop() {
+        match value {
+            Out::YText(text) => pending.extend(
+                text.diff(txn, yrs::types::text::YChange::identity)
+                    .into_iter()
+                    .map(|chunk| chunk.insert)
+                    .filter(|insert| !matches!(insert, Out::Any(Any::String(_)))),
+            ),
+            Out::YMap(map) => pending.extend(map.iter(txn).map(|(_, value)| value)),
+            Out::YArray(array) => pending.extend(array.iter(txn)),
+            Out::Any(any) => anys.push(any),
+            _ => {}
+        }
+    }
+    for any in &anys {
+        let mut values = vec![any];
+        while let Some(value) = values.pop() {
+            match value {
+                Any::String(text) if text.contains("SEQ") => return true,
+                Any::Array(items) => values.extend(items.iter()),
+                Any::Map(entries) => values.extend(entries.values()),
+                _ => {}
+            }
+        }
+    }
+    false
+}
 
 #[derive(Clone)]
 struct Mark {
@@ -68,6 +177,8 @@ struct LoweringContext {
     plans: Vec<StoryPlan>,
     compatibility_mode: u8,
     open_comments: OpenComments,
+    /// Sequences whose SEQ fields keep their cached results.
+    opaque_sequences: Vec<String>,
 }
 
 impl LoweringContext {
@@ -1103,7 +1214,7 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 914_400.0 * 96.0
 }
 
-fn image_payload(image: &Value) -> JsonObject {
+pub(crate) fn image_payload(image: &Value) -> JsonObject {
     let size = field(Some(image), "size");
     let wrap = field(Some(image), "wrap");
     let position = field(Some(image), "position");
@@ -1192,6 +1303,7 @@ fn image_payload(image: &Value) -> JsonObject {
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
+        "borderColorValue": nullish(field(outline, "color")),
         "borderStyle": border_style,
         "wrapText": wrap_text,
         "hlinkHref": nullish(field(Some(image), "hlinkHref")),
@@ -1202,16 +1314,12 @@ fn image_payload(image: &Value) -> JsonObject {
         "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentBottom": number(field(field(Some(image), "padding"), "bottom"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentLeft": number(field(field(Some(image), "padding"), "left"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
-            .filter(|value| *value != 0.0)
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
         "allowOverlap": nullish(field(Some(image), "allowOverlap"))
@@ -1230,14 +1338,14 @@ fn shape_payload(shape: &Value, source: &BTreeMap<String, String>) -> JsonObject
     map_from_value(json!({ "shapeJson": source_json(shape, source) }))
 }
 
-fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
+pub(crate) fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject {
     let size = field(Some(chart), "size");
     map_from_value(json!({
         "chartJson": source_json(chart, source),
         "chartType": nullish(field(Some(chart), "chartType")),
         "title": nullish(field(Some(chart), "title")),
-        "width": number(field(size, "width")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(320.0),
-        "height": number(field(size, "height")).filter(|value| *value != 0.0).map(emu_to_pixels).unwrap_or(220.0),
+        "width": number(field(size, "width")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(320.0),
+        "height": number(field(size, "height")).map(emu_to_pixels).filter(|value| *value > 0.0).unwrap_or(220.0),
         "rId": nullish(field(Some(chart), "rId")),
         "path": nullish(field(Some(chart), "path"))
     }))
@@ -1246,6 +1354,185 @@ fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject
 pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
     let instruction = instruction.trim();
     !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The sequences a paragraph's content keeps cached (upstream #970's seeding):
+/// SEQ fields nested in other fields or inside hyperlinks, which lower as part
+/// of something else and so cannot be counted.
+fn paragraph_opaque_sequences(paragraph: &Value) -> Vec<String> {
+    fn link(hyperlink: &Value, names: &mut Vec<String>) {
+        names.extend(hyperlink_sequence_names(hyperlink));
+        let children = field(Some(hyperlink), "structuredChildren")
+            .or_else(|| field(Some(hyperlink), "children"));
+        for child in array(children) {
+            if matches!(
+                string(field(Some(child), "type")),
+                Some("simpleField" | "complexField")
+            ) {
+                names.extend(nested_sequence_names(child));
+            }
+        }
+    }
+    fn control(sdt: &Value, names: &mut Vec<String>) {
+        for child in array(field(Some(sdt), "content")) {
+            match string(field(Some(child), "type")) {
+                Some("hyperlink") => link(child, names),
+                Some("simpleField" | "complexField") => names.extend(nested_sequence_names(child)),
+                Some("inlineSdt") => control(child, names),
+                _ => {}
+            }
+        }
+    }
+    let mut names = Vec::new();
+    for content in array(field(Some(paragraph), "content")) {
+        match string(field(Some(content), "type")) {
+            Some("hyperlink") => link(content, &mut names),
+            Some("simpleField" | "complexField") => names.extend(nested_sequence_names(content)),
+            Some("inlineSdt") => control(content, &mut names),
+            Some("insertion" | "deletion" | "moveFrom" | "moveTo") => {
+                for child in array(field(Some(content), "content")) {
+                    if string(field(Some(child), "type")) == Some("hyperlink") {
+                        link(child, &mut names);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The sequences of SEQ fields nested anywhere in a field's code or result.
+pub(crate) fn nested_sequence_names(field_value: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = Vec::new();
+    if let Value::Object(map) = field_value {
+        pending.extend(map.values().rev().map(|value| (value, false)));
+    }
+    while let Some((value, scanned_hyperlink)) = pending.pop() {
+        match value {
+            Value::Object(map) => {
+                if matches!(
+                    string(map.get("type")),
+                    Some("complexField" | "simpleField")
+                ) && let Some(name) = string(map.get("instruction"))
+                    .and_then(docx_layout::sequence_fields::sequence_name)
+                    && seen.insert(name.clone())
+                {
+                    names.push(name);
+                }
+                // Fields nested past the parser's limit stay raw runs of their parent field.
+                if string(map.get("type")) == Some("complexField") {
+                    for runs in [map.get("fieldCode"), map.get("fieldResult")] {
+                        let (mut instructions, mut raw) = (Vec::new(), Vec::new());
+                        for run in array(runs) {
+                            raw_field_sequence_names(run, &mut instructions, &mut raw);
+                        }
+                        names.extend(raw.into_iter().filter(|name| seen.insert(name.clone())));
+                    }
+                }
+                if string(map.get("type")) == Some("hyperlink") && !scanned_hyperlink {
+                    names.extend(
+                        hyperlink_sequence_names(value)
+                            .into_iter()
+                            .filter(|name| seen.insert(name.clone())),
+                    );
+                }
+                let scanned_hyperlink =
+                    scanned_hyperlink || string(map.get("type")) == Some("hyperlink");
+                pending.extend(map.values().rev().map(|value| (value, scanned_hyperlink)));
+            }
+            Value::Array(values) => {
+                pending.extend(values.iter().rev().map(|value| (value, scanned_hyperlink)))
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The sequences of SEQ fields inside a hyperlink, its controls and the fields
+/// in it, raw field characters included.
+pub(crate) fn hyperlink_sequence_names(hyperlink: &Value) -> Vec<String> {
+    let mut pending = vec![hyperlink];
+    let mut instructions: Vec<Option<String>> = Vec::new();
+    let mut names = Vec::new();
+    while let Some(node) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        match kind {
+            Some("hyperlink") => {
+                let children = field(Some(node), "structuredChildren")
+                    .or_else(|| field(Some(node), "children"));
+                pending.extend(array(children).iter().rev());
+            }
+            Some("inlineSdt") => {
+                pending.extend(array(field(Some(node), "content")).iter().rev());
+            }
+            Some("simpleField" | "complexField") => {
+                names.extend(
+                    string(field(Some(node), "instruction"))
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                let tree = field(Some(node), "fieldTree");
+                let result = field(field(Some(node), "structuredResult"), "inline")
+                    .or_else(|| field(field(tree, "result"), "inline"))
+                    .or_else(|| {
+                        field(
+                            Some(node),
+                            if kind == Some("simpleField") {
+                                "content"
+                            } else {
+                                "fieldResult"
+                            },
+                        )
+                    });
+                pending.extend(array(result).iter().rev());
+                if kind == Some("complexField") {
+                    let code = field(field(Some(node), "structuredCode"), "inline")
+                        .or_else(|| field(field(tree, "code"), "inline"))
+                        .or_else(|| field(Some(node), "fieldCode"));
+                    pending.extend(array(code).iter().rev());
+                }
+            }
+            Some("run") => raw_field_sequence_names(node, &mut instructions, &mut names),
+            _ => {}
+        }
+    }
+    names
+}
+
+/// SEQ names of the fields a run opens as raw `fldChar` and `instrText` content.
+fn raw_field_sequence_names(
+    run: &Value,
+    instructions: &mut Vec<Option<String>>,
+    names: &mut Vec<String>,
+) {
+    for content in array(field(Some(run), "content")) {
+        let instruction = match string(field(Some(content), "type")) {
+            Some("fieldChar") => match string(field(Some(content), "charType")) {
+                Some("begin") => {
+                    instructions.push(Some(String::new()));
+                    None
+                }
+                Some("separate") => instructions.last_mut().and_then(Option::take),
+                Some("end") => instructions.pop().flatten(),
+                _ => None,
+            },
+            Some("instrText") => {
+                if let Some(Some(instruction)) = instructions.last_mut() {
+                    instruction.push_str(string(field(Some(content), "text")).unwrap_or_default());
+                }
+                None
+            }
+            _ => None,
+        };
+        names.extend(
+            instruction
+                .as_deref()
+                .and_then(docx_layout::sequence_fields::sequence_name),
+        );
+    }
 }
 
 fn field_payload(
@@ -3462,37 +3749,36 @@ fn project_table(
     let borders = field(formatting, "borders")
         .or_else(|| field(field(table_style, "tblPr"), "borders"))
         .or_else(|| field(field(default_style, "tblPr"), "borders"));
-    let margins = field(formatting, "cellMargins")
-        .or_else(|| field(field(table_style, "tblPr"), "cellMargins"))
-        .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
-    let logical_left = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "end"
-        } else {
-            "start"
-        },
-    );
-    let logical_right = field(
-        margins,
-        if truthy(field(formatting, "bidi")) {
-            "start"
-        } else {
-            "end"
-        },
-    );
-    let default_margins = margins.map(|margins| {
+    // Each side on its own (#1101): direct formatting, then the table style's
+    // margins or else the default table style's.
+    let margin_layers: Vec<&Value> = [
+        field(formatting, "cellMargins"),
+        field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|margins| !margins.is_null())
+    .collect();
+    let margin_side = |keys: &[&str]| {
+        margin_layers.iter().find_map(|margins| {
+            keys.iter().find_map(|key| {
+                field(field(Some(*margins), key), "value").filter(|value| !value.is_null())
+            })
+        })
+    };
+    let (logical_left, logical_right) = if truthy(field(formatting, "bidi")) {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let default_margins = (!margin_layers.is_empty()).then(|| {
         drop_nulls(json!({
-            "top": nullish(field(field(Some(margins), "top"), "value")),
-            "bottom": nullish(field(field(Some(margins), "bottom"), "value")),
-            "left": nullish(
-                field(field(Some(margins), "left"), "value")
-                    .or_else(|| field(logical_left, "value"))
-            ),
-            "right": nullish(
-                field(field(Some(margins), "right"), "value")
-                    .or_else(|| field(logical_right, "value"))
-            )
+            "top": nullish(margin_side(&["top"])),
+            "bottom": nullish(margin_side(&["bottom"])),
+            "left": nullish(margin_side(&["left", logical_left])),
+            "right": nullish(margin_side(&["right", logical_right]))
         }))
     });
     let mut based_on = Vec::new();
@@ -3766,6 +4052,9 @@ fn visit_story(
                     marked = flow.item;
                     context.push(plan_index, flow.unit());
                 }
+                context
+                    .opaque_sequences
+                    .extend(paragraph_opaque_sequences(block));
                 let (mut units, mut ppr) = paragraph_units(
                     block,
                     &context.styles,
@@ -4263,7 +4552,8 @@ pub fn seed_parsed_docx(
     use yrs::updates::decoder::Decode;
     document.set_package(Some(PackageContext::new(&envelope)));
     let seed = EditingDoc::new(SEED_CLIENT_ID);
-    let fonts = seed_parsed_docx_in_place(&seed, envelope)?;
+    let (fonts, sequences) = seed_lowered(&seed, envelope)?;
+    seed_opaque_sequences(&seed, &sequences);
     let update = yrs::Update::decode_v1(&seed.encode_state_as_update_v1())
         .map_err(|error| error.to_string())?;
     document
@@ -4278,8 +4568,19 @@ pub fn seed_parsed_docx(
 /// state; keeps update decoding out of the viewer build.
 pub fn seed_parsed_docx_in_place(
     document: &EditingDoc,
-    mut envelope: docx_parse::S9WireEnvelope,
+    envelope: docx_parse::S9WireEnvelope,
 ) -> Result<Vec<String>, String> {
+    let (fonts, sequences) = seed_lowered(document, envelope)?;
+    view_opaque_sequences(document, &sequences);
+    Ok(fonts)
+}
+
+/// Seeds `document`'s stories; returns the fonts they name and the sequences
+/// whose SEQ fields keep their cached results.
+fn seed_lowered(
+    document: &EditingDoc,
+    mut envelope: docx_parse::S9WireEnvelope,
+) -> Result<(Vec<String>, Vec<String>), String> {
     let media = std::mem::take(&mut envelope.document.package.media_entries);
     let mut media_parts = HashMap::new();
     for (_, file) in &media {
@@ -4313,6 +4614,7 @@ pub fn seed_parsed_docx_in_place(
         plans: Vec::new(),
         compatibility_mode,
         open_comments: OpenComments::default(),
+        opaque_sequences: Vec::new(),
     };
     visit_story(
         &mut context,
@@ -4411,7 +4713,10 @@ pub fn seed_parsed_docx_in_place(
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
-    Ok(referenced_fonts.into_iter().collect())
+    Ok((
+        referenced_fonts.into_iter().collect(),
+        context.opaque_sequences,
+    ))
 }
 
 /// The raw ops that seed `blocks` (paragraphs the editor wrote) into an empty
@@ -4435,6 +4740,7 @@ pub(crate) fn fragment_ops(
         plans: Vec::new(),
         compatibility_mode: 12,
         open_comments: OpenComments::default(),
+        opaque_sequences: Vec::new(),
     };
     visit_story(
         &mut context,
@@ -4481,6 +4787,7 @@ mod tests {
             plans: Vec::new(),
             compatibility_mode: 12,
             open_comments: OpenComments::default(),
+            opaque_sequences: Vec::new(),
         };
         visit_story(
             &mut context,
@@ -4728,6 +5035,7 @@ mod tests {
             plans: Vec::new(),
             compatibility_mode: 12,
             open_comments: OpenComments::default(),
+            opaque_sequences: Vec::new(),
         };
         visit_story(
             &mut context,

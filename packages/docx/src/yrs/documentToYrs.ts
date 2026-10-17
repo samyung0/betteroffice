@@ -9,6 +9,7 @@ import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {
   BlockContent,
+  CellMargins,
   Chart,
   ComplexField,
   Document,
@@ -130,6 +131,8 @@ interface LoweringContext {
   compatibilityMode: number;
   /** Comment ranges open at the lowering point, each with the plan it opened in. */
   openComments: Array<[id: number, plan: number]>;
+  /** Sequences whose SEQ fields keep their cached results. */
+  opaqueSequences: string[];
 }
 
 /** The comments a unit of `plan` falls inside: a range covers only the story it opened in. */
@@ -470,6 +473,7 @@ function imagePayload(image: Image): Attrs {
       : null,
     borderWidth: borderWidth ?? null,
     borderColor: borderColor ?? null,
+    borderColorValue: image.outline?.color ?? null,
     borderStyle: borderStyle ?? null,
     wrapText: wrapText ?? null,
     hlinkHref: image.hlinkHref ?? null,
@@ -479,10 +483,10 @@ function imagePayload(image: Image): Attrs {
     cropLeft: image.crop?.left ?? null,
     shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
-    effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
-    effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,
-    effectExtentLeft: image.padding?.left ? emuToPixels(image.padding.left) : null,
-    effectExtentRight: image.padding?.right ? emuToPixels(image.padding.right) : null,
+    effectExtentTop: image.padding?.top != null ? emuToPixels(image.padding.top) : null,
+    effectExtentBottom: image.padding?.bottom != null ? emuToPixels(image.padding.bottom) : null,
+    effectExtentLeft: image.padding?.left != null ? emuToPixels(image.padding.left) : null,
+    effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     allowOverlap: image.allowOverlap ?? null,
   }) as Attrs;
@@ -502,8 +506,8 @@ function chartPayload(chart: Chart): Attrs {
     chartJson: JSON.stringify(chart),
     chartType: chart.chartType ?? null,
     title: chart.title ?? null,
-    width: chart.size?.width ? emuToPixels(chart.size.width) : 320,
-    height: chart.size?.height ? emuToPixels(chart.size.height) : 220,
+    width: chart.size?.width && chart.size.width > 0 ? emuToPixels(chart.size.width) : 320,
+    height: chart.size?.height && chart.size.height > 0 ? emuToPixels(chart.size.height) : 220,
     rId: chart.rId ?? null,
     path: chart.path ?? null,
   }) as Attrs;
@@ -545,6 +549,145 @@ function fieldPayload(
     },
     marks: formattingToMarks(mergeTextFormatting(styleFormatting, formatting)),
   };
+}
+
+/**
+ * The sequences a paragraph's content keeps cached (upstream #970's seeding): SEQ fields nested
+ * in other fields or inside hyperlinks, which lower as part of something else and so cannot be
+ * counted. Mirrors `paragraph_opaque_sequences` in seed.rs.
+ */
+function paragraphOpaqueSequences(paragraph: Paragraph): string[] {
+  const names: string[] = [];
+  const link = (hyperlink: Attrs): void => {
+    names.push(...hyperlinkSequenceNames(hyperlink));
+    for (const child of asNodes(defined(hyperlink.structuredChildren, hyperlink.children))) {
+      if (child.type === 'simpleField' || child.type === 'complexField') names.push(...nestedSequenceNames(child));
+    }
+  };
+  const control = (sdt: Attrs): void => {
+    for (const child of asNodes(sdt.content)) {
+      if (child.type === 'hyperlink') link(child);
+      else if (child.type === 'simpleField' || child.type === 'complexField') names.push(...nestedSequenceNames(child));
+      else if (child.type === 'inlineSdt') control(child);
+    }
+  };
+  for (const content of asNodes(paragraph.content)) {
+    if (content.type === 'hyperlink') link(content);
+    else if (content.type === 'simpleField' || content.type === 'complexField') names.push(...nestedSequenceNames(content));
+    else if (content.type === 'inlineSdt') control(content);
+    else if (
+      content.type === 'insertion' ||
+      content.type === 'deletion' ||
+      content.type === 'moveFrom' ||
+      content.type === 'moveTo'
+    ) {
+      for (const child of asNodes(content.content)) if (child.type === 'hyperlink') link(child);
+    }
+  }
+  return names;
+}
+
+/** `value` unless the key is absent, as seed.rs `field(..).or_else(..)` reads a JSON key. */
+function defined(value: unknown, otherwise: unknown): unknown {
+  return value === undefined ? otherwise : value;
+}
+
+function asNodes(value: unknown): Attrs[] {
+  return Array.isArray(value) ? value.filter((node): node is Attrs => node !== null && typeof node === 'object') : [];
+}
+
+/** The sequences of SEQ fields nested anywhere in a field's code or result (`nested_sequence_names`). */
+function nestedSequenceNames(field: Attrs): string[] {
+  const names: string[] = [];
+  const pending: Array<[unknown, boolean]> = Object.values(field).map((value) => [value, false]);
+  while (pending.length > 0) {
+    const [value, scannedHyperlink] = pending.pop()!;
+    if (Array.isArray(value)) {
+      for (const item of value) pending.push([item, scannedHyperlink]);
+    } else if (value !== null && typeof value === 'object') {
+      const node = value as Attrs;
+      if ((node.type === 'complexField' || node.type === 'simpleField') && typeof node.instruction === 'string') {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.push(name);
+      }
+      // Fields nested past the parser's limit stay raw runs of their parent field.
+      if (node.type === 'complexField') {
+        for (const runs of [node.fieldCode, node.fieldResult]) {
+          const instructions: Array<string | undefined> = [];
+          for (const run of asNodes(runs)) rawFieldSequenceNames(run, instructions, names);
+        }
+      }
+      if (node.type === 'hyperlink' && !scannedHyperlink) names.push(...hyperlinkSequenceNames(node));
+      const inside = scannedHyperlink || node.type === 'hyperlink';
+      for (const child of Object.values(node)) pending.push([child, inside]);
+    }
+  }
+  return names;
+}
+
+/** The sequences of SEQ fields inside a hyperlink, its controls and its fields (`hyperlink_sequence_names`). */
+function hyperlinkSequenceNames(hyperlink: Attrs): string[] {
+  const pending: Attrs[] = [hyperlink];
+  const instructions: Array<string | undefined> = [];
+  const names: string[] = [];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.type === 'hyperlink') {
+      pending.push(...asNodes(defined(node.structuredChildren, node.children)).reverse());
+    } else if (node.type === 'inlineSdt') {
+      pending.push(...asNodes(node.content).reverse());
+    } else if (node.type === 'simpleField' || node.type === 'complexField') {
+      if (typeof node.instruction === 'string') {
+        const name = sequenceName(node.instruction);
+        if (name !== undefined) names.push(name);
+      }
+      const tree = node.fieldTree as Attrs | undefined;
+      const inline = (content: unknown): unknown => (content as Attrs | undefined)?.inline;
+      const result = defined(
+        inline(node.structuredResult),
+        defined(inline(tree?.result), node.type === 'simpleField' ? node.content : node.fieldResult)
+      );
+      pending.push(...asNodes(result).reverse());
+      if (node.type === 'complexField') {
+        pending.push(...asNodes(defined(inline(node.structuredCode), defined(inline(tree?.code), node.fieldCode))).reverse());
+      }
+    } else if (node.type === 'run') {
+      rawFieldSequenceNames(node, instructions, names);
+    }
+  }
+  return names;
+}
+
+/** SEQ names of the fields a run opens as raw `fldChar` and `instrText` content. */
+function rawFieldSequenceNames(run: Attrs, instructions: Array<string | undefined>, names: string[]): void {
+  for (const content of asNodes(run.content)) {
+    let instruction: string | undefined;
+    if (content.type === 'fieldChar') {
+      if (content.charType === 'begin') instructions.push('');
+      else if (content.charType === 'separate' && instructions.length > 0) {
+        instruction = instructions[instructions.length - 1];
+        instructions[instructions.length - 1] = undefined;
+      } else if (content.charType === 'end') instruction = instructions.pop();
+    } else if (content.type === 'instrText') {
+      const index = instructions.length - 1;
+      if (index >= 0 && instructions[index] !== undefined) {
+        instructions[index] += typeof content.text === 'string' ? content.text : '';
+      }
+    }
+    const name = instruction === undefined ? undefined : sequenceName(instruction);
+    if (name !== undefined) names.push(name);
+  }
+}
+
+/** The sequence a SEQ instruction counts, in lower case (`sequence_name` in docx-layout). */
+function sequenceName(instruction: string): string | undefined {
+  const tokens = instruction.matchAll(/"([^"]*)(?:"|$)|([^\p{White_Space}]+)/gu);
+  const first = tokens.next().value;
+  const second = tokens.next().value;
+  const kind = first?.[1] ?? first?.[2];
+  const name = second?.[1] ?? second?.[2];
+  if (!kind || !/^[sS][eE][qQ]$/.test(kind) || name === undefined || name.startsWith('\\')) return undefined;
+  return name.toLowerCase();
 }
 
 function mathPayload(math: MathEquation): Attrs {
@@ -1605,20 +1748,33 @@ function projectTable(
   const tableStyle = effectiveStyleId ? styleResolver?.getStyle(effectiveStyleId) : undefined;
   const borders =
     table.formatting?.borders ?? tableStyle?.tblPr?.borders ?? defaultStyle?.tblPr?.borders;
-  const margins =
-    table.formatting?.cellMargins ??
-    tableStyle?.tblPr?.cellMargins ??
-    defaultStyle?.tblPr?.cellMargins;
-  const logicalLeft = table.formatting?.bidi ? margins?.end : margins?.start;
-  const logicalRight = table.formatting?.bidi ? margins?.start : margins?.end;
-  const defaultMargins = margins
-    ? {
-        top: margins.top?.value,
-        bottom: margins.bottom?.value,
-        left: margins.left?.value ?? logicalLeft?.value,
-        right: margins.right?.value ?? logicalRight?.value,
+  // Each side on its own (#1101): direct formatting, then the table style's margins or else the
+  // default table style's.
+  const marginLayers = [
+    table.formatting?.cellMargins,
+    tableStyle?.tblPr?.cellMargins ?? defaultStyle?.tblPr?.cellMargins,
+  ].filter((margins): margins is CellMargins => margins != null);
+  const marginSide = (...keys: (keyof CellMargins)[]) => {
+    for (const margins of marginLayers) {
+      for (const key of keys) {
+        const value = margins[key]?.value;
+        if (value != null) return value;
       }
-    : undefined;
+    }
+    return undefined;
+  };
+  const [logicalLeft, logicalRight]: (keyof CellMargins)[] = table.formatting?.bidi
+    ? ['end', 'start']
+    : ['start', 'end'];
+  const defaultMargins =
+    marginLayers.length > 0
+      ? {
+          top: marginSide('top'),
+          bottom: marginSide('bottom'),
+          left: marginSide('left', logicalLeft),
+          right: marginSide('right', logicalRight),
+        }
+      : undefined;
   const basedOnStyleIds: string[] = [];
   const visited = new Set<string>();
   let inherited = tableStyle;
@@ -1807,6 +1963,7 @@ function visitStory(
         marked = item;
         push(unit);
       }
+      context.opaqueSequences.push(...paragraphOpaqueSequences(block));
       const paragraph = paragraphUnits(
         context,
         planIndex,
@@ -2034,6 +2191,7 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     plans: [],
     compatibilityMode: compatibilityModeFromDocument(document),
     openComments: [],
+    opaqueSequences: [],
   };
   visitStory(context, 'body', document.package.document.content, {
     appendBodyTail: true,
@@ -2076,4 +2234,5 @@ export function documentToYrs(session: YrsSession, document: Document): void {
       },
     }))
   );
+  session.seedOpaqueSequences(context.opaqueSequences);
 }

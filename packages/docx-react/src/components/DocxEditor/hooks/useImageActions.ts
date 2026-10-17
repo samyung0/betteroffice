@@ -133,6 +133,8 @@ export function useImageActions({
         alt: data.alt ?? null,
         borderWidth: data.borderWidth ?? null,
         borderColor: data.borderColor ?? null,
+        // The edited colour wins over the source colour the outline painted.
+        borderColorValue: null,
         borderStyle: data.borderStyle ?? null,
         width: data.width ?? null,
         height: data.height ?? null,

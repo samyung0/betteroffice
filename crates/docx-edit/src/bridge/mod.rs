@@ -47,6 +47,7 @@ use docx_layout::types::{
     SectionBreakType, ShapeBlock, Size, SpacingExplicit, TabRun, TabStop, TableBlock, TableCell,
     TableRow, TextRun, UnderlineSpec,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map as JsonMap, Value};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -63,6 +64,8 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    /// The document's `w:compat` flags (`package.settings.compatibilityFlags`).
+    pub compatibility_flags: docx_parse::CompatibilityFlags,
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
@@ -202,7 +205,20 @@ fn lower_top_story(
     let comments = CommentIndex::decode(&txn, env)?;
     let mut active_stories = BTreeSet::new();
     let mut list_state = ListState::default();
-    lower_story(
+    // State seeded with sequence metadata numbers its SEQ fields (#970);
+    // older state keeps every cached result.
+    let sequence_metadata = txn
+        .get_map(crate::seed::SESSION)
+        .and_then(|session| session.get(&txn, crate::seed::OPAQUE_SEQUENCES));
+    let mut opaque_sequences: BTreeSet<String> = match &sequence_metadata {
+        Some(Out::Any(Any::Array(names))) => names
+            .iter()
+            .filter_map(any_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    let (mut blocks, _) = lower_story(
         &txn,
         story_id,
         env,
@@ -210,10 +226,18 @@ fn lower_top_story(
         0,
         &mut active_stories,
         &mut list_state,
+        &mut opaque_sequences,
         CellEdges::default(),
         paragraphs,
-    )
-    .map(|(blocks, _)| blocks)
+    )?;
+    // Word numbers SEQ fields in the main text only.
+    if story_id == "body" && sequence_metadata.is_some() {
+        docx_layout::sequence_fields::number_sequence_fields_with_opaque(
+            &mut blocks,
+            opaque_sequences,
+        );
+    }
+    Ok(blocks)
 }
 
 /// The paragraphs of a lowered story that a plain text insert re-lowers on
@@ -311,6 +335,7 @@ pub fn relower_text_insert(
                     entry.pm_start,
                     pm_units,
                     &mut list_state,
+                    &mut BTreeSet::new(),
                 );
                 suppress_cell_edge_spacing(&mut parts, &values, CellEdges::default());
                 lowered = match parts.as_slice() {
@@ -325,6 +350,10 @@ pub fn relower_text_insert(
     let Some(lowered) = lowered else {
         return Ok(false);
     };
+    // A SEQ field shows the number the whole body's numbering gives it.
+    if docx_layout::sequence_fields::reads_sequence_fields(std::slice::from_ref(&lowered)) {
+        return Ok(false);
+    }
     let block = entry.block;
     blocks[block] = lowered;
     for later in &mut blocks[block + 1..] {
@@ -548,6 +577,7 @@ fn lower_story<T: ReadTxn>(
     pm_base: u64,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
+    opaque_sequences: &mut BTreeSet<String>,
     cell_edges: CellEdges,
     mut paragraphs: Option<&mut Vec<PlainParagraph>>,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
@@ -646,7 +676,7 @@ fn lower_story<T: ReadTxn>(
                         slot.leading = true;
                         for &index in &slot.breaks {
                             if let Some(LayoutBlock::PageBreak(block)) = blocks.get_mut(index) {
-                                block.keeps_leading_spacing = Some(true);
+                                block.keeps_leading_spacing = keeps_leading_spacing(true, env);
                             }
                         }
                     }
@@ -668,6 +698,7 @@ fn lower_story<T: ReadTxn>(
                         paragraph_pm_start,
                         paragraph_pm_units,
                         list_state,
+                        opaque_sequences,
                     );
                     suppress_cell_edge_spacing(
                         &mut paragraph_blocks,
@@ -743,6 +774,7 @@ fn lower_story<T: ReadTxn>(
                         comment_index,
                         active_stories,
                         list_state,
+                        opaque_sequences,
                     )?;
                     if !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
@@ -829,7 +861,7 @@ fn lower_story<T: ReadTxn>(
                             id,
                             pm_start: Some(pm_cursor as f64),
                             pm_end: Some((pm_cursor + 1) as f64),
-                            keeps_leading_spacing: leading.then_some(true),
+                            keeps_leading_spacing: keeps_leading_spacing(leading, env),
                         }));
                     }
                     story_index += 1;
@@ -868,6 +900,7 @@ fn lower_story<T: ReadTxn>(
                         pm_cursor + 1,
                         active_stories,
                         list_state,
+                        opaque_sequences,
                         CellEdges {
                             before: cell_edges.before && story_index == 0,
                             after: cell_edges.after && story_index + 1 == story.len(txn),
@@ -952,6 +985,10 @@ fn lower_story<T: ReadTxn>(
                         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                         _ => "OTHER".to_owned(),
                     };
+                    let nested_sequences = lower_nested_sequences(
+                        instruction.as_deref(),
+                        shared_any(&field, txn, "resultProjection").as_ref(),
+                    );
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::Field {
                             field_type: mapped_type.clone(),
@@ -962,6 +999,11 @@ fn lower_story<T: ReadTxn>(
                             } else {
                                 shared_map_string(&field, txn, "displayText").unwrap_or_default()
                             }),
+                            locked: shared_any(&field, txn, "fldLock")
+                                .as_ref()
+                                .and_then(any_bool)
+                                .unwrap_or(false),
+                            nested_sequences,
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -1171,6 +1213,7 @@ fn lower_story<T: ReadTxn>(
                             decorative: block.decorative,
                             hyperlink: formatting.hyperlink.clone(),
                             inline_shape: Some(Box::new(block)),
+                            inline_chart: None,
                             is_insertion: formatting.is_insertion,
                             is_deletion: formatting.is_deletion,
                             change_author: formatting.change_author.clone(),
@@ -1214,6 +1257,8 @@ fn lower_story<T: ReadTxn>(
                                 raw_type: None,
                                 instruction: None,
                                 fallback: Some(text),
+                                locked: false,
+                                nested_sequences: Vec::new(),
                             },
                             formatting: lower_run_formatting(attributes, env),
                             story_start: story_index,
@@ -1233,9 +1278,8 @@ fn lower_story<T: ReadTxn>(
                 {
                     let pm_offset = paragraph_pm_units;
                     let Some(block) = lower_chart_block(
-                        &chart,
-                        txn,
-                        paragraph_pm_start + 1 + u64::from(pm_offset),
+                        &shared_values(&chart, txn),
+                        Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                         env,
                     ) else {
                         return Err(BridgeError::UnsupportedEmbed {
@@ -1275,6 +1319,12 @@ fn lower_story<T: ReadTxn>(
     })();
     active_stories.remove(story_id);
     result
+}
+
+/// Whether a page break leading a paragraph's text keeps that paragraph's
+/// space-before: Word drops it under `w:suppressSpBfAfterPgBrk`.
+fn keeps_leading_spacing(leading: bool, env: &RenderEnv) -> Option<bool> {
+    (leading && !env.compatibility_flags.suppress_sp_bf_after_pg_brk).then_some(true)
 }
 
 /// The page breaks opening a paragraph slot, lowered as the save writes them:
@@ -1387,6 +1437,7 @@ fn lower_table<T: ReadTxn>(
     comment_index: &CommentIndex,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
+    opaque_sequences: &mut BTreeSet<String>,
 ) -> Result<(TableBlock, u64), BridgeError> {
     let tbl_pr_value = shared_any(table, txn, "tblPr")
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
@@ -1495,6 +1546,7 @@ fn lower_table<T: ReadTxn>(
                 cell_pm_start + 1,
                 active_stories,
                 list_state,
+                opaque_sequences,
                 CellEdges {
                     before: true,
                     after: true,
@@ -1502,6 +1554,17 @@ fn lower_table<T: ReadTxn>(
                 None,
             )?;
 
+            // `w:allowSpaceOfSameStyleInTable`: same-style cell paragraphs keep
+            // their spacing.
+            if env.compatibility_flags.allow_space_of_same_style_in_table {
+                for block in &mut blocks {
+                    if let LayoutBlock::Paragraph(paragraph) = block
+                        && let Some(attrs) = &mut paragraph.attrs
+                    {
+                        attrs.contextual_spacing = Some(false);
+                    }
+                }
+            }
             let width_value = map_number(tc_pr, "width");
             let width_type = map_string(tc_pr, "widthType");
             let width =
@@ -1598,10 +1661,12 @@ fn lower_table<T: ReadTxn>(
     let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
         (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
     });
-    let cell_margin_left = table_margins
-        .and_then(|margins| map_number(margins, "left"))
-        .map(twips_to_pixels)
-        .filter(|value| value.is_finite() && *value > 0.0);
+    let table_margin = |side: &str| {
+        table_margins
+            .and_then(|margins| map_number(margins, side))
+            .map(twips_to_pixels)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    };
 
     Ok((
         TableBlock {
@@ -1617,6 +1682,9 @@ fn lower_table<T: ReadTxn>(
             // column algorithm stays the grid ("legacy") one.
             width_algorithm: map_string(tbl_pr, "tableLayout").map(|_| "legacy".to_owned()),
             layout_mode: map_string(tbl_pr, "tableLayout"),
+            // Capy's table width rules (2026-10-06) size every table: upstream's
+            // Word autofit, which this field turns on, stays off this round.
+            table_layout: None,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),
@@ -1624,7 +1692,8 @@ fn lower_table<T: ReadTxn>(
             indent,
             floating,
             compatibility_mode,
-            cell_margin_left,
+            cell_margin_left: table_margin("left"),
+            cell_margin_right: table_margin("right"),
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
@@ -1714,6 +1783,47 @@ fn image_transform_metrics(
     )
 }
 
+/// A picture's outline: its seeded source colour (theme colours resolved), else
+/// the edited CSS hex colour; none without a colour.
+fn image_outline(
+    values: &std::collections::HashMap<String, Any>,
+    env: &RenderEnv,
+) -> Option<CellBorderSpec> {
+    let color = values
+        .get("borderColorValue")
+        .and_then(any_json)
+        .and_then(|value| serde_json::from_value::<ColorValue>(value).ok())
+        .and_then(|mut color| {
+            color.rgb = color.rgb.take().or_else(|| {
+                color
+                    .theme_color
+                    .as_deref()
+                    .and_then(|slot| theme_color(slot, env))
+            });
+            color.theme_color = None;
+            resolve_color_value_to_hex(Some(&color))
+        })
+        .or_else(|| {
+            map_string(values, "borderColor")
+                .map(|color| css_hex(&color))
+                .filter(|hex| {
+                    hex.len() == 7 && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        })?;
+    Some(CellBorderSpec {
+        width: Some(map_number(values, "borderWidth").unwrap_or(1.0)),
+        color: Some(color),
+        style: Some(
+            match map_string(values, "borderStyle").as_deref() {
+                Some(style @ ("dotted" | "dashed")) => style,
+                _ => "solid",
+            }
+            .to_owned(),
+        ),
+        ooxml_style: None,
+    })
+}
+
 fn lower_image_values(
     values: &std::collections::HashMap<String, Any>,
     formatting: &RunFormatting,
@@ -1782,10 +1892,11 @@ fn lower_image_values(
         layout_in_cell: None,
         effect_extent: None,
         effects: None,
-        outline: None,
+        outline: image_outline(values, env),
         decorative: None,
         hyperlink: None,
         inline_shape: None,
+        inline_chart: None,
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -1969,6 +2080,7 @@ fn lower_shape_block<T: ReadTxn>(
         x: None,
         y: None,
         inner_text: None,
+        nested_sequences: Vec::new(),
         inner_measures: None,
         children: Vec::new(),
         scene: None,
@@ -1990,27 +2102,31 @@ fn lower_shape_block<T: ReadTxn>(
     })
 }
 
-fn lower_chart_block<T: ReadTxn>(
-    chart: &MapRef,
-    txn: &T,
-    pm_start: u64,
+/// A chart embed's block; one in a text box (`pm_start` none) has no
+/// document positions of its own.
+fn lower_chart_block(
+    values: &std::collections::HashMap<String, Any>,
+    pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
-    let values = shared_values(chart, txn);
-    let chart = map_string(&values, "chartJson")
+    let chart = map_string(values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
     let (width, height) = constrain_to_page(
-        map_number(&values, "width")
+        map_number(values, "width")
             .filter(|value| *value != 0.0)
             .unwrap_or(320.0),
-        map_number(&values, "height")
+        map_number(values, "height")
             .filter(|value| *value != 0.0)
             .unwrap_or(220.0),
         env,
     );
     Some(ChartBlock {
         sdt_groups: None,
-        id: BlockId::Str(format!("chart:{pm_start}")),
+        id: BlockId::Str(
+            pm_start
+                .map(|start| format!("chart:{start}"))
+                .unwrap_or_else(|| "chart:inline".to_owned()),
+        ),
         chart,
         width,
         height,
@@ -2019,10 +2135,10 @@ fn lower_chart_block<T: ReadTxn>(
         wrap_text: None,
         relative_height: None,
         behind_doc: None,
-        doc_start: Some(pm_start as f64),
-        doc_end: Some((pm_start + 1) as f64),
-        pm_start: Some(pm_start as f64),
-        pm_end: Some((pm_start + 1) as f64),
+        doc_start: pm_start.map(|start| start as f64),
+        doc_end: pm_start.map(|start| (start + 1) as f64),
+        pm_start: pm_start.map(|start| start as f64),
+        pm_end: pm_start.map(|start| (start + 1) as f64),
     })
 }
 
@@ -2234,18 +2350,27 @@ fn lower_inline_sdt_values(
                     "PAGE" | "NUMPAGES" | "DATE" | "TIME" => field_type.clone(),
                     _ => "OTHER".to_owned(),
                 };
+                let instruction = payload
+                    .and_then(|payload| map_string(payload, "instruction"))
+                    .filter(|value| !value.is_empty());
+                let nested_sequences = lower_nested_sequences(
+                    instruction.as_deref(),
+                    payload.and_then(|payload| payload.get("resultProjection")),
+                );
                 runs.push(RawRun {
                     kind: RawRunKind::Field {
                         field_type: mapped_type.clone(),
                         raw_type: (field_type != mapped_type).then_some(field_type),
-                        instruction: payload
-                            .and_then(|payload| map_string(payload, "instruction"))
-                            .filter(|value| !value.is_empty()),
+                        instruction,
                         fallback: Some(
                             payload
                                 .and_then(|payload| map_string(payload, "displayText"))
                                 .unwrap_or_default(),
                         ),
+                        locked: payload
+                            .and_then(|payload| map_bool(payload, "fldLock"))
+                            .unwrap_or(false),
+                        nested_sequences,
                     },
                     formatting,
                     story_start: story_index,
@@ -2384,6 +2509,7 @@ fn lower_cell_borders(
                     width: Some(0.0),
                     color: None,
                     style: Some("none".to_owned()),
+                    ooxml_style: None,
                 })
             })
     };
@@ -2435,6 +2561,7 @@ fn lower_cell_border(
         width: Some(width),
         color: Some(color),
         style: Some(css_style.to_owned()),
+        ooxml_style: Some(style),
     })
 }
 
@@ -2443,6 +2570,42 @@ struct CommentInterval {
     start: u32,
     end: u32,
     id: f64,
+}
+
+fn collect_shape_sequences(shape: &ShapeBlock, opaque_sequences: &mut BTreeSet<String>) {
+    opaque_sequences.extend(shape.nested_sequences.iter().cloned());
+    for run in shape
+        .inner_text
+        .iter()
+        .flatten()
+        .flat_map(|paragraph| &paragraph.runs)
+    {
+        if let Run::Field(field) = run {
+            opaque_sequences.extend(
+                field
+                    .instruction
+                    .as_deref()
+                    .and_then(docx_layout::sequence_fields::sequence_name),
+            );
+            opaque_sequences.extend(field.nested_sequences.iter().cloned());
+        }
+    }
+    for child in &shape.children {
+        collect_shape_sequences(child, opaque_sequences);
+    }
+}
+
+/// The SEQ sequence of a field whose projected children show instead of its
+/// own result, so its number cannot show.
+fn lower_nested_sequences(
+    instruction: Option<&str>,
+    result_projection: Option<&Any>,
+) -> Vec<String> {
+    result_projection
+        .and(instruction)
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .into_iter()
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -2458,6 +2621,8 @@ enum RawRunKind {
         raw_type: Option<String>,
         instruction: Option<String>,
         fallback: Option<String>,
+        locked: bool,
+        nested_sequences: Vec<String>,
     },
 }
 
@@ -2674,6 +2839,7 @@ fn flush_paragraph_parts(
     paragraph_pm_start: u64,
     paragraph_pm_units: u32,
     list_state: &mut ListState,
+    opaque_sequences: &mut BTreeSet<String>,
 ) -> Vec<LayoutBlock> {
     if env.show_hidden_text {
         for run in &mut raw_runs {
@@ -2682,8 +2848,36 @@ fn flush_paragraph_parts(
             }
         }
     } else {
-        raw_runs.retain(|run| run.formatting.hidden != Some(true));
-        drawings.retain(|drawing| !drawing.hidden);
+        // Word still counts a hidden SEQ field, so its sequence keeps its
+        // cached results.
+        raw_runs.retain(|run| {
+            if run.formatting.hidden != Some(true) {
+                return true;
+            }
+            if let RawRunKind::Field {
+                instruction,
+                nested_sequences,
+                ..
+            } = &run.kind
+            {
+                opaque_sequences.extend(
+                    instruction
+                        .as_deref()
+                        .and_then(docx_layout::sequence_fields::sequence_name),
+                );
+                opaque_sequences.extend(nested_sequences.iter().cloned());
+            }
+            false
+        });
+        drawings.retain(|drawing| {
+            if !drawing.hidden {
+                return true;
+            }
+            if let LayoutBlock::Shape(shape) = &drawing.block {
+                collect_shape_sequences(shape, opaque_sequences);
+            }
+            false
+        });
     }
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
@@ -3134,12 +3328,16 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
         } => Run::Field(FieldRun {
             fmt: raw.formatting,
             field_type,
             raw_type,
             instruction,
             fallback,
+            locked,
+            nested_sequences,
             pm_start,
             pm_end,
         }),
@@ -3513,6 +3711,11 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     }
 }
 
+/// A `w:sz` half-point size in points, clamped to Word's 1–1638 pt range.
+pub(crate) fn font_size_pt(half_points: f64) -> f64 {
+    (half_points / 2.0).clamp(1.0, 1638.0)
+}
+
 fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
     let Some(value) = attribute(attributes, "fontSize").or_else(|| attribute(attributes, "sz"))
     else {
@@ -3522,14 +3725,14 @@ fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
         // A scalar mark is the authored `w:sz`; the object form additionally
         // preserves an independent `w:szCs`. Both stay in half-points until
         // this conversion.
-        Any::Number(half_points) => result.font_size = Some(*half_points / 2.0),
-        Any::BigInt(half_points) => result.font_size = Some(*half_points as f64 / 2.0),
+        Any::Number(half_points) => result.font_size = Some(font_size_pt(*half_points)),
+        Any::BigInt(half_points) => result.font_size = Some(font_size_pt(*half_points as f64)),
         Any::Map(map) => {
             let size = map_number(map, "size").or_else(|| map_number(map, "sz"));
             let size_cs = map_number(map, "sizeCs").or_else(|| map_number(map, "szCs"));
             let rtl = mark_bool(attributes, "rtl") == Some(true);
-            result.font_size = if rtl { size_cs.or(size) } else { size }.map(|value| value / 2.0);
-            result.font_size_cs = size_cs.map(|value| value / 2.0);
+            result.font_size = if rtl { size_cs.or(size) } else { size }.map(font_size_pt);
+            result.font_size_cs = size_cs.map(font_size_pt);
         }
         _ => {}
     }
@@ -3657,7 +3860,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    lower_paragraph_spacing(values, &mut result, env);
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -3885,11 +4088,22 @@ fn suppress_cell_edge_spacing(
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
-    line_px: Option<f64>,
+    env: &RenderEnv,
 ) {
-    let line_px = line_px
+    let line_px = env
+        .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
+    // `w:doNotUseHTMLParagraphAutoSpacing`: automatic spacing is 5 pt before
+    // and 10 pt after.
+    let (auto_before_px, auto_after_px) = if env
+        .compatibility_flags
+        .do_not_use_html_paragraph_auto_spacing
+    {
+        (twips_to_pixels(100.0), twips_to_pixels(200.0))
+    } else {
+        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+    };
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
@@ -3922,14 +4136,14 @@ fn lower_paragraph_spacing(
             before_lines,
             after_lines,
             before: if auto_before {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+                Some(auto_before_px)
             } else {
                 before_lines
                     .map(|lines| lines * line_px / 100.0)
                     .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
-                Some(AUTO_PARAGRAPH_SPACING_PX)
+                Some(auto_after_px)
             } else {
                 after_lines
                     .map(|lines| lines * line_px / 100.0)
@@ -4040,7 +4254,7 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .get("defaultTextFormatting")
         .and_then(any_map)
         .and_then(|defaults| map_number(defaults, "fontSize"))
-        .map_or(10.0, |value| value / 2.0)
+        .map_or(10.0, font_size_pt)
 }
 
 fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
@@ -4082,7 +4296,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size_cs = map_number(defaults, "fontSizeCs").map(|value| value / 2.0);
+    result.font_size_cs = map_number(defaults, "fontSizeCs").map(font_size_pt);
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
@@ -5160,6 +5374,133 @@ mod tests {
             shifted.pointer("/1/rows/0/id"),
             Some(&Value::from(format!("{stable_table_id}:r0")))
         );
+    }
+
+    #[test]
+    fn font_sizes_clamp_to_words_range() {
+        assert_eq!(font_size_pt(0.0), 1.0);
+        assert_eq!(font_size_pt(24.0), 12.0);
+        assert_eq!(font_size_pt(4000.0), 1638.0);
+    }
+
+    #[test]
+    fn compatibility_flags_set_automatic_and_page_break_spacing() {
+        let auto = BTreeMap::from([
+            ("beforeAutospacing".to_owned(), Any::Bool(true)),
+            ("afterAutospacing".to_owned(), Any::Bool(true)),
+        ]);
+        let mut env = RenderEnv::default();
+        let mut attrs = ParagraphAttrs::default();
+        lower_paragraph_spacing(&auto, &mut attrs, &env);
+        let spacing = attrs.spacing.take().unwrap();
+        assert_eq!(
+            (spacing.before, spacing.after),
+            (
+                Some(AUTO_PARAGRAPH_SPACING_PX),
+                Some(AUTO_PARAGRAPH_SPACING_PX)
+            )
+        );
+        env.compatibility_flags
+            .do_not_use_html_paragraph_auto_spacing = true;
+        lower_paragraph_spacing(&auto, &mut attrs, &env);
+        let spacing = attrs.spacing.unwrap();
+        assert_eq!(
+            (spacing.before, spacing.after),
+            (Some(twips_to_pixels(100.0)), Some(twips_to_pixels(200.0)))
+        );
+
+        // A page break leading a paragraph keeps its space-before unless
+        // `w:suppressSpBfAfterPgBrk` is set.
+        let doc = EditingDoc::new(43);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Insert {
+                    index: 0,
+                    text: "Text".to_owned(),
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "pageBreak".to_owned(),
+                    payload: vec![("leading".to_owned(), Any::Bool(true))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        for (suppress, kept) in [(false, Some(true)), (true, None)] {
+            env.compatibility_flags.suppress_sp_bf_after_pg_brk = suppress;
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+            let LayoutBlock::PageBreak(page_break) = &blocks[0] else {
+                panic!("expected a leading page break, got {blocks:?}");
+            };
+            assert_eq!(
+                page_break.keeps_leading_spacing, kept,
+                "suppress {suppress}"
+            );
+        }
+    }
+
+    #[test]
+    fn tables_leave_upstream_autofit_off_whatever_their_layout() {
+        for (tbl_pr, layout_mode) in [
+            ("{}", None),
+            (r#"{"tableLayout":"autofit"}"#, Some("autofit")),
+            (r#"{"tableLayout":"fixed"}"#, Some("fixed")),
+        ] {
+            let doc = EditingDoc::new(41);
+            replace_story_with_paragraph(&doc, "body:t0:r0c0", "c00p", "A");
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            ("tblPr".to_owned(), Any::from_json(tbl_pr).unwrap()),
+                            ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(
+                                    r#"[{"trPr":{"isHeader":false},"cells":[
+                                      {"tcPr":{"colspan":1,"rowspan":1,"noWrap":false},"story":"body:t0:r0c0"}
+                                    ]}]"#,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let [LayoutBlock::Table(table)] = &blocks[..] else {
+                panic!("{tbl_pr}: expected one table, got {blocks:?}");
+            };
+            assert_eq!(table.table_layout, None, "{tbl_pr}");
+            assert_eq!(table.layout_mode.as_deref(), layout_mode, "{tbl_pr}");
+            // `w:allowSpaceOfSameStyleInTable` keeps same-style cell spacing.
+            let mut env = RenderEnv::default();
+            env.compatibility_flags.allow_space_of_same_style_in_table = true;
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+            let LayoutBlock::Table(table) = &blocks[0] else {
+                panic!("expected a table");
+            };
+            let LayoutBlock::Paragraph(paragraph) = &table.rows[0].cells[0].blocks[0] else {
+                panic!("expected a cell paragraph");
+            };
+            assert_eq!(
+                paragraph.attrs.as_ref().unwrap().contextual_spacing,
+                Some(false)
+            );
+        }
     }
 
     #[test]

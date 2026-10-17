@@ -185,6 +185,9 @@ fn layout_request(package: &S9PackageWire) -> Value {
         "numericIds": {},
         "tocStyleIds": toc_style_ids,
     });
+    if let Some(flags) = settings.get("compatibilityFlags") {
+        render_env["compatibilityFlags"] = flags.clone();
+    }
     if let Some(id) = default_paragraph_style_id {
         render_env["defaultParagraphStyleId"] = json!(id);
     }

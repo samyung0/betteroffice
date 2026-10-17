@@ -145,7 +145,9 @@ fn a_peer_keystroke_relays_out_one_paragraph_and_ships_one_page() {
     let pages = worker.stats().retained_pages;
     assert!(pages >= 6, "the fixture spans pages: {pages}");
     let peer = fixture.replica(2);
-    type_at(&peer, fixture.starts[PARAGRAPHS / 2] + 4, "x");
+    // A paragraph inside a page: an edit to one that opens a page re-places
+    // the page before it too, since the paragraph may now fit there.
+    type_at(&peer, fixture.starts[PARAGRAPHS / 2 + 2] + 4, "x");
     apply(&worker, &peer);
 
     let before = worker.stats();

@@ -691,28 +691,19 @@ export function yrsSelectionNearTable(session: YrsSession, table: YrsTableLoc) {
  * the structural transaction may delete. A surviving cell selection is
  * restored after the transaction; otherwise the caret stays beside the table.
  */
-export interface YrsHistoryActionResult {
-  changed: boolean;
-  story: string | null;
-}
-
-export function performYrsHistoryAction(
-  session: YrsSession,
-  redo: boolean
-): YrsHistoryActionResult {
+export function performYrsHistoryAction(session: YrsSession, redo: boolean): boolean {
   const before = session.selection();
   const cell = before ? yrsCellLocFromStory(before.head.story) : null;
   const nearby = cell ? yrsSelectionNearTable(session, cell) : null;
   if (nearby) session.setSelection(nearby);
 
   const changed = redo ? session.redo() : session.undo();
-  const story = changed ? (session.historyStories()[0] ?? null) : null;
-  if (!changed || !before || !nearby) return { changed, story };
+  if (!changed || !before || !nearby) return changed;
 
   const restoredCell = yrsCellLocFromStory(before.head.story);
   const cellIsLive =
     !restoredCell || yrsCellStory(session, restoredCell) === before.head.story;
-  if (!cellIsLive) return { changed, story };
+  if (!cellIsLive) return changed;
   try {
     const paragraphs = session.paragraphs(before.head.story);
     const paraIds = new Set(paragraphs.map((paragraph) => paragraph.paraId));
@@ -722,7 +713,7 @@ export function performYrsHistoryAction(
   } catch {
     // The structural history operation removed the selected story.
   }
-  return { changed, story };
+  return changed;
 }
 
 function authoredId(value: unknown): string | null {

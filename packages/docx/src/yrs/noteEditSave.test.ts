@@ -193,7 +193,7 @@ function rawNoteText(xml: string): string {
 describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-  it('selectively saves note clicks without rewriting clean stories', async () => {
+  it('saves note clicks typed through the editor path', async () => {
     const bytes = fixture();
     const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
     const session = await createYrsSession({ clientId: 53003 });
@@ -204,16 +204,13 @@ describe('typing into a note through the editor path', () => {
       const clicks = clickedNotePositions(session);
       expect(clicks.map((click) => click.story)).toEqual(['fn:2', 'en:2']);
       for (const click of clicks) typeAtDisplayPosition(session, click.story, click.position, ',');
-      saved = yrsToDocument(session, parsed, {
-        storyIds: new Set(clicks.map((click) => click.story)),
-      });
+      saved = yrsToDocument(session, parsed);
     } finally {
       session.destroy();
     }
 
-    expect(saved.package.document.content).toBe(parsed.package.document.content);
-
     const parts = readDocxContainer(await repackDocx(saved));
+    expect(rawNoteText(parts.text('word/document.xml') ?? '')).toBe('Body text');
     const footnotesXml = parts.text('word/footnotes.xml') ?? '';
     const endnotesXml = parts.text('word/endnotes.xml') ?? '';
     const footnote = noteXml(footnotesXml, 'footnote', 2);
@@ -227,7 +224,7 @@ describe('typing into a note through the editor path', () => {
     expect(noteXml(endnotesXml, 'endnote', 3)).toBe(noteXml(ENDNOTES, 'endnote', 3));
   });
 
-  it('selectively saves a body undo while the note caret is active', async () => {
+  it('saves a body undo made while the note caret is active', async () => {
     const bytes = fixture();
     const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
     const session = await createYrsSession({ clientId: 53004 });
@@ -237,25 +234,16 @@ describe('typing into a note through the editor path', () => {
       const body = session.paragraphs('body')[0];
       session.setSelection({ story: 'body', paraId: body.paraId, offset: 9 });
       session.insertText(session.selection()!.head, '!');
-      const afterBodyEdit = yrsToDocument(session, parsed, {
-        storyIds: new Set(['body']),
-      });
+      const afterBodyEdit = yrsToDocument(session, parsed);
+      const editedParts = readDocxContainer(await repackDocx(afterBodyEdit));
+      expect(rawNoteText(editedParts.text('word/document.xml') ?? '')).toBe('Body text!');
       const note = session.paragraphs('fn:2')[0];
       session.setSelection({ story: 'fn:2', paraId: note.paraId, offset: 0 });
 
       expect(session.undo()).toBe(true);
       expect(session.paragraphs('body')[0].text).toBe('Body text');
-      expect(session.historyStories()).toEqual(['body']);
 
-      const misattributed = yrsToDocument(session, afterBodyEdit, {
-        storyIds: new Set(['fn:2']),
-      });
-      const misattributedParts = readDocxContainer(await repackDocx(misattributed));
-      expect(rawNoteText(misattributedParts.text('word/document.xml') ?? '')).toBe('Body text!');
-
-      const saved = yrsToDocument(session, afterBodyEdit, {
-        storyIds: new Set(session.historyStories()),
-      });
+      const saved = yrsToDocument(session, afterBodyEdit);
       const savedParts = readDocxContainer(await repackDocx(saved));
       expect(rawNoteText(savedParts.text('word/document.xml') ?? '')).toBe('Body text');
     } finally {

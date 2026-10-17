@@ -110,7 +110,10 @@ pub fn unzip_parts_where(
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("bad zip entry name: {e}"))?
+            .into_owned();
         let Some(security_path) = normalized_security_path(&name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
@@ -231,7 +234,9 @@ impl SourceContainer {
         let mut files = HashSet::with_capacity(members.len());
         for (index, (name, header)) in members.iter().enumerate() {
             match archive.by_index_raw(index) {
-                Ok(file) if file.name() == name && file.header_start() == *header => {}
+                Ok(file)
+                    if file.name().is_ok_and(|entry| entry == name.as_str())
+                        && file.header_start() == *header => {}
                 _ => return false,
             }
             if !files.insert(name.as_str()) {

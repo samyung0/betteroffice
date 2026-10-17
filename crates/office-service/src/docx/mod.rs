@@ -376,7 +376,7 @@ impl DocxSession {
                                 .map(|asset| asset.sha256.clone())
                                 .unwrap_or_else(|| canonical(&payload)),
                             position: at.clone(),
-                            asset_ref: Some(ObjectRef {
+                            asset_ref: asset.is_some().then(|| ObjectRef {
                                 format: Format::Docx,
                                 kind: ObjectKind::Image,
                                 id: stable_id.clone(),
@@ -663,9 +663,10 @@ fn media_data_urls(document: &V) -> HashMap<String, String> {
         .collect()
 }
 
-/// A seeded source image names its package part (`media:<part>`); an inserted one carries its bytes.
+/// A seeded source image names its package part (`media:<part>`); an inserted one carries its bytes;
+/// a link-only picture (`r:link`) has an empty `src` and no bytes.
 fn docx_image_asset(src: &V, media: &HashMap<String, String>) -> Result<Option<Asset>> {
-    let Some(src) = src.as_str() else {
+    let Some(src) = src.as_str().filter(|src| !src.is_empty()) else {
         return Ok(None);
     };
     let Some(part) = src.strip_prefix("media:") else {

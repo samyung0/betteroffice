@@ -1307,7 +1307,7 @@ impl EngineSession {
     pub fn layout_font_requirements_json(&self, input_json: &str) -> Result<String, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (input, regions, notes, _, render_env, body_story) = request.split();
+        let (input, regions, notes, measurement, render_env, body_story) = request.split();
         let mut blocks = input
             .measured
             .into_iter()
@@ -1351,6 +1351,7 @@ impl EngineSession {
         }
         serde_json::to_string(&docx_layout::measure_blocks::collect_font_requirements(
             &blocks,
+            docx_layout::measure_blocks::default_font_family(&measurement.defaults),
         ))
         .map_err(|error| format!("serialize: {error}"))
     }
@@ -1574,6 +1575,12 @@ impl EngineSession {
         // pagination. Only a note reference can reserve note space, so a
         // document without one keeps a single measured arena.
         let base_input = (!refs.is_empty()).then(|| input.clone());
+        // Separator heights a request carries; the layout's default otherwise.
+        let separator_heights = input
+            .options
+            .note_separator_heights
+            .clone()
+            .unwrap_or_default();
         let body_has_section_break = input
             .measured
             .iter()
@@ -1615,6 +1622,7 @@ impl EngineSession {
             },
             &refs,
             &notes.contents,
+            &separator_heights,
             initial_layout,
             &regions,
         )
@@ -1640,7 +1648,13 @@ impl EngineSession {
         apply_document_regions(layout, &regions);
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
-        attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        attach_note_areas(
+            layout,
+            &page_note_map,
+            &notes.contents,
+            &separator_heights,
+            &regions,
+        );
         let measured_headers_footers = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -1736,8 +1750,12 @@ impl EngineSession {
                 content.display_number.unwrap_or(1),
                 content.display_label.as_deref().unwrap_or("1"),
             );
-            let measures =
-                docx_layout::measure_blocks::measure_blocks(&mut blocks, width, measurement)?;
+            // Note tables take no compatibility-mode cell-margin shift (#1265).
+            let measures = docx_layout::measure_blocks::measure_blocks_without_table_compat_shift(
+                &mut blocks,
+                width,
+                measurement,
+            )?;
             content.height = measures
                 .iter()
                 .map(docx_layout::measure_blocks::extent_height)
@@ -2715,9 +2733,7 @@ impl EngineSession {
             pagination
                 .layout
                 .as_ref()
-                .ok_or_else(|| "resident layout is not built".to_owned())?
-                .pages
-                .len(),
+                .ok_or_else(|| "resident layout is not built".to_owned())?,
             &extras,
         )
     }
@@ -2853,7 +2869,7 @@ impl EngineSession {
                     previous_pages,
                     epochs,
                     &mut next_page_id,
-                    rebuilt_page_start..rebuilt_page_end,
+                    &(rebuilt_page_start..rebuilt_page_end).collect(),
                 )?
             } else {
                 encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?

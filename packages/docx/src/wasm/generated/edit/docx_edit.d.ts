@@ -673,6 +673,11 @@ export class EditSession {
      */
     seed_from_docx(bytes: Uint8Array): string;
     /**
+     * Unions seeded opaque sequence names (`["figure", ...]`) into document
+     * state, as the byte seeder does after its stories.
+     */
+    seed_opaque_sequences(names_json: string): void;
+    /**
      * Selects a story, closing capture unless manual grouping is selected.
      */
     select_story(story: string): void;
@@ -1210,6 +1215,7 @@ export interface InitOutput {
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

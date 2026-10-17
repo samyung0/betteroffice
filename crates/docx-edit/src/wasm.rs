@@ -1040,6 +1040,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
                 verbatim_xml: None,
+                source_ordinal: None,
             })
             .collect()
     })
@@ -3521,6 +3522,14 @@ impl EditSession {
             .doc()
             .apply_raw_ops(story, ops, &ctx)
             .map_err(js_err)
+    }
+
+    /// Unions seeded opaque sequence names (`["figure", ...]`) into document
+    /// state, as the byte seeder does after its stories.
+    pub fn seed_opaque_sequences(&self, names_json: &str) -> Result<(), JsValue> {
+        let names: Vec<String> = serde_json::from_str(names_json).map_err(js_err)?;
+        crate::seed::seed_opaque_sequences(self.engine.doc(), &names);
+        Ok(())
     }
 
     /// Applies seed raw operations with deterministic item ordering.
