@@ -38,6 +38,7 @@ export {
   clampScroll,
   uniformOffsets,
   zoomedViewport,
+  MAX_SCROLL_EXTENT_PX,
 } from './viewport/index';
 
 export type {
@@ -95,6 +96,7 @@ export {
   wasmVersion,
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
+export { ClearTooLargeError, RangeTooLargeError } from './wasm/refusals';
 export {
   openWorkbookWorker,
   SheetGoneError,

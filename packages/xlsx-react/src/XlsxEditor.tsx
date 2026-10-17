@@ -14,12 +14,15 @@ import {
   cellAtPoint,
   cellRect,
   chartRegionAtPoint,
+  ClearTooLargeError,
   extendTo,
   fromTsv,
   hyperlinkAtCell,
+  MAX_SCROLL_EXTENT_PX,
   moveFocus,
   normalizeRange,
   openWorkbookWorker,
+  RangeTooLargeError,
   paintDisplayList,
   parseHyperlinkLocation,
   rangeRect,
@@ -134,6 +137,12 @@ export interface XlsxEditorCollaborationOptions {
 }
 
 /**
+ * Refusals the host shows: a clear over {@link XlsxEditorProps.clearLimitBytes},
+ * or a copy (or cut) of more cells than the engine reads at once.
+ */
+export type XlsxEditorNotice = 'clear-too-large' | 'copy-too-large';
+
+/**
  * Props for {@link XlsxEditor}.
  */
 export interface XlsxEditorProps {
@@ -162,6 +171,14 @@ export interface XlsxEditorProps {
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /**
+   * The bytes one clear (Delete, cut) may add to the shared document: a clear
+   * that could exceed it is refused, nothing changes, and `onNotice` hears of
+   * it. Unset, a clear is not limited here.
+   */
+  clearLimitBytes?: number;
+  /** A refused edit for the host to show; unset, the editor shows its message. */
+  onNotice?: (notice: XlsxEditorNotice) => void;
   /**
    * Flat chrome for hosts with their own toolbars: the formatting toolbar as one
    * 40px row (save, PNG export and print in its menu) over a 40px formula bar.
@@ -353,12 +370,12 @@ function medianTrack(offsets: number[] | undefined, fallback: number): number {
 // over a representative (median) row height.
 function deriveLimits(
   dl: DisplayList | null,
-  info: SheetInfo,
+  used: SheetInfo['usedRange'],
   viewportHeight: number
 ): SelectionLimits {
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
-  const usedRows = (info.usedRange?.end.row ?? 0) + 1;
-  const usedCols = (info.usedRange?.end.col ?? 0) + 1;
+  const usedRows = (used?.end.row ?? 0) + 1;
+  const usedCols = (used?.end.col ?? 0) + 1;
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
   return { rows: XLSX_MAX_ROWS, cols: XLSX_MAX_COLUMNS, usedRows, usedCols, rowsPerPage };
 }
@@ -579,6 +596,8 @@ function XlsxEditorContent({
   onPendingChange,
   className,
   readOnly = false,
+  clearLimitBytes,
+  onNotice,
   singleRowToolbar = false,
   onCommandStateChange,
   showCustomNumberFormat = true,
@@ -687,6 +706,8 @@ function XlsxEditorContent({
   // keyboard moves and typing scroll the focus cell into view, after the
   // commit that moved it.
   const revealPendingRef = useRef(false);
+  // a name box or hyperlink jump to another sheet, revealed once it is shown.
+  const revealOnSwitchRef = useRef(false);
   const [revealRequest, setRevealRequest] = useState(0);
   const requestReveal = useCallback(() => {
     revealPendingRef.current = true;
@@ -1201,7 +1222,13 @@ function XlsxEditorContent({
         : list
     );
     const switching = pendingSheet !== null && shown.seq < pendingSheet.seq;
-    if (pendingSheet && !switching) setPendingSheet(null);
+    if (pendingSheet && !switching) {
+      setPendingSheet(null);
+      if (revealOnSwitchRef.current) {
+        revealOnSwitchRef.current = false;
+        requestReveal();
+      }
+    }
     // a peer removed or moved away the sheet a draft is open on: drop the
     // draft rather than land it on whichever sheet is active now.
     const draft = pendingDraftRef.current;
@@ -1343,13 +1370,23 @@ function XlsxEditorContent({
     return `${cellAddress(range.top, range.left)}:${cellAddress(range.bottom, range.right)}`;
   }, []);
 
+  // the used range on screen, which inputs committed but not drawn yet extend.
+  const usedRange = useCallback((): SheetInfo['usedRange'] => {
+    let used = shownHere?.sheetInfo.usedRange ?? null;
+    for (const { sheetId, row, col } of optimistic) {
+      if (sheetId !== activeSheetId) continue;
+      const { start, end } = used ?? { start: { row, col }, end: { row, col } };
+      used = {
+        start: { row: Math.min(row, start.row), col: Math.min(col, start.col) },
+        end: { row: Math.max(row, end.row), col: Math.max(col, end.col) },
+      };
+    }
+    return used;
+  }, [shownHere, optimistic, activeSheetId]);
+
   const limits = useCallback((): SelectionLimits => {
-    return deriveLimits(
-      frameRef.current,
-      sheetInfo!,
-      (scrollRef.current?.clientHeight ?? 0) / zoom
-    );
-  }, [sheetInfo, zoom]);
+    return deriveLimits(frameRef.current, usedRange(), (scrollRef.current?.clientHeight ?? 0) / zoom);
+  }, [usedRange, zoom]);
 
   // map a viewport-local pointer event to a sheet cell via the frame geometry.
   const pointToCell = useCallback(
@@ -1550,57 +1587,69 @@ function XlsxEditorContent({
     focusContainer();
   }, [focusContainer]);
 
-  // the used range on screen, which inputs committed but not drawn yet extend.
-  const usedRange = useCallback((): SheetInfo['usedRange'] => {
-    let used = shownHere?.sheetInfo.usedRange ?? null;
-    for (const { sheetId, row, col } of optimistic) {
-      if (sheetId !== activeSheetId) continue;
-      const { start, end } = used ?? { start: { row, col }, end: { row, col } };
-      used = {
-        start: { row: Math.min(row, start.row), col: Math.min(col, start.col) },
-        end: { row: Math.max(row, end.row), col: Math.max(col, end.col) },
-      };
-    }
-    return used;
-  }, [shownHere, optimistic, activeSheetId]);
-
+  // the engine clears only the cells that hold content, so a sparse used range
+  // costs its stored cells; one over `clearLimitBytes` is refused unchanged.
   const clearCells = useCallback(() => {
     if (!handleRef.current || !selection || readOnly) return;
     const r = inUsedRange(normalizeRange(selection), usedRange());
     if (!r) return;
-    const edits: CellInputEdit[] = [];
-    for (let row = r.top; row <= r.bottom; row++) {
-      for (let col = r.left; col <= r.right; col++) edits.push({ row, col, input: '' });
-    }
-    onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportError);
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError, usedRange]);
+    const range = `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+    onSheet(activeSheetId, 'clearContents', activeSheet, range, clearLimitBytes).then(
+      applyResult,
+      (e: unknown) => {
+        if (e instanceof ClearTooLargeError && onNotice) onNotice('clear-too-large');
+        else reportError(e);
+      }
+    );
+  }, [
+    selection,
+    activeSheet,
+    activeSheetId,
+    applyResult,
+    onSheet,
+    readOnly,
+    reportError,
+    usedRange,
+    clearLimitBytes,
+    onNotice,
+  ]);
 
-  const copySelection = useCallback(async () => {
+  // whether the clipboard took the copy: a range over the engine's read cap is
+  // a notice, a denied clipboard leaves things as they are.
+  const copySelection = useCallback(async (): Promise<boolean> => {
     const handle = handleRef.current;
-    if (!handle || !selection) return;
+    if (!handle || !selection) return false;
     const r = upToUsedEnd(normalizeRange(selection), usedRange());
-    try {
-      // a selection wholly past the used range copies nothing (and asks the worker nothing).
-      const cells = r
-        ? await handle.onSheet(
-            activeSheetId,
-            'rangeCells',
-            activeSheet,
-            `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
-          )
-        : [];
-      const tsv = toTsv(
-        cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
-      );
-      await navigator.clipboard.writeText(tsv);
-    } catch {
-      // clipboard denied or read failed — nothing to paste, leave state as-is.
+    let cells: Awaited<ReturnType<WorkbookProxy['rangeCells']>> = [];
+    // a selection wholly past the used range copies nothing (and asks the worker nothing).
+    if (r) {
+      try {
+        cells = await handle.onSheet(
+          activeSheetId,
+          'rangeCells',
+          activeSheet,
+          `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
+        );
+      } catch (e) {
+        if (e instanceof RangeTooLargeError && onNotice) onNotice('copy-too-large');
+        else reportError(e);
+        return false;
+      }
     }
-  }, [selection, activeSheet, activeSheetId, usedRange]);
+    const tsv = toTsv(
+      cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
+    );
+    try {
+      await navigator.clipboard.writeText(tsv);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [selection, activeSheet, activeSheetId, usedRange, reportError, onNotice]);
 
+  // a cut clears only what its copy put on the clipboard.
   const cutSelection = useCallback(async () => {
-    await copySelection();
-    clearCells();
+    if (await copySelection()) clearCells();
   }, [copySelection, clearCells]);
 
   const pasteSelection = useCallback(async () => {
@@ -2199,14 +2248,12 @@ function XlsxEditorContent({
         requestReveal();
         return true;
       }
-      track(handle, handle.onSheet(sheetInfo.sheetIds[targetSheet], 'setActiveSheet', targetSheet))
-        .then(() => handle.cellPosition(targetSheet, destination.row, destination.col))
-        .then((position) => {
-          const scroll = scrollRef.current;
-          if (!scroll) return;
-          scroll.scrollLeft = position.x * zoomRef.current;
-          scroll.scrollTop = position.y * zoomRef.current;
-        }, reportError);
+      track(
+        handle,
+        handle.onSheet(sheetInfo.sheetIds[targetSheet], 'setActiveSheet', targetSheet)
+      ).catch(reportError);
+      // revealed once the sheet's frame lands, growing its scroll area as here.
+      revealOnSwitchRef.current = true;
       setPendingSheet({ index: targetSheet, seq: lastMutationRef.current });
       setSelection(selectionAt({ row: destination.row, col: destination.col }));
       return true;
@@ -2310,10 +2357,18 @@ function XlsxEditorContent({
     ? scaledRect(selectedChartRegion.rect, paintedZoom)
     : null;
 
-  // the scroll area: the used range, or as far as a revealed cell needed.
+  // the scroll area: the used range, or as far as a revealed cell needed, never
+  // past the browsers' element size limit (cells past it are not scrolled to).
   const ownReach = reach?.sheet === activeSheet ? reach : null;
-  const reachWidth = Math.max(sheetInfo?.contentWidth ?? 0, ownReach?.width ?? 0);
-  const reachHeight = Math.max(sheetInfo?.contentHeight ?? 0, ownReach?.height ?? 0);
+  const maxReach = MAX_SCROLL_EXTENT_PX / zoom;
+  const reachWidth = Math.min(
+    Math.max(sheetInfo?.contentWidth ?? 0, ownReach?.width ?? 0),
+    maxReach
+  );
+  const reachHeight = Math.min(
+    Math.max(sheetInfo?.contentHeight ?? 0, ownReach?.height ?? 0),
+    maxReach
+  );
   const reachRef = useRef({ width: reachWidth, height: reachHeight });
   reachRef.current = { width: reachWidth, height: reachHeight };
   const spacerWidth = sheetInfo ? reachWidth * zoom : undefined;
@@ -2410,9 +2465,11 @@ function XlsxEditorContent({
       to === start ? Math.floor(to * zoom) : Math.ceil(to * zoom);
     const scrollLeft = x === left ? scroll.scrollLeft : snap(x, cell.x);
     const scrollTop = y === top ? scroll.scrollTop : snap(y, cell.y);
-    // a cell past the used range: grow the scroll area first, then come back.
-    const needWidth = (scrollLeft + scroll.clientWidth) / zoom;
-    const needHeight = (scrollTop + scroll.clientHeight) / zoom;
+    // a cell past the used range: grow the scroll area first, then come back;
+    // past the size limit the scroll stops at its end.
+    const maxReach = MAX_SCROLL_EXTENT_PX / zoom;
+    const needWidth = Math.min((scrollLeft + scroll.clientWidth) / zoom, maxReach);
+    const needHeight = Math.min((scrollTop + scroll.clientHeight) / zoom, maxReach);
     if (needWidth > reachWidth || needHeight > reachHeight) {
       revealCellRef.current = { cell, row, col };
       setReach({
@@ -2713,7 +2770,7 @@ function XlsxEditorContent({
                 onChange={(e) => setNameDraft(e.target.value)}
                 onBlur={() => setNameDraft(null)}
                 onKeyDown={(e) => {
-                  if (e.key !== 'Enter' && e.key !== 'Escape') return;
+                  if ((e.key !== 'Enter' && e.key !== 'Escape') || e.nativeEvent.isComposing) return;
                   e.preventDefault();
                   // an address that names no cell keeps the box open on it, as Excel does.
                   if (e.key === 'Enter' && nameDraft !== null && !goToLocation(nameDraft.trim()))

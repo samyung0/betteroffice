@@ -7,6 +7,7 @@ export { XLSX_FRAME_PRESENTED_EVENT, XlsxEditor } from './XlsxEditor';
 export type {
   XlsxEditorProps,
   XlsxEditorApi,
+  XlsxEditorNotice,
   XlsxEditorCollaborationOptions,
 } from './XlsxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
