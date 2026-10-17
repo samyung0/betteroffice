@@ -772,7 +772,7 @@ fn parse_s9_package_impl(
         remove_orphan_comment_ranges(&mut note.content, &comment_ids);
     }
 
-    let repeated_para_ids = dedupe_package_paragraph_ids(
+    dedupe_package_paragraph_ids(
         &mut body,
         headers.as_mut(),
         footers.as_mut(),
@@ -781,11 +781,6 @@ fn parse_s9_package_impl(
         footnote_separators.as_mut(),
         endnote_separators.as_mut(),
     );
-    if repeated_para_ids > 0 {
-        warnings.push(format!(
-            "BetterOffice found {repeated_para_ids} paragraphs sharing a `w14:paraId` on open. A host addressing paragraphs by that raw Word ID should not assume it is unique; prefer a session anchor with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair the duplicates."
-        ));
-    }
 
     let template_variables = options
         .detect_variables

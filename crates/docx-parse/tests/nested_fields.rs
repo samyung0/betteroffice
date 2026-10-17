@@ -215,13 +215,16 @@ fn nested_fields_hold_each_level_once() {
         for paragraph in [&body, &header] {
             let counts = census(paragraph);
             assert_eq!(counts[kind], 10);
-            assert_eq!(counts[2], pictures);
             assert!(paragraph["content"][0]["fieldTree"].get("result").is_none());
             let (levels, inner) = innermost_result(paragraph);
             assert_eq!(levels, 10);
             assert_eq!(inner["type"], "run");
             assert!(census(inner)[2] > 0);
         }
+        // Capy's run view of a field holds the runs it shows, nested results
+        // included (09-29), so each level adds one copy: linear, never doubling.
+        let copies = |depth| census(&parse(&package(&chain(depth), "")).0)[2];
+        assert_eq!(copies(12) - copies(8), copies(8) - copies(4));
     }
 }
 

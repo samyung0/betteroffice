@@ -579,7 +579,7 @@ pub(crate) fn display_form<'a>(
 /// One document's cumulative metafile display allowances.
 #[derive(Debug)]
 #[cfg_attr(not(feature = "metafile"), allow(dead_code))]
-struct DisplayBudget {
+pub(crate) struct DisplayBudget {
     metafile_bytes: usize,
     svg_bytes: usize,
     #[cfg(feature = "metafile")]

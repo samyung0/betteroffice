@@ -187,7 +187,7 @@ fn bookmark_duplicates_cover_nested_content_and_other_stories() {
 }
 
 #[test]
-fn paragraph_duplicate_count_matches_flags_across_stories_and_separators() {
+fn paragraph_duplicates_are_flagged_across_stories_and_separators_without_a_warning() {
     let paragraph = r#"<w:p w14:paraId="0000000a"/>"#;
     let body = format!(
         r#"<w:p w14:paraId="0000000A"/><w:tbl><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl><w:sdt><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"#
@@ -234,12 +234,7 @@ fn paragraph_duplicate_count_matches_flags_across_stories_and_separators() {
         package["headerEntries"][0][1]["content"][0]["paraId"],
         "0000000a"
     );
-    assert_eq!(
-        parsed.document.warnings.unwrap(),
-        [
-            "BetterOffice found 8 paragraphs sharing a `w14:paraId` on open. A host addressing paragraphs by that raw Word ID should not assume it is unique; prefer a session anchor with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair the duplicates."
-        ]
-    );
+    assert_eq!(parsed.document.warnings, None);
 }
 
 #[test]
@@ -277,13 +272,12 @@ fn integrity_categories_are_additive_to_existing_warnings() {
         &[("custom/orphan.bin", "uncovered".to_owned())],
     );
     let warnings = parsed.document.warnings.unwrap();
-    assert_eq!(warnings.len(), 5, "{warnings:?}");
+    assert_eq!(warnings.len(), 4, "{warnings:?}");
     assert!(warnings[0].contains("1 orphan OPC parts"));
     assert!(warnings[1].contains("1 drawing doc properties"));
     assert!(warnings[2].contains("1 bookmark starts"));
-    assert!(warnings[3].starts_with("BetterOffice found 1 paragraphs sharing"));
     assert_eq!(
-        warnings[4],
+        warnings[3],
         "SmartArt diagram was skipped: no diagram data part was found."
     );
 }

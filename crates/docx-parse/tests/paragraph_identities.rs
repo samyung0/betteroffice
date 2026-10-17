@@ -1,8 +1,6 @@
 //! Paragraph IDs: identities and occurrences the parser records, and the
 //! paragraph ID plan a save applies.
 
-use std::sync::Arc;
-
 use docx_parse::block::BlockContent;
 use docx_parse::paragraph_identity::{W14_NAMESPACE, package_paragraph_ids};
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
@@ -105,87 +103,6 @@ fn saved_para_ids(xml: &[u8]) -> Vec<Option<String>> {
     ids
 }
 
-fn paragraph(blocks: &mut [BlockContent], index: usize) -> &mut docx_parse::Paragraph {
-    let BlockContent::Paragraph(paragraph) = &mut blocks[index] else {
-        panic!("block {index} is not a paragraph");
-    };
-    Arc::make_mut(paragraph)
-}
-
-#[test]
-fn every_valid_occurrence_keeps_its_id_and_later_repeats_are_flagged() {
-    let content = parse(&package(BODY, &[]), true)
-        .document
-        .package
-        .document
-        .content;
-    let summary: Vec<_> = content
-        .iter()
-        .map(|block| match block {
-            BlockContent::Paragraph(paragraph) => json!([
-                paragraph.para_id,
-                paragraph.repeated_para_id,
-                paragraph.source_ordinal,
-                paragraph
-                    .extra_attributes
-                    .iter()
-                    .map(|attribute| format!("{}={}", attribute.name, attribute.value))
-                    .collect::<Vec<_>>(),
-            ]),
-            BlockContent::RawXml(raw) => json!(["raw", raw.source_ordinal]),
-            _ => panic!("unexpected block"),
-        })
-        .collect();
-    assert_eq!(
-        summary,
-        [
-            json!(["0000000A", null, 0, []]),
-            json!(["0000000a", true, 1, []]),
-            json!([null, null, 2, ["w14:paraId=xyz"]]),
-            json!(["raw", 3]),
-            json!([null, null, 5, ["w14:paraId=80000000"]]),
-            json!([null, null, 6, []]),
-        ]
-    );
-    let plain = parse(&package(BODY, &[]), false)
-        .document
-        .package
-        .document
-        .content;
-    assert!(plain.iter().all(|block| match block {
-        BlockContent::Paragraph(paragraph) => paragraph.source_ordinal.is_none(),
-        BlockContent::RawXml(raw) => raw.source_ordinal.is_none(),
-        _ => true,
-    }));
-}
-
-#[test]
-fn saving_keeps_authored_ids_until_a_typed_id_replaces_them() {
-    let original = package(BODY, &[]);
-    let saved = save(&original, json!(null), |_| {});
-    let ids = saved_para_ids(&part(&saved, "word/document.xml"));
-    assert_eq!(
-        ids,
-        [
-            Some("0000000A"),
-            Some("0000000a"),
-            Some("xyz"),
-            Some("0000000B"),
-            None,
-            Some("80000000"),
-            None,
-        ]
-        .map(|id| id.map(str::to_owned))
-    );
-    let repaired = save(&original, json!(null), |blocks| {
-        paragraph(blocks, 2).para_id = Some("00000011".to_owned());
-    });
-    assert_eq!(
-        saved_para_ids(&part(&repaired, "word/document.xml"))[2].as_deref(),
-        Some("00000011")
-    );
-}
-
 #[test]
 fn assignments_reach_source_paragraphs_and_retained_xml_of_serialized_parts() {
     let original = package(BODY, &[]);
@@ -272,41 +189,6 @@ const COMMENTS_EXTENDED: &str = concat!(
 );
 
 #[test]
-fn patched_comments_rename_their_companion_references() {
-    let original = package(
-        BODY,
-        &[
-            ("word/comments.xml", COMMENTS),
-            ("word/commentsExtended.xml", COMMENTS_EXTENDED),
-        ],
-    );
-    let saved = save(
-        &original,
-        json!({"patchedParts": [
-            {"part": "word/comments.xml", "paraIds": [[0, "00000051"], [1, "00000052"], [2, "00000053"]]},
-        ]}),
-        |_| {},
-    );
-    assert_eq!(
-        String::from_utf8(part(&saved, "word/comments.xml")).unwrap(),
-        COMMENTS
-            .replacen("00000041", "00000051", 1)
-            .replacen("0000000A", "00000052", 1)
-            .replacen(
-                "<w:p><w:r><w:t>Bare",
-                r#"<w:p w14:paraId="00000053"><w:r><w:t>Bare"#,
-                1
-            )
-    );
-    assert_eq!(
-        String::from_utf8(part(&saved, "word/commentsExtended.xml")).unwrap(),
-        COMMENTS_EXTENDED
-            .replace("00000041", "00000051")
-            .replacen("0000000A", "00000052", 1)
-    );
-}
-
-#[test]
 fn ambiguous_comment_references_fall_back_to_serialized_comments() {
     let ambiguous = COMMENTS.replacen("00000041", "0000000A", 1);
     let original = package(
@@ -338,71 +220,5 @@ fn the_package_inventory_counts_values_numerically_across_parts() {
             .into_iter()
             .collect::<Vec<_>>(),
         vec![0x0A, 0x0B, 0x41]
-    );
-}
-
-#[test]
-fn paragraph_ids_resolve_their_namespace_on_parse_and_full_save() {
-    let bytes = package(
-        &format!(
-            r#"<w:p xmlns:w14="urn:other" w14:paraId="0000000A"/><w:p xmlns:x="{W14_NAMESPACE}" x:paraId="0000000B"/>"#
-        ),
-        &[],
-    );
-    let content = parse(&bytes, true).document.package.document.content;
-    let ids: Vec<_> = content
-        .iter()
-        .map(|block| match block {
-            BlockContent::Paragraph(paragraph) => paragraph.para_id.clone(),
-            _ => panic!("paragraph"),
-        })
-        .collect();
-    assert_eq!(ids, [None, Some("0000000B".to_owned())]);
-    let occurrences = docx_parse::paragraph_identity::paragraph_occurrences(
-        std::str::from_utf8(&part(&bytes, "word/document.xml")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        occurrences
-            .iter()
-            .map(|occurrence| occurrence.para_id.clone())
-            .collect::<Vec<_>>(),
-        ids
-    );
-
-    let saved = save(&bytes, Value::Null, |blocks| {
-        paragraph(blocks, 0).para_id = Some("0000000C".to_owned());
-    });
-    let xml = String::from_utf8(part(&saved, "word/document.xml")).unwrap();
-    assert!(xml.contains(&format!(
-        r#"<w:p xmlns:w14p0="{W14_NAMESPACE}" w14p0:paraId="0000000C" xmlns:w14="urn:other" w14:paraId="0000000A""#
-    )));
-    let reopened = parse(&saved, true).document.package.document.content;
-    let BlockContent::Paragraph(first) = &reopened[0] else {
-        panic!("paragraph");
-    };
-    assert_eq!(first.para_id.as_deref(), Some("0000000C"));
-}
-
-#[test]
-fn a_new_id_replaces_an_invalid_one_under_an_alias_prefix() {
-    let bytes = package(
-        &format!(
-            r#"<w:p xmlns:x="{W14_NAMESPACE}" x:paraId="xyz"><w:r><w:t>Alias</w:t></w:r></w:p>"#
-        ),
-        &[],
-    );
-    let content = parse(&bytes, true).document.package.document.content;
-    let BlockContent::Paragraph(alias) = &content[0] else {
-        panic!("paragraph");
-    };
-    assert_eq!(alias.para_id, None);
-    assert_eq!(alias.para_id_attribute.as_deref(), Some("x:paraId"));
-    let saved = save(&bytes, Value::Null, |blocks| {
-        paragraph(blocks, 0).para_id = Some("0000000C".to_owned());
-    });
-    assert_eq!(
-        saved_para_ids(&part(&saved, "word/document.xml")),
-        [Some("0000000C".to_owned())]
     );
 }

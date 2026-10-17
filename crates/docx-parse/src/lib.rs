@@ -32,7 +32,6 @@ pub mod borders;
 pub mod canonical;
 pub mod chart;
 pub mod comments;
-pub mod content_control;
 pub mod document;
 pub mod drawingml;
 pub mod fonts;
@@ -81,7 +80,6 @@ pub use borders::{
     BorderSpec, Borders, parse_border_spec, parse_paragraph_borders, parse_table_borders,
 };
 pub use comments::{Comment, parse_comments, remove_orphan_comment_ranges};
-pub use content_control::{clear_showing_placeholder_xml, parse_sdt_properties_xml};
 pub use document::{
     DocumentBody, Section, extract_all_template_variables, extract_template_variables,
     get_paragraph_text, is_empty_paragraph, parse_document_body,
@@ -89,12 +87,12 @@ pub use document::{
 pub use fonts::{FontEmbed, FontInfo, FontTable, parse_font_table};
 pub use formatting::{
     CellMargins, ConditionalFormatStyle, FloatingTableProperties, FontFamily, NumberingProperties,
-    ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame, RunLanguage, SpacingExplicit,
-    TableCellFormatting, TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
-    TextFill, TextFormatting, TextGlow, TextGradientStop, TextModernEffects, TextOutline,
-    TextReflection, TextShadow, merge_paragraph_formatting, merge_text_formatting,
-    parse_paragraph_properties, parse_run_properties, parse_table_cell_properties,
-    parse_table_properties, parse_table_row_properties,
+    ParagraphFormatting, ParagraphFrame, RunLanguage, SpacingExplicit, TableCellFormatting,
+    TableFormatting, TableLook, TableMeasurement, TableRowFormatting, TextFill, TextFormatting,
+    TextGlow, TextGradientStop, TextModernEffects, TextOutline, TextReflection, TextShadow,
+    merge_paragraph_formatting, merge_text_formatting, parse_paragraph_properties,
+    parse_run_properties, parse_table_cell_properties, parse_table_properties,
+    parse_table_row_properties,
 };
 pub use header_footer::{
     HeaderFooter, HeaderFooterAliasGroup, normalize_header_footer_type, parse_header_footer,

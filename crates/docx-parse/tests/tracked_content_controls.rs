@@ -157,8 +157,10 @@ fn tracked_control_children_preserve_fields_and_math() {
     }
 }
 
+/// Capy keeps a field a deletion holds and writes the deleted link text as
+/// deleted text (09-29), where upstream drops the field.
 #[test]
-fn ordinary_tracked_children_keep_legacy_output() {
+fn ordinary_tracked_children_keep_their_fields_and_deleted_text() {
     let content = format!(
         "{}{}{}",
         run("Deleted", true),
@@ -168,9 +170,10 @@ fn ordinary_tracked_children_keep_legacy_output() {
     let original = package(&tracked("del", &content));
     let model = parse(&original);
     let children = model[0]["content"][0]["content"].as_array().unwrap();
-    assert_eq!(children.len(), 2);
+    assert_eq!(children.len(), 3);
     assert_eq!(children[0]["type"], "run");
     assert_eq!(children[1]["type"], "hyperlink");
+    assert_eq!(children[2]["type"], "simpleField");
     let saved = repack(&original, model);
     let xml = ooxml_opc::unzip_parts(&saved)
         .unwrap()
@@ -180,10 +183,10 @@ fn ordinary_tracked_children_keep_legacy_output() {
         .1;
     let xml = String::from_utf8(xml).unwrap();
     assert!(xml.contains("<w:delText>Deleted</w:delText>"));
-    assert!(
-        xml.contains(
-            r#"<w:hyperlink w:anchor="target"><w:r><w:t>Linked</w:t></w:r></w:hyperlink>"#
-        )
-    );
-    assert!(!xml.contains("<w:fldSimple"));
+    assert!(xml.contains(
+        r#"<w:hyperlink w:anchor="target"><w:r><w:delText>Linked</w:delText></w:r></w:hyperlink>"#
+    ));
+    assert!(xml.contains(
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:delText>Field</w:delText></w:r></w:fldSimple>"#
+    ));
 }

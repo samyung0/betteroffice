@@ -1051,34 +1051,6 @@ fn decode_typed_inline(node_type: &str, value: &serde_json::Value) -> Option<Inl
 }
 
 impl InlineNode {
-    pub(crate) fn has_tracked_control(&self, control: bool, revision: bool) -> bool {
-        let (children, control, revision) = match self {
-            Self::InlineSdt(sdt) => (&sdt.content, true, revision),
-            Self::Tracked(change) => (&change.content, control, true),
-            Self::Hyperlink(link) => (
-                link.structured_children.as_ref().unwrap_or(&link.children),
-                control,
-                revision,
-            ),
-            Self::ComplexField(field) => {
-                return field
-                    .structured_result
-                    .as_ref()
-                    .and_then(|result| result.inline.as_ref())
-                    .is_some_and(|children| {
-                        children
-                            .iter()
-                            .any(|child| child.has_tracked_control(control, revision))
-                    });
-            }
-            _ => return false,
-        };
-        control && revision
-            || children
-                .iter()
-                .any(|child| child.has_tracked_control(control, revision))
-    }
-
     pub fn node_type(&self) -> &'static str {
         match self {
             Self::Run(_) => "run",
@@ -2317,6 +2289,7 @@ impl OpenComplexField {
             field_tree: Some(field_tree),
             continuation: None,
         };
+        field.project_leaf_tree();
         field
     }
 }
@@ -2809,39 +2782,6 @@ fn inline_content_length(node: &InlineNode) -> usize {
     }
 }
 
-/// Story width of one run atom: text in UTF-16 units, every live embed one.
-pub(crate) fn run_content_length(content: &RunContent) -> usize {
-    match content {
-        RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-            text.encode_utf16().count()
-        }
-        RunContent::Tab
-        | RunContent::PositionalTab { .. }
-        | RunContent::SoftHyphen
-        | RunContent::NoBreakHyphen
-        | RunContent::Symbol { .. }
-        | RunContent::FootnoteRef { .. }
-        | RunContent::EndnoteRef { .. }
-        | RunContent::CommentReference { .. }
-        | RunContent::Drawing { .. }
-        | RunContent::Shape { .. }
-        | RunContent::HorizontalRule { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => 1,
-        RunContent::Break { break_type, .. } => {
-            if break_type
-                .as_deref()
-                .is_none_or(|kind| kind == "textWrapping")
-            {
-                1
-            } else {
-                0
-            }
-        }
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -3320,6 +3260,23 @@ mod tests {
         assert_eq!(parse_sdt_control_type(Some(&unknown)), "richText");
     }
 
+    #[test]
+    fn plain_text_multi_line_is_read_and_synthesized() {
+        let properties = |xml: &str| parse_sdt_properties(Some(&root(xml)), None, None);
+        let single = properties(r#"<w:sdtPr><w:text/></w:sdtPr>"#);
+        assert_eq!(single.multi_line, Some(false));
+        let rich = properties(r#"<w:sdtPr><w:richText/></w:sdtPr>"#);
+        assert_eq!(rich.multi_line, None);
+        let mut multi = properties(r#"<w:sdtPr><w:text w:multiLine="1"/></w:sdtPr>"#);
+        assert_eq!(multi.multi_line, Some(true));
+        multi.raw_properties_xml = None;
+        let synthesized = crate::serializer::paragraph::synthesize_sdt_properties(&multi);
+        assert!(
+            synthesized.contains(r#"<w:text w:multiLine="1"/>"#),
+            "{synthesized}"
+        );
+    }
+
     #[derive(Serialize, Deserialize)]
     #[serde(untagged)]
     enum UntaggedInlineNode {
@@ -3384,18 +3341,11 @@ mod tests {
             ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>{paragraph}</w:body></w:document>"#).into_bytes()),
         ])
         .unwrap();
-        let packages: [&[u8]; 7] = [
+        let packages: [&[u8]; 4] = [
             &synthetic,
             include_bytes!("../../betteroffice-docx/tests/corpus/fixtures/betteroffice-demo.docx"),
             include_bytes!(
                 "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
-            ),
-            include_bytes!("../../docx-edit/tests/fixtures/structured-export/principal.docx"),
-            include_bytes!(
-                "../../docx-edit/tests/fixtures/field-code-paragraphs/body-field-code-nested.docx"
-            ),
-            include_bytes!(
-                "../../docx-edit/tests/fixtures/field-code-paragraphs/header-field-code-nested.docx"
             ),
             include_bytes!("../../docx-edit/tests/fixtures/footnote-anchor.docx"),
         ];

@@ -20,7 +20,6 @@ use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, list_button_num_ids, list_button_numbering};
 use crate::paragraph::{Paragraph, ParagraphContent};
-use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
@@ -33,8 +32,7 @@ use super::context::SerializerContext;
 use super::numbering::{insert_numbering_entries, serialize_numbering_xml};
 use super::paragraph::{block_comment_references, block_list_kinds, serialize_paragraph};
 use super::paragraph_ids::{
-    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, apply_assignments, comment_companions,
-    model_paragraph_ids, patch_comment_parts, patch_part,
+    COMMENTS_PART, S13ParagraphIds, S13SplicedPart, apply_assignments, patch_part,
 };
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
@@ -214,9 +212,6 @@ fn write_docx_s13_parts_with_warnings(
             .bytes("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
         let mut context = SerializerContext::new(&request.determinism)?;
-        context.set_chart_drawings(chart_drawings_in_part(
-            &package.text("word/document.xml").unwrap_or_default(),
-        ));
         let patched =
             build_source_patched_document_xml(&request.document, original, sources, &mut context)?;
         package.set_text("word/document.xml", patched);
@@ -266,55 +261,6 @@ fn write_docx_s13_parts_with_warnings(
         assignments: &assignments,
     };
 
-    let preserved = |path: &str| patched_parts.contains_key(package.resolve_path(path));
-    let changed: Option<HashSet<String>> = request
-        .selective
-        .as_ref()
-        .map(|selective| selective.changed_para_ids.iter().cloned().collect());
-    normalize_saved_comment_references(&mut request, |request, story| {
-        let part = |entries: &[(String, HeaderFooter)], index: usize, kind: &str| {
-            relationships
-                .get(&entries[index].0)
-                .filter(|relationship| {
-                    relationship.relationship_type == kind
-                        && !relationship.target.is_empty()
-                        && relationship.target_mode != Some(TargetMode::External)
-                })
-                .and_then(|relationship| {
-                    resolve_relative_path(&package.document_path, &relationship.target).ok()
-                })
-                .filter(|path| !preserved(path))
-                .map_or(Written::Nothing, |_| Written::Everything)
-        };
-        let note = |note: &Note, path: &str| {
-            if changed.is_some() || preserved(path) || note.verbatim_xml.is_some() {
-                Written::Nothing
-            } else {
-                Written::Everything
-            }
-        };
-        match story {
-            SavedStory::Body if preserved("word/document.xml") => Written::Nothing,
-            SavedStory::Body => changed
-                .clone()
-                .map_or(Written::Everything, Written::Paragraphs),
-            SavedStory::Header(index) => {
-                part(&request.header_entries, index, relationship_types::HEADER)
-            }
-            SavedStory::Footer(index) => {
-                part(&request.footer_entries, index, relationship_types::FOOTER)
-            }
-            SavedStory::Footnote(index) => note(&request.footnotes[index], "word/footnotes.xml"),
-            SavedStory::FootnoteSeparator(index) => {
-                note(&request.footnote_separators[index], "word/footnotes.xml")
-            }
-            SavedStory::Endnote(index) => note(&request.endnotes[index], "word/endnotes.xml"),
-            SavedStory::EndnoteSeparator(index) => {
-                note(&request.endnote_separators[index], "word/endnotes.xml")
-            }
-        }
-    });
-
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
     } else {
@@ -347,9 +293,6 @@ fn write_docx_s13_parts_with_warnings(
     for blocks in comment_stories {
         block_comment_references(blocks, &mut |id| context.note_comment_reference(id));
     }
-    context.set_chart_drawings(chart_drawings_in_part(
-        &package.text(&package.document_path).unwrap_or_default(),
-    ));
     let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
         String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
     } else if let Some(selective) = request.selective.as_ref() {
@@ -476,57 +419,6 @@ fn write_docx_s13_parts_with_warnings(
     Ok((bytes, context.take_warnings()))
 }
 
-/// Authored chart placements in one story part, keyed by relationship id.
-fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
-    let drawing_prefix = declared_prefix(xml, &WORDPROCESSINGML_URIS, "w");
-    let chart_prefix = declared_prefix(xml, &CHART_URIS, "c");
-    let open = format!("<{drawing_prefix}:drawing");
-    let close = format!("</{drawing_prefix}:drawing>");
-    let chart_open = format!("<{chart_prefix}:chart");
-    let mut drawings = HashMap::new();
-    let mut cursor = 0;
-    while let Some(relative) = xml[cursor..].find(&open) {
-        let start = cursor + relative;
-        let boundary = xml.as_bytes().get(start + open.len()).copied();
-        if !matches!(boundary, Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')) {
-            cursor = start + open.len();
-            continue;
-        }
-        let Some(tag_end) = find_tag_end(xml.as_bytes(), start) else {
-            break;
-        };
-        cursor = tag_end + 1;
-        if xml.as_bytes()[start..tag_end].ends_with(b"/") {
-            continue;
-        }
-        let Some(relative_close) = xml[cursor..].find(&close) else {
-            continue;
-        };
-        let span = &xml[start..cursor + relative_close + close.len()];
-        let Some(chart) = prefixed_tag(span, &chart_open) else {
-            continue;
-        };
-        if let Some(id) = xml_attribute(chart, "r:id").or_else(|| xml_attribute(chart, "id")) {
-            drawings
-                .entry(id.to_owned())
-                .or_insert_with(|| span.to_owned());
-        }
-    }
-    drawings
-}
-
-/// Namespace URIs a part may bind the drawing placement prefix to.
-const WORDPROCESSINGML_URIS: [&str; 2] = [
-    crate::xml::namespaces::W,
-    "http://purl.oclc.org/ooxml/wordprocessingml/main",
-];
-
-/// Namespace URIs a part may bind the chart reference prefix to.
-const CHART_URIS: [&str; 2] = [
-    "http://schemas.openxmlformats.org/drawingml/2006/chart",
-    "http://purl.oclc.org/ooxml/drawingml/chart",
-];
-
 /// Prefix the root element binds to one of `uris`, or `fallback` when the
 /// part declares none.
 fn declared_prefix(xml: &str, uris: &[&str], fallback: &str) -> String {
@@ -593,22 +485,6 @@ fn root_tag_end(xml: &str) -> Option<usize> {
             None => return None,
         }
     }
-}
-
-/// First opening tag starting with `open`, requiring a tag-name boundary.
-fn prefixed_tag<'a>(xml: &'a str, open: &str) -> Option<&'a str> {
-    let mut cursor = 0;
-    while let Some(relative) = xml[cursor..].find(open) {
-        let start = cursor + relative;
-        let boundary = xml.as_bytes().get(start + open.len()).copied();
-        if !matches!(boundary, Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')) {
-            cursor = start + open.len();
-            continue;
-        }
-        let end = find_tag_end(xml.as_bytes(), start)?;
-        return Some(&xml[start..=end]);
-    }
-    None
 }
 
 fn update_core_part(options: &S13SaveOptions, package: &mut Package, now: &str) {
@@ -770,14 +646,6 @@ fn save_error(message: impl Into<String>) -> ParseError {
     ParseError::Canonical(format!("S13 package save: {}", message.into()))
 }
 
-fn comments_need_paragraph_ids(document: &DocumentBody) -> bool {
-    let valid = |id: Option<&str>| id.is_some_and(|id| parse_paragraph_id(id).is_some());
-    document.comments.iter().flatten().any(|comment| {
-        !valid(comment.content.last().and_then(|p| p.para_id.as_deref()))
-            && !valid(comment.para_id.as_deref())
-    })
-}
-
 /// Applies the plan's source-paragraph IDs to every serialized part's model.
 /// A story of a save request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -791,12 +659,9 @@ enum SavedStory {
     EndnoteSeparator(usize),
 }
 
-/// What a save writes of a story from its model rather than its source bytes.
+/// What a source-paragraph splice writes of a story from its model rather than its source bytes.
 enum Written {
     Nothing,
-    Everything,
-    /// The paragraphs with these Word paragraph IDs.
-    Paragraphs(HashSet<String>),
     /// The top-level paragraphs at these blocks.
     Blocks(HashSet<usize>),
 }
@@ -805,8 +670,6 @@ impl Written {
     fn holds(&self, location: &ParagraphLocation) -> bool {
         match self {
             Self::Nothing => false,
-            Self::Everything => true,
-            Self::Paragraphs(ids) => location.para_id.as_ref().is_some_and(|id| ids.contains(id)),
             Self::Blocks(blocks) => !location.nested && blocks.contains(&location.block),
         }
     }
@@ -942,9 +805,6 @@ impl StoryParts<'_> {
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<String, ParseError> {
         let path = package.resolve_path(path);
-        context.set_chart_drawings(chart_drawings_in_part(
-            &package.text(path).unwrap_or_default(),
-        ));
         let Some(part) = self.spliced.get(path) else {
             return serialize(context);
         };
@@ -1921,6 +1781,7 @@ fn process_image_part<'a>(
                             part,
                             crate::media::media_mime_type(&path),
                             &path,
+                            &mut crate::media::DisplayBudget::default(),
                         )
                         .0
                         .as_ref()
@@ -2770,8 +2631,6 @@ pub fn build_patched_document_xml(
 #[derive(Default)]
 struct SelectiveParagraphIndex<'a> {
     count: usize,
-    in_control: bool,
-    in_revision: bool,
     by_id: HashMap<String, Vec<Paragraph>>,
     changed: HashSet<&'a str>,
     allocates_ids: bool,
@@ -2848,22 +2707,6 @@ impl<'a> SelectiveParagraphIndex<'a> {
         Some(())
     }
 
-    fn tracked(&mut self, content: &[InlineNode]) -> Option<()> {
-        for item in content {
-            match item {
-                _ if self.in_control => self.inline(item)?,
-                InlineNode::Run(run) => self.run(run)?,
-                InlineNode::Hyperlink(link) => self.hyperlink(link)?,
-                InlineNode::InlineSdt(_) => self.inline(item)?,
-                InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
-                    self.inline(item)?
-                }
-                _ => {}
-            }
-        }
-        Some(())
-    }
-
     fn inline(&mut self, node: &InlineNode) -> Option<()> {
         match node {
             InlineNode::Run(run) => self.run(run),
@@ -2914,17 +2757,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
             InlineNode::InlineSdt(sdt) => {
                 self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
                 self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
-                let previous = std::mem::replace(&mut self.in_control, true);
                 for item in &sdt.content {
                     self.inline(item)?;
                 }
-                self.in_control = previous;
-                Some(())
-            }
-            InlineNode::Tracked(change) => {
-                let previous = std::mem::replace(&mut self.in_revision, true);
-                self.tracked(&change.content)?;
-                self.in_revision = previous;
                 Some(())
             }
             InlineNode::Math(math) => {
@@ -4012,41 +3847,6 @@ mod tests {
     }
 
     #[test]
-    fn chart_run_without_a_drawing_replays_the_source_part_placement() {
-        let drawing = "<w:drawing><wp:inline><wp:extent cx=\"5486400\" cy=\"3200400\"/><wp:docPr id=\"1\" name=\"Chart 1\"/><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"rIdChart1\"/></a:graphicData></a:graphic></wp:inline></w:drawing>";
-        let original = base_package(&format!(
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p><w:p><w:r>{drawing}</w:r></w:p></w:body></w:document>"
-        ));
-        let request: S13SaveRequest = serde_json::from_value(json!({
-            "determinism": determinism(),
-            "document": { "content": [
-                text_paragraph("new", None),
-                {
-                    "type": "paragraph",
-                    "content": [{
-                        "type": "run",
-                        "content": [{
-                            "type": "chart",
-                            "chart": {
-                                "type": "chart", "chartType": "column",
-                                "rId": "rIdChart1", "path": "word/charts/chart1.xml",
-                                "series": [], "plotGroups": []
-                            }
-                        }]
-                    }]
-                }
-            ] },
-            "options": { "updateModifiedDate": false }
-        }))
-        .expect("request");
-        let (saved, warnings) = write_docx_s13_with_warnings(request, &original).expect("save");
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
-        assert!(document.contains("<w:t>new</w:t>"));
-        assert!(document.contains(drawing));
-    }
-
-    #[test]
     fn opaque_drawings_reference_missing_relationships_with_a_warning() {
         let original = base_package(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p></w:body></w:document>",
@@ -4078,74 +3878,6 @@ mod tests {
         let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
         assert!(document.contains("<w:t>new</w:t>"));
         assert!(document.contains("rIdOle"));
-    }
-
-    #[test]
-    fn chart_run_without_any_placement_is_dropped_with_a_warning() {
-        let original = base_package(
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>old</w:t></w:r></w:p></w:body></w:document>",
-        );
-        let request: S13SaveRequest = serde_json::from_value(json!({
-            "determinism": determinism(),
-            "document": { "content": [
-                text_paragraph("new", None),
-                {
-                    "type": "paragraph",
-                    "content": [{
-                        "type": "run",
-                        "content": [{
-                            "type": "chart",
-                            "chart": {
-                                "type": "chart", "chartType": "column",
-                                "rId": "rIdChart1", "path": "word/charts/chart1.xml",
-                                "series": [], "plotGroups": []
-                            }
-                        }]
-                    }]
-                }
-            ] },
-            "options": { "updateModifiedDate": false }
-        }))
-        .expect("request");
-        let (saved, warnings) = write_docx_s13_with_warnings(request, &original).expect("save");
-        assert_eq!(
-            warnings,
-            [
-                "chart run carries no drawing to replay (rId rIdChart1); keeping the run out of the output"
-            ]
-        );
-        let document = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
-        assert!(document.contains("<w:t>new</w:t>"));
-        assert!(!document.contains("c:chart"));
-    }
-
-    #[test]
-    fn chart_placements_resolve_under_declared_namespace_prefixes() {
-        let drawing = "<x:drawing><wp:inline><a:graphic><a:graphicData><ch:chart r:id=\"rId5\"/></a:graphicData></a:graphic></wp:inline></x:drawing>";
-        let xml = format!(
-            "<x:document xmlns:x=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:ch=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><x:body><x:p><x:r>{drawing}</x:r></x:p></x:body></x:document>"
-        );
-        assert_eq!(
-            chart_drawings_in_part(&xml).get("rId5").map(String::as_str),
-            Some(drawing)
-        );
-        let strict_drawing = "<s:drawing><wp:inline><a:graphic><a:graphicData><t:chart r:id=\"rId5\"/></a:graphicData></a:graphic></wp:inline></s:drawing>";
-        let strict = format!(
-            "<?xml version=\"1.0\"?><s:document xmlns:s=\"http://purl.oclc.org/ooxml/wordprocessingml/main\" xmlns:t=\"http://purl.oclc.org/ooxml/drawingml/chart\"><s:body><s:p><s:r>{strict_drawing}</s:r></s:p></s:body></s:document>"
-        );
-        assert_eq!(
-            chart_drawings_in_part(&strict)
-                .get("rId5")
-                .map(String::as_str),
-            Some(strict_drawing)
-        );
-        let legacy = "<w:document><w:body><w:p><w:r><w:drawing><c:chart r:id=\"rId5\"/></w:drawing></w:r></w:p></w:body></w:document>";
-        assert_eq!(
-            chart_drawings_in_part(legacy)
-                .get("rId5")
-                .map(String::as_str),
-            Some("<w:drawing><c:chart r:id=\"rId5\"/></w:drawing>")
-        );
     }
 
     #[test]
