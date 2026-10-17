@@ -375,19 +375,41 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         if (pending) setPendingPartCaretVersion((version) => version + 1);
         return;
       }
-      if (partEdit) {
-        if (!hitBelongsToPart(partEdit, hit) && onBodyClick) {
+      // A press on a band outside the open part leaves that part open, so the
+      // body caret never returns and scrolls. With a band open, a single click
+      // moves into another existing band, like Word; otherwise the click
+      // handler opens it on a double-click.
+      if ((region === 'header' || region === 'footer') && !hitBelongsToPart(partEdit, hit)) {
+        if (
+          e.detail < 2 &&
+          (partEdit?.kind === 'header' || partEdit?.kind === 'footer') &&
+          hit?.rId != null &&
+          onHeaderFooterDoubleClick
+        ) {
           e.stopPropagation();
           const pending =
-            hit?.region === 'body' && hit.pos != null && yrsSession
-              ? { session: yrsSession, story: 'body', position: hit.pos }
-              : null;
+            hit.pos == null || !yrsSession
+              ? null
+              : {
+                  session: yrsSession,
+                  story: partEditStory({ kind: region, rId: hit.rId }),
+                  position: hit.pos,
+                };
           pendingPartCaretRef.current = pending;
-          onBodyClick();
+          onHeaderFooterDoubleClick(region, (point?.pageIndex ?? 0) + 1);
           if (pending) setPendingPartCaretVersion((version) => version + 1);
-          return;
         }
-      } else if (region === 'header' || region === 'footer') {
+        return;
+      }
+      if (partEdit && !hitBelongsToPart(partEdit, hit) && onBodyClick) {
+        e.stopPropagation();
+        const pending =
+          hit?.region === 'body' && hit.pos != null && yrsSession
+            ? { session: yrsSession, story: 'body', position: hit.pos }
+            : null;
+        pendingPartCaretRef.current = pending;
+        onBodyClick();
+        if (pending) setPendingPartCaretVersion((version) => version + 1);
         return;
       }
 
@@ -431,6 +453,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       getPositionFromMouse,
       getYrsPositionProjection,
       onBodyClick,
+      onHeaderFooterDoubleClick,
       onNoteClick,
       partEdit,
       readOnly,
@@ -710,10 +733,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      // A read-only editor never opens a header or footer to edit.
-      if (e.detail === 2 && !partEdit && !readOnly && onHeaderFooterDoubleClick) {
+      // A read-only editor never opens a header or footer to edit; a band
+      // outside the open part opens directly (#1165).
+      if (e.detail === 2 && !readOnly && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
-        if (region === 'header' || region === 'footer') {
+        if (
+          (region === 'header' || region === 'footer') &&
+          !hitBelongsToPart(partEdit, point?.hit ?? null)
+        ) {
           e.preventDefault();
           e.stopPropagation();
           onHeaderFooterDoubleClick(region, (point?.pageIndex ?? 0) + 1);

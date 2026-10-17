@@ -1,7 +1,8 @@
 /**
- * A double click on a header or footer opens that band, on any page. The
- * press must not move the body caret: scrolling the caret into view would
- * move the page before the click, which hit-tests at click time.
+ * A double click on a header or footer opens that band, on any page (upstream
+ * #1163), also from another open band (#1165). The press must not move the
+ * body caret: scrolling the caret into view would move the page before the
+ * click, which hit-tests at click time.
  */
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -9,6 +10,7 @@ import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
+import type { PartEdit } from '../partEdit';
 import type { YrsInputRef } from '../YrsInput';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
@@ -44,10 +46,11 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function setup() {
+function setup(partEdit: PartEdit | null = null) {
   const placed: number[] = [];
   const words: number[] = [];
   const opened: Array<[string, number | undefined]> = [];
+  const bodyClicks: number[] = [];
   const queries = {
     displayList: { pages: [{ pageIndex: 0, ...PAGE, primitives: [] }] },
     pageCount: () => 1,
@@ -86,13 +89,15 @@ function setup() {
     displayListQueries: queries,
     canvasHostRef: { current: host },
     onHeaderFooterDoubleClick: (region, page) => opened.push([region, page]),
+    partEdit,
+    onBodyClick: () => bodyClicks.push(1),
     setSelectionRects: () => {},
     setCaretPosition: () => {},
     setIsFocused: () => {},
     scrollToPositionImpl: () => {},
   };
   renderHook(() => usePagesPointer(options));
-  return { placed, words, opened };
+  return { placed, words, opened, bodyClicks };
 }
 
 function doubleClick(x: number, y: number): void {
@@ -121,4 +126,12 @@ test('a double click on a footer opens it and leaves the body caret alone', () =
   expect(opened).toEqual([['footer', 1]]);
   expect(placed).toEqual([]);
   expect(words).toEqual([]);
+});
+
+test('a double click on a header with the footer open opens the header without closing to the body', () => {
+  const { placed, opened, bodyClicks } = setup({ kind: 'footer', rId: 'rId8' });
+  doubleClick(400, 40);
+  expect(opened.at(-1)).toEqual(['header', 1]);
+  expect(bodyClicks).toEqual([]);
+  expect(placed).toEqual([]);
 });
