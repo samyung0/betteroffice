@@ -31,6 +31,8 @@ import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEdit
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
 const CHART_FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/charts.xlsx');
+// a few used cells, so most of the window lies past the used range.
+const SMALL_FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/defined-names.xlsx');
 const UNDRAWABLE_FIXTURE = resolve(
   import.meta.dir,
   '../../xlsx/test-fixtures/unsupported-charts.xlsx'
@@ -202,6 +204,7 @@ function fixtureFrom(bytes: Uint8Array): Fixture {
 }
 
 let plain: Fixture;
+let small: Fixture;
 let linked: Fixture;
 let charted: Fixture;
 let undrawable: Fixture;
@@ -229,6 +232,7 @@ beforeAll(async () => {
   await initWasm(new Uint8Array(readFileSync(WASM)));
   const source = new Uint8Array(readFileSync(FIXTURE));
   plain = fixtureFrom(source);
+  small = fixtureFrom(new Uint8Array(readFileSync(SMALL_FIXTURE)));
   linked = fixtureFrom(withHyperlink(source));
   charted = fixtureFrom(new Uint8Array(readFileSync(CHART_FIXTURE)));
   undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
@@ -596,6 +600,30 @@ describe('XlsxEditor keyboard', () => {
     expect(view.nameBox().value).toBe('A71');
     for (let step = 0; step < 12; step += 1) await press(view.surface, 'ArrowRight');
     expect(view.nameBox().value).toBe('M71');
+  }, MANY_KEYS_MS);
+
+  it('selects the cells a drag or a Shift+click covers past the used range', async () => {
+    const view = await mountEditor(small);
+    const from = { row: 9, col: 1 };
+    const to = { row: 14, col: 3 };
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, pointAt(small, from));
+      fireEvent.mouseMove(view.surface, { ...pointAt(small, to), buttons: 1 });
+      fireEvent.mouseUp(window, pointAt(small, to));
+    });
+    expect(view.nameBox().value).toBe('D15');
+    const pressed = cellRect(small.grid, from.row, from.col)!;
+    const under = cellRect(small.grid, to.row, to.col)!;
+    const box = view.selectionBox()!.style;
+    expect([box.left, box.top, box.width, box.height].map((value) => Math.round(parseFloat(value)))).toEqual(
+      [pressed.x, pressed.y, under.x + under.w - pressed.x, under.y + under.h - pressed.y].map(Math.round)
+    );
+
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, { ...pointAt(small, { row: 20, col: 4 }), shiftKey: true });
+      fireEvent.mouseUp(window, pointAt(small, { row: 20, col: 4 }));
+    });
+    expect(view.nameBox().value).toBe('E21');
   }, MANY_KEYS_MS);
 
   it('selects the cell an address typed into the name box names', async () => {
