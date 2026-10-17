@@ -92,7 +92,10 @@ pub fn unzip_parts_with_limits(
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("bad zip entry name: {e}"))?
+            .into_owned();
         let Some(security_path) = normalized_security_path(&name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
