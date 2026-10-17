@@ -3,6 +3,7 @@ pub(crate) mod rebase;
 mod remote_equivalence;
 
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -393,7 +394,7 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
-        workbook.recalculate_all(options);
+        workbook.recalculate_at_open(options);
         Ok(workbook)
     }
 
@@ -404,9 +405,16 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
-        workbook.recalculate_all(options);
+        workbook.recalculate_at_open(options);
         workbook.mark_exact();
         Ok(workbook)
+    }
+
+    /// The recalculation at open shows current values without counting as an
+    /// edit, so a save without edits keeps the file's cached values.
+    fn recalculate_at_open(&mut self, options: CalculationOptions) {
+        self.rebuild_and_recalculate(options);
+        self.edited_since_open = false;
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
@@ -1133,6 +1141,14 @@ impl Workbook {
                     },
                     active_sheet,
                 )?;
+                if parts
+                    .iter()
+                    .all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
+                    && let Some(source) = &self.source_container
+                    && source.holds_exactly(parts.iter().map(|(name, _)| name.as_str()))
+                {
+                    return Ok(source.as_bytes().to_vec());
+                }
                 self.rezip(&parts)
             }
             None => self.rezip(&xlsx_parse::serialize_workbook_with_active_sheet(
