@@ -55,6 +55,10 @@ const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
+/// What clearing one cell can add to the collaboration update at most: a cell that
+/// came with the file is overwritten with an empty content record (about 112 bytes
+/// measured), one added since only drops its record.
+pub const CLEARED_CELL_UPDATE_BYTES: usize = 128;
 /// Largest browser-safe collaboration client identifier.
 pub const MAX_COLLABORATION_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 /// Maximum client entries accepted in a collaboration state vector.
@@ -1665,6 +1669,42 @@ impl Workbook {
         mark(EditStage::Recalculated);
         self.keep_exact(exact, &[(sheet, cell, formula)], &result);
         Ok(self.mutation_result(true, result, &seeds))
+    }
+
+    /// Clears the content of the cells in `range` that hold a value or a formula,
+    /// keeping their formats, as one undo step; empty cells cost nothing, so a
+    /// sparse range costs only its stored cells. Refused with nothing changed when
+    /// the update could exceed `max_update_bytes` ([`CLEARED_CELL_UPDATE_BYTES`]
+    /// per cleared cell).
+    pub fn clear_contents(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        max_update_bytes: Option<usize>,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let edits = self
+            .sheet(sheet)?
+            .iter_cells()
+            .filter(|(at, cell)| {
+                range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
+            })
+            .map(|(cell, _)| CellInput {
+                cell,
+                input: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let bytes = edits.len().saturating_mul(CLEARED_CELL_UPDATE_BYTES);
+        if let Some(max) = max_update_bytes
+            && bytes > max
+        {
+            return Err(Error::ClearTooLarge {
+                cells: edits.len() as u64,
+                bytes: bytes as u64,
+                max: max as u64,
+            });
+        }
+        self.edit_cells(sheet, &edits, options)
     }
 
     pub fn edit_cells(

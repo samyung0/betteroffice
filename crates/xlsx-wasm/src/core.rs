@@ -167,6 +167,14 @@ struct RangeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearArgs {
+    sheet: u32,
+    range: String,
+    max_update_bytes: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct ChartHitArgs {
     viewport: Viewport,
     x: f32,
@@ -645,6 +653,25 @@ impl Session {
         let result = self
             .workbook
             .edit_cells(SheetId(args.sheet), &edits, calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn clear_contents_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ClearArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad clear args: {error}"))?;
+        let result = self
+            .workbook
+            .clear_contents(
+                SheetId(args.sheet),
+                parse_range(&args.range)?,
+                args.max_update_bytes,
+                calculation_options(now_serial),
+            )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }

@@ -10,6 +10,7 @@ import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
+import { refusalOf } from './refusals';
 import { StaleProposalError } from './staleProposal';
 
 /**
@@ -363,6 +364,13 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /**
+   * clear the content of the cells in `range` (A1) that hold a value or a
+   * formula, keeping formats, as one undo step: empty cells cost nothing. Throws
+   * {@link ClearTooLargeError}, changing nothing, when the update could exceed
+   * `maxUpdateBytes`.
+   */
+  clearContents(sheet: number, range: string, maxUpdateBytes?: number): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -675,6 +683,16 @@ export function openWorkbook(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    clearContents(sheet: number, range: string, maxUpdateBytes?: number): EditResult {
+      try {
+        return parseJson(
+          () => doc.clearContentsJson(JSON.stringify({ sheet, range, maxUpdateBytes })),
+          true
+        );
+      } catch (error) {
+        throw (error instanceof Error && refusalOf(error.message)) || error;
+      }
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

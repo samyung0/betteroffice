@@ -1,10 +1,10 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
-    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane, GridGeometry,
-    Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    AnchorCell, AnchorEditAs, AnchorExtent, CLEARED_CELL_UPDATE_BYTES, CalculationOptions, Cell,
+    CellInput, CellRange, CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind,
+    ColStyle, DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane,
+    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_COLS, MAX_ROWS, NumberFormatKind,
     NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId,
     StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
@@ -111,6 +111,59 @@ fn sheet_info_reports_the_used_range_as_edits_grow_and_shrink_it() {
         used(&workbook),
         Some(CellRange::new(cell("A1"), cell("B2")))
     );
+}
+
+#[test]
+fn clearing_a_sparse_range_touches_only_its_stored_cells() {
+    let mut sheet = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("B2", 2.0), ("Z100000", 3.0)] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let mut workbook = Workbook::from_model_collaborative(model, 7101).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let sink = updates.clone();
+    let _subscription = workbook
+        .observe_update_v1(move |event| sink.lock().unwrap().push(event.update))
+        .unwrap();
+    let range = CellRange::new(cell("A1"), cell("Z100000"));
+    let options = CalculationOptions::default();
+    // 3 cells may take 3 x CLEARED_CELL_UPDATE_BYTES: refused under that, nothing changed.
+    let refused = workbook.clear_contents(SheetId(0), range, Some(300), options);
+    assert!(matches!(
+        refused,
+        Err(Error::ClearTooLarge {
+            cells: 3,
+            bytes: 384,
+            max: 300
+        })
+    ));
+    assert!(updates.lock().unwrap().is_empty());
+    assert_eq!(
+        workbook.sheet_info().unwrap().used_range,
+        Some(range),
+        "a refused clear changes nothing"
+    );
+
+    workbook
+        .clear_contents(SheetId(0), range, Some(384), options)
+        .unwrap();
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    assert_eq!(sheet.iter_cells().count(), 0);
+    // one update, within the bound the limit is checked against.
+    let updates = updates.lock().unwrap();
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].len() <= 3 * CLEARED_CELL_UPDATE_BYTES);
+    assert_eq!(workbook.history_state().undo_depth, 1);
 }
 
 #[test]

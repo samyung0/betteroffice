@@ -37,6 +37,11 @@ export class XlsxDocument {
     checkpointCellsJson(): string;
     checkpointProjectionJson(): string;
     /**
+     * clear the cells of a range that hold content, as one undo step; returns
+     * `SheetInfo` json, or a "clear too large" error when over `maxUpdateBytes`.
+     */
+    clearContentsJson(args: string): string;
+    /**
      * Stop observation and discard queued events.
      */
     clearUpdateObservation(): void;
@@ -186,6 +191,7 @@ export interface InitOutput {
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_checkpointCellsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_checkpointProjectionJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_clearContentsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];

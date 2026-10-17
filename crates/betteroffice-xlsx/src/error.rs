@@ -44,6 +44,12 @@ pub enum Error {
         cols: u64,
         max: u64,
     },
+    /// A clear whose collaboration update could exceed the caller's limit; nothing changed.
+    ClearTooLarge {
+        cells: u64,
+        bytes: u64,
+        max: u64,
+    },
     InvalidViewport,
     DisplayTooLarge {
         cells: u64,
@@ -119,6 +125,10 @@ impl fmt::Display for Error {
             Self::RangeTooLarge { rows, cols, max } => {
                 write!(f, "range {rows}x{cols} exceeds the {max}-cell copy cap")
             }
+            Self::ClearTooLarge { cells, bytes, max } => write!(
+                f,
+                "clear too large: {cells} cells may take {bytes} bytes, over the {max}-byte limit"
+            ),
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,

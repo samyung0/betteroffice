@@ -10,6 +10,7 @@ import type {
   WorkbookHandle,
   WorkbookUpdateListener,
 } from '../wasm/loader';
+import { refusalOf } from '../wasm/refusals';
 import { StaleProposalError } from '../wasm/staleProposal';
 import {
   MUTATING_METHODS,
@@ -139,7 +140,7 @@ export async function openWorkbookWorker(
     if (message.ok) request.resolve(message.value);
     else if (message.stale) request.reject(new StaleProposalError(message.stale));
     else if (message.error === SHEET_GONE) request.reject(new SheetGoneError(message.error));
-    else request.reject(new Error(message.error));
+    else request.reject(refusalOf(message.error) ?? new Error(message.error));
   };
   worker.onerror = (event) => fail(new Error(`workbook worker failed: ${event.message}`));
   worker.onmessageerror = () => fail(new Error('workbook worker sent an unreadable message'));
