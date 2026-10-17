@@ -4552,6 +4552,10 @@ mod tests {
                 "39.8%",
                 RunProperties {
                     font_family: Some(family.to_owned()),
+                    highlight: Some(ColorValue {
+                        rgb: Some("FFFF00".to_owned()),
+                        ..ColorValue::default()
+                    }),
                     ..RunProperties::default()
                 },
             ),

@@ -12,9 +12,12 @@ use ooxml_drawingml::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
+    decode_embedded_font_within, presentation_break_opportunities, shape, single_line_box,
+    uppercase_for_language,
 };
-use pptx_edit::paragraph::{ListCounters, ParagraphCascade, SlideParents, find_placeholder};
+use pptx_edit::paragraph::{
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, merge_paragraph_properties,
+};
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
 };
@@ -23,8 +26,7 @@ use pptx_parse::{
     CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
     Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
-    TextOverflow, builtin_table_style, effective_color_map, find_placeholder, inherited_paragraph,
-    master_for_layout, master_text_style, paragraph_cascade,
+    TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,8 +35,9 @@ use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
-    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
-    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    ListKind, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow,
+    Strike, Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun,
+    Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -155,7 +158,9 @@ type FaceKey = (String, bool, bool);
 
 pub struct SlideRenderer {
     fonts: FontStore,
-    faces: HashMap<(String, bool, bool), FontFace>,
+    faces: HashMap<FaceKey, FontFace>,
+    /// The deck's embedded faces, ahead of `faces` for the same key.
+    embedded: HashMap<FaceKey, FontFace>,
     /// Faces drawn only for characters a run's own face has no glyph for,
     /// with the weight and slant each was registered for.
     coverage_faces: Vec<(bool, bool, FontFace)>,
@@ -178,6 +183,7 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            embedded: HashMap::new(),
             coverage_faces: Vec::new(),
             fallback: None,
             fallback_family: None,
@@ -293,20 +299,6 @@ impl SlideRenderer {
             .fonts
             .register(bytes)
             .map_err(|error| RenderError::Font(error.to_string()))?;
-        let requested = normalize_family(family);
-        let metrics = family_metrics(&requested, bold, italic);
-        let face = FontFace {
-            id,
-            family: family.to_owned(),
-            requested_family: requested.clone(),
-            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
-            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
-            line_id: id,
-        };
-        self.faces.insert((requested, bold, italic), face.clone());
-        self.fallback.get_or_insert(face);
-        self.fallback_family
-            .get_or_insert_with(|| normalize_family(family));
         self.font_count += 1;
         if let Ok(cache) = self.text_layouts.get_mut() {
             cache.clear();
@@ -331,6 +323,7 @@ impl SlideRenderer {
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
             requested_family: requested,
+            line_id: id,
         }
     }
 
@@ -716,7 +709,10 @@ impl SlideRenderer {
     /// resolution would fall back to.
     fn has_face_for(&self, family: &str) -> bool {
         let requested = normalize_family(family);
-        self.faces.keys().any(|(name, _, _)| *name == requested)
+        self.embedded
+            .keys()
+            .chain(self.faces.keys())
+            .any(|(name, _, _)| *name == requested)
     }
 
     fn resolve_face(
@@ -743,18 +739,16 @@ impl SlideRenderer {
                 });
             }
         }
+        // An embedded family with only some styles (a bold alone) still
+        // draws in its own face, as the browser picks it for the name.
+        if let Some(face) = nearest_face(&self.embedded, &requested, bold, italic) {
+            return Ok(self.with_requested_metrics(face, &requested, bold, italic));
+        }
         let face = self
-            .faces
-            .iter()
-            .filter(|((name, _, _), _)| Some(name) == self.fallback_family.as_ref())
-            .min_by_key(|((_, face_bold, face_italic), _)| {
-                (
-                    2 * u8::from(*face_bold != bold) + u8::from(*face_italic != italic),
-                    *face_bold,
-                    *face_italic,
-                )
-            })
-            .map(|(_, face)| self.with_requested_metrics(face, &requested, bold, italic))
+            .fallback_family
+            .as_ref()
+            .and_then(|name| nearest_face(&self.faces, name, bold, italic))
+            .map(|face| self.with_requested_metrics(face, &requested, bold, italic))
             .ok_or(RenderError::NoFont)?;
         if normalize_family(&face.family) != requested {
             substitutions.record(family, &requested, &face.family);
@@ -2449,8 +2443,22 @@ impl BodyCascade<'_> {
         self.primary?.paragraphs.get(source?)
     }
 
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, source: Option<usize>, index: usize) -> Option<&RunProperties> {
+        let inherited = [self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .filter_map(|body| body.paragraphs.get(index));
+        self.primary_paragraph(source)
+            .into_iter()
+            .chain(inherited)
+            .find_map(|paragraph| paragraph.end_properties.as_ref())
+    }
+
     fn paragraph_properties(
         &self,
+        source: Option<usize>,
         index: usize,
         level: u32,
         authored: Option<&Bullet>,
@@ -2465,7 +2473,7 @@ impl BodyCascade<'_> {
             placeholder: self.placeholder,
             style_color: self.style_color,
         }
-        .properties(index, level, authored)
+        .properties(index, source, level, authored)
     }
 }
 
@@ -2681,8 +2689,15 @@ fn resolve_content(
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
     let mut numbering = ListCounters::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties =
-            cascade.paragraph_properties(index, paragraph.level, paragraph.bullet.as_ref());
+        // The paragraph's own marker is its file paragraph's unless an edit
+        // changed it, so it overrides the cascade either way.
+        let mut properties = cascade.paragraph_properties(
+            paragraph.source,
+            index,
+            paragraph.level,
+            paragraph.bullet.as_ref(),
+        );
+        merge_paragraph_properties(&mut properties, &paragraph.overrides);
         let language = properties
             .default_run
             .as_ref()
@@ -2732,13 +2747,23 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let written_marker = numbering
-            .next(
-                properties.bullet.as_ref(),
-                paragraph.level,
-                paragraph.runs.iter().any(|run| !run.text.is_empty()),
-            )
-            .map(|marker| marker.text());
+        // A blank paragraph between list items is spacing, not an item:
+        // PowerPoint neither marks it nor counts it towards the next number,
+        // except the one being typed in, which shows the marker it would take.
+        let has_text = paragraph.runs.iter().any(|run| !run.text.is_empty());
+        let written_marker = if has_text || !paragraph.caret {
+            numbering.next(properties.bullet.as_ref(), paragraph.level, has_text)
+        } else {
+            numbering
+                .clone()
+                .next(properties.bullet.as_ref(), paragraph.level, true)
+        }
+        .map(|marker| marker.text());
+        let list = match &properties.bullet {
+            Some(Bullet::Character { value }) if !value.trim().is_empty() => Some(ListKind::Bullet),
+            Some(Bullet::AutoNumber { .. }) => Some(ListKind::Number),
+            _ => None,
+        };
         let marker = written_marker
             .as_deref()
             .map(|marker| symbol_bullet(marker, properties.bullet_font.as_ref(), theme));
@@ -3236,7 +3261,9 @@ fn chart_text_primitive(
                     bold,
                     italic,
                     underline: false,
+                    strike: None,
                     color: text.color.to_owned(),
+                    highlight: None,
                     letter_spacing_px: tracking,
                     baseline_offset_px: 0.0,
                     glyphs,
@@ -3416,6 +3443,7 @@ fn text_layout_key(
             bullet_style,
             rtl,
             runs,
+            list: _,
         } = paragraph;
         key.push(match align {
             TextAlign::Left => 0,
@@ -3517,7 +3545,9 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         bold,
         italic,
         underline,
+        strike,
         color,
+        highlight,
         caps,
     } = style;
     key_u32(key, id.to_u32());
@@ -3536,7 +3566,13 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
     key.push(u8::from(*bold));
     key.push(u8::from(*italic));
     key.push(u8::from(*underline));
+    key.push(match strike {
+        None => 0,
+        Some(Strike::Single) => 1,
+        Some(Strike::Double) => 2,
+    });
     key_str(key, color);
+    key_opt_str(key, highlight);
     key.push(match caps {
         TextCaps::None => 0,
         TextCaps::Small => 1,
@@ -3735,7 +3771,7 @@ fn layout_paragraph(
             }],
         }];
         // Only the empty item the caret is in has a marker here.
-        prepend_bullet(fonts, paragraph, x, &mut lines, scale)?;
+        prepend_bullet(fonts, paragraph, (x, width), &mut lines, scale)?;
         return Ok(lines);
     }
     let ranges = if stacked {
@@ -4366,7 +4402,9 @@ fn positioned_runs(
                     && run.bold == cluster.style.bold
                     && run.italic == cluster.style.italic
                     && run.underline == cluster.style.underline
+                    && run.strike == cluster.style.strike
                     && run.color == cluster.style.color
+                    && run.highlight == cluster.style.highlight
             });
         if !append {
             run_direction = None;
@@ -9660,7 +9698,25 @@ mod tests {
     }
 
     #[test]
-    fn a_placeholder_without_a_transform_takes_its_layout_placeholders() {
+    fn placeholder_matching_prefers_indices_and_normalizes_common_types() {
+        let indexed = Placeholder {
+            placeholder_type: Some("body".to_owned()),
+            index: Some(4),
+            orientation: None,
+            size: None,
+        };
+        let same_index = Placeholder {
+            placeholder_type: Some("title".to_owned()),
+            index: Some(4),
+            orientation: None,
+            size: None,
+        };
+        let centered_title = Placeholder {
+            placeholder_type: Some("ctrTitle".to_owned()),
+            index: None,
+            orientation: None,
+            size: None,
+        };
         let title = Placeholder {
             placeholder_type: Some("title".to_owned()),
             index: None,
@@ -9690,7 +9746,6 @@ mod tests {
             rotation_deg: 0.0,
             flip_h: false,
             flip_v: false,
-            inherited: None,
             hidden: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),

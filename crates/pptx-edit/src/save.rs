@@ -8,11 +8,12 @@ use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
     DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, PptxPackage,
     RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
-    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite, find_placeholder,
+    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
 use crate::deck::baseline_snapshot;
+use crate::paragraph::{SlideParents, find_placeholder};
 use crate::{
     CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
     ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
@@ -27,35 +28,20 @@ struct SlideContext<'a> {
 
 impl<'a> SlideContext<'a> {
     fn new(package: &'a PptxPackage, snapshot: &SlideSnapshot) -> Self {
-        let source_shapes = snapshot
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
-            .map(|slide| slide.shapes.as_slice())
-            .unwrap_or_default();
-        let layout = slide_layout(package, snapshot.layout_part_path.as_deref());
-        let master = pptx_parse::master_for_layout(package, layout);
+        let parents = SlideParents::resolve(
+            package,
+            snapshot.source_part_path.as_deref(),
+            snapshot.layout_part_path.as_deref(),
+        );
         Self {
-            layout,
-            master,
-            source_shapes,
+            layout: parents.layout,
+            master: parents.master,
+            source_shapes: parents
+                .slide
+                .map(|slide| slide.shapes.as_slice())
+                .unwrap_or_default(),
         }
     }
-}
-
-/// A slide's layout: its own, else the package's first.
-pub(crate) fn slide_layout<'a>(
-    package: &'a PptxPackage,
-    layout_part_path: Option<&str>,
-) -> Option<&'a SlideLayout> {
-    layout_part_path
-        .and_then(|path| {
-            package
-                .layouts
-                .iter()
-                .find(|layout| layout.part_path == path)
-        })
-        .or_else(|| package.layouts.first())
 }
 
 impl DeckSession {
@@ -600,6 +586,7 @@ fn paragraph_writes(
         writes.push(ParagraphWrite {
             source_index,
             template_index,
+            preserved_xml: None,
             rebuild: true,
             properties_changed,
             alignment: paragraph.alignment.clone(),
@@ -624,6 +611,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             font_size_pt: run.style.font_size_pt,
             spacing_pt: run.style.spacing_pt,
             baseline_pct: run.style.baseline_pct,
+            kern_pt: run.style.kern_pt,
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
@@ -634,6 +622,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             highlight: run.style.highlight.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,
+            effects: None,
         },
     }
 }

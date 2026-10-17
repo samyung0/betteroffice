@@ -314,6 +314,61 @@ fn pptx_replace_text_replaces_its_one_occurrence_in_the_style_it_replaces() {
     );
 }
 
+/// A run's own `kern` is part of the style a replacement takes, and the
+/// export writes it back.
+#[test]
+fn pptx_replace_text_keeps_the_runs_kern() {
+    const KERNED: &[u8] = include_bytes!("../../pptx-edit/tests/fixtures/run-kern.pptx");
+    let sha = sha256_hex(KERNED);
+    let seeded = seed(Format::Pptx, KERNED).unwrap();
+    let target = inspect(KERNED, checkpoint(Format::Pptx, &sha, &seeded))
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.value == "OUR GREEN INITIATIVES")
+        .unwrap();
+    let edit = apply_commands(
+        KERNED,
+        checkpoint(Format::Pptx, &sha, &seeded),
+        &[replace(&target, "GREEN", "BLUE")],
+    )
+    .unwrap();
+    let story = &target.position[..target.position.rfind(':').unwrap()];
+    let deck = DeckSession::open_from_update_with_source(&edit.state, KERNED, 9996).unwrap();
+    let paragraph = deck
+        .story(story)
+        .unwrap()
+        .paragraphs
+        .into_iter()
+        .find(|paragraph| paragraph.id == target.id)
+        .unwrap();
+    assert!(
+        paragraph
+            .runs
+            .iter()
+            .all(|run| run.style.kern_pt == Some(0.0)),
+        "{:?}",
+        paragraph.runs
+    );
+    let saved = export(
+        KERNED,
+        checkpoint(Format::Pptx, &sha, &edit.state),
+        Determinism {
+            seed: &"0".repeat(64),
+            now: "2026-10-17T00:00:00.000Z",
+        },
+    )
+    .unwrap();
+    let slide = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(slide.contains("OUR BLUE INITIATIVES"), "{slide}");
+    // The run's and the list style's.
+    assert_eq!(slide.matches(r#"kern="0""#).count(), 2, "{slide}");
+}
+
 /// `base` with `from`, which occurs once in the part at `path`, replaced.
 fn with_part(base: &[u8], path: &str, from: &str, to: &str) -> Vec<u8> {
     let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(base)

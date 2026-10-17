@@ -25,6 +25,7 @@ export type RunAttribute =
   | 'underline'
   | 'spacing'
   | 'baseline'
+  | 'kern'
   | 'caps'
   | 'strike'
   | 'highlight';

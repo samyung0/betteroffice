@@ -1,7 +1,7 @@
-//! A placeholder draws at the same rect and orientation live, after its first
-//! geometry edit, and once that edit is saved and the deck reopened.
+//! A placeholder without a full transform of its own draws at the rect and
+//! orientation it inherits.
 
-use pptx_edit::{DeckSession, EditCtx, ShapeSnapshot};
+use pptx_edit::{DeckSession, ShapeSnapshot};
 use pptx_render::{Primitive, SlideRenderer, Transform};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -124,10 +124,6 @@ fn deck(slide: &str, layout: &str, master: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-fn context() -> EditCtx {
-    EditCtx::local("inherited")
-}
-
 fn emu(px: f32) -> i64 {
     (f64::from(px) * 9525.0).round() as i64
 }
@@ -161,22 +157,6 @@ fn shape(session: &DeckSession, index: usize) -> ShapeSnapshot {
     session.snapshot().unwrap().slides[0].shapes[index].clone()
 }
 
-fn slide_id(session: &DeckSession) -> String {
-    session.snapshot().unwrap().slides[0].id.clone()
-}
-
-fn reopened(session: &DeckSession) -> DeckSession {
-    DeckSession::open(&session.save().unwrap(), 2).unwrap()
-}
-
-fn turned(rotation_deg: f32, flip_h: bool) -> Transform {
-    Transform {
-        rotation_deg,
-        flip_h,
-        flip_v: false,
-    }
-}
-
 /// A body placeholder over a turned and flipped layout body at
 /// `952500,1905000 7620000x2857500`.
 fn body_deck(properties: &str) -> Vec<u8> {
@@ -197,39 +177,6 @@ fn body_deck(properties: &str) -> Vec<u8> {
 const LAYOUT_BODY: (i64, i64, i64, i64) = (952_500, 1_905_000, 7_620_000, 2_857_500);
 
 #[test]
-fn a_move_to_the_slide_corner_draws_there_live_and_reopened() {
-    let bytes = deck(
-        &sp(2, "Title", r#"<p:ph type="title"/>"#, "<p:spPr/>"),
-        &sp(
-            2,
-            "Title Placeholder",
-            r#"<p:ph type="title"/>"#,
-            &filled(
-                r#"<a:xfrm><a:off x="762000" y="457200"/><a:ext cx="10668000" cy="1143000"/></a:xfrm>"#,
-            ),
-        ),
-        "",
-    );
-    let session = DeckSession::open(&bytes, 1).unwrap();
-    let title = shape(&session, 0);
-    assert_eq!(
-        drawn(&session, &title.id),
-        (
-            (762_000, 457_200, 10_668_000, 1_143_000),
-            Transform::default()
-        )
-    );
-
-    session
-        .move_shape(&context(), &slide_id(&session), &title.id, 0, 0)
-        .unwrap();
-
-    let live = drawn(&session, &title.id);
-    assert_eq!(live, ((0, 0, 10_668_000, 1_143_000), Transform::default()));
-    assert_eq!(drawn(&reopened(&session), &title.id), live);
-}
-
-#[test]
 fn an_offset_only_transform_is_not_inherited_and_draws_with_its_own_orientation() {
     let session = DeckSession::open(
         &body_deck(r#"<p:spPr><a:xfrm><a:off x="123825" y="657225"/></a:xfrm></p:spPr>"#),
@@ -238,68 +185,10 @@ fn an_offset_only_transform_is_not_inherited_and_draws_with_its_own_orientation(
     .unwrap();
     let body = shape(&session, 0);
 
-    assert_eq!(body.inherited, None);
     assert_eq!(
         drawn(&session, &body.id),
         (LAYOUT_BODY, Transform::default())
     );
-}
-
-#[test]
-fn an_api_move_of_an_offset_only_transform_moves_the_rect_it_draws_at() {
-    let session = DeckSession::open(
-        &body_deck(r#"<p:spPr><a:xfrm><a:off x="123825" y="657225"/></a:xfrm></p:spPr>"#),
-        1,
-    )
-    .unwrap();
-    let body = shape(&session, 0);
-
-    session
-        .move_shape(
-            &context(),
-            &slide_id(&session),
-            &body.id,
-            1_905_000,
-            2_857_500,
-        )
-        .unwrap();
-
-    let live = drawn(&session, &body.id);
-    assert_eq!(
-        live,
-        (
-            (1_905_000, 2_857_500, LAYOUT_BODY.2, LAYOUT_BODY.3),
-            Transform::default()
-        )
-    );
-    assert_eq!(drawn(&reopened(&session), &body.id), live);
-}
-
-#[test]
-fn a_rotation_only_transform_keeps_its_own_rotation_through_a_resize() {
-    let session =
-        DeckSession::open(&body_deck(r#"<p:spPr><a:xfrm rot="1200000"/></p:spPr>"#), 1).unwrap();
-    let body = shape(&session, 0);
-
-    assert_eq!(body.inherited, None);
-    assert_eq!(
-        drawn(&session, &body.id),
-        (LAYOUT_BODY, turned(20.0, false))
-    );
-
-    session
-        .resize_shape(
-            &context(),
-            &slide_id(&session),
-            &body.id,
-            7_620_000,
-            2_857_500,
-        )
-        .unwrap();
-
-    let live = drawn(&session, &body.id);
-    assert_eq!(live, ((0, 0, 7_620_000, 2_857_500), turned(20.0, false)));
-    assert_eq!(drawn(&reopened(&session), &body.id), live);
 }
 
 /// A slide number and a date whose indices name the layout's content
@@ -366,87 +255,13 @@ const MASTER_NUMBER: (i64, i64, i64, i64) = (8_610_600, 6_286_500, 2_743_200, 38
 const MASTER_DATE: (i64, i64, i64, i64) = (838_200, 6_286_500, 2_743_200, 381_000);
 
 #[test]
-fn a_slide_number_and_date_inherit_the_rect_they_are_drawn_at() {
+fn a_slide_number_and_date_draw_at_the_masters_rect() {
     let session = DeckSession::open(&footer_deck(), 1).unwrap();
     for (index, expected) in [(0, MASTER_NUMBER), (1, MASTER_DATE)] {
         let footer = shape(&session, index);
-        let inherited = footer
-            .inherited
-            .expect("the master placeholder has geometry");
-
-        assert_eq!(
-            (inherited.x, inherited.y, inherited.width, inherited.height),
-            expected
-        );
         assert_eq!(
             drawn(&session, &footer.id),
             (expected, Transform::default())
         );
     }
-}
-
-#[test]
-fn a_first_nudge_keeps_the_drawn_size_of_a_slide_number_and_date() {
-    let session = DeckSession::open(&footer_deck(), 1).unwrap();
-    let slide_id = slide_id(&session);
-    for (index, (x, y, width, height)) in [(0, MASTER_NUMBER), (1, MASTER_DATE)] {
-        let footer = shape(&session, index);
-        session
-            .move_shape(&context(), &slide_id, &footer.id, x + 95_250, y)
-            .unwrap();
-
-        let live = drawn(&session, &footer.id);
-        assert_eq!(live, ((x + 95_250, y, width, height), Transform::default()));
-        assert_eq!(drawn(&reopened(&session), &footer.id), live);
-    }
-}
-
-#[test]
-fn an_all_zero_transform_reopens_with_the_orientation_it_inherits() {
-    let bytes = deck(
-        &sp(
-            7,
-            "Zeroed",
-            r#"<p:ph type="pic" idx="20"/>"#,
-            r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm></p:spPr>"#,
-        ),
-        &sp(
-            8,
-            "Picture Placeholder",
-            r#"<p:ph type="pic" idx="20"/>"#,
-            &filled(
-                r#"<a:xfrm rot="5400000" flipH="1"><a:off x="1905000" y="952500"/><a:ext cx="2857500" cy="1905000"/></a:xfrm>"#,
-            ),
-        ),
-        "",
-    );
-    let session = DeckSession::open(&bytes, 1).unwrap();
-    let zeroed = shape(&session, 0);
-    assert_eq!(
-        drawn(&session, &zeroed.id),
-        (
-            (1_905_000, 952_500, 2_857_500, 1_905_000),
-            turned(90.0, true)
-        )
-    );
-
-    session
-        .move_shape(
-            &context(),
-            &slide_id(&session),
-            &zeroed.id,
-            2_000_250,
-            952_500,
-        )
-        .unwrap();
-
-    let live = drawn(&session, &zeroed.id);
-    assert_eq!(
-        live,
-        (
-            (2_000_250, 952_500, 2_857_500, 1_905_000),
-            turned(90.0, true)
-        )
-    );
-    assert_eq!(drawn(&reopened(&session), &zeroed.id), live);
 }

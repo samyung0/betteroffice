@@ -177,14 +177,8 @@ fn parse_shape_children(
     for child in parent.child_elements() {
         if child.local_name() == "AlternateContent" {
             if let Some(branch) = alternate_content_branch(child) {
-                let mut parsed = parse_shape_children(
-                    branch,
-                    relationships,
-                    part,
-                    budget,
-                    elements,
-                    previews,
-                )?;
+                let mut parsed =
+                    parse_shape_children(branch, relationships, part, budget, elements, previews)?;
                 if branch.local_name() == "Fallback" {
                     flag_equations(&mut parsed, &math_shape_ids(child));
                 }

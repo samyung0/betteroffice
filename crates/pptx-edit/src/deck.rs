@@ -5,10 +5,7 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{
-    GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody, find_placeholder,
-    inherited_paragraph, master_for_layout, master_text_style, paragraph_cascade,
-};
+use pptx_parse::{GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -18,7 +15,7 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
-use crate::save::slide_layout;
+use crate::paragraph::{ParagraphCascade, SlideParents, find_placeholder};
 use crate::story::{
     baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story,
     validate_text_style,
@@ -267,40 +264,37 @@ pub(crate) fn inherited_indents(
     index: usize,
     level: u32,
 ) -> [Option<i64>; 2] {
-    let mut indents = [None; 2];
     let Some((slide, node, body)) = source_story(package, story_id) else {
-        return indents;
+        return [None; 2];
     };
     // A table cell has only its own list styles.
-    let (mut style, mut master_body, mut layout_body) = (None, None, None);
+    let mut cascade = ParagraphCascade {
+        primary: Some(body),
+        ..ParagraphCascade::default()
+    };
     if let ShapeNode::Shape(shape) = node {
+        let parents = SlideParents::resolve(package, Some(&slide.part_path), None);
         let placeholder = shape.base.placeholder.as_ref();
-        let layout = slide_layout(package, slide.layout_part_path.as_deref());
-        let master = master_for_layout(package, layout);
         let placeholder_body = |shapes| match find_placeholder(shapes, placeholder?)? {
             ShapeNode::Shape(shape) => shape.text.as_ref(),
             _ => None,
         };
-        style = master.and_then(|master| master_text_style(master, placeholder, level));
-        master_body = master.and_then(|master| placeholder_body(&master.shapes));
-        layout_body = layout.and_then(|layout| placeholder_body(&layout.shapes));
+        cascade = ParagraphCascade {
+            layout: parents
+                .layout
+                .and_then(|layout| placeholder_body(&layout.shapes)),
+            master: parents
+                .master
+                .and_then(|master| placeholder_body(&master.shapes)),
+            master_slide: parents.master,
+            default_style: &package.presentation.default_text_style,
+            default_paragraph: package.presentation.default_text_paragraph.as_deref(),
+            placeholder,
+            ..cascade
+        };
     }
-    let bodies = [
-        (master_body, inherited_paragraph(master_body, index, level)),
-        (layout_body, inherited_paragraph(layout_body, index, level)),
-        (Some(body), None),
-    ];
-    for properties in style.into_iter().chain(paragraph_cascade(bodies, level)) {
-        for (value, from) in indents
-            .iter_mut()
-            .zip([properties.margin_left, properties.indent])
-        {
-            if from.is_some() {
-                *value = from;
-            }
-        }
-    }
-    indents
+    let properties = cascade.properties(index, None, level, None);
+    [properties.margin_left, properties.indent]
 }
 
 fn seeded_slide_id(slide_index: usize, reference_id: u32) -> String {

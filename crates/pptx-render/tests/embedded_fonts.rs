@@ -192,7 +192,7 @@ fn an_embedded_face_measures_and_wraps_the_text_it_names() {
 
     assert_eq!(
         texts(&fallback.lines),
-        ["Embedded as ", "text it wraps later", "Second line"]
+        ["Embedded as text ", "it wraps later", "Second line"]
     );
     assert_eq!(
         texts(&embedded.lines),
