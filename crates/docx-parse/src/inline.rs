@@ -3260,6 +3260,23 @@ mod tests {
         assert_eq!(parse_sdt_control_type(Some(&unknown)), "richText");
     }
 
+    #[test]
+    fn plain_text_multi_line_is_read_and_synthesized() {
+        let properties = |xml: &str| parse_sdt_properties(Some(&root(xml)), None, None);
+        let single = properties(r#"<w:sdtPr><w:text/></w:sdtPr>"#);
+        assert_eq!(single.multi_line, Some(false));
+        let rich = properties(r#"<w:sdtPr><w:richText/></w:sdtPr>"#);
+        assert_eq!(rich.multi_line, None);
+        let mut multi = properties(r#"<w:sdtPr><w:text w:multiLine="1"/></w:sdtPr>"#);
+        assert_eq!(multi.multi_line, Some(true));
+        multi.raw_properties_xml = None;
+        let synthesized = crate::serializer::paragraph::synthesize_sdt_properties(&multi);
+        assert!(
+            synthesized.contains(r#"<w:text w:multiLine="1"/>"#),
+            "{synthesized}"
+        );
+    }
+
     #[derive(Serialize, Deserialize)]
     #[serde(untagged)]
     enum UntaggedInlineNode {
