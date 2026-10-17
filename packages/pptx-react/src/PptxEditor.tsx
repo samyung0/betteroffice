@@ -531,6 +531,8 @@ function PptxEditorContent({
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+  /** The selection the last text edit left; a different one means the caret moved. */
+  const editedSelectionRef = useRef<PptxTextSelection | null>(null);
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
   /** Select all's objects; a text or single-object selection replaces it. */
   const [multiSelection, setMultiSelection] = useState<{
@@ -1877,10 +1879,19 @@ function PptxEditorContent({
   const commit = (nextSelection: PptxTextSelection | null) => {
     if (readOnly) return;
     selectionRef.current = nextSelection ? { ...nextSelection, focusLine: undefined } : null;
+    editedSelectionRef.current = selectionRef.current;
     setSelection(selectionRef.current);
     setShapeSelection(null);
     recentClickRef.current = null;
     refreshAt(undefined, true);
+  };
+
+  /** The engine groups typing in one story by time alone, so text typed after
+   *  a caret move ends the typing run first and is its own undo step. */
+  const endTypingRunIfMoved = (handle: PresentationHandle) => {
+    if (selectionRef.current === editedSelectionRef.current) return;
+    editedSelectionRef.current = selectionRef.current;
+    if (handle.undoCaptureMode() === 'auto') handle.addUndoBoundary();
   };
 
   const insertSlideText = (text: string) => {
@@ -1888,6 +1899,7 @@ function PptxEditorContent({
     const current = selectionRef.current;
     if (!handle || !current || readOnly || canvasReview.reviewing || !text) return;
     try {
+      endTypingRunIfMoved(handle);
       const start = Math.min(current.anchor, current.focus);
       const end = Math.max(current.anchor, current.focus);
       const receipt = handle.replaceText(current.storyId, start, end, text.replace(/\r\n?/g, '\n'), typingStyle(textStyle));
@@ -2032,6 +2044,7 @@ function PptxEditorContent({
         return;
       }
       if (readOnly) return;
+      endTypingRunIfMoved(handle);
       // A table cell leaves Tab to the browser until cells get their own navigation.
       if (event.key === 'Tab' && !modifier && !event.altKey && !isTableCellStory(selection.storyId)) {
         event.preventDefault();
