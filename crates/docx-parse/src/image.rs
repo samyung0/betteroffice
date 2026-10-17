@@ -115,6 +115,9 @@ pub struct Image {
     pub name: Option<String>,
     #[serde(rename = "rId")]
     pub relationship_id: String,
+    /// Set at save when the relationship is external: the picture is written with `r:link`.
+    #[serde(skip)]
+    pub linked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub src: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,6 +313,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
         id: None,
         name: None,
         relationship_id,
+        linked: false,
         src: None,
         mime_type: None,
         filename: None,

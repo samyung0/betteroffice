@@ -790,7 +790,10 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
         .end_element()
         .start_element("pic:blipFill")
         .start_element("a:blip")
-        .attribute("r:embed", relationship_id);
+        .attribute(
+            if image.linked { "r:link" } else { "r:embed" },
+            relationship_id,
+        );
     if image.opacity.is_some_and(|opacity| opacity < 1.0) {
         let amount = image.opacity.unwrap_or_default().clamp(0.0, 1.0) * 100_000.0;
         writer

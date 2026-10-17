@@ -1747,6 +1747,16 @@ fn process_image_part<'a>(
         .ok_or_else(|| save_error("invalid image relationships path"))?;
     for blocks in stories {
         visit_new_images(blocks, &mut |image| {
+            if image.src.as_deref().is_none_or(str::is_empty) {
+                // A link-only picture has no bytes; it stays a link to its external target.
+                image.linked = relationships
+                    .existing_position(&image.relationship_id)
+                    .is_some_and(|position| {
+                        let entry = *relationships.entry(position);
+                        relationships.attr(&entry.target_mode) == Some("External")
+                    });
+                return Ok(());
+            }
             if let Some(part) = image
                 .src
                 .as_deref()
