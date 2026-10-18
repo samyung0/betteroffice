@@ -39,6 +39,7 @@ export const incrementalCommits: XlsxScenario = {
     }
     expect(handle.cell(SHEET, ROW, 1).input).toBe(WORD);
 
+    let previous = handle.cell(SHEET, ROW, 0).input;
     for (let length = 1; length <= formula.length; length += 1) {
       const partial = formula.slice(0, length);
       const keystroke = profiledEdit(
@@ -49,11 +50,12 @@ export const incrementalCommits: XlsxScenario = {
         0,
         partial
       );
-      expect(keystroke.applied).toBe(true);
-      // a prefix that parses once its open parenthesis is closed is stored closed.
-      expect([partial, `'${partial}`, `${partial})`]).toContain(
-        handle.cell(SHEET, ROW, 0).input
-      );
+      // a prefix that parses once its open parenthesis is closed is stored
+      // closed, so the whole formula after it changes nothing.
+      const input = handle.cell(SHEET, ROW, 0).input;
+      expect(keystroke.applied).toBe(input !== previous);
+      expect([partial, `'${partial}`, `${partial})`]).toContain(input);
+      previous = input;
     }
     expect(handle.cell(SHEET, ROW, 0)).toMatchObject({
       input: formula,
