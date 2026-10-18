@@ -14,10 +14,11 @@ import {
   cellAtPoint,
   cellRect,
   chartRegionAtPoint,
-  ClearTooLargeError,
+  EditTooLargeError,
   extendTo,
   fromTsv,
   hyperlinkAtCell,
+  joinTsv,
   MAX_SCROLL_EXTENT_PX,
   moveFocus,
   normalizeRange,
@@ -137,10 +138,20 @@ export interface XlsxEditorCollaborationOptions {
 }
 
 /**
- * Refusals the host shows: a clear over {@link XlsxEditorProps.clearLimitBytes},
- * or a copy (or cut) of more cells than the engine reads at once.
+ * Refusals the host shows: an edit (a clear, cut or paste) whose update could
+ * pass the engine's 64 MiB cap, or a copy (or cut) of more cells than
+ * {@link XLSX_COPY_MAX_CELLS}. Nothing changed.
  */
-export type XlsxEditorNotice = 'clear-too-large' | 'copy-too-large';
+export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large';
+
+/** A copy reads its area in pieces under the engine's 100,000-cell read cap. */
+const COPY_PIECE_CELLS = 100_000;
+/**
+ * The largest area (rows x columns, from the selection's top-left to the used
+ * range's end) a copy or cut takes. AWAITING CONFIRMATION (Epo): proposed from
+ * the 2026-10-18 headless Chromium measurements at 1M, 5M and 10M cells.
+ */
+export const XLSX_COPY_MAX_CELLS = 5_000_000;
 
 /**
  * Props for {@link XlsxEditor}.
@@ -172,11 +183,11 @@ export interface XlsxEditorProps {
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
   /**
-   * The bytes one clear (Delete, cut) may add to the shared document: a clear
-   * that could exceed it is refused, nothing changes, and `onNotice` hears of
-   * it. Unset, a clear is not limited here.
+   * The host is still sending a large update in pieces: the grid and formula
+   * bar show a loading cursor and edits are refused until it turns false;
+   * selection, scrolling and copy still work, and an open cell edit waits.
    */
-  clearLimitBytes?: number;
+  sending?: boolean;
   /** A refused edit for the host to show; unset, the editor shows its message. */
   onNotice?: (notice: XlsxEditorNotice) => void;
   /**
@@ -595,8 +606,8 @@ function XlsxEditorContent({
   onFirstPaint,
   onPendingChange,
   className,
-  readOnly = false,
-  clearLimitBytes,
+  readOnly: readOnlyProp = false,
+  sending = false,
   onNotice,
   singleRowToolbar = false,
   onCommandStateChange,
@@ -609,6 +620,15 @@ function XlsxEditorContent({
   initialZoom = 1,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
+  // a cut reading its selection in pieces refuses edits, as a send does, so
+  // the clipboard holds what it clears.
+  const [cutReading, setCutReading] = useState(false);
+  // while busy every edit path gates on `readOnly`; the cell editor and a
+  // formula draft stay open and commit once it ends.
+  const busy = sending || cutReading;
+  const readOnly = readOnlyProp || busy;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -961,7 +981,7 @@ function XlsxEditorContent({
   );
 
   useEffect(() => {
-    if (!readOnly) return;
+    if (!readOnlyProp) return;
     setEditing(null);
     setFormulaDraft(null);
     setCapturedFormat(null);
@@ -972,7 +992,12 @@ function XlsxEditorContent({
     setNudgeOffset(null);
     if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = null;
-  }, [readOnly]);
+  }, [readOnlyProp]);
+
+  // the loading cursor while busy; hovering sets the grid's cursor otherwise.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.style.cursor = busy ? 'progress' : 'default';
+  }, [busy]);
 
   useEffect(() => {
     const toolbar = toolbarRef.current;
@@ -1587,70 +1612,101 @@ function XlsxEditorContent({
     focusContainer();
   }, [focusContainer]);
 
-  // the engine clears only the cells that hold content, so a sparse used range
-  // costs its stored cells; one over `clearLimitBytes` is refused unchanged.
+  // an edit past the engine's update cap changed nothing: a notice for the host.
+  const reportEditError = useCallback(
+    (e: unknown) => {
+      if (e instanceof EditTooLargeError && onNotice) onNotice('edit-too-large');
+      else reportError(e);
+    },
+    [onNotice, reportError]
+  );
+
+  // the engine clears only the cells of `target` inside the used range that
+  // hold content, so a sparse used range costs its stored cells.
+  const clearRange = useCallback(
+    (target: Selection) => {
+      const r = inUsedRange(normalizeRange(target), usedRange());
+      if (!r) return;
+      const range = `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+      onSheet(activeSheetId, 'clearContents', activeSheet, range).then(applyResult, reportEditError);
+    },
+    [activeSheet, activeSheetId, applyResult, onSheet, reportEditError, usedRange]
+  );
+
   const clearCells = useCallback(() => {
     if (!handleRef.current || !selection || readOnly) return;
-    const r = inUsedRange(normalizeRange(selection), usedRange());
-    if (!r) return;
-    const range = `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
-    onSheet(activeSheetId, 'clearContents', activeSheet, range, clearLimitBytes).then(
-      applyResult,
-      (e: unknown) => {
-        if (e instanceof ClearTooLargeError && onNotice) onNotice('clear-too-large');
-        else reportError(e);
-      }
-    );
-  }, [
-    selection,
-    activeSheet,
-    activeSheetId,
-    applyResult,
-    onSheet,
-    readOnly,
-    reportError,
-    usedRange,
-    clearLimitBytes,
-    onNotice,
-  ]);
+    clearRange(selection);
+  }, [selection, readOnly, clearRange]);
 
-  // whether the clipboard took the copy: a range over the engine's read cap is
-  // a notice, a denied clipboard leaves things as they are.
-  const copySelection = useCallback(async (): Promise<boolean> => {
-    const handle = handleRef.current;
-    if (!handle || !selection) return false;
-    const r = upToUsedEnd(normalizeRange(selection), usedRange());
-    let cells: Awaited<ReturnType<WorkbookProxy['rangeCells']>> = [];
-    // a selection wholly past the used range copies nothing (and asks the worker nothing).
-    if (r) {
+  // whether the clipboard took a copy of `target`: its area from its own
+  // top-left up to the used range's end, read in pieces under the engine's
+  // read cap. One past XLSX_COPY_MAX_CELLS is a notice; a denied clipboard
+  // leaves things as they are.
+  const copySelection = useCallback(
+    async (target: Selection | null = selection): Promise<boolean> => {
+      const handle = handleRef.current;
+      if (!handle || !target) return false;
+      const r = upToUsedEnd(normalizeRange(target), usedRange());
+      const pieces: string[] = [];
+      // a selection wholly past the used range copies nothing (and asks the worker nothing).
+      if (r) {
+        const rows = r.bottom - r.top + 1;
+        const cols = r.right - r.left + 1;
+        if (rows * cols > XLSX_COPY_MAX_CELLS) {
+          if (onNotice) onNotice('copy-too-large');
+          else
+            reportError(
+              new RangeTooLargeError(
+                `range ${rows}x${cols} exceeds the ${XLSX_COPY_MAX_CELLS}-cell copy cap`
+              )
+            );
+          return false;
+        }
+        const pieceRows = Math.max(1, Math.floor(COPY_PIECE_CELLS / cols));
+        try {
+          for (let top = r.top; top <= r.bottom; top += pieceRows) {
+            const bottom = Math.min(r.bottom, top + pieceRows - 1);
+            const cells = await handle.onSheet(
+              activeSheetId,
+              'rangeCells',
+              activeSheet,
+              `${cellAddress(top, r.left)}:${cellAddress(bottom, r.right)}`
+            );
+            pieces.push(
+              toTsv(cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula }))))
+            );
+          }
+        } catch (e) {
+          reportError(e);
+          return false;
+        }
+      }
       try {
-        cells = await handle.onSheet(
-          activeSheetId,
-          'rangeCells',
-          activeSheet,
-          `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
-        );
-      } catch (e) {
-        if (e instanceof RangeTooLargeError && onNotice) onNotice('copy-too-large');
-        else reportError(e);
+        await navigator.clipboard.writeText(joinTsv(pieces));
+        return true;
+      } catch {
         return false;
       }
-    }
-    const tsv = toTsv(
-      cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
-    );
-    try {
-      await navigator.clipboard.writeText(tsv);
-      return true;
-    } catch {
-      return false;
-    }
-  }, [selection, activeSheet, activeSheetId, usedRange, reportError, onNotice]);
+    },
+    [selection, activeSheet, activeSheetId, usedRange, reportError, onNotice]
+  );
 
-  // a cut clears only what its copy put on the clipboard.
+  // a cut reads, then clears only what its copy put on the clipboard; edits
+  // wait while it reads. Read-only, it copies.
   const cutSelection = useCallback(async () => {
-    if (await copySelection()) clearCells();
-  }, [copySelection, clearCells]);
+    if (!selection) return;
+    if (readOnly) {
+      await copySelection(selection);
+      return;
+    }
+    const target = selection;
+    setCutReading(true);
+    try {
+      if (await copySelection(target)) clearRange(target);
+    } finally {
+      setCutReading(false);
+    }
+  }, [selection, readOnly, copySelection, clearRange]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;
@@ -1671,12 +1727,12 @@ function XlsxEditorContent({
       width = Math.max(width, rowArr.length);
       rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
     });
-    onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportError);
+    onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportEditError);
     setSelection({
       anchor: { row: r.top, col: r.left },
       focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
     });
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError]);
+  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportEditError]);
 
 
   const formatSelection = useCallback(
@@ -2194,6 +2250,12 @@ function XlsxEditorContent({
           x: e.clientX - chartDrag.clientX,
           y: e.clientY - chartDrag.clientY,
         });
+        return;
+      }
+      // the loading cursor holds while busy; a drag still extends the selection.
+      if (busyRef.current && !draggingRef.current) {
+        e.currentTarget.style.cursor = 'progress';
+        e.currentTarget.title = '';
         return;
       }
       const addr = pointToCell(e.clientX, e.clientY);
@@ -2811,7 +2873,11 @@ function XlsxEditorContent({
                 onBlur={() => {
                   if (document.hasFocus()) commitFormula();
                 }}
-                style={xlsxToolbarStyles.formulaInput}
+                style={
+                  busy
+                    ? { ...xlsxToolbarStyles.formulaInput, cursor: 'progress' }
+                    : xlsxToolbarStyles.formulaInput
+                }
               />
             </div>
             <PresenceStrip
@@ -2862,6 +2928,7 @@ function XlsxEditorContent({
         ref={scrollRef}
         className="xlsx-editor__scroll"
         data-testid="xlsx-scroll"
+        aria-busy={busy || undefined}
         tabIndex={0}
         onKeyDown={onKeyDown}
         onMouseDown={onMouseDown}
@@ -2989,11 +3056,12 @@ function XlsxEditorContent({
             {/* stays mounted and focused while its cell is scrolled away, so
                 keys and composition keep landing in the edit; the next key
                 scrolls the cell back, as in Excel and Sheets. */}
-            {!readOnly && editing && (
+            {!readOnlyProp && editing && (
               <input
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
+                readOnly={busy}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (!shownWhole(editing.row, editing.col)) requestReveal();

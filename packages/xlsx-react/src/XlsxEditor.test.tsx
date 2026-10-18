@@ -22,7 +22,14 @@ import {
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import { cellRect, initWasm, MAX_SCROLL_EXTENT_PX, openWorkbook, selectionAt } from '@betteroffice/xlsx';
+import {
+  cellRect,
+  initWasm,
+  MAX_SCROLL_EXTENT_PX,
+  openWorkbook,
+  selectionAt,
+  toTsv,
+} from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '@betteroffice/xlsx/collaboration';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
@@ -232,6 +239,13 @@ let offset: Fixture;
 let sparse: Fixture;
 // J90000:J90010 only.
 let farColumn: Fixture;
+// A1 and AZ100000: 5.2M cells from A1, past the copy ceiling.
+let pastCeiling: Fixture;
+// eight values spread over A1:Y10000, 250,000 cells from A1.
+const SPREAD: Record<string, number> = {
+  A1: 1, Y1: 2, C2: 3, M4000: 4, N4001: 5, B7999: 6, X8001: 7, Y10000: 8,
+};
+let spread: Fixture;
 let linked: Fixture;
 let charted: Fixture;
 let undrawable: Fixture;
@@ -265,6 +279,8 @@ beforeAll(async () => {
     await withCells(smallBytes, { C5: 1, D5: 2, C6: 3, D6: 4, C7: 5, D7: 6, C8: 7, D8: 8 })
   );
   sparse = fixtureFrom(await withCells(smallBytes, { A1: 1, Z100000: 2 }));
+  pastCeiling = fixtureFrom(await withCells(smallBytes, { A1: 1, AZ100000: 2 }));
+  spread = fixtureFrom(await withCells(smallBytes, SPREAD));
   farColumn = fixtureFrom(
     await withCells(
       smallBytes,
@@ -317,10 +333,12 @@ async function mountEditor(
   const onFirstPaint = () => {
     ready.painted += 1;
   };
-  const view = render(
+  const file = fixture.bytes.slice();
+  const element = (extra: Partial<XlsxEditorProps>) => (
     <XlsxEditor
       {...props}
-      file={fixture.bytes.slice()}
+      {...extra}
+      file={file}
       onChange={onChange}
       onSave={onSave}
       onFirstPaint={onFirstPaint}
@@ -331,6 +349,7 @@ async function mountEditor(
       }}
     />
   );
+  const view = render(element({}));
   const nameBox = () => view.getByTestId('xlsx-name-box') as HTMLInputElement;
   await waitFor(() => expect(ready.painted).toBe(1));
   const idle = () => idleWith(() => ready.handle);
@@ -349,6 +368,19 @@ async function mountEditor(
     idle,
     workbook: () => ready.handle!,
     api: () => ready.api!,
+    /** The same workbook with other props (no reopen). */
+    setProps: (extra: Partial<XlsxEditorProps>) =>
+      act(async () => {
+        view.rerender(element(extra));
+      }),
+    /** The toolbar controls still taking input. */
+    liveControls: () =>
+      Array.from(
+        view
+          .getByTestId('xlsx-toolbar')
+          .querySelectorAll('button:not(:disabled), input:not(:disabled):not([readonly])'),
+        (node) => node.getAttribute('data-testid')
+      ),
     /** A cell's editable text on sheet 0, once every change posted landed. */
     input: async (row: number, col: number) => {
       await idle();
@@ -786,10 +818,37 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
-  // J90000:J90010: select all is A1:J90010, past the engine's 100,000-cell read.
-  it('keeps the cells a cut could not copy, with a notice', async () => {
+  // J90000:J90010: select all is A1:J90010, 900,100 cells read in nine pieces.
+  it('cuts a far column through a whole-sheet selection read in pieces', async () => {
+    const view = await mountEditor(farColumn);
+    const calls = watch(view);
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'x', { ctrlKey: true });
+      // the pieces are read one after another, then the clear goes out.
+      await waitFor(() => expect(calls.sent('clearContents')).toHaveLength(1), { timeout: 20_000 });
+      const ranges = calls.sent('rangeCells').map((args) => args[1]);
+      expect(ranges).toHaveLength(10);
+      expect([ranges[0], ranges[9]]).toEqual(['A1:J10000', 'A90001:J90010']);
+      const rows = calls.written[0].split(/\r?\n/);
+      expect(rows).toHaveLength(90_010);
+      expect([rows[89_998], rows[89_999], rows[90_009]]).toEqual([
+        '\t\t\t\t\t\t\t\t\t',
+        '\t\t\t\t\t\t\t\t\t1',
+        '\t\t\t\t\t\t\t\t\t11',
+      ]);
+      expect(calls.sent('clearContents').map((args) => args[1])).toEqual(['J90000:J90010']);
+      expect(await view.input(89_999, 9)).toBe('');
+    } finally {
+      calls.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  // A1 and AZ100000: 5.2M cells, past XLSX_COPY_MAX_CELLS.
+  it('cuts nothing past the copy ceiling, with a notice', async () => {
     const notices: string[] = [];
-    const view = await mountEditor(farColumn, undefined, undefined, {
+    const view = await mountEditor(pastCeiling, undefined, undefined, {
       onNotice: (notice) => notices.push(notice),
     });
     const calls = watch(view);
@@ -798,30 +857,167 @@ describe('XlsxEditor keyboard', () => {
       await press(view.surface, 'a', { ctrlKey: true });
       await press(view.surface, 'x', { ctrlKey: true });
       await view.idle();
-      expect(calls.sent('rangeCells').map((args) => args[1])).toEqual(['A1:J90010']);
       expect(notices).toEqual(['copy-too-large']);
+      expect(calls.sent('rangeCells')).toEqual([]);
       expect(calls.written).toEqual([]);
       expect(calls.sent('clearContents')).toEqual([]);
-      expect(await view.input(89_999, 9)).toBe('1');
+      expect(await view.input(0, 0)).toBe('1');
+      expect(await view.input(99_999, 51)).toBe('2');
     } finally {
       calls.restore();
     }
   }, MANY_KEYS_MS);
 
-  it('refuses a clear over its byte limit with a notice and changes nothing', async () => {
+  // 25 columns x 10,000 rows: three reads of at most 100,000 cells.
+  it('copies a 250,000-cell selection in pieces exactly as the cells read', async () => {
+    const view = await mountEditor(spread);
+    const calls = watch(view);
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await waitFor(() => expect(calls.written).toHaveLength(1), { timeout: 20_000 });
+      expect(calls.sent('rangeCells').map((args) => args[1])).toEqual([
+        'A1:Y4000',
+        'A4001:Y8000',
+        'A8001:Y10000',
+      ]);
+      // the oracle: the sheet's eight values on a blank 10,000 x 25 grid.
+      const grid = Array.from({ length: 10_000 }, () => Array.from({ length: 25 }, () => ''));
+      for (const [address, value] of Object.entries(SPREAD)) {
+        const [, letter, row] = /^([A-Z])(\d+)$/.exec(address)!;
+        grid[Number(row) - 1][letter.charCodeAt(0) - 65] = String(value);
+      }
+      expect(calls.written).toEqual([
+        toTsv(grid.map((row) => row.map((input) => ({ input, isFormula: false })))),
+      ]);
+    } finally {
+      calls.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  it('refuses a paste past the engine update cap with a notice and changes nothing', async () => {
     const notices: string[] = [];
-    // two cells may take 256 bytes.
-    const view = await mountEditor(sparse, undefined, undefined, {
-      clearLimitBytes: 200,
+    const view = await mountEditor(plain, undefined, undefined, {
       onNotice: (notice) => notices.push(notice),
     });
-    await view.click({ row: 0, col: 0 });
-    await press(view.surface, 'a', { ctrlKey: true });
-    await press(view.surface, 'Delete');
-    await view.idle();
-    expect(notices).toEqual(['clear-too-large']);
-    expect(await view.input(0, 0)).toBe('1');
-    expect(await view.input(99_999, 25)).toBe('2');
+    const before = await view.input(1, 1);
+    // 90,000 formulas may take 896 bytes each: over 64 MiB.
+    const text = Array.from({ length: 300 }, () => Array(300).fill('=A1').join('\t')).join('\r\n');
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: async () => text, writeText: async () => {} },
+    });
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'v', { ctrlKey: true });
+      await view.idle();
+      expect(notices).toEqual(['edit-too-large']);
+      expect(await view.input(1, 1)).toBe(before);
+      expect(await view.input(299, 299)).toBe('');
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
+  it('refuses edits while a large update is sending, keeping selection and copy', async () => {
+    const view = await mountEditor(plain, undefined, undefined, { sending: true });
+    const calls = watch(view);
+    try {
+      await view.click({ row: 1, col: 1 });
+      const before = await view.input(1, 1);
+      await press(view.surface, '7');
+      expect(view.editor()).toBeNull();
+      await press(view.surface, 'Delete');
+      await press(view.surface, 'v', { ctrlKey: true });
+      await press(view.surface, 'z', { ctrlKey: true });
+      // the toolbar keeps only what edits nothing, as in View.
+      expect(view.liveControls()).toEqual([
+        'xlsx-search-menus',
+        'xlsx-zoom',
+        null,
+        'xlsx-toolbar-more',
+        'xlsx-export-png',
+        'xlsx-name-box',
+      ]);
+      expect(view.formulaInput().readOnly).toBe(true);
+      // selection and copy still work.
+      await press(view.surface, 'ArrowDown');
+      expect(view.nameBox().value).toBe('B3');
+      await press(view.surface, 'c', { ctrlKey: true });
+      await view.idle();
+      expect(calls.written).toHaveLength(1);
+      expect(calls.sent('clearContents')).toEqual([]);
+      expect(calls.sent('editCells')).toEqual([]);
+      expect(calls.sent('undo')).toEqual([]);
+      expect(await view.input(1, 1)).toBe(before);
+
+      await view.setProps({ sending: false });
+      await press(view.surface, '7');
+      await press(view.editor()!, 'Enter');
+      expect(await view.input(2, 1)).toBe('7');
+    } finally {
+      calls.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  it('shows the loading cursor on the grid and formula bar while sending', async () => {
+    const view = await mountEditor(plain, undefined, undefined, { sending: true });
+    expect(view.surface.getAttribute('aria-busy')).toBe('true');
+    expect(view.surface.style.cursor).toBe('progress');
+    expect(view.formulaInput().style.cursor).toBe('progress');
+    fireEvent.mouseMove(view.surface, pointAt(plain, { row: 2, col: 2 }));
+    expect(view.surface.style.cursor).toBe('progress');
+    await view.setProps({ sending: false });
+    expect(view.surface.getAttribute('aria-busy')).toBeNull();
+    expect(view.surface.style.cursor).toBe('default');
+    expect(view.formulaInput().style.cursor).toBe('');
+  }, MANY_KEYS_MS);
+
+  it('refuses edits while a cut reads its selection, then clears what it copied', async () => {
+    const view = await mountEditor(farColumn);
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sent: string[] = [];
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+      sent.push(method);
+      // the cut's first read waits until the test lets it go.
+      if (method === 'rangeCells' && sent.filter((name) => name === 'rangeCells').length === 1)
+        return held.then(() => forward(sheetId, method, ...args));
+      return forward(sheetId, method, ...args);
+    }) as WorkbookProxy['onSheet']);
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async () => {} },
+    });
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'x', { ctrlKey: true });
+      expect(view.surface.getAttribute('aria-busy')).toBe('true');
+      await press(view.surface, 'Delete');
+      await press(view.surface, '7');
+      expect(view.editor()).toBeNull();
+      expect(sent.filter((name) => name === 'clearContents' || name === 'editCells')).toEqual([]);
+      await act(async () => {
+        release();
+      });
+      await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull(), { timeout: 20_000 });
+      await view.idle();
+      expect(sent.filter((name) => name === 'clearContents')).toHaveLength(1);
+      expect(await view.input(89_999, 9)).toBe('');
+    } finally {
+      spy.mockRestore();
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
   }, MANY_KEYS_MS);
 
   it('reveals a far cell on another sheet the name box goes to', async () => {

@@ -74,7 +74,7 @@ export {
 } from './hyperlinks/index';
 
 export type { CellInput } from './clipboard/index';
-export { toTsv, fromTsv } from './clipboard/index';
+export { toTsv, fromTsv, joinTsv } from './clipboard/index';
 
 export type {
   A11yStrings,
@@ -96,7 +96,7 @@ export {
   wasmVersion,
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
-export { ClearTooLargeError, RangeTooLargeError } from './wasm/refusals';
+export { EditTooLargeError, RangeTooLargeError } from './wasm/refusals';
 export {
   openWorkbookWorker,
   SheetGoneError,
