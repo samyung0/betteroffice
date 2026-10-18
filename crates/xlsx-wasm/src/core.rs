@@ -104,6 +104,9 @@ struct EditArgs {
     row: u32,
     col: u32,
     input: String,
+    /// typed by the user: a formula that does not parse is refused.
+    #[serde(default)]
+    typed: bool,
 }
 
 #[derive(Deserialize)]
@@ -601,15 +604,15 @@ impl Session {
     ) -> Result<String, String> {
         let args: EditArgs =
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
-        let result = self
-            .workbook
-            .edit_cell(
-                SheetId(args.sheet),
-                CellRef::new(args.row, args.col),
-                &args.input,
-                calculation_options(now_serial),
-            )
-            .map_err(|error| error.to_string())?;
+        let (sheet, cell) = (SheetId(args.sheet), CellRef::new(args.row, args.col));
+        let options = calculation_options(now_serial);
+        let result = if args.typed {
+            self.workbook
+                .edit_typed_cell(sheet, cell, &args.input, options)
+        } else {
+            self.workbook.edit_cell(sheet, cell, &args.input, options)
+        }
+        .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
 

@@ -32,6 +32,7 @@ import {
   SheetGoneError,
   StaleProposalError,
   toTsv,
+  UnparsedFormulaError,
   zoomedViewport,
 } from '@betteroffice/xlsx';
 import type {
@@ -650,6 +651,10 @@ function XlsxEditorContent({
   const flushNudgeRef = useRef<() => void>(() => {});
   // commits the open draft: null without a workbook, else whether it landed.
   const settlePendingEditsRef = useRef<() => Promise<boolean> | null>(() => null);
+  // opens a refused formula's draft again (the cell editor's, else the formula bar's).
+  const reopenRefusedRef = useRef<
+    (sheetId: string, row: number, col: number, value: string, formulaBar: boolean) => void
+  >(() => {});
   // the open cell or formula-bar draft and the sheet it was typed on: the
   // commit lands on that sheet while it is still the active one, else nowhere.
   const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
@@ -893,12 +898,20 @@ function XlsxEditorContent({
     [track]
   );
 
-  // a cell input committed: posted, and drawn over its cell until the
-  // worker's frame shows it. A draft whose sheet a peer removed is dropped.
+  // a typed cell input committed: posted, and drawn over its cell until the
+  // worker's frame shows it. A draft whose sheet a peer removed is dropped; a
+  // formula that does not parse is refused and its draft opens again.
   const commitCell = useCallback(
-    (sheetId: string, sheet: number, row: number, col: number, value: string) => {
+    (
+      sheetId: string,
+      sheet: number,
+      row: number,
+      col: number,
+      value: string,
+      formulaBar: boolean
+    ) => {
       if (!handleRef.current) return Promise.resolve(false);
-      const done = onSheet(sheetId, 'editCell', sheet, row, col, value);
+      const done = onSheet(sheetId, 'editCell', sheet, row, col, value, true);
       const seq = lastMutationRef.current;
       setOptimistic((list) => [
         ...list.filter(
@@ -913,6 +926,10 @@ function XlsxEditorContent({
         },
         (e: unknown) => {
           if (e instanceof SheetGoneError) return true;
+          if (e instanceof UnparsedFormulaError) {
+            setOptimistic((list) => list.filter((entry) => entry.seq !== seq));
+            reopenRefusedRef.current(sheetId, row, col, value, formulaBar);
+          }
           reportError(e);
           return false;
         }
@@ -1374,7 +1391,7 @@ function XlsxEditorContent({
     suppressBlurRef.current = false;
     setEditing(null);
     setFormulaDraft(null);
-    return commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, value);
+    return commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, value, !editing);
   };
 
   const selectedRangeA1 = useCallback((target: Selection): string => {
@@ -1583,7 +1600,7 @@ function XlsxEditorContent({
       if (!handleRef.current || !editing || !draft || readOnly) return;
       if (refocus) suppressBlurRef.current = true;
       const { row, col, value, sheetId } = editing;
-      void commitCell(sheetId, draft.sheet, row, col, value);
+      void commitCell(sheetId, draft.sheet, row, col, value, false);
       setEditing(null);
       const base = selectionAt({ row, col });
       setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
@@ -1596,8 +1613,25 @@ function XlsxEditorContent({
   const cancelEditor = useCallback(() => {
     suppressBlurRef.current = true;
     setEditing(null);
+    setError(null);
     focusContainer();
   }, [focusContainer]);
+
+  // a refused formula opens again on its cell as typed, while its sheet is the
+  // one shown and no other draft opened meanwhile; typing or Escape there
+  // clears the message.
+  reopenRefusedRef.current = (sheetId, row, col, value, formulaBar) => {
+    if (sheetId !== activeSheetId || pendingDraftRef.current || readOnlyRef.current) return;
+    setSelection(selectionAt({ row, col }));
+    if (formulaBar) {
+      formulaSheetIdRef.current = sheetId;
+      setFormulaDraft(value);
+      formulaInputRef.current?.focus();
+      return;
+    }
+    setEditing({ row, col, value, sheetId });
+    requestReveal();
+  };
 
   // the engine clears only the cells that hold content, so a sparse used range
   // costs its stored cells; one over `clearLimitBytes` is refused unchanged.
@@ -1983,7 +2017,7 @@ function XlsxEditorContent({
       const draft = pendingDraftRef.current;
       if (!handleRef.current || !selection || formulaDraft == null || !draft || readOnly) return;
       const { row, col } = selection.anchor;
-      void commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft);
+      void commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft, true);
       setFormulaDraft(null);
       if (move) {
         setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
@@ -2819,6 +2853,7 @@ function XlsxEditorContent({
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (formulaDraft === null) formulaSheetIdRef.current = activeSheetId;
+                  setError(null);
                   setFormulaDraft(e.target.value);
                 }}
                 onKeyDown={(e) => {
@@ -2828,6 +2863,7 @@ function XlsxEditorContent({
                     e.preventDefault();
                   } else if (e.key === 'Escape') {
                     setFormulaDraft(null);
+                    setError(null);
                     focusContainer();
                     e.preventDefault();
                   }
@@ -3022,6 +3058,7 @@ function XlsxEditorContent({
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (!shownWhole(editing.row, editing.col)) requestReveal();
+                  setError(null);
                   setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev));
                 }}
                 onKeyDown={(e) => {

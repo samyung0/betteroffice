@@ -2579,3 +2579,46 @@ describe('XlsxEditor active cell', () => {
     expect([await view.input(0, 0), await view.input(0, 2)]).toEqual(['x', '']);
   });
 });
+
+describe('XlsxEditor formula entry', () => {
+  const press = async (target: Element, key: string) => {
+    await act(async () => {
+      fireEvent.keyDown(target, { key });
+    });
+    await idleWith(() => currentWorkbook);
+  };
+
+  // Excel and Sheets close the parentheses a typed formula leaves open.
+  it('closes the parentheses a formula typed in the cell or the formula bar leaves open', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    view.type('=SUM(B3:B5');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(10, 1)).toBe('=SUM(B3:B5)');
+    view.typeFormula('=ROUND(SUM(B3:B5');
+    await press(view.formulaInput(), 'Enter');
+    expect(await view.input(11, 1)).toBe('=ROUND(SUM(B3:B5))');
+  });
+
+  it('refuses a formula that still does not parse with a message, its edit left open', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    view.type('=B3*/2');
+    await press(view.editor()!, 'Enter');
+    expect([view.editor()?.value, view.nameBox().value]).toEqual(['=B3*/2', 'B11']);
+    expect(view.error()?.textContent).toContain("there's a problem with this formula");
+    expect(await view.input(10, 1)).toBe('900');
+    view.type('=B3*2');
+    expect(view.error() === null).toBe(true);
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(10, 1)).toBe('=B3*2');
+
+    view.typeFormula('=B3+');
+    await press(view.formulaInput(), 'Enter');
+    expect([view.formula(), view.nameBox().value]).toEqual(['=B3+', 'B12']);
+    expect(view.error() === null).toBe(false);
+    expect(await view.input(11, 1)).toBe('1000');
+  });
+});

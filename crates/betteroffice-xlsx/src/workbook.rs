@@ -1611,7 +1611,20 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+        self.edit_cell_marked(sheet, cell, input, false, options, &mut |_| {})
+    }
+
+    /// [`Workbook::edit_cell`] for input a user typed into the cell: a formula
+    /// that does not parse, even with its open parentheses closed, is refused
+    /// with [`Error::UnparsedFormula`] instead of stored as text.
+    pub fn edit_typed_cell(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, true, options, &mut |_| {})
     }
 
     /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
@@ -1625,7 +1638,7 @@ impl Workbook {
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.edit_cell_marked(sheet, cell, input, options, mark)
+            self.edit_cell_marked(sheet, cell, input, false, options, mark)
         })
     }
 
@@ -1634,11 +1647,19 @@ impl Workbook {
         sheet: SheetId,
         cell: CellRef,
         input: &str,
+        typed: bool,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
         let state = edit_cell_state(&self.model, sheet, cell, input);
+        if typed
+            && state.formula.is_none()
+            && input.starts_with('=')
+            && !text_formatted(&self.model, state.style)
+        {
+            return Err(Error::UnparsedFormula);
+        }
         validate_cell_state(&state)?;
         if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
             return Ok(MutationResult::default());
@@ -4225,12 +4246,7 @@ fn edit_cell_state(
         .sheet(sheet)
         .and_then(|sheet| sheet.cell(cell))
         .and_then(|cell| cell.style);
-    let number_format = workbook.styles.resolved_format(style).number_format;
-    let mut state = if !input.is_empty()
-        && matches!(
-            number_format,
-            FormatCode::Builtin(49) | FormatCode::Custom("@")
-        ) {
+    let mut state = if !input.is_empty() && text_formatted(workbook, style) {
         CellState {
             value: CellValue::Text {
                 value: input.strip_prefix('\'').unwrap_or(input).to_string(),
@@ -4242,6 +4258,14 @@ fn edit_cell_state(
     };
     state.style = style;
     state
+}
+
+/// Whether a cell in `style` takes typed input as text (the Text number format).
+fn text_formatted(workbook: &WorkbookModel, style: Option<u32>) -> bool {
+    matches!(
+        workbook.styles.resolved_format(style).number_format,
+        FormatCode::Builtin(49) | FormatCode::Custom("@")
+    )
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {

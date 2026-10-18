@@ -96,7 +96,7 @@ export {
   wasmVersion,
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
-export { ClearTooLargeError, RangeTooLargeError } from './wasm/refusals';
+export { ClearTooLargeError, RangeTooLargeError, UnparsedFormulaError } from './wasm/refusals';
 export {
   openWorkbookWorker,
   SheetGoneError,
