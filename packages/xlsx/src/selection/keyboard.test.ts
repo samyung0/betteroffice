@@ -42,6 +42,26 @@ describe('arrow navigation', () => {
     expect(out).toEqual({ anchor: { row: 5, col: 5 }, focus: { row: 5, col: 19 } });
   });
 
+  // Excel keeps the active cell (the anchor) where the selection started.
+  it('steps from the active cell, not the far end, once a range is selected', () => {
+    const range = { anchor: { row: 5, col: 5 }, focus: { row: 8, col: 7 } };
+    expect(moved(press(range, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 6, col: 5 }));
+    expect(moved(press(range, { key: 'Enter' }))).toEqual(selectionAt({ row: 6, col: 5 }));
+    expect(moved(press(range, { key: 'Tab' }))).toEqual(selectionAt({ row: 5, col: 6 }));
+    expect(moved(press(range, { key: 'Home' }))).toEqual(selectionAt({ row: 5, col: 0 }));
+    expect(moved(press(range, { key: 'ArrowLeft', ctrlKey: true }))).toEqual(
+      selectionAt({ row: 5, col: 0 })
+    );
+    expect(moved(press(range, { key: 'ArrowDown', shiftKey: true }))).toEqual({
+      anchor: { row: 5, col: 5 },
+      focus: { row: 9, col: 7 },
+    });
+    expect(moved(press(range, { key: 'ArrowRight', ctrlKey: true, shiftKey: true }))).toEqual({
+      anchor: { row: 5, col: 5 },
+      focus: { row: 8, col: 19 },
+    });
+  });
+
   it('moves past the used range to the sheet edge, where ctrl/cmd+arrow stays put', () => {
     const edge = selectionAt({ row: 59, col: 19 });
     expect(moved(press(edge, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 60, col: 19 }));

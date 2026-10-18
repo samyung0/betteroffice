@@ -104,7 +104,7 @@ export function xlsxCommandEdits(command: XlsxCommand): boolean {
 export interface XlsxCommandState {
   canUndo: boolean;
   canRedo: boolean;
-  /** The selection's size and focus cell, zero-based. */
+  /** The selection's size and active cell, zero-based. */
   selection: { rows: number; columns: number; focusRow: number; focusColumn: number } | null;
   frozenRows: number;
   frozenColumns: number;

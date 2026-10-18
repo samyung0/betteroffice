@@ -682,7 +682,7 @@ describe('XlsxEditor keyboard', () => {
       fireEvent.mouseMove(view.surface, { ...pointAt(small, to), buttons: 1 });
       fireEvent.mouseUp(window, pointAt(small, to));
     });
-    expect(view.nameBox().value).toBe('D15');
+    expect(view.nameBox().value).toBe('B10');
     const pressed = cellRect(small.grid, from.row, from.col)!;
     const under = cellRect(small.grid, to.row, to.col)!;
     const box = view.selectionBox()!.style;
@@ -694,7 +694,7 @@ describe('XlsxEditor keyboard', () => {
       fireEvent.mouseDown(view.surface, { ...pointAt(small, { row: 20, col: 4 }), shiftKey: true });
       fireEvent.mouseUp(window, pointAt(small, { row: 20, col: 4 }));
     });
-    expect(view.nameBox().value).toBe('E21');
+    expect(view.nameBox().value).toBe('B10');
   }, MANY_KEYS_MS);
 
   // sample.xlsx's Budget sheet uses A1:D62.
@@ -2499,5 +2499,83 @@ describe('XlsxEditor menu commands', () => {
     expect((await view.api().handle.selectionFormatting(0, 'B3')).textWrapping).toBe('wrap');
     await view.run('zoom:150');
     expect(view.state().zoom).toBe(1.5);
+  });
+});
+
+describe('XlsxEditor active cell', () => {
+  // a press, a pointer move of `dy` CSS px and the release: a jittery click or a short drag.
+  const pressAndMove = async (
+    view: Awaited<ReturnType<typeof mountEditor>>,
+    at: { clientX: number; clientY: number },
+    dy: number
+  ) => {
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, at);
+      fireEvent.mouseMove(view.surface, { ...at, clientY: at.clientY + dy, buttons: 1 });
+      fireEvent.mouseUp(window, { ...at, clientY: at.clientY + dy });
+    });
+    await view.idle();
+  };
+  // Budget cut to A1:D5: row 8 lies past the used range.
+  let trimmed: Fixture;
+  beforeAll(() => {
+    const handle = openWorkbook(plain.bytes.slice());
+    try {
+      handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 5, count: 58 }]);
+      trimmed = fixtureFrom(handle.save());
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('keeps the pressed cell active when a press past the used range moves a little', async () => {
+    const view = await mountEditor(trimmed);
+    await pressAndMove(view, pointAt(trimmed, { row: 7, col: 0 }), 2);
+    expect(view.nameBox().value).toBe('A8');
+  });
+
+  // Excel and Sheets keep the pressed cell active while a drag grows the range.
+  it('keeps the pressed cell active when the pointer slips onto the cell above', async () => {
+    const view = await mountEditor();
+    const cell = cellRect(plain.grid, 5, 1)!;
+    await pressAndMove(view, { clientX: cell.x + cell.w / 2, clientY: cell.y + 1 }, -2);
+    expect(view.nameBox().value).toBe('B6');
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'x' });
+    });
+    await act(async () => {
+      fireEvent.keyDown(view.editor()!, { key: 'Enter' });
+    });
+    expect([await view.input(5, 1), await view.input(4, 1)]).toEqual(['x', '300']);
+  });
+
+  it('moves only the far end with Shift+arrows, and steps from the active cell after', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 2, col: 1 });
+    for (const key of ['ArrowDown', 'ArrowDown', 'ArrowRight'])
+      await act(async () => {
+        fireEvent.keyDown(view.surface, { key, shiftKey: true });
+      });
+    await view.idle();
+    expect(view.nameBox().value).toBe('B3');
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown' });
+    });
+    await view.idle();
+    expect(view.nameBox().value).toBe('B4');
+  });
+
+  // Budget's title is merged over A1:D1.
+  it('selects a merged cell by its top-left cell, so typing replaces what it shows', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 0, col: 2 });
+    expect([view.nameBox().value, view.formula()]).toEqual(['A1', 'Quarterly Budget Report']);
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'x' });
+    });
+    await act(async () => {
+      fireEvent.keyDown(view.editor()!, { key: 'Enter' });
+    });
+    expect([await view.input(0, 0), await view.input(0, 2)]).toEqual(['x', '']);
   });
 });

@@ -14,8 +14,10 @@ export interface CellAddr {
 
 /**
  * An active selection as an anchor/focus pair. `anchor` is the fixed corner
- * (where the selection started); `focus` is the moving corner. A collapsed
- * selection has `anchor` equal to `focus`.
+ * where the selection started and the active cell (the name box, the formula
+ * bar and typing go there, as in Excel); `focus` is the moving corner a drag,
+ * Shift+click or Shift+arrow moves. A collapsed selection has `anchor` equal to
+ * `focus`.
  */
 export interface Selection {
   anchor: CellAddr;

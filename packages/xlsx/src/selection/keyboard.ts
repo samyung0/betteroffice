@@ -64,8 +64,11 @@ export function selectionKeyReducer(
   const direction = ARROWS[key.key];
   if (direction) {
     if (mod(key)) {
-      const edge = edgeInDirection(state.focus, direction, limits);
-      return moveAction(key.shiftKey ? extendTo(state, edge, limits) : selectionAt(edge));
+      return moveAction(
+        key.shiftKey
+          ? extendTo(state, edgeInDirection(state.focus, direction, limits), limits)
+          : selectionAt(edgeInDirection(state.anchor, direction, limits))
+      );
     }
     return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits }));
   }
@@ -83,14 +86,14 @@ export function selectionKeyReducer(
 
     case 'Home':
       return moveAction(
-        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.focus.row, col: 0 })
+        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.anchor.row, col: 0 })
       );
 
     case 'End':
       return moveAction(
         mod(key)
           ? selectionAt({ row: limits.usedRows - 1, col: limits.usedCols - 1 })
-          : selectionAt({ row: state.focus.row, col: limits.usedCols - 1 })
+          : selectionAt({ row: state.anchor.row, col: limits.usedCols - 1 })
       );
 
     case 'PageDown':

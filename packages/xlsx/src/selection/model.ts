@@ -86,17 +86,19 @@ function delta(direction: Direction, step: number): CellAddr {
 }
 
 /**
- * Move the focus one (or `step`) cells in a direction. When `extend` is set the
- * anchor holds and the range grows; otherwise the whole selection collapses onto
- * the new focus. The result is clamped to the grid bounds in `opts.limits`.
+ * Step one (or `step`) cells in a direction. When `extend` is set the anchor
+ * holds and the focus moves, growing the range; otherwise the selection
+ * collapses onto the cell that far from the anchor (the active cell). The
+ * result is clamped to the grid bounds in `opts.limits`.
  */
 export function moveFocus(sel: Selection, direction: Direction, opts: MoveOpts): Selection {
   const { limits } = opts;
   const step = opts.step ?? 1;
   const d = delta(direction, step);
+  const from = opts.extend ? sel.focus : sel.anchor;
   const next: CellAddr = {
-    row: clamp(sel.focus.row + d.row, 0, limits.rows - 1),
-    col: clamp(sel.focus.col + d.col, 0, limits.cols - 1),
+    row: clamp(from.row + d.row, 0, limits.rows - 1),
+    col: clamp(from.col + d.col, 0, limits.cols - 1),
   };
   return opts.extend ? extendTo(sel, next) : selectionAt(next);
 }

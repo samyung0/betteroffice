@@ -256,6 +256,18 @@ function sameCell(a: CellAddr, b: CellAddr): boolean {
   return a.row === b.row && a.col === b.col;
 }
 
+// the top-left cell of the merged range holding `addr`, else `addr`.
+function mergeOrigin(addr: CellAddr, merges: readonly MergedRange[]): CellAddr {
+  const merge = merges.find(
+    (m) =>
+      addr.row >= m.start.row &&
+      addr.row <= m.end.row &&
+      addr.col >= m.start.col &&
+      addr.col <= m.end.col
+  );
+  return merge ? { row: merge.start.row, col: merge.start.col } : addr;
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -764,7 +776,7 @@ function XlsxEditorContent({
       ? {
           sheet: activeSheet,
           sheetId: formulaSheetIdRef.current,
-          ...selection.focus,
+          ...selection.anchor,
           value: formulaDraft,
         }
       : null;
@@ -777,15 +789,15 @@ function XlsxEditorContent({
     const cell = shownHere.cells[`${row}:${col}`];
     if (cell) return cell.input;
     if (cellRect(shownHere.displayList.grid, row, col)) return '';
-    const focus = shownHere.view.selection?.focus;
-    return focus && focus.row === row && focus.col === col ? shownHere.focus?.input : undefined;
+    const active = shownHere.view.selection?.anchor;
+    return active && sameCell(active, { row, col }) ? shownHere.active?.input : undefined;
   };
 
-  // the name box and formula bar's cell: its address at once, its text from
-  // the frame (or the input just committed to it) once the frame has it.
+  // the name box and formula bar's cell, the active one: its address at once,
+  // its text from the frame (or the input just committed to it) once the frame has it.
   const focusedCell: CellEdit | null = useMemo(() => {
     if (!selection || !sheetInfo) return null;
-    const { row, col } = selection.focus;
+    const { row, col } = selection.anchor;
     const a1 = cellAddress(row, col);
     const pending = optimistic.find(
       (entry) => entry.sheetId === activeSheetId && entry.row === row && entry.col === col
@@ -793,8 +805,8 @@ function XlsxEditorContent({
     if (pending) return { a1, input: pending.text, isFormula: pending.text.startsWith('=') };
     const cell =
       shownHere?.cells[`${row}:${col}`] ??
-      (shownHere?.view.selection && sameCell(shownHere.view.selection.focus, selection.focus)
-        ? shownHere.focus
+      (shownHere?.view.selection && sameCell(shownHere.view.selection.anchor, selection.anchor)
+        ? shownHere.active
         : null);
     return cell ?? { a1, input: '', isFormula: false };
   }, [selection, sheetInfo, optimistic, activeSheetId, shownHere]);
@@ -1534,7 +1546,7 @@ function XlsxEditorContent({
     (seed?: string) => {
       const handle = handleRef.current;
       if (!handle || !selection || readOnly) return;
-      const { row, col } = selection.focus;
+      const { row, col } = selection.anchor;
       const sheetId = activeSheetId;
       const known = seed ?? knownInput(row, col);
       if (known !== undefined) {
@@ -1551,9 +1563,9 @@ function XlsxEditorContent({
           () => ''
         )
         .then((value) => {
-          const focus = selectionRef.current?.focus;
+          const active = selectionRef.current?.anchor;
           if (handleRef.current !== handle || readOnlyRef.current) return;
-          if (!focus || !sameCell(focus, { row, col })) return;
+          if (!active || !sameCell(active, { row, col })) return;
           setEditing((current) => current ?? { row, col, value, sheetId });
           requestReveal();
         });
@@ -1965,12 +1977,12 @@ function XlsxEditorContent({
     }
   }, [fileName, zoom]);
 
-  // commit the formula bar draft to the focused cell.
+  // commit the formula bar draft to the active cell.
   const commitFormula = useCallback(
     (move?: Direction) => {
       const draft = pendingDraftRef.current;
       if (!handleRef.current || !selection || formulaDraft == null || !draft || readOnly) return;
-      const { row, col } = selection.focus;
+      const { row, col } = selection.anchor;
       void commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft);
       setFormulaDraft(null);
       if (move) {
@@ -2164,8 +2176,10 @@ function XlsxEditorContent({
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
       if (dismissesEditor) commitEditor();
+      // the pressed cell stays active while a drag or Shift+click moves the far
+      // end, as in Excel; a merged cell is pressed at its top-left cell.
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
-      else setSelection(selectionAt(addr));
+      else setSelection(selectionAt(mergeOrigin(addr, visibleMergedRanges)));
       // no click start: a press that dismissed the editor must not also follow a
       // hyperlink in the cell it selects.
       clickStartRef.current = dismissesEditor ? null : addr;
@@ -2173,7 +2187,17 @@ function XlsxEditorContent({
       setDragging(true);
       focusContainer();
     },
-    [editing, selection, pointToCell, pointToChart, limits, focusContainer, commitEditor, readOnly]
+    [
+      editing,
+      selection,
+      pointToCell,
+      pointToChart,
+      limits,
+      focusContainer,
+      commitEditor,
+      readOnly,
+      visibleMergedRanges,
+    ]
   );
 
   const onMouseMove = useCallback(
@@ -2325,22 +2349,22 @@ function XlsxEditorContent({
   const renderedSelection = selection
     ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges)
     : null;
-  const renderedFocus = selection
+  const renderedActive = selection
     ? expandRangeToMergedCells(
         {
-          top: selection.focus.row,
-          left: selection.focus.col,
-          bottom: selection.focus.row,
-          right: selection.focus.col,
+          top: selection.anchor.row,
+          left: selection.anchor.col,
+          bottom: selection.anchor.row,
+          right: selection.anchor.col,
         },
         visibleMergedRanges
       )
     : null;
   const selRect = grid && renderedSelection ? rangeRect(grid, renderedSelection) : null;
-  const focusRect = grid && renderedFocus ? rangeRect(grid, renderedFocus) : null;
+  const activeRect = grid && renderedActive ? rangeRect(grid, renderedActive) : null;
   const editRect = grid && editing ? cellRect(grid, editing.row, editing.col) : null;
   const scaledSelectionRect = selRect ? scaledRect(selRect, paintedZoom) : null;
-  const scaledFocusRect = focusRect ? scaledRect(focusRect, paintedZoom) : null;
+  const scaledActiveRect = activeRect ? scaledRect(activeRect, paintedZoom) : null;
   const scaledEditRect = editRect ? scaledRect(editRect, paintedZoom) : null;
   // committed inputs on this sheet the worker has not drawn yet, over their cells.
   const optimisticCells = grid
@@ -2495,7 +2519,8 @@ function XlsxEditorContent({
     if (!revealPendingRef.current || !handle || !frameRef.current?.grid || !selection || !sheetInfo)
       return;
     revealPendingRef.current = false;
-    const { row, col } = selection.focus;
+    // an open edit shows its cell; a move, the far end it moved.
+    const { row, col } = editing ?? selection.focus;
     if (shownWhole(row, col)) return;
     // the worker places the cell after every change posted before; a later
     // reveal supersedes this one.
@@ -2604,9 +2629,9 @@ function XlsxEditorContent({
     if (!range || !sheetInfo) return;
     const amount = (value === 'current' ? value : Number(value)) as FreezeAmount;
     if (kind === 'freezeRows')
-      return void freeze(frozenCount(amount, selection!.focus.row), sheetInfo.frozenCols);
+      return void freeze(frozenCount(amount, selection!.anchor.row), sheetInfo.frozenCols);
     if (kind === 'freezeColumns')
-      return void freeze(sheetInfo.frozenRows, frozenCount(amount, selection!.focus.col));
+      return void freeze(sheetInfo.frozenRows, frozenCount(amount, selection!.anchor.col));
     const cells = {
       start: { row: range.top, col: range.left },
       end: { row: range.bottom, col: range.right },
@@ -2631,8 +2656,8 @@ function XlsxEditorContent({
     if (ops[command]) applyStructure(ops[command]);
   };
 
-  const focusRow = selection?.focus.row ?? -1;
-  const focusColumn = selection?.focus.col ?? -1;
+  const focusRow = selection?.anchor.row ?? -1;
+  const focusColumn = selection?.anchor.col ?? -1;
   const frozenRows = sheetInfo?.frozenRows ?? 0;
   const frozenColumns = sheetInfo?.frozenCols ?? 0;
   const canUnmerge = mergedRanges.length > 0;
@@ -2940,14 +2965,14 @@ function XlsxEditorContent({
                 }}
               />
             )}
-            {scaledFocusRect && !selectedChart && !editing && (
+            {scaledActiveRect && !selectedChart && !editing && (
               <div
                 style={{
                   position: 'absolute',
-                  left: scaledFocusRect.x,
-                  top: scaledFocusRect.y,
-                  width: scaledFocusRect.w,
-                  height: scaledFocusRect.h,
+                  left: scaledActiveRect.x,
+                  top: scaledActiveRect.y,
+                  width: scaledActiveRect.w,
+                  height: scaledActiveRect.h,
                   boxSizing: 'border-box',
                   border: `2px solid ${BRAND}`,
                 }}

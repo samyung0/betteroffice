@@ -211,8 +211,8 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
     sheetInfo,
     displayList,
     cells: grid ? windowCells(open, sheet, grid) : {},
-    focus: selection
-      ? quietly(() => open.cell(sheet, selection.focus.row, selection.focus.col), null)
+    active: selection
+      ? quietly(() => open.cell(sheet, selection.anchor.row, selection.anchor.col), null)
       : null,
     ...selectionState(open, sheet, rangeA1, quietly),
     visibleMerged: grid ? visibleMerged(open, sheet, grid, quietly) : [],
