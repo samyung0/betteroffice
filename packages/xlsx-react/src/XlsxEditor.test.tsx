@@ -2737,3 +2737,49 @@ describe('XlsxEditor point mode', () => {
     expect(view.editor()?.value).toBe('=A1');
   });
 });
+
+describe('XlsxEditor cell text', () => {
+  // B12 in 20pt bold Georgia, dark red, and nothing else in its row.
+  let styled: Fixture;
+  beforeAll(() => {
+    const handle = openWorkbook(plain.bytes.slice());
+    try {
+      handle.patchRangeStyle(0, 'B12', {
+        fontFamily: 'Georgia',
+        fontSize: 20,
+        bold: true,
+        textColor: '#c00000',
+      });
+      styled = fixtureFrom(handle.save());
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('draws the open edit and the text waiting for its frame as the canvas draws the cell', async () => {
+    const view = await mountEditor(styled);
+    await view.click({ row: 11, col: 1 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'x' });
+    });
+    await view.idle();
+    const input = view.editor()!;
+    // 20pt is 26.67px at 100%, as the canvas paints it.
+    expect([
+      input.style.fontSize,
+      input.style.fontWeight,
+      input.style.fontFamily,
+      input.style.color,
+    ]).toEqual(['26.666667px', 'bold', 'Georgia, sans-serif', '#c00000']);
+    // the committed text shows over its cell until the worker's frame draws it.
+    act(() => {
+      fireEvent.keyDown(input, { key: 'Enter' });
+    });
+    const pending = view.surface.querySelector<HTMLElement>('[data-testid="xlsx-pending-cell"]');
+    expect(pending && [pending.style.fontSize, pending.style.color]).toEqual([
+      '26.666667px',
+      '#c00000',
+    ]);
+    await view.idle();
+  });
+});

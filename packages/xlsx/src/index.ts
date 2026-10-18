@@ -86,7 +86,7 @@ export type {
 } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 
-export { paintDisplayList } from './render/canvas2d';
+export { cellFont, paintDisplayList } from './render/canvas2d';
 export {
   initWasm,
   isWasmAvailable,

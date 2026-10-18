@@ -12,6 +12,7 @@ import {
   buildA11yGrid,
   cellAddress,
   cellAtPoint,
+  cellFont,
   cellRect,
   chartRegionAtPoint,
   ClearTooLargeError,
@@ -52,6 +53,7 @@ import type {
   Selection,
   SelectionLimits,
   SheetInfo,
+  TextCmd,
   Viewport,
   WorkbookFrame,
   WorkbookProxy,
@@ -232,6 +234,33 @@ interface OptimisticEdit {
   row: number;
   col: number;
   text: string;
+  /** its cell's text style, as the edit drew it. */
+  style: CellTextStyle;
+}
+
+/** A cell's text as the canvas paints it: its font at 100% and its colour. */
+interface CellTextStyle {
+  font: Pick<TextCmd, 'fontFamily' | 'fontSize' | 'bold' | 'italic'>;
+  color: string;
+}
+
+// the workbook default (Calibri 11, black) until a frame describes the cell.
+const DEFAULT_CELL_TEXT: CellTextStyle = {
+  font: { fontFamily: 'Calibri', fontSize: 11 },
+  color: '#000000',
+};
+
+function cellTextStyle(formatting: SelectionFormatting | null): CellTextStyle {
+  if (!formatting) return DEFAULT_CELL_TEXT;
+  return {
+    font: {
+      fontFamily: formatting.fontFamily ?? DEFAULT_CELL_TEXT.font.fontFamily,
+      fontSize: formatting.fontSize ?? DEFAULT_CELL_TEXT.font.fontSize,
+      bold: formatting.bold,
+      italic: formatting.italic,
+    },
+    color: formatting.textColor ?? DEFAULT_CELL_TEXT.color,
+  };
 }
 
 // stable stand-ins while no frame describes the selection: derived values
@@ -803,6 +832,19 @@ function XlsxEditorContent({
   // the frame on screen draws the sheet the user is on.
   const shownHere = shown && shown.sheetInfo.activeSheet === activeSheet ? shown : null;
   const selectionFormatting = shownHere?.formatting ?? NO_FORMATTING;
+  // the active cell's text style once the frame on screen describes this
+  // selection: the open edit and the inputs waiting for their frame use it.
+  const shownSelection = shownHere?.view.selection;
+  const activeTextStyle = cellTextStyle(
+    selection &&
+      shownSelection &&
+      sameCell(shownSelection.anchor, selection.anchor) &&
+      sameCell(shownSelection.focus, selection.focus)
+      ? selectionFormatting
+      : null
+  );
+  const activeTextStyleRef = useRef(activeTextStyle);
+  activeTextStyleRef.current = activeTextStyle;
   const historyState = shown?.history ?? NO_HISTORY;
   const mergedRanges = shownHere?.selectionMerged ?? NO_MERGES;
   const visibleMergedRanges = shownHere?.visibleMerged ?? NO_MERGES;
@@ -951,7 +993,7 @@ function XlsxEditorContent({
         ...list.filter(
           (entry) => entry.sheetId !== sheetId || entry.row !== row || entry.col !== col
         ),
-        { seq, sheetId, row, col, text: value },
+        { seq, sheetId, row, col, text: value, style: activeTextStyleRef.current },
       ]);
       return done.then(
         (result) => {
@@ -3192,9 +3234,8 @@ function XlsxEditorContent({
                   whiteSpace: 'nowrap',
                   lineHeight: `${entry.rect.h}px`,
                   textAlign: NUMBER_INPUT.test(entry.text) ? 'right' : 'left',
-                  fontSize: 13 * paintedZoom,
-                  fontFamily: 'system-ui, sans-serif',
-                  color: '#202124',
+                  font: cellFont(entry.style.font, paintedZoom),
+                  color: entry.style.color,
                   background: '#ffffff',
                 }}
               >
@@ -3293,7 +3334,8 @@ function XlsxEditorContent({
                         boxSizing: 'border-box',
                         border: `2px solid ${BRAND}`,
                         padding: '0 3px',
-                        font: `${13 * paintedZoom}px system-ui, sans-serif`,
+                        font: cellFont(activeTextStyle.font, paintedZoom),
+                        color: activeTextStyle.color,
                         background: '#ffffff',
                         pointerEvents: 'auto',
                         outline: 'none',
