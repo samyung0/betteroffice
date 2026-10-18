@@ -179,10 +179,10 @@ fn collect_paragraph_font_requirements(
         .unwrap_or("Calibri");
     add_font_requirement(default_family, false, false, scripts, requirements);
     for run in &paragraph.runs {
-        let (formatting, include_regular) = match run {
-            Run::Text(text) => (&text.fmt, true),
-            Run::Tab(tab) => (&tab.fmt, false),
-            Run::Field(field) => (&field.fmt, false),
+        let (formatting, include_regular, text) = match run {
+            Run::Text(text) => (&text.fmt, true, text.text.as_str()),
+            Run::Tab(tab) => (&tab.fmt, false, ""),
+            Run::Field(field) => (&field.fmt, false, ""),
             _ => continue,
         };
         let family = formatting.font_family.as_deref().unwrap_or(default_family);
@@ -195,13 +195,16 @@ fn collect_paragraph_font_requirements(
         let Some(slots) = &formatting.font_slots else {
             continue;
         };
-        for family in [
-            slots.ascii.as_deref(),
-            slots.h_ansi.as_deref(),
-            slots.east_asia.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
+        let east_asia = slots.east_asia.as_deref().filter(|_| {
+            ooxml_text::uses_east_asia_slot(
+                text,
+                formatting.complex_script.unwrap_or(false),
+                slots.hint.as_deref(),
+            )
+        });
+        for family in [slots.ascii.as_deref(), slots.h_ansi.as_deref(), east_asia]
+            .into_iter()
+            .flatten()
         {
             add_font_requirement(family, bold, italic, scripts, requirements);
             if include_regular {
@@ -2949,6 +2952,27 @@ mod tests {
             requirement["key"] == "yu mincho|0|0"
                 && requirement["scripts"] == serde_json::json!(["cjk-jp"])
         }));
+    }
+
+    #[test]
+    fn requires_an_east_asian_slot_family_only_for_text_that_uses_it() {
+        let asks_for_mincho = |text: &str, slots: serde_json::Value| {
+            let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+                "kind": "paragraph",
+                "id": "p",
+                "runs": [{"kind": "text", "text": text, "fontSlots": slots}]
+            }]))
+            .unwrap();
+            collect_font_requirements(&blocks)
+                .iter()
+                .any(|requirement| requirement.family == "ＭＳ 明朝")
+        };
+        let slots = json!({"ascii": "Calibri", "eastAsia": "ＭＳ 明朝"});
+        let hinted = json!({"ascii": "Calibri", "eastAsia": "ＭＳ 明朝", "hint": "eastAsia"});
+
+        assert!(!asks_for_mincho("Lesson plan", slots.clone()));
+        assert!(asks_for_mincho("Lesson 計画", slots));
+        assert!(asks_for_mincho("“Lesson”", hinted));
     }
 
     #[test]

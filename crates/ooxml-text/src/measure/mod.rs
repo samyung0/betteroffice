@@ -132,6 +132,8 @@ pub use input::{
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 
+pub use prepare::uses_east_asia_slot;
+
 use crate::font_store::{FontId, FontStore};
 
 /// Why measurement refused an input.

@@ -24,3 +24,4 @@ wasm-alloc.workspace = true
 
 [dev-dependencies]
 ooxml-opc.workspace = true
+ooxml-text.workspace = true

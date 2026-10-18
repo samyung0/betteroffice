@@ -892,8 +892,37 @@ export async function preloadCommonFonts(): Promise<void> {
   await loadFonts(commonFonts);
 }
 
+const EAST_ASIAN_CHARSETS = new Set(['80', '81', '82', '86', '88']);
+
+function isEastAsianCodePoint(point: number): boolean {
+  return (
+    (point >= 0x1100 && point <= 0x11ff) ||
+    (point >= 0x2e80 && point <= 0x30ff) ||
+    (point >= 0x3130 && point <= 0x318f) ||
+    (point >= 0x31a0 && point <= 0x31ff) ||
+    (point >= 0x3400 && point <= 0x4dbf) ||
+    (point >= 0x4e00 && point <= 0x9fff) ||
+    (point >= 0xa960 && point <= 0xa97f) ||
+    (point >= 0xac00 && point <= 0xd7ff) ||
+    (point >= 0xf900 && point <= 0xfaff) ||
+    (point >= 0xff00 && point <= 0xffef)
+  );
+}
+
+/** Whether a run's text uses its East Asian font slot (ooxml-text's `uses_east_asia_slot`). */
+function usesEastAsianSlot(text: string, hint: unknown): boolean {
+  for (const char of text) {
+    const point = char.codePointAt(0) ?? 0;
+    if (isEastAsianCodePoint(point)) return true;
+    if (hint === 'eastAsia' && point > 0x7f && (point < 0x0300 || point > 0x036f)) return true;
+  }
+  return false;
+}
+
 /**
- * Extract all font families used in a document
+ * Extract the font families a document uses. East Asian ones (`eastAsia`
+ * slots, CJK-charset fontTable entries) count only when some run's text uses
+ * its East Asian slot, so a document merely naming a CJK face loads none.
  *
  * Uses loose typing to handle any document-like structure.
  *
@@ -903,6 +932,8 @@ export async function preloadCommonFonts(): Promise<void> {
 export function extractFontsFromDocument(document: unknown): Set<string> {
   const fonts = new Set<string>();
   if (typeof document !== 'object' || document === null) return fonts;
+  const eastAsian = new Set<string>();
+  let eastAsianText = false;
 
   // Walk the parsed document/style/table containers, including nested tables,
   // text boxes and header/footer content. Bound the traversal because every
@@ -926,8 +957,18 @@ export function extractFontsFromDocument(document: unknown): Set<string> {
       const slots = family as Record<string, unknown>;
       for (const slot of ['ascii', 'hAnsi', 'eastAsia', 'cs']) {
         const name = slots[slot];
-        if (typeof name === 'string' && name.trim()) fonts.add(name.trim());
+        if (typeof name === 'string' && name.trim())
+          (slot === 'eastAsia' ? eastAsian : fonts).add(name.trim());
       }
+    }
+    if (!eastAsianText && record.type === 'run' && Array.isArray(record.content)) {
+      const text = record.content
+        .map((item) => (item as { type?: unknown; text?: unknown }))
+        .filter((item) => item.type === 'text' && typeof item.text === 'string')
+        .map((item) => item.text as string)
+        .join('');
+      const formatting = record.formatting as { fontFamily?: { hint?: unknown } } | undefined;
+      eastAsianText = usesEastAsianSlot(text, formatting?.fontFamily?.hint);
     }
     // fontTable.xml names and altName aliases are both legitimate authored
     // references; preload both so a run using either spelling resolves.
@@ -935,14 +976,19 @@ export function extractFontsFromDocument(document: unknown): Set<string> {
       typeof record.name === 'string' &&
       ('altName' in record || 'panose1' in record || 'embedRegular' in record)
     ) {
-      if (record.name.trim()) fonts.add(record.name.trim());
+      const target =
+        typeof record.charset === 'string' && EAST_ASIAN_CHARSETS.has(record.charset)
+          ? eastAsian
+          : fonts;
+      if (record.name.trim()) target.add(record.name.trim());
       if (typeof record.altName === 'string' && record.altName.trim()) {
-        fonts.add(record.altName.trim());
+        target.add(record.altName.trim());
       }
     }
     for (const child of Object.values(record)) stack.push(child);
   }
 
+  if (eastAsianText) for (const name of eastAsian) fonts.add(name);
   return fonts;
 }
 
