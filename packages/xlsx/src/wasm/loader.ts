@@ -367,10 +367,9 @@ export interface WorkbookHandle extends CollaborationReplica {
   /**
    * clear the content of the cells in `range` (A1) that hold a value or a
    * formula, keeping formats, as one undo step: empty cells cost nothing. Throws
-   * {@link ClearTooLargeError}, changing nothing, when the update could exceed
-   * `maxUpdateBytes`.
+   * {@link EditTooLargeError}, changing nothing, past the engine's update cap.
    */
-  clearContents(sheet: number, range: string, maxUpdateBytes?: number): EditResult;
+  clearContents(sheet: number, range: string): EditResult;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -684,12 +683,9 @@ export function openWorkbook(
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
     },
-    clearContents(sheet: number, range: string, maxUpdateBytes?: number): EditResult {
+    clearContents(sheet: number, range: string): EditResult {
       try {
-        return parseJson(
-          () => doc.clearContentsJson(JSON.stringify({ sheet, range, maxUpdateBytes })),
-          true
-        );
+        return parseJson(() => doc.clearContentsJson(JSON.stringify({ sheet, range })), true);
       } catch (error) {
         throw (error instanceof Error && refusalOf(error.message)) || error;
       }

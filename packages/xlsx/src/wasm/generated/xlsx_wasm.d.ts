@@ -38,7 +38,7 @@ export class XlsxDocument {
     checkpointProjectionJson(): string;
     /**
      * clear the cells of a range that hold content, as one undo step; returns
-     * `SheetInfo` json, or a "clear too large" error when over `maxUpdateBytes`.
+     * `SheetInfo` json, or an "edit too large" error past the update cap.
      */
     clearContentsJson(args: string): string;
     /**
