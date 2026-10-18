@@ -50,7 +50,8 @@ export const incrementalCommits: XlsxScenario = {
         partial
       );
       expect(keystroke.applied).toBe(true);
-      expect([partial, `'${partial}`]).toContain(
+      // a prefix that parses once its open parenthesis is closed is stored closed.
+      expect([partial, `'${partial}`, `${partial})`]).toContain(
         handle.cell(SHEET, ROW, 0).input
       );
     }
