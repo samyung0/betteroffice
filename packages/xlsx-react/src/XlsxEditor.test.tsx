@@ -2622,3 +2622,118 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(11, 1)).toBe('1000');
   });
 });
+
+describe('XlsxEditor point mode', () => {
+  const press = async (target: Element, key: string, init: KeyboardEventInit = {}) => {
+    await act(async () => {
+      fireEvent.keyDown(target, { key, ...init });
+    });
+    await idleWith(() => currentWorkbook);
+  };
+
+  it('puts a clicked cell into a formula waiting for a reference instead of committing it', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    expect(view.editor()?.value).toBe('=');
+    await view.click({ row: 2, col: 1 });
+    expect(view.editor()?.value).toBe('=B3');
+    expect(view.nameBox().value).toBe('B11');
+    // pointing again replaces the reference; an operator ends it.
+    await view.click({ row: 3, col: 1 });
+    expect(view.editor()?.value).toBe('=B4');
+    view.type('=B4+');
+    await view.click({ row: 2, col: 2 });
+    expect(view.editor()?.value).toBe('=B4+C3');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(10, 1)).toBe('=B4+C3');
+  });
+
+  it('commits as before when the formula waits for no reference', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    view.type('=B3');
+    await view.click({ row: 2, col: 2 });
+    expect(view.editor() === null).toBe(true);
+    expect(view.nameBox().value).toBe('C3');
+    expect(await view.input(10, 1)).toBe('=B3');
+  });
+
+  it('points with the arrow keys in a typed edit, and F2 switches them to the caret', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    await press(view.editor()!, 'ArrowUp');
+    expect(view.editor()?.value).toBe('=B10');
+    await press(view.editor()!, 'ArrowUp');
+    await press(view.editor()!, 'ArrowUp', { shiftKey: true });
+    expect(view.editor()?.value).toBe('=B8:B9');
+    view.type('=B8:B9+');
+    await press(view.editor()!, 'F2');
+    await press(view.editor()!, 'ArrowLeft');
+    expect(view.editor()?.value).toBe('=B8:B9+');
+    view.editor()!.setSelectionRange(7, 7);
+    await press(view.editor()!, 'F2');
+    await press(view.editor()!, 'ArrowLeft');
+    expect(view.editor()?.value).toBe('=B8:B9+A11');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(10, 1)).toBe('=B8:B9+A11');
+  });
+
+  it('leaves the arrows to the caret in an edit opened with F2 until F2 is pressed', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, 'F2');
+    view.type('=');
+    await press(view.editor()!, 'ArrowUp');
+    expect(view.editor()?.value).toBe('=');
+    await press(view.editor()!, 'F2');
+    await press(view.editor()!, 'ArrowUp');
+    expect(view.editor()?.value).toBe('=B10');
+  });
+
+  it('drags a range into a formula waiting for a reference', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    view.type('=SUM(');
+    const from = pointAt(plain, { row: 2, col: 1 });
+    const to = pointAt(plain, { row: 4, col: 1 });
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, from);
+      fireEvent.mouseMove(view.surface, to);
+      fireEvent.mouseUp(window, to);
+    });
+    await view.idle();
+    expect(view.editor()?.value).toBe('=SUM(B3:B5');
+    expect(view.surface.querySelector('[data-testid="xlsx-pointed-reference"]') === null).toBe(false);
+    view.type('=SUM(B3:B5)');
+    expect(view.surface.querySelector('[data-testid="xlsx-pointed-reference"]') === null).toBe(true);
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(10, 1)).toBe('=SUM(B3:B5)');
+  });
+
+  it('puts a clicked cell into a formula-bar draft waiting for a reference', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    view.typeFormula('=');
+    await view.click({ row: 2, col: 1 });
+    expect(view.formula()).toBe('=B3');
+    expect(view.nameBox().value).toBe('B11');
+  });
+
+  // Budget's title is merged over A1:D1.
+  it('names a merged cell by its top-left cell, pointed or arrowed into', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    await view.click({ row: 0, col: 2 });
+    expect(view.editor()?.value).toBe('=A1');
+    await press(view.editor()!, 'Escape');
+    await view.click({ row: 1, col: 2 });
+    await press(view.surface, '=');
+    await press(view.editor()!, 'ArrowUp');
+    expect(view.editor()?.value).toBe('=A1');
+  });
+});
