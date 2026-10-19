@@ -983,27 +983,46 @@ describe('XlsxEditor keyboard', () => {
     expect(view.formulaInput().style.cursor).toBe('');
   }, MANY_KEYS_MS);
 
-  it('refuses edits while a cut reads its selection, then clears what it copied', async () => {
-    const view = await mountEditor(farColumn);
+  // the worker calls made, the first read held until released, and what
+  // reaches the clipboard.
+  const holdFirstRead = (view: Awaited<ReturnType<typeof mountEditor>>) => {
     const proxy = view.workbook();
     const forward = proxy.onSheet.bind(proxy);
-    let release!: () => void;
+    let open!: () => void;
     const held = new Promise<void>((resolve) => {
-      release = resolve;
+      open = resolve;
     });
     const sent: string[] = [];
     const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
       sent.push(method);
-      // the cut's first read waits until the test lets it go.
       if (method === 'rangeCells' && sent.filter((name) => name === 'rangeCells').length === 1)
         return held.then(() => forward(sheetId, method, ...args));
       return forward(sheetId, method, ...args);
     }) as WorkbookProxy['onSheet']);
+    const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
-      value: { writeText: async () => {} },
+      value: { writeText: async (text: string) => void written.push(text) },
     });
+    return {
+      sent,
+      written,
+      release: () =>
+        act(async () => {
+          open();
+        }),
+      restore: () => {
+        spy.mockRestore();
+        if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+        else Reflect.deleteProperty(navigator, 'clipboard');
+      },
+    };
+  };
+
+  it('refuses edits while a cut reads its selection, then clears what it copied', async () => {
+    const view = await mountEditor(farColumn);
+    const read = holdFirstRead(view);
     try {
       await view.click({ row: 0, col: 0 });
       await press(view.surface, 'a', { ctrlKey: true });
@@ -1012,18 +1031,32 @@ describe('XlsxEditor keyboard', () => {
       await press(view.surface, 'Delete');
       await press(view.surface, '7');
       expect(view.editor()).toBeNull();
-      expect(sent.filter((name) => name === 'clearContents' || name === 'editCells')).toEqual([]);
-      await act(async () => {
-        release();
-      });
+      expect(read.sent.filter((name) => name === 'clearContents' || name === 'editCells')).toEqual([]);
+      await read.release();
       await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull(), { timeout: 20_000 });
       await view.idle();
-      expect(sent.filter((name) => name === 'clearContents')).toHaveLength(1);
+      expect(read.sent.filter((name) => name === 'clearContents')).toHaveLength(1);
       expect(await view.input(89_999, 9)).toBe('');
     } finally {
-      spy.mockRestore();
-      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
-      else Reflect.deleteProperty(navigator, 'clipboard');
+      read.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  it('ends a cut as a copy when sending starts during its read', async () => {
+    const view = await mountEditor(farColumn);
+    const read = holdFirstRead(view);
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await view.setProps({ sending: true });
+      await read.release();
+      await waitFor(() => expect(read.written).toHaveLength(1), { timeout: 20_000 });
+      await view.idle();
+      expect(read.sent.filter((name) => name === 'clearContents')).toEqual([]);
+      expect(await view.input(89_999, 9)).toBe('1');
+    } finally {
+      read.restore();
     }
   }, MANY_KEYS_MS);
 
@@ -2858,6 +2891,33 @@ describe('XlsxEditor menu commands', () => {
     await view.run('zoom:150');
     expect(view.state().zoom).toBe(1.5);
   });
+
+  it('leaves a merge whose unmerge read answers after sending started', async () => {
+    const view = await mountEditor();
+    await act(async () => {
+      await view.api().selectCells(0, { anchor: { row: 2, col: 1 }, focus: { row: 3, col: 2 } });
+    });
+    await view.run('merge:all');
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    let open!: () => void;
+    const held = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) =>
+      method === 'mergedRanges'
+        ? held.then(() => forward(sheetId, method, ...args))
+        : forward(sheetId, method, ...args)) as WorkbookProxy['onSheet']);
+    try {
+      await view.run('merge:unmerge');
+      await view.setProps({ sending: true });
+      await act(async () => open());
+      await view.idle();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await view.workbook().mergedRanges(0, 'B3:C4')).toHaveLength(1);
+  });
 });
 
 describe('XlsxEditor active cell', () => {
@@ -3200,6 +3260,25 @@ describe('XlsxEditor formula entry', () => {
       held.restore();
     }
     expect([await view.input(10, 1), await view.input(11, 1)]).toEqual(['', '=B3*2']);
+  });
+
+  it('refuses a row insert and a host clear that waited on a commit once sending started', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await view.run('insertRowAbove');
+      await act(async () => view.api().clearSelection());
+      await view.setProps({ sending: true });
+      await held.release();
+    } finally {
+      held.restore();
+    }
+    expect([view.nameBox().value, await view.input(10, 1), await view.input(11, 1)]).toEqual([
+      'B11',
+      '=B3*2',
+      '1000',
+    ]);
   });
 
   // the press commits the formula-bar draft first: a refusal keeps it on its cell.

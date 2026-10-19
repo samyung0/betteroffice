@@ -708,6 +708,9 @@ function XlsxEditorContent({
   const readOnly = readOnlyProp || busy;
   const busyRef = useRef(busy);
   busyRef.current = busy;
+  // what the host refuses, apart from the editor's own cut read.
+  const hostRefusesRef = useRef(false);
+  hostRefusesRef.current = readOnlyProp || sending;
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -1092,7 +1095,9 @@ function XlsxEditorContent({
       setCapturedFormat(null);
       paintSourceRef.current = null;
     };
-    if (commitInFlightRef.current) void settled.then((landed) => landed && clear());
+    // a pause begun while the commit waited refuses it.
+    if (commitInFlightRef.current)
+      void settled.then((landed) => landed && !readOnlyRef.current && clear());
     else clear();
   }, []);
 
@@ -1962,7 +1967,8 @@ function XlsxEditorContent({
     const target = selection;
     setCutReading(true);
     try {
-      if (await copySelection(target)) clearRange(target);
+      // a pause begun during the read leaves a copy.
+      if ((await copySelection(target)) && !hostRefusesRef.current) clearRange(target);
     } finally {
       setCutReading(false);
     }
@@ -2161,7 +2167,7 @@ function XlsxEditorContent({
         handle
           .onSheet(sheetId, 'mergedRanges', activeSheet, selectedRangeA1(selection))
           .then((merged) => {
-            if (merged.length === 0) return;
+            if (merged.length === 0 || readOnlyRef.current) return;
             return onSheet(
               sheetId,
               'applyOps',
@@ -2974,6 +2980,8 @@ function XlsxEditorContent({
     const settled = settlePendingEditsRef.current();
     if (!settled) return false;
     const apply = () => {
+      // a pause begun while the commit waited refuses it.
+      if (readOnlyRef.current) return;
       onSheet(activeSheetId, 'applyOps', ops).then(applyResult, reportError);
     };
     if (commitInFlightRef.current) void settled.then((landed) => landed && apply());
