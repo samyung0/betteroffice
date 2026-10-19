@@ -577,7 +577,11 @@ export function openWorkbook(
           }
         }
       }
-      if (failed) throw toError(failure);
+      if (failed) {
+        // an engine refusal reaches the caller typed, as through the worker.
+        const error = toError(failure);
+        throw refusalOf(error.message) ?? error;
+      }
       return result as T;
     } finally {
       wasmCallDepth -= 1;
@@ -688,11 +692,7 @@ export function openWorkbook(
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
     },
     clearContents(sheet: number, range: string): EditResult {
-      try {
-        return parseJson(() => doc.clearContentsJson(JSON.stringify({ sheet, range })), true);
-      } catch (error) {
-        throw (error instanceof Error && refusalOf(error.message)) || error;
-      }
+      return parseJson(() => doc.clearContentsJson(JSON.stringify({ sheet, range })), true);
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
