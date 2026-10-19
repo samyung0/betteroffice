@@ -1248,6 +1248,39 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  // a peer edits C2 while the cut of B2 reads: the clipboard keeps what was read.
+  it('clears nothing, with a notice, when a peer changed the sheet during a cut read', async () => {
+    const notices: string[] = [];
+    const view = await mountEditor(plain, undefined, undefined, {
+      collaboration: { clientId: 3501 },
+      onNotice: (notice) => notices.push(notice),
+    });
+    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3502 });
+    const read = holdFirstRead(view);
+    try {
+      const editor = view.workbook();
+      const before = await editor.encodeStateVector();
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'x', { ctrlKey: true });
+      peer.editCell(0, 1, 2, 'peer');
+      await act(async () => {
+        await editor.applyUpdate(peer.encodeStateAsUpdate(before));
+      });
+      await read.release();
+      await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull());
+      await view.idle();
+      expect([notices, read.sent.filter((method) => method === 'clearContents'), read.written]).toEqual([
+        ['cut-peer-change'],
+        [],
+        ['Q1'],
+      ]);
+      expect([await view.input(1, 1), await view.input(1, 2)]).toEqual(['Q1', 'peer']);
+    } finally {
+      read.restore();
+      peer.dispose();
+    }
+  }, MANY_KEYS_MS);
+
   // J90000:J90010: the cut's first of ten pieces is held, then J90010 is copied.
   it('clears nothing when a copy made during a cut read supersedes it', async () => {
     const view = await mountEditor(farColumn);

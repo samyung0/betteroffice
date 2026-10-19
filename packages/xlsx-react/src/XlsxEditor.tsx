@@ -149,9 +149,14 @@ export interface XlsxEditorCollaborationOptions {
  * pass the engine's 64 MiB cap, or a copy (or cut) of more cells than
  * {@link XLSX_COPY_MAX_CELLS} or more text than {@link XLSX_COPY_MAX_BYTES}.
  * Nothing changed. `copy-failed`: the browser refused a copy's (or cut's)
- * clipboard write, and a cut cleared nothing.
+ * clipboard write, and a cut cleared nothing. `cut-peer-change`: a peer's
+ * change arrived while a cut read, so it copied and cleared nothing.
  */
-export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large' | 'copy-failed';
+export type XlsxEditorNotice =
+  | 'edit-too-large'
+  | 'copy-too-large'
+  | 'copy-failed'
+  | 'cut-peer-change';
 
 /** A copy reads its area in pieces under the engine's 100,000-cell read cap. */
 const COPY_PIECE_CELLS = 100_000;
@@ -2027,7 +2032,8 @@ function XlsxEditorContent({
   );
 
   // a cut reads, then clears the range it copied (nothing once a newer copy
-  // superseded its read); edits wait while it reads. Read-only, it copies.
+  // superseded its read, or after a peer's change arrived meanwhile, with a
+  // notice); edits wait while it reads. Read-only, it copies.
   const cutSelection = useCallback(async () => {
     if (!selection) return;
     if (readOnly) {
@@ -2048,14 +2054,28 @@ function XlsxEditorContent({
               `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
             )
         : undefined;
+    const remoteSeen = remoteSeenRef.current;
     setCutReading(true);
     try {
       // a pause begun during the read leaves a copy.
-      if ((await copySelection(target, check)) && !hostRefusesRef.current) clearRange(target);
+      if (!(await copySelection(target, check)) || hostRefusesRef.current) return;
+      if (remoteSeenRef.current === remoteSeen) clearRange(target);
+      else if (onNotice) onNotice('cut-peer-change');
+      else reportError(new Error('Someone changed the sheet during the cut: copied, not cleared.'));
     } finally {
       setCutReading(false);
     }
-  }, [selection, readOnly, copySelection, clearRange, usedRange, activeSheet, activeSheetId]);
+  }, [
+    selection,
+    readOnly,
+    copySelection,
+    clearRange,
+    usedRange,
+    activeSheet,
+    activeSheetId,
+    onNotice,
+    reportError,
+  ]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;
