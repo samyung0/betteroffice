@@ -13,6 +13,7 @@ import type {
 import { refusalOf } from '../wasm/refusals';
 import { StaleProposalError } from '../wasm/staleProposal';
 import {
+  CUT_CHANGED,
   MUTATING_METHODS,
   SHEET_GONE,
   WORKBOOK_METHODS,
@@ -57,12 +58,21 @@ export interface WorkbookProxy extends WorkbookCalls {
     property: 'bold' | 'italic' | 'strikethrough'
   ): Promise<EditResult>;
   onUpdate(listener: WorkbookUpdateListener): () => void;
+  /**
+   * A cut's clear of `range` on the active sheet while it is still `sheetId`,
+   * else a {@link SheetGoneError}; a {@link CutChangedError} when a peer changed
+   * a cell in the range the cut's `checkClearContents` watched (nothing cleared).
+   */
+  clearCut(sheetId: string, range: string): Promise<EditResult>;
   /** Ends the worker; pending requests fail. */
   dispose(): void;
 }
 
 /** A call refused because its sheet stopped being the active one. */
 export class SheetGoneError extends Error {}
+
+/** A cut's clear refused: a peer changed a cell in its range while it read. */
+export class CutChangedError extends Error {}
 
 /** The error of an open whose signal was aborted. */
 const OPEN_CANCELLED = 'workbook open was cancelled';
@@ -140,6 +150,7 @@ export async function openWorkbookWorker(
     if (message.ok) request.resolve(message.value);
     else if (message.stale) request.reject(new StaleProposalError(message.stale));
     else if (message.error === SHEET_GONE) request.reject(new SheetGoneError(message.error));
+    else if (message.error === CUT_CHANGED) request.reject(new CutChangedError(message.error));
     else request.reject(refusalOf(message.error) ?? new Error(message.error));
   };
   worker.onerror = (event) => fail(new Error(`workbook worker failed: ${event.message}`));
@@ -215,6 +226,7 @@ export async function openWorkbookWorker(
     ) => call(method, args, sheetId) as Promise<ReturnType<WorkbookHandle[K]>>,
     toggle: (sheetId, range, property) =>
       send<EditResult>({ type: 'toggle', sheetId, range, property }, [], true),
+    clearCut: (sheetId, range) => send<EditResult>({ type: 'clearCut', sheetId, range }, [], true),
     onUpdate(listener) {
       if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
       listeners.add(listener);

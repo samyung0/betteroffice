@@ -17,6 +17,7 @@ import {
   cellRect,
   CellTextTooLongError,
   chartRegionAtPoint,
+  CutChangedError,
   EditTooLargeError,
   extendTo,
   fromTsv,
@@ -149,8 +150,8 @@ export interface XlsxEditorCollaborationOptions {
  * pass the engine's 64 MiB cap, or a copy (or cut) of more cells than
  * {@link XLSX_COPY_MAX_CELLS} or more text than {@link XLSX_COPY_MAX_BYTES}.
  * Nothing changed. `copy-failed`: the browser refused a copy's (or cut's)
- * clipboard write, and a cut cleared nothing. `cut-peer-change`: a peer's
- * change arrived while a cut read, so it copied and cleared nothing.
+ * clipboard write, and a cut cleared nothing. `cut-peer-change`: a peer
+ * changed a cell in a cut's range while it read, so it copied and cleared nothing.
  */
 export type XlsxEditorNotice =
   | 'edit-too-large'
@@ -996,6 +997,7 @@ function XlsxEditorContent({
             : null;
       if (kind) setRefusal({ kind, selection: selectionRef.current });
       else if (e instanceof EditTooLargeError && onNotice) onNotice('edit-too-large');
+      else if (e instanceof CutChangedError && onNotice) onNotice('cut-peer-change');
       else reportError(e);
     },
     [onNotice, reportError]
@@ -1932,14 +1934,20 @@ function XlsxEditorContent({
 
   // the engine clears only the cells of `target` inside the used range that
   // hold content, so a sparse used range costs its stored cells.
+  // A cut's clear (`cut`) is refused in the worker when a peer changed a cell
+  // in the range its check watched, whenever that change landed.
   const clearRange = useCallback(
-    (target: Selection) => {
+    (target: Selection, cut = false) => {
+      const proxy = handleRef.current;
       const r = inUsedRange(normalizeRange(target), usedRange());
-      if (!r) return;
+      if (!proxy || !r) return;
       const range = `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
-      onSheet(activeSheetId, 'clearContents', activeSheet, range).then(applyResult, reportEditError);
+      const cleared = cut
+        ? track(proxy, proxy.clearCut(activeSheetId, range))
+        : onSheet(activeSheetId, 'clearContents', activeSheet, range);
+      cleared.then(applyResult, reportEditError);
     },
-    [activeSheet, activeSheetId, applyResult, onSheet, reportEditError, usedRange]
+    [activeSheet, activeSheetId, applyResult, onSheet, track, reportEditError, usedRange]
   );
 
   const clearCells = useCallback(() => {
@@ -2032,7 +2040,7 @@ function XlsxEditorContent({
   );
 
   // a cut reads, then clears the range it copied (nothing once a newer copy
-  // superseded its read, or after a peer's change arrived meanwhile, with a
+  // superseded its read, or when a peer changed a cell in it meanwhile, with a
   // notice); edits wait while it reads. Read-only, it copies.
   const cutSelection = useCallback(async () => {
     if (!selection) return;
@@ -2041,27 +2049,18 @@ function XlsxEditorContent({
       return;
     }
     const target = selection;
-    // a clear past the engine's update cap is refused before anything is copied.
+    // a clear past the engine's update cap is refused before anything is
+    // copied; the check also has the worker watch the selection for a peer's
+    // change until the clear.
     const handle = handleRef.current;
-    const r = inUsedRange(normalizeRange(target), usedRange());
     const check =
-      handle && r
-        ? () =>
-            handle.onSheet(
-              activeSheetId,
-              'checkClearContents',
-              activeSheet,
-              `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
-            )
+      handle && inUsedRange(normalizeRange(target), usedRange())
+        ? () => handle.onSheet(activeSheetId, 'checkClearContents', activeSheet, selectedRangeA1(target))
         : undefined;
-    const remoteSeen = remoteSeenRef.current;
     setCutReading(true);
     try {
       // a pause begun during the read leaves a copy.
-      if (!(await copySelection(target, check)) || hostRefusesRef.current) return;
-      if (remoteSeenRef.current === remoteSeen) clearRange(target);
-      else if (onNotice) onNotice('cut-peer-change');
-      else reportError(new Error('Someone changed the sheet during the cut: copied, not cleared.'));
+      if ((await copySelection(target, check)) && !hostRefusesRef.current) clearRange(target, true);
     } finally {
       setCutReading(false);
     }
@@ -2073,8 +2072,7 @@ function XlsxEditorContent({
     usedRange,
     activeSheet,
     activeSheetId,
-    onNotice,
-    reportError,
+    selectedRangeA1,
   ]);
 
   const pasteSelection = useCallback(async () => {
