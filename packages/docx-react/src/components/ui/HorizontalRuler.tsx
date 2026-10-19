@@ -100,6 +100,8 @@ export function HorizontalRuler({
 }: HorizontalRulerProps): React.ReactElement {
   const { t } = useTranslation();
   const [dragging, setDragging] = useState<MarkerType | null>(null);
+  const leftDraggable = editable && !!onLeftMarginChange;
+  const rightDraggable = editable && !!onRightMarginChange;
   const [hoveredMarker, setHoveredMarker] = useState<MarkerType | null>(null);
   const [dragValue, setDragValue] = useState<number | null>(null);
   const [dragPositionPx, setDragPositionPx] = useState<number | null>(null);
@@ -236,6 +238,8 @@ export function HorizontalRuler({
     >
       {/* Gray margin zones — click & drag anywhere in the gray area to adjust margin */}
       <div
+        data-ruler-margin="left"
+        data-draggable={leftDraggable}
         style={{
           position: 'absolute',
           top: 0,
@@ -244,14 +248,14 @@ export function HorizontalRuler({
           height: RULER_HEIGHT,
           backgroundColor: MARGIN_ZONE_COLOR,
           borderRight: `1px solid ${MARGIN_ZONE_COLOR}`,
-          cursor: editable ? 'ew-resize' : 'default',
+          cursor: leftDraggable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
-        onMouseDown={
-          editable && onLeftMarginChange ? (e) => handleDragStart(e, 'leftMargin') : undefined
-        }
+        onMouseDown={leftDraggable ? (e) => handleDragStart(e, 'leftMargin') : undefined}
       />
       <div
+        data-ruler-margin="right"
+        data-draggable={rightDraggable}
         style={{
           position: 'absolute',
           top: 0,
@@ -260,12 +264,10 @@ export function HorizontalRuler({
           height: RULER_HEIGHT,
           backgroundColor: MARGIN_ZONE_COLOR,
           borderLeft: `1px solid ${MARGIN_ZONE_COLOR}`,
-          cursor: editable ? 'ew-resize' : 'default',
+          cursor: rightDraggable ? 'ew-resize' : 'default',
           zIndex: 1,
         }}
-        onMouseDown={
-          editable && onRightMarginChange ? (e) => handleDragStart(e, 'rightMargin') : undefined
-        }
+        onMouseDown={rightDraggable ? (e) => handleDragStart(e, 'rightMargin') : undefined}
       />
 
       {/* Tick marks, drawn over the margin zones (an opaque tint would hide them) */}

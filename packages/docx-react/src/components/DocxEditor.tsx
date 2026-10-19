@@ -203,6 +203,12 @@ export interface DocxEditorProps {
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
+   * False leaves out the final section's edits that change only this editor's
+   * document model: the rulers' margin drags and a header or footer's Remove
+   * (default: true).
+   */
+  finalSectionEditable?: boolean;
+  /**
    * When true, the editor does not intercept Cmd/Ctrl+F or Cmd/Ctrl+H.
    * This lets the browser or host app handle native find/history shortcuts.
    */
@@ -648,6 +654,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     initialZoom = 1.0,
     pinchZoom = false,
     showHiddenText = false,
+    finalSectionEditable = true,
     readOnly: readOnlyProp = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
@@ -2019,8 +2026,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           zoom,
           unit: rulerUnit,
           editable: !readOnly,
-          onLeftMarginChange: handleLeftMarginChange,
-          onRightMarginChange: handleRightMarginChange,
+          onLeftMarginChange: finalSectionEditable ? handleLeftMarginChange : undefined,
+          onRightMarginChange: finalSectionEditable ? handleRightMarginChange : undefined,
           indentLeft: state.paragraphIndentLeft,
           indentRight: state.paragraphIndentRight,
           onIndentLeftChange: handleIndentLeftChange,
@@ -2036,8 +2043,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           zoom,
           unit: rulerUnit,
           editable: !readOnly,
-          onTopMarginChange: handleTopMarginChange,
-          onBottomMarginChange: handleBottomMarginChange,
+          onTopMarginChange: finalSectionEditable ? handleTopMarginChange : undefined,
+          onBottomMarginChange: finalSectionEditable ? handleBottomMarginChange : undefined,
         }}
         outlineProps={{
           headings: outlineHeadings,
@@ -2143,7 +2150,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               setPartEditTarget={setPartEditTarget}
               onHeaderFooterDoubleClick={handleHeaderFooterDoubleClick}
               onNoteClick={setPartEditTarget}
-              onRemoveHeaderFooter={handleRemoveHeaderFooter}
+              onRemoveHeaderFooter={finalSectionEditable ? handleRemoveHeaderFooter : undefined}
               onBodyClick={handleBodyClick}
               zoom={zoom}
               readOnly={readOnly}
