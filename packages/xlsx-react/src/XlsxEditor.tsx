@@ -193,7 +193,9 @@ export interface XlsxEditorProps {
    * The host holds back its collaboration messages (pacing, an update's
    * pieces, a timeout): the grid and formula bar show a loading cursor and
    * every edit is refused as in `readOnly` until it turns false. Selection,
-   * scrolling and copy still work, and an open cell edit stays open, read-only.
+   * scrolling and copy still work. An open cell edit or formula-bar draft stays
+   * open, read-only, on its cell: a press elsewhere, a sheet switch,
+   * `selectCells` and `clearSelection` are refused while it is open.
    */
   sending?: boolean;
   /** A refused edit for the host to show; unset, the editor shows its message. */
@@ -2463,6 +2465,13 @@ function XlsxEditorContent({
       // a chart painted under it, or move the grid.
       const dismissesEditor = editing != null;
       if (dismissesEditor && editorInputRef.current?.contains(e.target as Node)) return;
+      // while busy an open draft stays on its cell, read-only: a press that
+      // would leave it is refused, as a sheet switch is.
+      if (busyRef.current && (editing || formulaDraft !== null)) {
+        e.preventDefault();
+        clickStartRef.current = null;
+        return;
+      }
       // a draft the engine may refuse (in the cell or the formula bar) keeps the
       // focus: the press commits it first and acts once it landed, so a refusal
       // leaves the selection on the draft's cell.

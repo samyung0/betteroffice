@@ -1215,6 +1215,29 @@ describe('XlsxEditor keyboard', () => {
     expect(await view.input(2, 2)).toBe('draft');
   }, MANY_KEYS_MS);
 
+  it('keeps an open cell or formula-bar draft on its cell while sending when another cell is pressed', async () => {
+    const view = await mountEditor(plain);
+    const d5 = await view.input(4, 3);
+    await view.doubleClick({ row: 2, col: 2 });
+    view.type('draft');
+    await view.setProps({ sending: true });
+    await view.click({ row: 4, col: 3 });
+    expect([view.editor()?.value, view.nameBox().value]).toEqual(['draft', 'C3']);
+    await view.setProps({ sending: false });
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(2, 2)).toBe('draft');
+
+    await view.click({ row: 10, col: 1 });
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('=B3*2');
+    await view.setProps({ sending: true });
+    await view.click({ row: 4, col: 3 });
+    expect([view.formula(), view.nameBox().value]).toEqual(['=B3*2', 'B11']);
+    await view.setProps({ sending: false });
+    await press(view.formulaInput(), 'Enter');
+    expect([await view.input(10, 1), await view.input(4, 3)]).toEqual(['=B3*2', d5]);
+  }, MANY_KEYS_MS);
+
   it('reveals a far cell on another sheet the name box goes to', async () => {
     const view = await mountEditor(plain);
     await view.click({ row: 0, col: 0 });
