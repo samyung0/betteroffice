@@ -155,8 +155,8 @@ export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large';
 const COPY_PIECE_CELLS = 100_000;
 /**
  * The largest area (rows x columns, from the selection's top-left to the used
- * range's end) a copy or cut takes. AWAITING CONFIRMATION (Epo): proposed from
- * the 2026-10-18 headless Chromium measurements at 1M, 5M and 10M cells.
+ * range's end) a copy or cut takes, set from headless Chromium measurements at
+ * 1M, 5M and 10M cells.
  */
 export const XLSX_COPY_MAX_CELLS = 5_000_000;
 
