@@ -150,6 +150,15 @@ describe('select-all, edit, and clear', () => {
     });
   });
 
+  // the selection always holds the active cell, as in Excel.
+  it('cmd/ctrl+A moves an active cell outside the used range to its first cell', () => {
+    expect(moved(press(selectionAt({ row: 70, col: 3 }), { key: 'a', ctrlKey: true }))).toEqual({
+      anchor: { row: 0, col: 0 },
+      focus: { row: 59, col: 19 },
+      active: { row: 0, col: 0 },
+    });
+  });
+
   it('F2 starts editing without seeding input', () => {
     expect(press(sel, { key: 'F2' })).toEqual({ type: 'startEdit' });
   });

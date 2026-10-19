@@ -51,13 +51,17 @@ function isPrintable(key: KeyInput): boolean {
   return key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey;
 }
 
-/** The whole used range, keeping the selection's active cell, as Excel does. */
+/**
+ * The whole used range, keeping the selection's active cell as Excel does; an
+ * active cell outside that range moves to its first cell, so the selection
+ * always holds it.
+ */
 export function selectAll(state: Selection | null, limits: SelectionLimits): Selection {
-  return {
-    anchor: { row: 0, col: 0 },
-    focus: { row: limits.usedRows - 1, col: limits.usedCols - 1 },
-    active: { ...(state ? activeCell(state) : { row: 0, col: 0 }) },
-  };
+  const anchor = { row: 0, col: 0 };
+  const focus = { row: limits.usedRows - 1, col: limits.usedCols - 1 };
+  const active = state ? activeCell(state) : anchor;
+  const inside = active.row <= focus.row && active.col <= focus.col;
+  return { anchor, focus: { ...focus }, active: { ...(inside ? active : anchor) } };
 }
 
 /**
