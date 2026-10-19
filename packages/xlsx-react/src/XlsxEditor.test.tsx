@@ -3269,6 +3269,48 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(10, 1)).toBe('=B3*2');
   });
 
+  it('keeps a refused cell draft on its cell when a cell was pressed during the wait', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*/2');
+      await press(view.editor()!, 'Enter');
+      await view.click({ row: 4, col: 3 });
+      await held.release();
+    } finally {
+      held.restore();
+    }
+    expect([view.editor()?.value, view.nameBox().value, refusal(view) === null]).toEqual([
+      '=B3*/2',
+      'B11',
+      false,
+    ]);
+  });
+
+  it('stays on the sheet when a draft refused after a sheet tab press, committing it once', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    const selected = () =>
+      [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')].map(
+        (tab) => tab.getAttribute('aria-selected') === 'true'
+      );
+    try {
+      await typeInB11(view, '=B3*/2');
+      await press(view.editor()!, 'Enter');
+      await act(async () => {
+        fireEvent.click(view.surface.ownerDocument.querySelectorAll('[role="tab"]')[1]);
+      });
+      await held.release();
+      expect([selected().slice(0, 2), view.editor()?.value, held.edits()]).toEqual([
+        [true, false],
+        '=B3*/2',
+        1,
+      ]);
+    } finally {
+      held.restore();
+    }
+  });
+
   it('inserts a row asked for while a formula commit waits once the engine took it', async () => {
     const view = await mountEditor();
     const held = holdEdits(view);
