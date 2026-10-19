@@ -1060,6 +1060,50 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  // the latest copy or cut owns the clipboard: an older read writes nothing.
+  it('keeps the clipboard of a cut made while an earlier copy still read', async () => {
+    const view = await mountEditor(plain);
+    const read = holdFirstRead(view);
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'x', { ctrlKey: true });
+      expect([read.written, await view.input(1, 1)]).toEqual([['Q1'], '']);
+      await read.release();
+      await view.idle();
+      expect(read.written).toEqual(['Q1']);
+    } finally {
+      read.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  // J90000:J90010: the cut's first of ten pieces is held, then J90010 is copied.
+  it('clears nothing when a copy made during a cut read supersedes it', async () => {
+    const view = await mountEditor(farColumn);
+    const read = holdFirstRead(view);
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await press(view.surface, 'End', { ctrlKey: true });
+      await press(view.surface, 'c', { ctrlKey: true });
+      expect(read.written).toEqual(['11']);
+      await read.release();
+      await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull(), { timeout: 20_000 });
+      await view.idle();
+      expect([
+        read.sent.filter((name) => name === 'rangeCells').length,
+        read.sent.filter((name) => name === 'clearContents'),
+        read.written,
+      ]).toEqual([2, [], ['11']]);
+      expect(await view.input(89_999, 9)).toBe('1');
+    } finally {
+      read.restore();
+    }
+  }, MANY_KEYS_MS);
+
   // each edit path with an edit ready to land: the changes before the pause
   // leave an undo and a redo, and the paint brush is armed on B2.
   for (const [mode, pause] of [

@@ -1904,14 +1904,19 @@ function XlsxEditorContent({
     clearRange(selection);
   }, [selection, readOnly, clearRange]);
 
+  // the latest copy or cut read.
+  const copyGenerationRef = useRef(0);
   // whether the clipboard took a copy of `target`: its area from its own
   // top-left up to the used range's end, read in pieces under the engine's
   // read cap. One past XLSX_COPY_MAX_CELLS is a notice; a denied clipboard
-  // leaves things as they are.
+  // leaves things as they are. A newer copy or cut supersedes it: it stops
+  // reading and writes nothing, so the clipboard holds the latest.
   const copySelection = useCallback(
     async (target: Selection | null = selection): Promise<boolean> => {
       const handle = handleRef.current;
       if (!handle || !target) return false;
+      const generation = ++copyGenerationRef.current;
+      const superseded = () => generation !== copyGenerationRef.current;
       const r = upToUsedEnd(normalizeRange(target), usedRange());
       const pieces: string[] = [];
       // a selection wholly past the used range copies nothing (and asks the worker nothing).
@@ -1938,6 +1943,7 @@ function XlsxEditorContent({
               activeSheet,
               `${cellAddress(top, r.left)}:${cellAddress(bottom, r.right)}`
             );
+            if (superseded()) return false;
             pieces.push(
               toTsv(cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula }))))
             );
@@ -1957,8 +1963,8 @@ function XlsxEditorContent({
     [selection, activeSheet, activeSheetId, usedRange, reportError, onNotice]
   );
 
-  // a cut reads, then clears only what its copy put on the clipboard; edits
-  // wait while it reads. Read-only, it copies.
+  // a cut reads, then clears the range it copied (nothing once a newer copy
+  // superseded its read); edits wait while it reads. Read-only, it copies.
   const cutSelection = useCallback(async () => {
     if (!selection) return;
     if (readOnly) {
