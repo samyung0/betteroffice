@@ -7667,6 +7667,20 @@ fn a_typed_formula_is_closed_or_refused_while_other_input_stores_it_as_text() {
         .unwrap();
     assert_eq!(input(&workbook, "D1"), "=SUM(A1:A2)");
     assert_eq!(input(&workbook, "D2"), "=ROUND(SUM(A1:A2))");
+    // a call whose function takes no arguments is complete once closed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D5"), "=TODAY(", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D5"), "=TODAY()");
+    // an unfinished argument list is repaired by closing it, as typed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D7"), "=SUM(A1,", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D7"), "=SUM(A1,)");
+    assert!(matches!(
+        workbook.edit_typed_cell(SheetId(0), cell("D6"), "=SUM(", options),
+        Err(Error::UnparsedFormula)
+    ));
 
     assert!(matches!(
         workbook.edit_typed_cell(SheetId(0), cell("D3"), "=A1+", options),

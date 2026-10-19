@@ -1,6 +1,7 @@
 //! turning raw editor input into a `CellState`, classified the way excel does:
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
+use xlsx_calc::functions::{Func, resolve};
 use xlsx_calc::{EvalContext, Expr, evaluate, parse_formula};
 use xlsx_model::{CellProvider, CellValue, SheetId};
 
@@ -138,11 +139,18 @@ fn typed_formula(text: String) -> Option<(String, Expr)> {
 
 /// `text` with a `)` for each `(` it leaves open, or `None` when none is open,
 /// a `)` has no `(`, a string, quoted sheet name or `[` is left open, or the
-/// text ends in `(` (a call with no arguments yet is not a finished formula).
+/// text ends in a call with no arguments yet whose function takes some
+/// (`=SUM(` is not a finished formula, `=TODAY(` is).
 /// Parentheses inside strings, quoted names and structured references do not count.
 fn close_open_parens(text: &str) -> Option<String> {
-    if text.trim_end().ends_with('(') {
-        return None;
+    if let Some(head) = text.trim_end().strip_suffix('(') {
+        let name = head
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+            .next()
+            .unwrap_or_default();
+        if !resolve(name).is_some_and(Func::takes_no_arguments) {
+            return None;
+        }
     }
     let mut depth = 0usize;
     let mut brackets = 0usize;
@@ -281,6 +289,10 @@ mod tests {
             ("=ROUND(SUM(A1:A2", "ROUND(SUM(A1:A2))"),
             ("=IF(A1>1,\"(\",\"b\"", "IF(A1>1,\"(\",\"b\")"),
             ("=SUM('Q (1)'!A1:A2", "SUM('Q (1)'!A1:A2)"),
+            ("=TODAY(", "TODAY()"),
+            ("=SUM(B3,", "SUM(B3,)"),
+            ("=INT(PI(", "INT(PI())"),
+            ("=row(", "row()"),
         ] {
             let state = cell_state_for_input_no_eval(typed);
             assert_eq!(state.formula.as_deref(), Some(stored), "{typed}");
@@ -293,7 +305,15 @@ mod tests {
 
     #[test]
     fn leaves_a_formula_closing_cannot_fix_as_text() {
-        for typed in ["=", "=A1+", "=SUM(", "=A1)", "=IF(A1=\"x", "=SUM(A1:A2;B1"] {
+        for typed in [
+            "=",
+            "=A1+",
+            "=SUM(",
+            "=ROUND(A1,ABS(",
+            "=A1)",
+            "=IF(A1=\"x",
+            "=SUM(A1:A2;B1",
+        ] {
             let state = cell_state_for_input_no_eval(typed);
             assert!(state.formula.is_none(), "{typed}");
             assert_eq!(
