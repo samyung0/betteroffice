@@ -1155,6 +1155,33 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  it('refuses a sheet switch, clearSelection and selectCells while sending with an edit open', async () => {
+    const view = await mountEditor(plain);
+    const tabs = () => [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')];
+    await view.doubleClick({ row: 2, col: 2 });
+    view.type('draft');
+    await view.setProps({ sending: true });
+    await act(async () => {
+      fireEvent.click(tabs()[1]);
+    });
+    await view.idle();
+    await act(async () => view.api().clearSelection());
+    let selecting!: Promise<boolean>;
+    await act(async () => {
+      selecting = view.api().selectCells(1, selectionAt({ row: 4, col: 0 }));
+      await selecting;
+    });
+    expect(await selecting).toBe(false);
+    expect([tabs()[0].getAttribute('aria-selected'), view.editor()?.value, view.nameBox().value]).toEqual([
+      'true',
+      'draft',
+      'C3',
+    ]);
+    await view.setProps({ sending: false });
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(2, 2)).toBe('draft');
+  }, MANY_KEYS_MS);
+
   it('reveals a far cell on another sheet the name box goes to', async () => {
     const view = await mountEditor(plain);
     await view.click({ row: 0, col: 0 });

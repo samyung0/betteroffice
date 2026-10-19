@@ -735,7 +735,8 @@ function XlsxEditorContent({
   const nudgeTimerRef = useRef<number | null>(null);
   const suppressBlurRef = useRef(false);
   const flushNudgeRef = useRef<() => void>(() => {});
-  // commits the open draft: null without a workbook, else whether it landed.
+  // commits the open draft: null without a workbook or while busy with a draft
+  // open, else whether it landed.
   const settlePendingEditsRef = useRef<() => Promise<boolean> | null>(() => null);
   // the commit of a draft the engine may refuse, until the engine answers.
   const commitInFlightRef = useRef<Promise<boolean> | null>(null);
@@ -1557,7 +1558,10 @@ function XlsxEditorContent({
     setDragging(false);
     if (commitInFlightRef.current) return commitInFlightRef.current;
     const draft = pendingDraftRef.current;
-    if (!draft || readOnlyRef.current) return Promise.resolve(true);
+    if (!draft) return Promise.resolve(true);
+    // while busy the draft stays open, read-only: what would close it is refused.
+    if (busyRef.current) return null;
+    if (readOnlyRef.current) return Promise.resolve(true);
     // the live input stays current during IME composition, when state lags.
     const value = editing ? (editorInputRef.current?.value ?? draft.value) : draft.value;
     const done = commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, value);
