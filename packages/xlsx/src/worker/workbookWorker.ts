@@ -54,6 +54,8 @@ const SHEET_FIRST = new Set<WorkbookMethod>([
   'rangeCells',
   'editCell',
   'editCells',
+  'clearContents',
+  'checkClearContents',
   'moveChart',
   'patchRangeStyle',
   'setNumberFormat',

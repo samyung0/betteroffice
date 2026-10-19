@@ -2461,6 +2461,56 @@ describe('XlsxEditor with a peer', () => {
     }
   });
 
+  // Summary is the second of Budget, Summary and Styled; the editor's frame
+  // still says index 1 when the Delete goes out.
+  it('clears the active sheet when a peer inserted a sheet before it', async () => {
+    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3601 });
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        collaboration={{ clientId: 3602 }}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    try {
+      await waitFor(() => expect(api).toBeDefined());
+      const editor = api!.handle;
+      await idleWith(() => editor);
+      await act(async () => {
+        fireEvent.click(view.getAllByRole('tab')[1]);
+      });
+      await idleWith(() => editor);
+      const filled = async (sheet: number) =>
+        (await editor.rangeCells(sheet, 'A1:Z80')).flat().filter((cell) => cell.input).length;
+      const budget = await filled(0);
+      expect(await filled(1)).toBeGreaterThan(0);
+      const surface = view.getByTestId('xlsx-scroll');
+      await act(async () => {
+        fireEvent.keyDown(surface, { key: 'a', ctrlKey: true });
+      });
+      await idleWith(() => editor);
+      const before = await editor.encodeStateVector();
+      peer.applyOps([{ type: 'addSheet', index: 0, name: 'First' }]);
+      await act(async () => {
+        void editor.applyUpdate(peer.encodeStateAsUpdate(before));
+        fireEvent.keyDown(surface, { key: 'Delete' });
+      });
+      await idleWith(() => editor);
+      const names = (await editor.sheetInfo()).sheetNames;
+      expect([names.slice(0, 3), await filled(1), await filled(2)]).toEqual([
+        ['First', 'Budget', 'Summary'],
+        budget,
+        0,
+      ]);
+    } finally {
+      cleanup();
+      peer.dispose();
+    }
+  });
+
   it('keeps every key typed while a peer pastes a large range, the edit on its cell', async () => {
     const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3301 });
     let api: XlsxEditorApi | undefined;
