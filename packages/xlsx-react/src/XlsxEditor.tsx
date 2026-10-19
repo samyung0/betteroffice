@@ -183,9 +183,10 @@ export interface XlsxEditorProps {
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
   /**
-   * The host is still sending a large update in pieces: the grid and formula
-   * bar show a loading cursor and edits are refused until it turns false;
-   * selection, scrolling and copy still work, and an open cell edit waits.
+   * The host holds back its collaboration messages (pacing, an update's
+   * pieces, a timeout): the grid and formula bar show a loading cursor and
+   * every edit is refused as in `readOnly` until it turns false. Selection,
+   * scrolling and copy still work, and an open cell edit stays open, read-only.
    */
   sending?: boolean;
   /** A refused edit for the host to show; unset, the editor shows its message. */
@@ -624,7 +625,7 @@ function XlsxEditorContent({
   // the clipboard holds what it clears.
   const [cutReading, setCutReading] = useState(false);
   // while busy every edit path gates on `readOnly`; the cell editor and a
-  // formula draft stay open and commit once it ends.
+  // formula draft stay open, read-only, until it ends.
   const busy = sending || cutReading;
   const readOnly = readOnlyProp || busy;
   const busyRef = useRef(busy);
@@ -980,10 +981,15 @@ function XlsxEditorContent({
     [track]
   );
 
+  // read-only or busy drops the gestures that would land an edit later (an
+  // armed paint brush, a chart drag, an arrow burst); only read-only drops the
+  // open cell and formula drafts.
   useEffect(() => {
-    if (!readOnlyProp) return;
-    setEditing(null);
-    setFormulaDraft(null);
+    if (!readOnly) return;
+    if (readOnlyProp) {
+      setEditing(null);
+      setFormulaDraft(null);
+    }
     setCapturedFormat(null);
     paintSourceRef.current = null;
     chartDragRef.current = null;
@@ -992,7 +998,7 @@ function XlsxEditorContent({
     setNudgeOffset(null);
     if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = null;
-  }, [readOnlyProp]);
+  }, [readOnly, readOnlyProp]);
 
   // the loading cursor while busy; hovering sets the grid's cursor otherwise.
   useEffect(() => {

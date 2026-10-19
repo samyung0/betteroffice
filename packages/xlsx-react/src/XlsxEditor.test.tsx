@@ -32,7 +32,13 @@ import {
 } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffice/xlsx';
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '@betteroffice/xlsx/collaboration';
-import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
+import {
+  freezePaneOp,
+  XLSX_COMMANDS,
+  xlsxCommandEdits,
+  type XlsxCommand,
+  type XlsxCommandState,
+} from './commands';
 import { useState } from 'react';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
 
@@ -818,7 +824,7 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
-  // J90000:J90010: select all is A1:J90010, 900,100 cells read in nine pieces.
+  // J90000:J90010: select all is A1:J90010, 900,100 cells read in ten pieces.
   it('cuts a far column through a whole-sheet selection read in pieces', async () => {
     const view = await mountEditor(farColumn);
     const calls = watch(view);
@@ -1017,6 +1023,134 @@ describe('XlsxEditor keyboard', () => {
       spy.mockRestore();
       if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
       else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
+  // each edit path with an edit ready to land: the changes before the pause
+  // leave an undo and a redo, and the paint brush is armed on B2.
+  for (const [mode, pause] of [
+    ['read-only', { readOnly: true }],
+    ['sending', { sending: true }],
+  ] as const) {
+    it(`refuses every edit while ${mode}, and lands none once it ends`, async () => {
+      let changes = 0;
+      const view = await mountEditor(plain, undefined, () => {
+        changes += 1;
+      });
+      const calls = watch(view);
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          readText: async () => 'pasted',
+          writeText: async (text: string) => void calls.written.push(text),
+        },
+      });
+      const paint = () => document.querySelector('[title="Paint format"]') as HTMLButtonElement;
+      try {
+        await view.click({ row: 1, col: 1 });
+        const below = await view.input(2, 1);
+        await press(view.surface, '1');
+        await press(view.editor()!, 'Enter');
+        await press(view.surface, '2');
+        await press(view.editor()!, 'Enter');
+        await press(view.surface, 'z', { ctrlKey: true });
+        await view.click({ row: 1, col: 1 });
+        await act(async () => {
+          fireEvent.click(paint());
+        });
+        await view.idle();
+        expect(paint().getAttribute('aria-pressed')).toBe('true');
+        expect(changes).toBe(3);
+
+        await view.setProps(pause);
+        // the brush would land on the next selection.
+        await view.click({ row: 4, col: 3 });
+        for (const key of ['7', 'F2', 'Delete', 'Backspace']) await press(view.surface, key);
+        await view.doubleClick({ row: 4, col: 3 });
+        expect(view.editor()).toBeNull();
+        await press(view.surface, 'v', { ctrlKey: true });
+        await press(view.surface, 'x', { ctrlKey: true });
+        await press(view.surface, 'z', { ctrlKey: true });
+        await press(view.surface, 'y', { ctrlKey: true });
+        await press(view.surface, 'z', { ctrlKey: true, shiftKey: true });
+        for (const command of XLSX_COMMANDS.filter(xlsxCommandEdits)) await view.run(command);
+        expect(view.liveControls()).toEqual([
+          'xlsx-search-menus',
+          'xlsx-zoom',
+          null,
+          'xlsx-toolbar-more',
+          'xlsx-export-png',
+          'xlsx-name-box',
+        ]);
+        expect(view.formulaInput().readOnly).toBe(true);
+        await view.idle();
+        // a cut copies only.
+        expect(calls.written).toHaveLength(1);
+        expect(changes).toBe(3);
+
+        await view.setProps({ readOnly: false, sending: false });
+        await settle();
+        await view.idle();
+        expect(changes).toBe(3);
+        expect(calls.sent('clearContents')).toEqual([]);
+        expect(calls.sent('editCells')).toEqual([]);
+        expect(calls.sent('applyFormat')).toEqual([]);
+        expect(calls.sent('applyOps')).toEqual([]);
+        // neither the undo nor the redo landed.
+        expect(await view.input(1, 1)).toBe('1');
+        expect(await view.input(2, 1)).toBe(below);
+        await press(view.surface, '7');
+        await press(view.editor()!, 'Enter');
+        expect(await view.input(4, 3)).toBe('7');
+        expect(changes).toBe(4);
+      } finally {
+        calls.restore();
+      }
+    }, MANY_KEYS_MS);
+
+    it(`refuses chart drags and nudges while ${mode}`, async () => {
+      const [chart] = charted.charts;
+      let changes = 0;
+      const view = await mountEditor(charted, undefined, () => {
+        changes += 1;
+      });
+      await selectChart(view, chart);
+      await view.setProps(pause);
+      for (let step = 0; step < 3; step++) await press(view.surface, 'ArrowRight');
+      expect(view.outlineAt().x).toBe(Math.round(chart.rect.x));
+      const start = chartCenter(chart);
+      fireEvent.mouseDown(view.surface, start);
+      fireEvent.mouseMove(view.surface, {
+        clientX: start.clientX + 40,
+        clientY: start.clientY + 24,
+        buttons: 1,
+      });
+      await act(async () => {
+        fireEvent.mouseUp(window, { clientX: start.clientX + 40, clientY: start.clientY + 24 });
+      });
+      await settle();
+      await view.idle();
+      expect(view.outlineAt().x).toBe(Math.round(chart.rect.x));
+      expect(changes).toBe(0);
+    }, MANY_KEYS_MS);
+  }
+
+  it('keeps an open cell edit read-only while sending, then commits it', async () => {
+    const view = await mountEditor(plain);
+    const calls = watch(view);
+    try {
+      await view.doubleClick({ row: 2, col: 2 });
+      view.type('draft');
+      await view.setProps({ sending: true });
+      expect(view.editor()!.readOnly).toBe(true);
+      await press(view.editor()!, 'Enter');
+      expect(view.editor()!.value).toBe('draft');
+      expect(calls.sent('editCell')).toEqual([]);
+      await view.setProps({ sending: false });
+      await press(view.editor()!, 'Enter');
+      expect(await view.input(2, 2)).toBe('draft');
+    } finally {
+      calls.restore();
     }
   }, MANY_KEYS_MS);
 
