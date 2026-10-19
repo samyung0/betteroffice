@@ -174,7 +174,6 @@ struct RangeArgs {
 struct ClearArgs {
     sheet: u32,
     range: String,
-    max_update_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -672,7 +671,6 @@ impl Session {
             .clear_contents(
                 SheetId(args.sheet),
                 parse_range(&args.range)?,
-                args.max_update_bytes,
                 calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;

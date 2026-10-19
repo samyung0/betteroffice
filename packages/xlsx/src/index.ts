@@ -76,7 +76,7 @@ export {
 } from './hyperlinks/index';
 
 export type { CellInput } from './clipboard/index';
-export { toTsv, fromTsv } from './clipboard/index';
+export { toTsv, fromTsv, joinTsv } from './clipboard/index';
 
 export type {
   A11yStrings,
@@ -100,7 +100,7 @@ export {
 export { StaleProposalError } from './wasm/staleProposal';
 export {
   CellTextTooLongError,
-  ClearTooLargeError,
+  EditTooLargeError,
   RangeTooLargeError,
   UnparsedFormulaError,
 } from './wasm/refusals';

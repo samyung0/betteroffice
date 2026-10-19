@@ -335,7 +335,7 @@ impl XlsxDocument {
     }
 
     /// clear the cells of a range that hold content, as one undo step; returns
-    /// `SheetInfo` json, or a "clear too large" error when over `maxUpdateBytes`.
+    /// `SheetInfo` json, or an "edit too large" error past the update cap.
     #[wasm_bindgen(js_name = clearContentsJson)]
     pub fn clear_contents_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.session
