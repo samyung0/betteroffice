@@ -2793,6 +2793,21 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(10, 1)).toBe('=B3*2');
   });
 
+  it('selects a cell pressed after Enter while the commit waits once it landed', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await press(view.editor()!, 'Enter');
+      await view.click({ row: 4, col: 3 });
+      expect(view.nameBox().value).toBe('B11');
+      await held.release();
+      expect([view.nameBox().value, view.editor() === null]).toEqual(['D5', true]);
+    } finally {
+      held.restore();
+    }
+  });
+
   it('switches to a sheet tab pressed while a formula commit waits once the engine took it', async () => {
     const view = await mountEditor();
     const held = holdEdits(view);
