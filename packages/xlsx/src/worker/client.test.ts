@@ -109,6 +109,7 @@ describe('workbook worker', () => {
     expect(frame.displayList.grid?.startRow).toBe(0);
     expect(frame.history.canUndo).toBe(true);
     expect(frame.formatting).toEqual(openWorkbook(sample()).selectionFormatting(0, 'A3:B4'));
+    expect(frame.activeFormatting).toEqual(openWorkbook(sample()).selectionFormatting(0, 'A3:A3'));
   });
 
   it("refuses a call on a sheet that stopped being the active one", async () => {

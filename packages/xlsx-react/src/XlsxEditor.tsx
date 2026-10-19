@@ -9,11 +9,13 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+  activeCell,
   buildA11yGrid,
   cellAddress,
   cellAtPoint,
   cellFont,
   cellRect,
+  CellTextTooLongError,
   chartRegionAtPoint,
   ClearTooLargeError,
   extendTo,
@@ -27,6 +29,7 @@ import {
   paintDisplayList,
   parseHyperlinkLocation,
   rangeRect,
+  selectAll,
   selectionAt,
   selectionKeyReducer,
   safeExternalHyperlink,
@@ -261,6 +264,15 @@ function cellTextStyle(formatting: SelectionFormatting | null): CellTextStyle {
     },
     color: formatting.textColor ?? DEFAULT_CELL_TEXT.color,
   };
+}
+
+// the engine's cell text limit (Excel's): a longer draft may be refused.
+const MAX_CELL_TEXT_CHARS = 32_767;
+
+// a draft the engine may refuse, a formula or text past the limit, closes only
+// once the engine took it (UTF-16 length bounds the engine's character count).
+function mayBeRefused(value: string): boolean {
+  return value.startsWith('=') || value.length > MAX_CELL_TEXT_CHARS;
 }
 
 // stable stand-ins while no frame describes the selection: derived values
@@ -704,10 +716,8 @@ function XlsxEditorContent({
   const flushNudgeRef = useRef<() => void>(() => {});
   // commits the open draft: null without a workbook, else whether it landed.
   const settlePendingEditsRef = useRef<() => Promise<boolean> | null>(() => null);
-  // opens a refused formula's draft again (the cell editor's, else the formula bar's).
-  const reopenRefusedRef = useRef<
-    (sheetId: string, row: number, col: number, value: string, formulaBar: boolean) => void
-  >(() => {});
+  // the commit of a draft the engine may refuse, until the engine answers.
+  const commitInFlightRef = useRef<Promise<boolean> | null>(null);
   // the open cell or formula-bar draft and the sheet it was typed on: the
   // commit lands on that sheet while it is still the active one, else nowhere.
   const pendingDraftRef = useRef<(Omit<EditState, 'arrowsPoint'> & { sheet: number }) | null>(
@@ -762,6 +772,16 @@ function XlsxEditorContent({
   const flushEditorRef = useRef<() => Promise<void>>(async () => {});
   const [editing, setEditing] = useState<EditState | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
+  // a draft's commit awaits the engine: its input takes no keys meanwhile.
+  const [committing, setCommitting] = useState(false);
+  // what the engine refused and the selection it was refused on: shown under
+  // the formula bar until the draft changes or the selection moves.
+  const [refusal, setRefusal] = useState<{
+    kind: 'formula' | 'cell-text';
+    selection: Selection | null;
+  } | null>(null);
+  // a double click while a commit awaits the engine opens the editor once it landed.
+  const openOnLandRef = useRef(false);
   // the reference point mode last wrote into the open draft, outlined on the
   // grid; `pointDragRef` while the press that wrote it is still down.
   const [pointed, setPointed] = useState<PointedRef | null>(null);
@@ -832,15 +852,13 @@ function XlsxEditorContent({
   // the frame on screen draws the sheet the user is on.
   const shownHere = shown && shown.sheetInfo.activeSheet === activeSheet ? shown : null;
   const selectionFormatting = shownHere?.formatting ?? NO_FORMATTING;
-  // the active cell's text style once the frame on screen describes this
-  // selection: the open edit and the inputs waiting for their frame use it.
+  // the active cell's own text style (as Excel, whatever the rest of the
+  // selection uses) once the frame on screen describes that cell: the open
+  // edit and the inputs waiting for their frame use it.
   const shownSelection = shownHere?.view.selection;
   const activeTextStyle = cellTextStyle(
-    selection &&
-      shownSelection &&
-      sameCell(shownSelection.anchor, selection.anchor) &&
-      sameCell(shownSelection.focus, selection.focus)
-      ? selectionFormatting
+    selection && shownSelection && sameCell(activeCell(shownSelection), activeCell(selection))
+      ? (shownHere?.activeFormatting ?? null)
       : null
   );
   const activeTextStyleRef = useRef(activeTextStyle);
@@ -857,7 +875,7 @@ function XlsxEditorContent({
       ? {
           sheet: activeSheet,
           sheetId: formulaSheetIdRef.current,
-          ...selection.anchor,
+          ...activeCell(selection),
           value: formulaDraft,
         }
       : null;
@@ -870,15 +888,17 @@ function XlsxEditorContent({
     const cell = shownHere.cells[`${row}:${col}`];
     if (cell) return cell.input;
     if (cellRect(shownHere.displayList.grid, row, col)) return '';
-    const active = shownHere.view.selection?.anchor;
-    return active && sameCell(active, { row, col }) ? shownHere.active?.input : undefined;
+    const shownSelection = shownHere.view.selection;
+    return shownSelection && sameCell(activeCell(shownSelection), { row, col })
+      ? shownHere.active?.input
+      : undefined;
   };
 
   // the name box and formula bar's cell, the active one: its address at once,
   // its text from the frame (or the input just committed to it) once the frame has it.
   const focusedCell: CellEdit | null = useMemo(() => {
     if (!selection || !sheetInfo) return null;
-    const { row, col } = selection.anchor;
+    const { row, col } = activeCell(selection);
     const a1 = cellAddress(row, col);
     const pending = optimistic.find(
       (entry) => entry.sheetId === activeSheetId && entry.row === row && entry.col === col
@@ -886,7 +906,8 @@ function XlsxEditorContent({
     if (pending) return { a1, input: pending.text, isFormula: pending.text.startsWith('=') };
     const cell =
       shownHere?.cells[`${row}:${col}`] ??
-      (shownHere?.view.selection && sameCell(shownHere.view.selection.anchor, selection.anchor)
+      (shownHere?.view.selection &&
+      sameCell(activeCell(shownHere.view.selection), activeCell(selection))
         ? shownHere.active
         : null);
     return cell ?? { a1, input: '', isFormula: false };
@@ -896,6 +917,21 @@ function XlsxEditorContent({
     if (e instanceof SheetGoneError) return;
     setError(messageOf(e));
   }, []);
+
+  // an input the engine refused shows on the line under the formula bar.
+  const reportEditError = useCallback(
+    (e: unknown) => {
+      const kind =
+        e instanceof UnparsedFormulaError
+          ? 'formula'
+          : e instanceof CellTextTooLongError
+            ? 'cell-text'
+            : null;
+      if (kind) setRefusal({ kind, selection: selectionRef.current });
+      else reportError(e);
+    },
+    [reportError]
+  );
 
   // ask the worker for the frame of the current view. One request at a time:
   // a change meanwhile asks again once it is answered, at the next animation
@@ -976,16 +1012,10 @@ function XlsxEditorContent({
 
   // a typed cell input committed: posted, and drawn over its cell until the
   // worker's frame shows it. A draft whose sheet a peer removed is dropped; a
-  // formula that does not parse is refused and its draft opens again.
+  // formula that does not parse or text past the limit is refused with a line
+  // under the formula bar.
   const commitCell = useCallback(
-    (
-      sheetId: string,
-      sheet: number,
-      row: number,
-      col: number,
-      value: string,
-      formulaBar: boolean
-    ) => {
+    (sheetId: string, sheet: number, row: number, col: number, value: string) => {
       if (!handleRef.current) return Promise.resolve(false);
       const done = onSheet(sheetId, 'editCell', sheet, row, col, value, true);
       const seq = lastMutationRef.current;
@@ -1002,26 +1032,41 @@ function XlsxEditorContent({
         },
         (e: unknown) => {
           if (e instanceof SheetGoneError) return true;
-          if (e instanceof UnparsedFormulaError) {
-            setOptimistic((list) => list.filter((entry) => entry.seq !== seq));
-            reopenRefusedRef.current(sheetId, row, col, value, formulaBar);
-          }
-          reportError(e);
+          setOptimistic((list) => list.filter((entry) => entry.seq !== seq));
+          reportEditError(e);
           return false;
         }
       );
     },
-    [onSheet, applyResult, reportError]
+    [onSheet, applyResult, reportEditError]
   );
 
+  // `close` runs once the engine took the commit; a refusal leaves the draft open.
+  const awaitCommit = useCallback((done: Promise<boolean>, close: () => void) => {
+    setCommitting(true);
+    const settled = done.then((landed) => {
+      commitInFlightRef.current = null;
+      setCommitting(false);
+      if (landed) close();
+      return landed;
+    });
+    commitInFlightRef.current = settled;
+    return settled;
+  }, []);
+
   const clearSelection = useCallback(() => {
-    if (!settlePendingEditsRef.current()) return;
-    setSelection(null);
-    setSelectedChart(null);
-    setEditing(null);
-    setFormulaDraft(null);
-    setCapturedFormat(null);
-    paintSourceRef.current = null;
+    const settled = settlePendingEditsRef.current();
+    if (!settled) return;
+    const clear = () => {
+      setSelection(null);
+      setSelectedChart(null);
+      setEditing(null);
+      setFormulaDraft(null);
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
+    };
+    if (commitInFlightRef.current) void settled.then((landed) => landed && clear());
+    else clear();
   }, []);
 
   const selectCells = useCallback(
@@ -1037,7 +1082,9 @@ function XlsxEditorContent({
           nextSelection.focus.row,
           nextSelection.focus.col
         );
-        if (handleRef.current !== proxy || !settlePendingEditsRef.current()) return false;
+        const settled = settlePendingEditsRef.current();
+        if (handleRef.current !== proxy || !settled) return false;
+        if (commitInFlightRef.current && !(await settled)) return false;
         const switched = track(proxy, proxy.onSheet(info.sheetIds[sheet], 'setActiveSheet', sheet));
         setPendingSheet({ index: sheet, seq: lastMutationRef.current });
         setSelection({
@@ -1098,6 +1145,7 @@ function XlsxEditorContent({
   useEffect(() => {
     setEditing(null);
     setFormulaDraft(null);
+    setRefusal(null);
     setSelectedChart(null);
     setReach(null);
     // a burst belongs to the document it was typed on: its timer would fire
@@ -1471,17 +1519,23 @@ function XlsxEditorContent({
     chartDragRef.current = null;
     setChartDragOffset(null);
     setDragging(false);
+    if (commitInFlightRef.current) return commitInFlightRef.current;
     const draft = pendingDraftRef.current;
     if (!draft || readOnlyRef.current) return Promise.resolve(true);
     // the live input stays current during IME composition, when state lags.
     const value = editing ? (editorInputRef.current?.value ?? draft.value) : draft.value;
-    pendingDraftRef.current = null;
-    suppressBlurRef.current = true;
-    editorInputRef.current?.blur();
-    suppressBlurRef.current = false;
-    setEditing(null);
-    setFormulaDraft(null);
-    return commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, value, !editing);
+    const done = commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, value);
+    const close = () => {
+      pendingDraftRef.current = null;
+      suppressBlurRef.current = true;
+      editorInputRef.current?.blur();
+      suppressBlurRef.current = false;
+      setEditing(null);
+      setFormulaDraft(null);
+    };
+    if (mayBeRefused(value)) return awaitCommit(done, close);
+    close();
+    return done;
   };
 
   const selectedRangeA1 = useCallback((target: Selection): string => {
@@ -1653,7 +1707,7 @@ function XlsxEditorContent({
     (seed?: string) => {
       const handle = handleRef.current;
       if (!handle || !selection || readOnly) return;
-      const { row, col } = selection.anchor;
+      const { row, col } = activeCell(selection);
       const sheetId = activeSheetId;
       const known = seed ?? knownInput(row, col);
       if (known !== undefined) {
@@ -1670,9 +1724,9 @@ function XlsxEditorContent({
           () => ''
         )
         .then((value) => {
-          const active = selectionRef.current?.anchor;
+          const current = selectionRef.current;
           if (handleRef.current !== handle || readOnlyRef.current) return;
-          if (!active || !sameCell(active, { row, col })) return;
+          if (!current || !sameCell(activeCell(current), { row, col })) return;
           setEditing((current) => current ?? { row, col, value, sheetId, arrowsPoint: false });
           requestReveal();
         });
@@ -1680,48 +1734,47 @@ function XlsxEditorContent({
     [selection, activeSheet, activeSheetId, readOnly, requestReveal, knownInput]
   );
 
-  // commit the open editor, optionally stepping the selection like excel.
-  // `refocus: false` from the input's own blur: focus is already going
-  // elsewhere, and moving it back would cancel that (Chromium).
+  // commit the open editor, optionally stepping (or with `extend`, extending)
+  // the selection like excel; `after` runs once the edit closed. A draft the
+  // engine may refuse stays open until the engine took it. `refocus: false`
+  // from the input's own blur: focus is already going elsewhere, and moving it
+  // back would cancel that (Chromium).
   const commitEditor = useCallback(
-    (move?: Direction, refocus = true) => {
+    (move?: Direction, refocus = true, extend = false, after?: () => void) => {
       // the open draft (null once a peer's change dropped it).
       const draft = pendingDraftRef.current;
-      if (!handleRef.current || !editing || !draft || readOnly) return;
-      if (refocus) suppressBlurRef.current = true;
+      if (!handleRef.current || !editing || !draft || readOnly || commitInFlightRef.current)
+        return;
       const { row, col, value, sheetId } = editing;
-      void commitCell(sheetId, draft.sheet, row, col, value, false);
-      setEditing(null);
-      const base = selectionAt({ row, col });
-      setSelection(move ? moveFocus(base, move, { limits: limits() }) : base);
-      if (move) requestReveal();
-      if (refocus) focusContainer();
+      const done = commitCell(sheetId, draft.sheet, row, col, value);
+      const close = () => {
+        if (refocus) suppressBlurRef.current = true;
+        setEditing(null);
+        const base = selectionAt({ row, col });
+        setSelection(move ? moveFocus(base, move, { extend, limits: limits() }) : base);
+        if (move) requestReveal();
+        after?.();
+        if (refocus) focusContainer();
+      };
+      if (mayBeRefused(value)) void awaitCommit(done, close);
+      else close();
     },
-    [editing, commitCell, limits, focusContainer, readOnly, requestReveal]
+    [editing, commitCell, awaitCommit, limits, focusContainer, readOnly, requestReveal]
   );
+
+  useEffect(() => {
+    if (committing) return;
+    const open = openOnLandRef.current;
+    openOnLandRef.current = false;
+    if (open && !editing) openEditor();
+  }, [committing, editing, openEditor]);
 
   const cancelEditor = useCallback(() => {
     suppressBlurRef.current = true;
     setEditing(null);
-    setError(null);
+    setRefusal(null);
     focusContainer();
   }, [focusContainer]);
-
-  // a refused formula opens again on its cell as typed, while its sheet is the
-  // one shown and no other draft opened meanwhile; typing or Escape there
-  // clears the message.
-  reopenRefusedRef.current = (sheetId, row, col, value, formulaBar) => {
-    if (sheetId !== activeSheetId || pendingDraftRef.current || readOnlyRef.current) return;
-    setSelection(selectionAt({ row, col }));
-    if (formulaBar) {
-      formulaSheetIdRef.current = sheetId;
-      setFormulaDraft(value);
-      formulaInputRef.current?.focus();
-      return;
-    }
-    setEditing({ row, col, value, sheetId, arrowsPoint: false });
-    requestReveal();
-  };
 
   // the draft point mode writes into: the in-cell edit, else a formula-bar
   // draft, with its caret.
@@ -1767,7 +1820,8 @@ function XlsxEditorContent({
   const writePointed = (anchor: CellAddr, focus: CellAddr, span: Omit<PointSpan, 'live'>) => {
     const named = writeReference(span.text, span.start, span.end, ...pointedCells(anchor, focus));
     const next = { ...named, anchor, focus };
-    pointCaretRef.current = next.end;
+    // an unchanged draft renders nothing, so it would leave a stale caret request.
+    pointCaretRef.current = next.text === span.text ? null : next.end;
     pointedRef.current = next;
     setPointed(next);
     if (editing) setEditing((prev) => (prev ? { ...prev, value: next.text } : prev));
@@ -1861,12 +1915,12 @@ function XlsxEditorContent({
       width = Math.max(width, rowArr.length);
       rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
     });
-    onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportError);
+    onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportEditError);
     setSelection({
       anchor: { row: r.top, col: r.left },
       focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
     });
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportError]);
+  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportEditError]);
 
 
   const formatSelection = useCallback(
@@ -2155,20 +2209,27 @@ function XlsxEditorContent({
     }
   }, [fileName, zoom]);
 
-  // commit the formula bar draft to the active cell.
+  // commit the formula bar draft to the active cell; a draft the engine may
+  // refuse stays open until the engine took it.
   const commitFormula = useCallback(
-    (move?: Direction) => {
+    (move?: Direction, refocus = false) => {
       const draft = pendingDraftRef.current;
       if (!handleRef.current || !selection || formulaDraft == null || !draft || readOnly) return;
-      const { row, col } = selection.anchor;
-      void commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft, true);
-      setFormulaDraft(null);
-      if (move) {
-        setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
-        requestReveal();
-      }
+      if (commitInFlightRef.current) return;
+      const { row, col } = activeCell(selection);
+      const done = commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft);
+      const close = () => {
+        setFormulaDraft(null);
+        if (move) {
+          setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+          requestReveal();
+        }
+        if (refocus) focusContainer();
+      };
+      if (mayBeRefused(formulaDraft)) void awaitCommit(done, close);
+      else close();
     },
-    [selection, formulaDraft, commitCell, limits, readOnly, requestReveal]
+    [selection, formulaDraft, commitCell, awaitCommit, limits, readOnly, requestReveal, focusContainer]
   );
 
   flushEditorRef.current = async () => {
@@ -2315,6 +2376,8 @@ function XlsxEditorContent({
       // a chart painted under it, or move the grid.
       const dismissesEditor = editing != null;
       if (dismissesEditor && editorInputRef.current?.contains(e.target as Node)) return;
+      // a draft the engine may refuse keeps the focus until it landed.
+      const awaitsEngine = editing != null && mayBeRefused(editing.value);
       // a formula waiting for an operand takes the pressed cell as a reference,
       // as in Excel and Sheets: the draft stays open and keeps the focus.
       const point = pointModeRef.current;
@@ -2339,6 +2402,14 @@ function XlsxEditorContent({
       // triggers, so both branches finish the edit for the same visible reason.
       const chart = pointToChart(e.clientX, e.clientY);
       if (chart) {
+        if (awaitsEngine) {
+          e.preventDefault();
+          clickStartRef.current = null;
+          commitEditor(undefined, true, false, () =>
+            setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable })
+          );
+          return;
+        }
         if (dismissesEditor) commitEditor();
         setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable });
         // only a primary press starts a drag: a right-press opens a context
@@ -2365,6 +2436,19 @@ function XlsxEditorContent({
       if (!selection) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
+      if (awaitsEngine) {
+        e.preventDefault();
+        clickStartRef.current = null;
+        const extend = e.shiftKey;
+        commitEditor(undefined, true, false, () =>
+          setSelection((prev) =>
+            extend && prev
+              ? extendTo(prev, addr, limits())
+              : selectionAt(mergeOrigin(addr, visibleMergedRanges))
+          )
+        );
+        return;
+      }
       if (dismissesEditor) commitEditor();
       // the pressed cell stays active while a drag or Shift+click moves the far
       // end, as in Excel; a merged cell is pressed at its top-left cell.
@@ -2518,7 +2602,7 @@ function XlsxEditorContent({
 
   const onDoubleClick = useCallback(
     (e: React.MouseEvent) => {
-      if (editing || pointedRef.current) return;
+      if (pointedRef.current || (editing && !commitInFlightRef.current)) return;
       if (pointToChart(e.clientX, e.clientY)) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (
@@ -2528,7 +2612,8 @@ function XlsxEditorContent({
       ) {
         return;
       }
-      if (selection) openEditor();
+      if (commitInFlightRef.current) openOnLandRef.current = true;
+      else if (selection) openEditor();
     },
     [editing, openEditor, pointToCell, pointToChart, selection]
   );
@@ -2544,13 +2629,14 @@ function XlsxEditorContent({
   const renderedSelection = selection
     ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges)
     : null;
-  const renderedActive = selection
+  const shownActive = selection ? activeCell(selection) : null;
+  const renderedActive = shownActive
     ? expandRangeToMergedCells(
         {
-          top: selection.anchor.row,
-          left: selection.anchor.col,
-          bottom: selection.anchor.row,
-          right: selection.anchor.col,
+          top: shownActive.row,
+          left: shownActive.col,
+          bottom: shownActive.row,
+          right: shownActive.col,
         },
         visibleMergedRanges
       )
@@ -2764,7 +2850,13 @@ function XlsxEditorContent({
     const handle = handleRef.current;
     if (!handle) return;
     // the burst belongs to the sheet it was typed on.
-    if (!settlePendingEditsRef.current()) return;
+    const settled = settlePendingEditsRef.current();
+    if (!settled) return;
+    // a draft awaiting the engine switches once it landed, and not if refused.
+    if (commitInFlightRef.current) {
+      void settled.then((landed) => landed && switchSheet(index, sheetId));
+      return;
+    }
     initialScrollRef.current = true;
     track(
       handle,
@@ -2788,8 +2880,14 @@ function XlsxEditorContent({
 
   // ops on the selection that no toolbar button carries, as one undo step.
   const applyStructure = (ops: unknown[]) => {
-    if (!handleRef.current || readOnly || !settlePendingEditsRef.current()) return false;
-    onSheet(activeSheetId, 'applyOps', ops).then(applyResult, reportError);
+    if (!handleRef.current || readOnly) return false;
+    const settled = settlePendingEditsRef.current();
+    if (!settled) return false;
+    const apply = () => {
+      onSheet(activeSheetId, 'applyOps', ops).then(applyResult, reportError);
+    };
+    if (commitInFlightRef.current) void settled.then((landed) => landed && apply());
+    else apply();
     return true;
   };
 
@@ -2817,11 +2915,7 @@ function XlsxEditorContent({
     }
     if (command === 'selectAll') {
       if (!sheetInfo) return;
-      const { usedRows, usedCols } = limits();
-      setSelection({
-        anchor: { row: 0, col: 0 },
-        focus: { row: usedRows - 1, col: usedCols - 1 },
-      });
+      setSelection(selectAll(selection, limits()));
       // The grid takes the keys next, Ctrl/Cmd+C first.
       focusContainer();
       return;
@@ -2843,9 +2937,9 @@ function XlsxEditorContent({
     if (!range || !sheetInfo) return;
     const amount = (value === 'current' ? value : Number(value)) as FreezeAmount;
     if (kind === 'freezeRows')
-      return void freeze(frozenCount(amount, selection!.anchor.row), sheetInfo.frozenCols);
+      return void freeze(frozenCount(amount, activeCell(selection!).row), sheetInfo.frozenCols);
     if (kind === 'freezeColumns')
-      return void freeze(sheetInfo.frozenRows, frozenCount(amount, selection!.anchor.col));
+      return void freeze(sheetInfo.frozenRows, frozenCount(amount, activeCell(selection!).col));
     const cells = {
       start: { row: range.top, col: range.left },
       end: { row: range.bottom, col: range.right },
@@ -2870,8 +2964,8 @@ function XlsxEditorContent({
     if (ops[command]) applyStructure(ops[command]);
   };
 
-  const focusRow = selection?.anchor.row ?? -1;
-  const focusColumn = selection?.anchor.col ?? -1;
+  const focusRow = selection ? activeCell(selection).row : -1;
+  const focusColumn = selection ? activeCell(selection).col : -1;
   const frozenRows = sheetInfo?.frozenRows ?? 0;
   const frozenColumns = sheetInfo?.frozenCols ?? 0;
   const canUnmerge = mergedRanges.length > 0;
@@ -3029,23 +3123,23 @@ function XlsxEditorContent({
                 aria-label={t('toolbar.formulaPlaceholder')}
                 disabled={!sheetInfo}
                 // Read-only, not disabled: its text still selects and copies.
-                readOnly={readOnly}
+                readOnly={readOnly || committing}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (formulaDraft === null) formulaSheetIdRef.current = activeSheetId;
-                  setError(null);
+                  setRefusal(null);
                   // typing ends a pointed reference.
                   setPointed(null);
                   setFormulaDraft(e.target.value);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    commitFormula(e.shiftKey ? 'up' : 'down');
-                    focusContainer();
+                    if (formulaDraft === null) focusContainer();
+                    else commitFormula(e.shiftKey ? 'up' : 'down', true);
                     e.preventDefault();
                   } else if (e.key === 'Escape') {
                     setFormulaDraft(null);
-                    setError(null);
+                    setRefusal(null);
                     focusContainer();
                     e.preventDefault();
                   }
@@ -3086,6 +3180,28 @@ function XlsxEditorContent({
           </div>
         </EditorToolbar>
         </div>
+      {refusal?.selection === selection && (
+        <div
+          data-testid="xlsx-edit-refusal"
+          role="alert"
+          style={{
+            position: 'absolute',
+            top: toolbarHeight,
+            left: 0,
+            right: 0,
+            zIndex: 1,
+            padding: '4px 12px',
+            boxSizing: 'border-box',
+            borderBottom: '1px solid var(--xlsx-divider, #e2e8f0)',
+            background: 'var(--xlsx-chrome-bg, #ffffff)',
+            color: 'var(--xlsx-error, #b00020)',
+            font: `12px ${chromeFont}`,
+            pointerEvents: 'none',
+          }}
+        >
+          {t(refusal.kind === 'formula' ? 'editor.formulaRefused' : 'editor.cellTextTooLong')}
+        </div>
+      )}
       {!readOnly && features.proposals && showProposals && proposalsPanelOpen && (
         <ProposalsPanel
           proposals={proposals}
@@ -3250,10 +3366,11 @@ function XlsxEditorContent({
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
+                readOnly={committing}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (!shownWhole(editing.row, editing.col)) requestReveal();
-                  setError(null);
+                  setRefusal(null);
                   // typing ends a pointed reference.
                   setPointed(null);
                   setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev));
@@ -3270,14 +3387,23 @@ function XlsxEditorContent({
                     return;
                   }
                   // in Enter mode the arrows point from the edited cell while
-                  // the formula waits for an operand, Shift extending.
+                  // the formula waits for an operand, Shift extending; where no
+                  // reference fits they commit and move, as Excel does.
                   const direction = POINT_ARROWS[e.key];
-                  const span =
-                    direction && editing.arrowsPoint && !e.ctrlKey && !e.metaKey && !e.altKey
-                      ? pointSpan()
-                      : null;
-                  if (direction && span) {
+                  if (
+                    direction &&
+                    editing.arrowsPoint &&
+                    !e.ctrlKey &&
+                    !e.metaKey &&
+                    !e.altKey &&
+                    !e.nativeEvent.isComposing
+                  ) {
                     e.preventDefault();
+                    const span = pointSpan();
+                    if (!span) {
+                      commitEditor(direction, true, e.shiftKey);
+                      return;
+                    }
                     const from = span.live ?? selectionAt({ row: editing.row, col: editing.col });
                     const moved = e.shiftKey
                       ? moveFocus(from, direction, { extend: true, limits: limits() })

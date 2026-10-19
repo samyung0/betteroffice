@@ -53,6 +53,7 @@ export type {
 } from './selection/index';
 
 export {
+  activeCell,
   cellAddress,
   columnLetter,
   selectionAt,
@@ -61,6 +62,7 @@ export {
   cellCount,
   extendTo,
   moveFocus,
+  selectAll,
   selectionKeyReducer,
 } from './selection/index';
 
@@ -96,7 +98,12 @@ export {
   wasmVersion,
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
-export { ClearTooLargeError, RangeTooLargeError, UnparsedFormulaError } from './wasm/refusals';
+export {
+  CellTextTooLongError,
+  ClearTooLargeError,
+  RangeTooLargeError,
+  UnparsedFormulaError,
+} from './wasm/refusals';
 export {
   openWorkbookWorker,
   SheetGoneError,

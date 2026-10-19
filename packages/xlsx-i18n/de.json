@@ -16,6 +16,8 @@
     "appLabel": null,
     "demoCellText": null,
     "openError": null,
+    "formulaRefused": null,
+    "cellTextTooLong": null,
     "sheetTabsLabel": null
   },
   "proposals": {

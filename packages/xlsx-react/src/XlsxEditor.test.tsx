@@ -27,6 +27,7 @@ import type { CellAddr, ChartRegion, GridMeta, WorkbookProxy } from '@betteroffi
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '@betteroffice/xlsx/collaboration';
 import { freezePaneOp, type XlsxCommand, type XlsxCommandState } from './commands';
 import { useState } from 'react';
+import { zhCN } from '@betteroffice/xlsx-i18n';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -2565,6 +2566,24 @@ describe('XlsxEditor active cell', () => {
     expect(view.nameBox().value).toBe('B4');
   });
 
+  // Excel and Sheets keep the active cell where it was.
+  it('keeps the active cell where it was on select all, so typing goes there', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 4, col: 2 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'a', ctrlKey: true });
+    });
+    await view.idle();
+    expect(view.nameBox().value).toBe('C5');
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'x' });
+    });
+    await act(async () => {
+      fireEvent.keyDown(view.editor()!, { key: 'Enter' });
+    });
+    expect([await view.input(4, 2), await view.input(0, 0)]).toEqual(['x', 'Quarterly Budget Report']);
+  });
+
   // Budget's title is merged over A1:D1.
   it('selects a merged cell by its top-left cell, so typing replaces what it shows', async () => {
     const view = await mountEditor();
@@ -2581,9 +2600,9 @@ describe('XlsxEditor active cell', () => {
 });
 
 describe('XlsxEditor formula entry', () => {
-  const press = async (target: Element, key: string) => {
+  const press = async (target: Element, key: string, init: KeyboardEventInit = {}) => {
     await act(async () => {
-      fireEvent.keyDown(target, { key });
+      fireEvent.keyDown(target, { key, ...init });
     });
     await idleWith(() => currentWorkbook);
   };
@@ -2599,27 +2618,107 @@ describe('XlsxEditor formula entry', () => {
     view.typeFormula('=ROUND(SUM(B3:B5');
     await press(view.formulaInput(), 'Enter');
     expect(await view.input(11, 1)).toBe('=ROUND(SUM(B3:B5))');
+    // a call whose function takes no arguments is complete once closed.
+    await press(view.surface, '=');
+    view.type('=TODAY(');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(12, 1)).toBe('=TODAY()');
+    // an unfinished argument list is repaired on entry by closing it.
+    await press(view.surface, '=');
+    view.type('=SUM(B3,');
+    await press(view.editor()!, 'Enter');
+    expect(await view.input(13, 1)).toBe('=SUM(B3,)');
   });
 
-  it('refuses a formula that still does not parse with a message, its edit left open', async () => {
+  const refusal = (view: Awaited<ReturnType<typeof mountEditor>>) =>
+    view.surface.ownerDocument.querySelector('[data-testid="xlsx-edit-refusal"]')?.textContent ?? null;
+
+  it('refuses a formula that does not parse with a line under the formula bar, the edit never closing', async () => {
     const view = await mountEditor();
     await view.click({ row: 10, col: 1 });
     await press(view.surface, '=');
     view.type('=B3*/2');
-    await press(view.editor()!, 'Enter');
+    const input = view.editor();
+    await press(input!, 'Enter');
+    // the same input, never unmounted, still holds the draft on its cell.
+    expect(view.editor() === input).toBe(true);
     expect([view.editor()?.value, view.nameBox().value]).toEqual(['=B3*/2', 'B11']);
-    expect(view.error()?.textContent).toContain("there's a problem with this formula");
+    expect(refusal(view)).toBe("There's a problem with this formula. Check its parentheses, quotes and operators.");
+    expect(view.error() === null).toBe(true);
     expect(await view.input(10, 1)).toBe('900');
     view.type('=B3*2');
-    expect(view.error() === null).toBe(true);
+    expect(refusal(view)).toBe(null);
     await press(view.editor()!, 'Enter');
     expect(await view.input(10, 1)).toBe('=B3*2');
 
     view.typeFormula('=B3+');
     await press(view.formulaInput(), 'Enter');
     expect([view.formula(), view.nameBox().value]).toEqual(['=B3+', 'B12']);
-    expect(view.error() === null).toBe(false);
+    expect(refusal(view) === null).toBe(false);
     expect(await view.input(11, 1)).toBe('1000');
+  });
+
+  it('shows the refusal of text past 32,767 characters on the same line, translated', async () => {
+    const view = await mountEditor(plain, undefined, undefined, { i18n: zhCN });
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, 'x');
+    view.type('x'.repeat(40_000));
+    await press(view.editor()!, 'Enter');
+    expect([view.editor()?.value.length, view.nameBox().value]).toEqual([40_000, 'B11']);
+    expect(refusal(view)).toBe('一个单元格最多可容纳 32,767 个字符。');
+    expect(view.error() === null).toBe(true);
+    expect(await view.input(10, 1)).toBe('900');
+  });
+
+  it('shows a pasted text past 32,767 characters on the same line', async () => {
+    const view = await mountEditor();
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: async () => 'x'.repeat(40_000) },
+    });
+    try {
+      await view.click({ row: 10, col: 1 });
+      await press(view.surface, 'v', { ctrlKey: true });
+      await view.idle();
+      expect(refusal(view)).toBe('A cell holds at most 32,767 characters.');
+      expect(view.error() === null).toBe(true);
+      expect(await view.input(10, 1)).toBe('900');
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it("waits for the engine's answer before a formula's edit closes", async () => {
+    const view = await mountEditor();
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) =>
+      method === 'editCell'
+        ? gate.then(() => forward(sheetId, method, ...args))
+        : forward(sheetId, method, ...args)) as WorkbookProxy['onSheet']);
+    try {
+      await view.click({ row: 10, col: 1 });
+      await press(view.surface, '=');
+      view.type('=B3*2');
+      await press(view.editor()!, 'Enter');
+      expect([view.editor()?.value, view.editor()?.readOnly, view.nameBox().value]).toEqual([
+        '=B3*2',
+        true,
+        'B11',
+      ]);
+      await act(async () => release());
+      await view.idle();
+      expect([view.editor() === null, view.nameBox().value]).toEqual([true, 'B12']);
+      expect(await view.input(10, 1)).toBe('=B3*2');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -2679,6 +2778,61 @@ describe('XlsxEditor point mode', () => {
     expect(view.editor()?.value).toBe('=B8:B9+A11');
     await press(view.editor()!, 'Enter');
     expect(await view.input(10, 1)).toBe('=B8:B9+A11');
+  });
+
+  // Excel's Enter mode: an arrow where no reference fits commits and moves.
+  it('commits and moves on an arrow where no reference fits, in an edit opened by typing', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, 'n');
+    view.type('note');
+    await press(view.editor()!, 'ArrowDown');
+    expect([view.editor() === null, view.nameBox().value]).toEqual([true, 'B12']);
+    expect(await view.input(10, 1)).toBe('note');
+    await press(view.surface, '=');
+    view.type('=B3');
+    await press(view.editor()!, 'ArrowRight');
+    expect([view.editor() === null, view.nameBox().value]).toEqual([true, 'C12']);
+    expect(await view.input(11, 1)).toBe('=B3');
+    await press(view.surface, 'm');
+    await press(view.editor()!, 'ArrowDown', { shiftKey: true });
+    expect([view.nameBox().value, view.selectionBox() === null]).toEqual(['C12', false]);
+    expect(await view.input(11, 2)).toBe('m');
+    // F2 gives the arrows to the caret: nothing commits.
+    await press(view.surface, 'k');
+    await press(view.editor()!, 'F2');
+    await press(view.editor()!, 'ArrowDown');
+    expect(view.editor()?.value).toBe('k');
+  });
+
+  // a range that cuts a merged block grows over it, as the selection does.
+  it('grows a pointed range over a merged block it cuts', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    const from = pointAt(plain, { row: 2, col: 1 });
+    const to = pointAt(plain, { row: 0, col: 2 });
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, from);
+      fireEvent.mouseMove(view.surface, to);
+      fireEvent.mouseUp(window, to);
+    });
+    await view.idle();
+    expect(view.editor()?.value).toBe('=A1:D3');
+  });
+
+  // re-pointing the same cell changes nothing, so no stale caret may follow.
+  it('keeps the formula-bar caret where typing leaves it after the same cell is pointed again', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    view.typeFormula('=');
+    await view.click({ row: 2, col: 1 });
+    await view.click({ row: 2, col: 1 });
+    expect(view.formula()).toBe('=B3');
+    await act(async () => {
+      view.typeFormula('=B3+');
+    });
+    expect(view.formulaInput().selectionStart).toBe(4);
   });
 
   it('leaves the arrows to the caret in an edit opened with F2 until F2 is pressed', async () => {
@@ -2754,6 +2908,28 @@ describe('XlsxEditor cell text', () => {
     } finally {
       handle.dispose();
     }
+  });
+
+  // Excel: the active cell's own font, whatever the rest of the selection uses.
+  it("draws the open edit in the active cell's font over a selection with mixed fonts", async () => {
+    const view = await mountEditor(styled);
+    await view.click({ row: 11, col: 1 });
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, { ...pointAt(styled, { row: 10, col: 1 }), shiftKey: true });
+      fireEvent.mouseUp(window, pointAt(styled, { row: 10, col: 1 }));
+    });
+    await view.idle();
+    expect(view.nameBox().value).toBe('B12');
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'x' });
+    });
+    await view.idle();
+    const input = view.editor()!;
+    expect([input.style.fontSize, input.style.fontWeight, input.style.color]).toEqual([
+      '26.666667px',
+      'bold',
+      '#c00000',
+    ]);
   });
 
   it('draws the open edit and the text waiting for its frame as the canvas draws the cell', async () => {

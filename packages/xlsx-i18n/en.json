@@ -114,6 +114,8 @@
     "appLabel": "Spreadsheet editor",
     "demoCellText": "OpenOOXML xlsx",
     "openError": "Couldn't open this workbook",
+    "formulaRefused": "There's a problem with this formula. Check its parentheses, quotes and operators.",
+    "cellTextTooLong": "A cell holds at most 32,767 characters.",
     "sheetTabsLabel": "Sheets"
   },
   "proposals": {
