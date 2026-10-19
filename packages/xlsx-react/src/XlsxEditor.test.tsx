@@ -212,8 +212,6 @@ function countEngine(proxy: WorkbookProxy) {
 // the workbook of the editor mounted last.
 let currentWorkbook: WorkbookProxy | null = null;
 
-// every request posted so far answered and the frames it asked for painted:
-// a round trip to the worker, the commits it triggers, again until quiet.
 // a clipboard `write` that records the text of each ClipboardItem it takes.
 function writeInto(written: string[]) {
   return async ([item]: ClipboardItem[]) => {
@@ -221,6 +219,8 @@ function writeInto(written: string[]) {
   };
 }
 
+// every request posted so far answered and the frames it asked for painted:
+// a round trip to the worker, the commits it triggers, again until quiet.
 function idleWith(proxy: () => WorkbookProxy | null | undefined) {
   return act(async () => {
     for (let round = 0; round < 4; round += 1) {
