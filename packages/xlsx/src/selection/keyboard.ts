@@ -6,7 +6,7 @@
  * the F2/Enter handlers below.
  */
 
-import { extendTo, moveFocus, selectionAt } from './model';
+import { activeCell, extendTo, moveFocus, selectionAt } from './model';
 import type {
   CellAddr,
   Direction,
@@ -52,6 +52,19 @@ function isPrintable(key: KeyInput): boolean {
 }
 
 /**
+ * The whole used range, keeping the selection's active cell as Excel does; an
+ * active cell outside that range moves to its first cell, so the selection
+ * always holds it.
+ */
+export function selectAll(state: Selection | null, limits: SelectionLimits): Selection {
+  const anchor = { row: 0, col: 0 };
+  const focus = { row: limits.usedRows - 1, col: limits.usedCols - 1 };
+  const active = state ? activeCell(state) : anchor;
+  const inside = active.row <= focus.row && active.col <= focus.col;
+  return { anchor, focus: { ...focus }, active: { ...(inside ? active : anchor) } };
+}
+
+/**
  * Reduce a keystroke to a selection action against the current selection and
  * grid limits. Returns `{ type: 'none' }` for keys this layer does not own so
  * the chrome can fall through to its own handling.
@@ -64,8 +77,11 @@ export function selectionKeyReducer(
   const direction = ARROWS[key.key];
   if (direction) {
     if (mod(key)) {
-      const edge = edgeInDirection(state.focus, direction, limits);
-      return moveAction(key.shiftKey ? extendTo(state, edge, limits) : selectionAt(edge));
+      return moveAction(
+        key.shiftKey
+          ? extendTo(state, edgeInDirection(state.focus, direction, limits), limits)
+          : selectionAt(edgeInDirection(activeCell(state), direction, limits))
+      );
     }
     return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits }));
   }
@@ -83,14 +99,14 @@ export function selectionKeyReducer(
 
     case 'Home':
       return moveAction(
-        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.focus.row, col: 0 })
+        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: activeCell(state).row, col: 0 })
       );
 
     case 'End':
       return moveAction(
         mod(key)
           ? selectionAt({ row: limits.usedRows - 1, col: limits.usedCols - 1 })
-          : selectionAt({ row: state.focus.row, col: limits.usedCols - 1 })
+          : selectionAt({ row: activeCell(state).row, col: limits.usedCols - 1 })
       );
 
     case 'PageDown':
@@ -112,12 +128,9 @@ export function selectionKeyReducer(
       return { type: 'clear' };
   }
 
-  // cmd/ctrl+A selects the whole used range.
+  // cmd/ctrl+A selects the whole used range, the active cell staying put.
   if ((key.key === 'a' || key.key === 'A') && mod(key)) {
-    return moveAction({
-      anchor: { row: 0, col: 0 },
-      focus: { row: limits.usedRows - 1, col: limits.usedCols - 1 },
-    });
+    return moveAction(selectAll(state, limits));
   }
 
   if (isPrintable(key)) {

@@ -98,9 +98,11 @@ export interface WorkbookFrame {
    * `row:col`; a drawn cell left out is empty.
    */
   cells: Record<string, CellEdit>;
-  /** The selection's focus cell, drawn or not. */
-  focus: CellEdit | null;
+  /** The selection's active cell, drawn or not. */
+  active: CellEdit | null;
   formatting: SelectionFormatting;
+  /** The active cell's own formatting: the cell editor draws with its font. */
+  activeFormatting: SelectionFormatting;
   /** Merged ranges inside the selection and inside the drawn window, at most 1,024 each. */
   selectionMerged: MergedRange[];
   visibleMerged: MergedRange[];

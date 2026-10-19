@@ -20,7 +20,7 @@ import {
   StaleProposalError,
 } from '../wasm/loader';
 import type { GridMeta } from '../display-list/types';
-import { cellAddress, normalizeRange } from '../selection/index';
+import { activeCell, cellAddress, normalizeRange } from '../selection/index';
 import {
   MUTATING_METHODS,
   SHEET_GONE,
@@ -73,6 +73,7 @@ let queue = Promise.resolve();
 let selectionReads: {
   key: string;
   formatting: SelectionFormatting;
+  activeFormatting: SelectionFormatting;
   merged: MergedRange[];
 } | null = null;
 
@@ -197,6 +198,10 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
   const rangeA1 = range
     ? `${cellAddress(range.top, range.left)}:${cellAddress(range.bottom, range.right)}`
     : null;
+  const active = selection ? activeCell(selection) : null;
+  const activeA1 = active
+    ? `${cellAddress(active.row, active.col)}:${cellAddress(active.row, active.col)}`
+    : null;
   const quietly = <T,>(read: () => T, fallback: T): T => {
     try {
       return read();
@@ -211,10 +216,8 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
     sheetInfo,
     displayList,
     cells: grid ? windowCells(open, sheet, grid) : {},
-    focus: selection
-      ? quietly(() => open.cell(sheet, selection.focus.row, selection.focus.col), null)
-      : null,
-    ...selectionState(open, sheet, rangeA1, quietly),
+    active: active ? quietly(() => open.cell(sheet, active.row, active.col), null) : null,
+    ...selectionState(open, sheet, rangeA1, activeA1, quietly),
     visibleMerged: grid ? visibleMerged(open, sheet, grid, quietly) : [],
     history: quietly(() => open.historyState(), {
       canUndo: false,
@@ -226,22 +229,36 @@ function frame(open: WorkbookHandle, requested: WorkbookView): WorkbookFrame {
   };
 }
 
-/** The selection's formatting and merged ranges, read again only after a change. */
+/**
+ * The selection's formatting, its active cell's own, and its merged ranges,
+ * read again only after a change.
+ */
 function selectionState(
   open: WorkbookHandle,
   sheet: number,
   rangeA1: string | null,
+  activeA1: string | null,
   quietly: <T>(read: () => T, fallback: T) => T
-): Pick<WorkbookFrame, 'formatting' | 'selectionMerged'> {
-  if (!rangeA1) return { formatting: {}, selectionMerged: [] };
-  const key = `${sheet}!${rangeA1}`;
-  if (selectionReads?.key !== key)
+): Pick<WorkbookFrame, 'formatting' | 'activeFormatting' | 'selectionMerged'> {
+  if (!rangeA1 || !activeA1) return { formatting: {}, activeFormatting: {}, selectionMerged: [] };
+  const key = `${sheet}!${rangeA1}!${activeA1}`;
+  if (selectionReads?.key !== key) {
+    const formatting = quietly(() => open.selectionFormatting(sheet, rangeA1), {});
     selectionReads = {
       key,
-      formatting: quietly(() => open.selectionFormatting(sheet, rangeA1), {}),
+      formatting,
+      activeFormatting:
+        activeA1 === rangeA1
+          ? formatting
+          : quietly(() => open.selectionFormatting(sheet, activeA1), {}),
       merged: quietly(() => open.mergedRanges(sheet, rangeA1), []).slice(0, MAX_MERGED_RANGES),
     };
-  return { formatting: selectionReads.formatting, selectionMerged: selectionReads.merged };
+  }
+  return {
+    formatting: selectionReads.formatting,
+    activeFormatting: selectionReads.activeFormatting,
+    selectionMerged: selectionReads.merged,
+  };
 }
 
 /** The merged ranges over the drawn window's span, as the editor reads them. */

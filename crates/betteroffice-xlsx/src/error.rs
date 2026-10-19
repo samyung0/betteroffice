@@ -50,6 +50,8 @@ pub enum Error {
         bytes: u64,
         max: u64,
     },
+    /// A typed formula that does not parse; nothing changed.
+    UnparsedFormula,
     InvalidViewport,
     DisplayTooLarge {
         cells: u64,
@@ -129,6 +131,7 @@ impl fmt::Display for Error {
                 f,
                 "clear too large: {cells} cells may take {bytes} bytes, over the {max}-byte limit"
             ),
+            Self::UnparsedFormula => f.write_str("there's a problem with this formula"),
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,

@@ -357,9 +357,10 @@ export interface WorkbookHandle extends CollaborationReplica {
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
    * recalc its transitive dependents. one undo step; moved dependents come back
-   * in `EditResult.changed`.
+   * in `EditResult.changed`. A formula that does not parse is stored as text,
+   * or refused with an {@link UnparsedFormulaError} when the user `typed` it.
    */
-  editCell(sheet: number, row: number, col: number, input: string): EditResult;
+  editCell(sheet: number, row: number, col: number, input: string, typed?: boolean): EditResult;
   /** `editCell` with the facade's stage timings attached. */
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
@@ -672,8 +673,11 @@ export function openWorkbook(
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
     },
-    editCell(sheet: number, row: number, col: number, input: string): EditResult {
-      return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
+    editCell(sheet: number, row: number, col: number, input: string, typed?: boolean): EditResult {
+      return parseJson(
+        () => doc.editCellJson(JSON.stringify({ sheet, row, col, input, typed })),
+        true
+      );
     },
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult {
       return parseJson(

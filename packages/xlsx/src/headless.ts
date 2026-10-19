@@ -45,6 +45,7 @@ export type {
 } from './selection/index';
 
 export {
+  activeCell,
   cellAddress,
   columnLetter,
   selectionAt,
@@ -53,6 +54,7 @@ export {
   cellCount,
   extendTo,
   moveFocus,
+  selectAll,
   selectionKeyReducer,
 } from './selection/index';
 

@@ -7651,3 +7651,58 @@ fn profiled_mutations_time_each_stage_once() {
         Some("A2*2")
     );
 }
+
+#[test]
+fn a_typed_formula_is_closed_or_refused_while_other_input_stores_it_as_text() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = CalculationOptions::default();
+    let input = |workbook: &Workbook, address: &str| {
+        workbook.cell(SheetId(0), cell(address)).unwrap().input
+    };
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D1"), "=SUM(A1:A2", options)
+        .unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("D2"), "=ROUND(SUM(A1:A2", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D1"), "=SUM(A1:A2)");
+    assert_eq!(input(&workbook, "D2"), "=ROUND(SUM(A1:A2))");
+    // a call whose function takes no arguments is complete once closed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D5"), "=TODAY(", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D5"), "=TODAY()");
+    // an unfinished argument list is repaired by closing it, as typed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D7"), "=SUM(A1,", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D7"), "=SUM(A1,)");
+    assert!(matches!(
+        workbook.edit_typed_cell(SheetId(0), cell("D6"), "=SUM(", options),
+        Err(Error::UnparsedFormula)
+    ));
+
+    assert!(matches!(
+        workbook.edit_typed_cell(SheetId(0), cell("D3"), "=A1+", options),
+        Err(Error::UnparsedFormula)
+    ));
+    assert_eq!(input(&workbook, "D3"), "");
+    workbook
+        .edit_cell(SheetId(0), cell("D3"), "=A1+", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D3"), "'=A1+");
+
+    // a Text-formatted cell takes what is typed as text, as in Excel.
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(cell("D4"), cell("D4")),
+            NumberFormatMutation::PlainText,
+            options,
+        )
+        .unwrap();
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D4"), "=A1+", options)
+        .unwrap();
+    assert!(!workbook.cell(SheetId(0), cell("D4")).unwrap().is_formula);
+}

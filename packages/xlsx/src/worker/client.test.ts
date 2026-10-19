@@ -104,11 +104,12 @@ describe('workbook worker', () => {
     expect(proxy.mutationsInFlight).toBe(0);
     expect(frame.seq).toBe(proxy.posted);
     expect(frame.cells['2:0'].input).toBe('Before the frame');
-    expect(frame.focus?.a1).toBe('B4');
+    expect(frame.active?.a1).toBe('A3');
     expect(frame.sheetInfo.activeSheet).toBe(0);
     expect(frame.displayList.grid?.startRow).toBe(0);
     expect(frame.history.canUndo).toBe(true);
     expect(frame.formatting).toEqual(openWorkbook(sample()).selectionFormatting(0, 'A3:B4'));
+    expect(frame.activeFormatting).toEqual(openWorkbook(sample()).selectionFormatting(0, 'A3:A3'));
   });
 
   it("refuses a call on a sheet that stopped being the active one", async () => {
