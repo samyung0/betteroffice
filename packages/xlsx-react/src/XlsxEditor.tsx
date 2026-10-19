@@ -147,8 +147,9 @@ export interface XlsxEditorCollaborationOptions {
 /**
  * Refusals the host shows: an edit (a clear, cut or paste) whose update could
  * pass the engine's 64 MiB cap, or a copy (or cut) of more cells than
- * {@link XLSX_COPY_MAX_CELLS}. Nothing changed. `copy-failed`: the browser
- * refused a copy's (or cut's) clipboard write, and a cut cleared nothing.
+ * {@link XLSX_COPY_MAX_CELLS} or more text than {@link XLSX_COPY_MAX_BYTES}.
+ * Nothing changed. `copy-failed`: the browser refused a copy's (or cut's)
+ * clipboard write, and a cut cleared nothing.
  */
 export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large' | 'copy-failed';
 
@@ -176,6 +177,23 @@ function writeClipboard(text: Promise<string>): Promise<void> {
  * 1M, 5M and 10M cells.
  */
 export const XLSX_COPY_MAX_CELLS = 5_000_000;
+
+/**
+ * The most text a copy or cut takes, in UTF-8 bytes (64 MB): cells sharing one
+ * long string make far more text than their count suggests.
+ */
+export const XLSX_COPY_MAX_BYTES = 64_000_000;
+
+/** `text`'s size in UTF-8, counted without encoding it. */
+function utf8Bytes(text: string): number {
+  let bytes = text.length;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    // two bytes up to U+07FF and per surrogate (four a pair), else three.
+    if (code >= 0x80) bytes += code < 0x800 || (code >= 0xd800 && code < 0xe000) ? 1 : 2;
+  }
+  return bytes;
+}
 
 /**
  * Props for {@link XlsxEditor}.
@@ -1929,7 +1947,8 @@ function XlsxEditorContent({
   // whether the clipboard took a copy of `target`: its area from its own
   // top-left up to the used range's end, read in pieces under the engine's
   // read cap. The write starts in the key press, before the read, so a long
-  // read keeps the browser's permission. One past XLSX_COPY_MAX_CELLS is a
+  // read keeps the browser's permission. One past XLSX_COPY_MAX_CELLS, or
+  // whose text passes XLSX_COPY_MAX_BYTES (it stops reading there), is a
   // notice, and so is a write the browser refuses. A newer copy or cut
   // supersedes it: it stops reading and writes nothing, so the clipboard
   // holds the latest. `check` runs before the read: a refusal copies nothing.
@@ -1941,27 +1960,28 @@ function XlsxEditorContent({
       const handle = handleRef.current;
       if (!handle || !target) return false;
       const generation = ++copyGenerationRef.current;
+      const tooLarge = (message: string) => {
+        if (onNotice) onNotice('copy-too-large');
+        else reportError(new RangeTooLargeError(message));
+      };
       const r = upToUsedEnd(normalizeRange(target), usedRange());
       if (r) {
         const rows = r.bottom - r.top + 1;
         const cols = r.right - r.left + 1;
         if (rows * cols > XLSX_COPY_MAX_CELLS) {
-          if (onNotice) onNotice('copy-too-large');
-          else
-            reportError(
-              new RangeTooLargeError(
-                `range ${rows}x${cols} exceeds the ${XLSX_COPY_MAX_CELLS}-cell copy cap`
-              )
-            );
+          tooLarge(`range ${rows}x${cols} exceeds the ${XLSX_COPY_MAX_CELLS}-cell copy cap`);
           return false;
         }
       }
-      // a text the copy refused itself (superseded, a failed check or read)
-      // leaves the clipboard as it was, without the copy-failed notice.
+      // a text the copy refused itself (superseded, too long, a failed check
+      // or read) leaves the clipboard as it was, without the copy-failed
+      // notice; `quiet` is one already told or never to tell.
       let refused = false;
+      const quiet = new Error('copy refused');
       const text = (async () => {
         await check?.();
         const pieces: string[] = [];
+        let bytes = 0;
         // a selection wholly past the used range copies nothing (and asks the worker nothing).
         if (r) {
           const pieceRows = Math.max(1, Math.floor(COPY_PIECE_CELLS / (r.right - r.left + 1)));
@@ -1973,16 +1993,23 @@ function XlsxEditorContent({
               activeSheet,
               `${cellAddress(top, r.left)}:${cellAddress(bottom, r.right)}`
             );
-            if (generation !== copyGenerationRef.current) throw new Error('copy superseded');
-            pieces.push(
-              toTsv(cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula }))))
+            if (generation !== copyGenerationRef.current) throw quiet;
+            const piece = toTsv(
+              cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
             );
+            // the joined text: each piece and the row break (CRLF) before it.
+            bytes += utf8Bytes(piece) + (pieces.length > 0 ? 2 : 0);
+            if (bytes > XLSX_COPY_MAX_BYTES) {
+              tooLarge(`copy text exceeds the ${XLSX_COPY_MAX_BYTES}-byte copy cap`);
+              throw quiet;
+            }
+            pieces.push(piece);
           }
         }
         return joinTsv(pieces);
       })().catch((e: unknown) => {
         refused = true;
-        if (generation === copyGenerationRef.current) reportEditError(e);
+        if (e !== quiet && generation === copyGenerationRef.current) reportEditError(e);
         throw e;
       });
       try {

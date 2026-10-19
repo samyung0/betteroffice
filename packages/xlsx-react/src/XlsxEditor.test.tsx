@@ -1206,6 +1206,48 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  // select all reads A1:J90010 in ten pieces, here 100,000 cells of 100
+  // characters each (about 10.1 MB): the seventh piece passes 64 MB.
+  it('stops a copy whose text passes 64 MB with a notice, a cut clearing nothing', async () => {
+    const notices: string[] = [];
+    const view = await mountEditor(farColumn, undefined, undefined, {
+      onNotice: (notice) => notices.push(notice),
+    });
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    const long = 'x'.repeat(100);
+    const piece = Array.from({ length: 10_000 }, () =>
+      Array.from({ length: 10 }, () => ({ input: long, isFormula: false }))
+    );
+    const sent: string[] = [];
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+      sent.push(method);
+      return method === 'rangeCells' ? Promise.resolve(piece) : forward(sheetId, method, ...args);
+    }) as WorkbookProxy['onSheet']);
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write: writeInto(written) },
+    });
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await waitFor(() => expect(notices).toEqual(['copy-too-large']), { timeout: 20_000 });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await waitFor(() => expect(notices).toHaveLength(2), { timeout: 20_000 });
+      await view.idle();
+      const reads = sent.filter((method) => method === 'rangeCells').length;
+      expect([reads, sent.filter((method) => method === 'clearContents'), written]).toEqual([14, [], []]);
+      expect(await view.input(89_999, 9)).toBe('1');
+    } finally {
+      spy.mockRestore();
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
   // J90000:J90010: the cut's first of ten pieces is held, then J90010 is copied.
   it('clears nothing when a copy made during a cut read supersedes it', async () => {
     const view = await mountEditor(farColumn);
