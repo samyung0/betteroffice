@@ -1041,13 +1041,16 @@ function XlsxEditorContent({
     [onSheet, applyResult, reportEditError]
   );
 
-  // `close` runs once the engine took the commit; a refusal leaves the draft open.
-  const awaitCommit = useCallback((done: Promise<boolean>, close: () => void) => {
+  // `close` runs once the engine took the commit (`late`: after a wait); a
+  // refusal leaves the draft open, its arrows moving the caret as Excel's Edit
+  // mode does.
+  const awaitCommit = useCallback((done: Promise<boolean>, close: (late: boolean) => void) => {
     setCommitting(true);
     const settled = done.then((landed) => {
       commitInFlightRef.current = null;
       setCommitting(false);
-      if (landed) close();
+      if (landed) close(true);
+      else setEditing((prev) => (prev?.arrowsPoint ? { ...prev, arrowsPoint: false } : prev));
       return landed;
     });
     commitInFlightRef.current = settled;
@@ -1743,21 +1746,31 @@ function XlsxEditorContent({
     (move?: Direction, refocus = true, extend = false, after?: () => void) => {
       // the open draft (null once a peer's change dropped it).
       const draft = pendingDraftRef.current;
-      if (!handleRef.current || !editing || !draft || readOnly || commitInFlightRef.current)
+      if (!handleRef.current || !editing || !draft || readOnly) return;
+      // a press while the commit waits acts once it landed.
+      const inFlight = commitInFlightRef.current;
+      if (inFlight) {
+        if (after) void inFlight.then((landed) => landed && after());
         return;
+      }
       const { row, col, value, sheetId } = editing;
       const done = commitCell(sheetId, draft.sheet, row, col, value);
-      const close = () => {
-        if (refocus) suppressBlurRef.current = true;
+      const focused = document.activeElement;
+      const close = (late: boolean) => {
+        // after a wait the grid takes the focus back only if it stayed put.
+        const refocusNow = refocus && (!late || document.activeElement === focused);
+        suppressBlurRef.current = refocusNow && document.activeElement === editorInputRef.current;
+        // what waited on this commit must not commit the draft again.
+        pendingDraftRef.current = null;
         setEditing(null);
         const base = selectionAt({ row, col });
         setSelection(move ? moveFocus(base, move, { extend, limits: limits() }) : base);
         if (move) requestReveal();
         after?.();
-        if (refocus) focusContainer();
+        if (refocusNow) focusContainer();
       };
       if (mayBeRefused(value)) void awaitCommit(done, close);
-      else close();
+      else close(false);
     },
     [editing, commitCell, awaitCommit, limits, focusContainer, readOnly, requestReveal]
   );
@@ -2210,24 +2223,33 @@ function XlsxEditorContent({
   }, [fileName, zoom]);
 
   // commit the formula bar draft to the active cell; a draft the engine may
-  // refuse stays open until the engine took it.
+  // refuse stays open until the engine took it, and `after` runs once it closed.
   const commitFormula = useCallback(
-    (move?: Direction, refocus = false) => {
+    (move?: Direction, refocus = false, after?: () => void) => {
       const draft = pendingDraftRef.current;
       if (!handleRef.current || !selection || formulaDraft == null || !draft || readOnly) return;
-      if (commitInFlightRef.current) return;
+      const inFlight = commitInFlightRef.current;
+      if (inFlight) {
+        if (after) void inFlight.then((landed) => landed && after());
+        return;
+      }
       const { row, col } = activeCell(selection);
       const done = commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft);
-      const close = () => {
+      const focused = document.activeElement;
+      const close = (late: boolean) => {
+        // the formula bar's blur below must not commit the draft again.
+        pendingDraftRef.current = null;
         setFormulaDraft(null);
         if (move) {
           setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
           requestReveal();
         }
-        if (refocus) focusContainer();
+        after?.();
+        // after a wait the grid takes the focus back only if it stayed put.
+        if (refocus && (!late || document.activeElement === focused)) focusContainer();
       };
       if (mayBeRefused(formulaDraft)) void awaitCommit(done, close);
-      else close();
+      else close(false);
     },
     [selection, formulaDraft, commitCell, awaitCommit, limits, readOnly, requestReveal, focusContainer]
   );
@@ -2376,8 +2398,14 @@ function XlsxEditorContent({
       // a chart painted under it, or move the grid.
       const dismissesEditor = editing != null;
       if (dismissesEditor && editorInputRef.current?.contains(e.target as Node)) return;
-      // a draft the engine may refuse keeps the focus until it landed.
-      const awaitsEngine = editing != null && mayBeRefused(editing.value);
+      // a draft the engine may refuse (in the cell or the formula bar) keeps the
+      // focus: the press commits it first and acts once it landed, so a refusal
+      // leaves the selection on the draft's cell.
+      const awaitsEngine = editing
+        ? mayBeRefused(editing.value)
+        : formulaDraft !== null && mayBeRefused(formulaDraft);
+      const commitThen = (after: () => void) =>
+        editing ? commitEditor(undefined, true, false, after) : commitFormula(undefined, true, after);
       // a formula waiting for an operand takes the pressed cell as a reference,
       // as in Excel and Sheets: the draft stays open and keeps the focus.
       const point = pointModeRef.current;
@@ -2405,9 +2433,7 @@ function XlsxEditorContent({
         if (awaitsEngine) {
           e.preventDefault();
           clickStartRef.current = null;
-          commitEditor(undefined, true, false, () =>
-            setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable })
-          );
+          commitThen(() => setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable }));
           return;
         }
         if (dismissesEditor) commitEditor();
@@ -2436,24 +2462,21 @@ function XlsxEditorContent({
       if (!selection) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
+      // the pressed cell stays active while a drag or Shift+click moves the far
+      // end, as in Excel: Shift+click extends from the active cell (after
+      // Ctrl+A too); a merged cell is pressed at its top-left cell.
+      const press = (prev: Selection | null) =>
+        e.shiftKey
+          ? prev && extendTo(selectionAt(activeCell(prev)), addr, limits())
+          : selectionAt(mergeOrigin(addr, visibleMergedRanges));
       if (awaitsEngine) {
         e.preventDefault();
         clickStartRef.current = null;
-        const extend = e.shiftKey;
-        commitEditor(undefined, true, false, () =>
-          setSelection((prev) =>
-            extend && prev
-              ? extendTo(prev, addr, limits())
-              : selectionAt(mergeOrigin(addr, visibleMergedRanges))
-          )
-        );
+        commitThen(() => setSelection(press));
         return;
       }
       if (dismissesEditor) commitEditor();
-      // the pressed cell stays active while a drag or Shift+click moves the far
-      // end, as in Excel; a merged cell is pressed at its top-left cell.
-      if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
-      else setSelection(selectionAt(mergeOrigin(addr, visibleMergedRanges)));
+      setSelection(press);
       // no click start: a press that dismissed the editor must not also follow a
       // hyperlink in the cell it selects.
       clickStartRef.current = dismissesEditor ? null : addr;
@@ -2463,12 +2486,14 @@ function XlsxEditorContent({
     },
     [
       editing,
+      formulaDraft,
       selection,
       pointToCell,
       pointToChart,
       limits,
       focusContainer,
       commitEditor,
+      commitFormula,
       readOnly,
       visibleMergedRanges,
     ]
@@ -3366,7 +3391,16 @@ function XlsxEditorContent({
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
+                // keys typed while a commit waits for the engine are dropped.
                 readOnly={committing}
+                // a click in the edit places the caret: the arrows move it from
+                // then on, as Excel's Edit mode.
+                onMouseDown={() => {
+                  if (!editing.arrowsPoint) return;
+                  pointedRef.current = null;
+                  setPointed(null);
+                  setEditing((prev) => (prev ? { ...prev, arrowsPoint: false } : prev));
+                }}
                 onChange={(e) => {
                   onPendingChange?.(true);
                   if (!shownWhole(editing.row, editing.col)) requestReveal();

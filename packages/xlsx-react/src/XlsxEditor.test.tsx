@@ -2584,6 +2584,28 @@ describe('XlsxEditor active cell', () => {
     expect([await view.input(4, 2), await view.input(0, 0)]).toEqual(['x', 'Quarterly Budget Report']);
   });
 
+  // Excel: Ctrl+A at C5, then Shift+click E10 selects C5:E10.
+  it('extends a Shift+click after select all from the active cell', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 4, col: 2 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'a', ctrlKey: true });
+    });
+    await view.idle();
+    await act(async () => {
+      fireEvent.mouseDown(view.surface, { ...pointAt(plain, { row: 9, col: 4 }), shiftKey: true });
+      fireEvent.mouseUp(window, pointAt(plain, { row: 9, col: 4 }));
+    });
+    await view.idle();
+    const from = cellRect(plain.grid, 4, 2)!;
+    const to = cellRect(plain.grid, 9, 4)!;
+    const box = view.selectionBox()!.style;
+    expect([
+      view.nameBox().value,
+      ...[box.left, box.top, box.width, box.height].map((value) => Math.round(parseFloat(value))),
+    ]).toEqual(['C5', ...[from.x, from.y, to.x + to.w - from.x, to.y + to.h - from.y].map(Math.round)]);
+  });
+
   // Budget's title is merged over A1:D1.
   it('selects a merged cell by its top-left cell, so typing replaces what it shows', async () => {
     const view = await mountEditor();
@@ -2690,35 +2712,175 @@ describe('XlsxEditor formula entry', () => {
     }
   });
 
-  it("waits for the engine's answer before a formula's edit closes", async () => {
-    const view = await mountEditor();
+  // holds every cell edit back until released, as a busy engine would.
+  const holdEdits = (view: Awaited<ReturnType<typeof mountEditor>>) => {
     const proxy = view.workbook();
     const forward = proxy.onSheet.bind(proxy);
-    let release = () => {};
+    let open = () => {};
     const gate = new Promise<void>((resolve) => {
-      release = resolve;
+      open = resolve;
     });
     const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) =>
       method === 'editCell'
         ? gate.then(() => forward(sheetId, method, ...args))
         : forward(sheetId, method, ...args)) as WorkbookProxy['onSheet']);
+    return {
+      release: async () => {
+        await act(async () => open());
+        await view.idle();
+      },
+      edits: () => spy.mock.calls.filter(([, method]) => method === 'editCell').length,
+      restore: () => spy.mockRestore(),
+    };
+  };
+
+  // a formula typed into B11 (900; B12 holds 1000) in an edit opened by typing.
+  const typeInB11 = async (view: Awaited<ReturnType<typeof mountEditor>>, value: string) => {
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, '=');
+    view.type(value);
+  };
+
+  it("waits for the engine's answer before a formula's edit closes", async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
     try {
-      await view.click({ row: 10, col: 1 });
-      await press(view.surface, '=');
-      view.type('=B3*2');
+      await typeInB11(view, '=B3*2');
       await press(view.editor()!, 'Enter');
       expect([view.editor()?.value, view.editor()?.readOnly, view.nameBox().value]).toEqual([
         '=B3*2',
         true,
         'B11',
       ]);
-      await act(async () => release());
-      await view.idle();
+      await held.release();
       expect([view.editor() === null, view.nameBox().value]).toEqual([true, 'B12']);
       expect(await view.input(10, 1)).toBe('=B3*2');
     } finally {
-      spy.mockRestore();
+      held.restore();
     }
+  });
+
+  // after Enter the user is not typing into that formula (Epo, 2026-10-19).
+  it("drops the keys typed while a formula's commit waits for the engine", async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await press(view.editor()!, 'Enter');
+      await press(view.editor()!, '5');
+      await press(view.editor()!, 'Enter');
+      expect([view.editor()?.readOnly, view.editor()?.value]).toEqual([true, '=B3*2']);
+      await held.release();
+      expect([view.editor() === null, view.nameBox().value, held.edits()]).toEqual([true, 'B12', 1]);
+    } finally {
+      held.restore();
+    }
+    expect([await view.input(10, 1), await view.input(11, 1)]).toEqual(['=B3*2', '1000']);
+  });
+
+  it('selects a cell pressed while a formula commit waits once the engine took it', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await view.click({ row: 4, col: 3 });
+      expect([view.nameBox().value, view.editor()?.readOnly]).toEqual(['B11', true]);
+      await held.release();
+      expect([view.nameBox().value, view.editor() === null]).toEqual(['D5', true]);
+    } finally {
+      held.restore();
+    }
+    expect(await view.input(10, 1)).toBe('=B3*2');
+  });
+
+  it('switches to a sheet tab pressed while a formula commit waits once the engine took it', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    const selected = () =>
+      [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')].map(
+        (tab) => tab.getAttribute('aria-selected') === 'true'
+      );
+    try {
+      await typeInB11(view, '=B3*2');
+      await press(view.editor()!, 'Enter');
+      await act(async () => {
+        fireEvent.click(view.surface.ownerDocument.querySelectorAll('[role="tab"]')[1]);
+      });
+      await view.idle();
+      expect(selected().slice(0, 2)).toEqual([true, false]);
+      await held.release();
+      expect(selected().slice(0, 2)).toEqual([false, true]);
+    } finally {
+      held.restore();
+    }
+    expect(await view.input(10, 1)).toBe('=B3*2');
+  });
+
+  it('inserts a row asked for while a formula commit waits once the engine took it', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await view.run('insertRowAbove');
+      expect((await view.workbook().cell(0, 10, 1)).input).toBe('900');
+      await held.release();
+    } finally {
+      held.restore();
+    }
+    expect([await view.input(10, 1), await view.input(11, 1)]).toEqual(['', '=B3*2']);
+  });
+
+  // the press commits the formula-bar draft first: a refusal keeps it on its cell.
+  it('keeps a refused formula-bar draft on its cell when another cell is pressed', async () => {
+    const view = await mountEditor();
+    const d5 = await view.input(4, 3);
+    await view.click({ row: 10, col: 1 });
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('=B3*/2');
+    await press(view.formulaInput(), 'Enter');
+    await view.click({ row: 4, col: 3 });
+    expect([view.formula(), view.nameBox().value, refusal(view) === null]).toEqual([
+      '=B3*/2',
+      'B11',
+      false,
+    ]);
+    view.typeFormula('=B3*2');
+    await press(view.formulaInput(), 'Enter');
+    expect([await view.input(10, 1), await view.input(4, 3)]).toEqual(['=B3*2', d5]);
+  });
+
+  // Excel's Edit mode after a refusal: the arrows fix the formula, not commit it again.
+  it('moves the caret with the arrows after a refusal in an edit opened by typing', async () => {
+    const view = await mountEditor();
+    await typeInB11(view, '=B3*/2');
+    await press(view.editor()!, 'Enter');
+    const edits = spyOn(view.workbook(), 'onSheet');
+    try {
+      await press(view.editor()!, 'ArrowLeft');
+      await press(view.editor()!, 'ArrowRight');
+      expect([view.editor()?.value, view.nameBox().value]).toEqual(['=B3*/2', 'B11']);
+      expect(edits.mock.calls.filter(([, method]) => method === 'editCell').length).toBe(0);
+    } finally {
+      edits.mockRestore();
+    }
+  });
+
+  it('leaves the focus where it went while a commit waited, the next edit committing on leave', async () => {
+    const view = await mountEditor();
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*2');
+      await press(view.editor()!, 'Enter');
+      await act(async () => view.nameBox().focus());
+      await held.release();
+      expect([view.editor() === null, document.activeElement === view.nameBox()]).toEqual([true, true]);
+    } finally {
+      held.restore();
+    }
+    await view.click({ row: 12, col: 1 });
+    await press(view.surface, 'x');
+    await act(async () => view.formulaInput().focus());
+    expect(await view.input(12, 1)).toBe('x');
   });
 });
 
@@ -2803,6 +2965,17 @@ describe('XlsxEditor point mode', () => {
     await press(view.editor()!, 'F2');
     await press(view.editor()!, 'ArrowDown');
     expect(view.editor()?.value).toBe('k');
+  });
+
+  // a click in the edit places the caret, as Excel's Edit mode.
+  it('moves the caret with the arrows after a click in an edit opened by typing', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await press(view.surface, 'H');
+    view.type('Helo world');
+    await act(async () => view.pressInEditor({ row: 10, col: 1 }));
+    await press(view.editor()!, 'ArrowRight');
+    expect([view.editor()?.value, view.nameBox().value]).toEqual(['Helo world', 'B11']);
   });
 
   // a range that cuts a merged block grows over it, as the selection does.
