@@ -668,7 +668,7 @@ impl<'de> Visitor<'de> for HyperlinkSeed {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::cell::Cell;
@@ -702,7 +702,7 @@ mod tests {
     #[global_allocator]
     static ALLOCATOR: PeakAlloc = PeakAlloc;
 
-    fn peak_bytes<T>(body: impl FnOnce() -> T) -> usize {
+    pub(crate) fn peak_bytes<T>(body: impl FnOnce() -> T) -> usize {
         LIVE.with(|live| live.set(0));
         PEAK.with(|peak| peak.set(0));
         let value = body();

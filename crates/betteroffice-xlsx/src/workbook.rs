@@ -1725,12 +1725,23 @@ impl Workbook {
         range: CellRange,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        let filled = |(at, cell): &(CellRef, &xlsx_model::Cell)| {
+            range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
+        };
+        // counted first, so a refused clear builds no edit per cell.
+        let cells = self.sheet(sheet)?.iter_cells().filter(filled).count();
+        let bytes = cells.saturating_mul(EDITED_CELL_UPDATE_BYTES);
+        if bytes > MAX_COLLABORATION_BYTES {
+            return Err(Error::EditTooLarge {
+                cells: cells as u64,
+                bytes: bytes as u64,
+                max: MAX_COLLABORATION_BYTES as u64,
+            });
+        }
         let edits = self
             .sheet(sheet)?
             .iter_cells()
-            .filter(|(at, cell)| {
-                range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
-            })
+            .filter(filled)
             .map(|(cell, _)| CellInput {
                 cell,
                 input: String::new(),
@@ -4684,6 +4695,40 @@ fn invalidates_proposals(op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clear past the update cap is refused before it builds an edit per cell.
+    #[test]
+    fn a_clear_past_the_update_cap_is_refused_before_it_collects_its_cells() {
+        use xlsx_model::Cell;
+        let cells = MAX_COLLABORATION_BYTES / EDITED_CELL_UPDATE_BYTES + 1;
+        let mut sheet = Sheet::new("Data");
+        for index in 0..cells as u32 {
+            sheet.set_cell(
+                CellRef::new(index / 100, index % 100),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut workbook = Workbook::from_model(WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        })
+        .unwrap();
+        let range = CellRange::new(CellRef::new(0, 0), CellRef::new(cells as u32 / 100, 99));
+        let mut refused = None;
+        let peak = crate::sheet_json::tests::peak_bytes(|| {
+            refused =
+                Some(workbook.clear_contents(SheetId(0), range, CalculationOptions::default()));
+        });
+        assert!(matches!(
+            refused,
+            Some(Err(Error::EditTooLarge { cells: counted, .. })) if counted == cells as u64
+        ));
+        // an edit per cell would hold at least `cells` CellInputs (32 bytes each).
+        assert!(peak < cells, "a refused clear allocated {peak} bytes");
+    }
 
     /// The edit bound covers what the edit adds to the update, for the values,
     /// texts and formulas the bound's constants were measured on.
