@@ -194,8 +194,8 @@ export interface XlsxEditorProps {
    * pieces, a timeout): the grid and formula bar show a loading cursor and
    * every edit is refused as in `readOnly` until it turns false. Selection,
    * scrolling and copy still work. An open cell edit or formula-bar draft stays
-   * open, read-only, on its cell: a press elsewhere, a sheet switch,
-   * `selectCells` and `clearSelection` are refused while it is open.
+   * open, read-only, on its cell: a press elsewhere, a sheet switch, the name
+   * box, `selectCells` and `clearSelection` are refused while it is open.
    */
   sending?: boolean;
   /** A refused edit for the host to show; unset, the editor shows its message. */
@@ -2645,6 +2645,14 @@ function XlsxEditorContent({
         (name) => name.toLowerCase() === destination.sheetName.toLowerCase()
       );
       if (targetSheet < 0) return false;
+      // a draft awaiting the engine goes once it landed, and not if refused;
+      // while busy an open draft refuses it.
+      const settled = settlePendingEditsRef.current();
+      if (!settled) return false;
+      if (commitInFlightRef.current) {
+        void settled.then((landed) => landed && goToLocation(location));
+        return true;
+      }
       setEditing(null);
       setFormulaDraft(null);
       setCapturedFormat(null);

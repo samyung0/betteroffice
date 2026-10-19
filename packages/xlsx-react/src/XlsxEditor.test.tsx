@@ -1188,7 +1188,7 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
-  it('refuses a sheet switch, clearSelection and selectCells while sending with an edit open', async () => {
+  it('refuses a sheet switch, the name box, clearSelection and selectCells while sending with an edit open', async () => {
     const view = await mountEditor(plain);
     const tabs = () => [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')];
     await view.doubleClick({ row: 2, col: 2 });
@@ -1198,6 +1198,8 @@ describe('XlsxEditor keyboard', () => {
       fireEvent.click(tabs()[1]);
     });
     await view.idle();
+    fireEvent.change(view.nameBox(), { target: { value: 'D5' } });
+    await press(view.nameBox(), 'Enter');
     await act(async () => view.api().clearSelection());
     let selecting!: Promise<boolean>;
     await act(async () => {
@@ -1205,11 +1207,7 @@ describe('XlsxEditor keyboard', () => {
       await selecting;
     });
     expect(await selecting).toBe(false);
-    expect([tabs()[0].getAttribute('aria-selected'), view.editor()?.value, view.nameBox().value]).toEqual([
-      'true',
-      'draft',
-      'C3',
-    ]);
+    expect([tabs()[0].getAttribute('aria-selected'), view.editor()?.value]).toEqual(['true', 'draft']);
     await view.setProps({ sending: false });
     await press(view.editor()!, 'Enter');
     expect(await view.input(2, 2)).toBe('draft');
@@ -3355,6 +3353,37 @@ describe('XlsxEditor formula entry', () => {
     await press(view.surface, 'x');
     await act(async () => view.formulaInput().focus());
     expect(await view.input(12, 1)).toBe('x');
+  });
+
+  it('goes where the name box names once a waiting commit landed, and nowhere after a refusal', async () => {
+    const view = await mountEditor();
+    const goTo = async (address: string) => {
+      await act(async () => view.nameBox().focus());
+      fireEvent.change(view.nameBox(), { target: { value: address } });
+      await press(view.nameBox(), 'Enter');
+    };
+    let held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*/2');
+      await goTo('D5');
+      await held.release();
+    } finally {
+      held.restore();
+    }
+    expect([view.editor()?.value, view.nameBox().value, refusal(view) === null]).toEqual([
+      '=B3*/2',
+      'B11',
+      false,
+    ]);
+    view.type('=B3*2');
+    held = holdEdits(view);
+    try {
+      await goTo('D5');
+      await held.release();
+    } finally {
+      held.restore();
+    }
+    expect([view.nameBox().value, await view.input(10, 1)]).toEqual(['D5', '=B3*2']);
   });
 });
 
