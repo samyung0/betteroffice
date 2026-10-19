@@ -3498,6 +3498,28 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(12, 1)).toBe('x');
   });
 
+  // the user moved on to the host's page (a chat box) while the engine answered.
+  it('leaves the focus outside the editor when a refusal lands after it moved there', async () => {
+    const view = await mountEditor();
+    const outside = document.createElement('input');
+    document.body.append(outside);
+    const held = holdEdits(view);
+    try {
+      await typeInB11(view, '=B3*/2');
+      await press(view.editor()!, 'Enter');
+      await act(async () => outside.focus());
+      await held.release();
+      expect([view.editor()?.value, refusal(view) === null, document.activeElement === outside]).toEqual([
+        '=B3*/2',
+        false,
+        true,
+      ]);
+    } finally {
+      held.restore();
+      outside.remove();
+    }
+  });
+
   it('goes where the name box names once a waiting commit landed, and nowhere after a refusal', async () => {
     const view = await mountEditor();
     const goTo = async (address: string) => {

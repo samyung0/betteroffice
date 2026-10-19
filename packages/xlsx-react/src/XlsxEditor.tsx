@@ -1537,10 +1537,13 @@ function XlsxEditorContent({
   }, []);
 
   // focus the in-cell editor when it opens, without scrolling the grid. it
-  // stays mounted while its cell is off screen, so focus never leaves it.
+  // stays mounted while its cell is off screen, so focus never leaves it. A
+  // change to the open edit (a refusal landing after the focus moved away)
+  // leaves the focus where it is.
+  const openEdit = editing && `${editing.sheetId}!${editing.row}:${editing.col}`;
   useEffect(() => {
-    if (editing) editorInputRef.current?.focus({ preventScroll: true });
-  }, [editing]);
+    if (openEdit) editorInputRef.current?.focus({ preventScroll: true });
+  }, [openEdit]);
 
   // a pointed reference ends with its draft, and its caret follows it in.
   useLayoutEffect(() => {
