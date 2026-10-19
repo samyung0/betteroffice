@@ -213,6 +213,13 @@ let currentWorkbook: WorkbookProxy | null = null;
 
 // every request posted so far answered and the frames it asked for painted:
 // a round trip to the worker, the commits it triggers, again until quiet.
+// a clipboard `write` that records the text of each ClipboardItem it takes.
+function writeInto(written: string[]) {
+  return async ([item]: ClipboardItem[]) => {
+    written.push(await (await item.getType('text/plain')).text());
+  };
+}
+
 function idleWith(proxy: () => WorkbookProxy | null | undefined) {
   return act(async () => {
     for (let round = 0; round < 4; round += 1) {
@@ -635,7 +642,7 @@ describe('XlsxEditor keyboard', () => {
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
-      value: { writeText: async (text: string) => void written.push(text) },
+      value: { write: writeInto(written) },
     });
     return {
       sent: (method: string) => sent.filter((call) => call.method === method).map((call) => call.args),
@@ -1003,7 +1010,7 @@ describe('XlsxEditor keyboard', () => {
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
-      value: { writeText: async (text: string) => void written.push(text) },
+      value: { write: writeInto(written) },
     });
     return {
       sent,
@@ -1079,6 +1086,85 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  // the browser's permission lasts a few seconds after the key press: the
+  // write starts there, filled once the read answers.
+  it('starts the clipboard write at the key press, before the cells are read', async () => {
+    const view = await mountEditor(plain);
+    const read = holdFirstRead(view);
+    let started = 0;
+    const written: string[] = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: (items: ClipboardItem[]) => {
+          started += 1;
+          return writeInto(written)(items);
+        },
+      },
+    });
+    try {
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'c', { ctrlKey: true });
+      expect([started, written]).toEqual([1, []]);
+      await read.release();
+      await view.idle();
+      expect(written).toEqual(['Q1']);
+    } finally {
+      read.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  it('shows the copy-failed notice when the browser refuses the write, a cut clearing nothing', async () => {
+    const notices: string[] = [];
+    const view = await mountEditor(plain, undefined, undefined, {
+      onNotice: (notice) => notices.push(notice),
+    });
+    const calls = watch(view);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: async () => {
+          throw new Error('Document is not focused.');
+        },
+      },
+    });
+    try {
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await view.idle();
+      expect([notices, calls.sent('clearContents'), await view.input(1, 1)]).toEqual([
+        ['copy-failed', 'copy-failed'],
+        [],
+        'Q1',
+      ]);
+    } finally {
+      calls.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  it('writes the text once read where the browser has no ClipboardItem', async () => {
+    const view = await mountEditor(plain);
+    const item = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const written: string[] = [];
+    Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => void written.push(text) },
+    });
+    try {
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await view.idle();
+      expect(written).toEqual(['Q1']);
+    } finally {
+      if (item) Object.defineProperty(globalThis, 'ClipboardItem', item);
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
   // J90000:J90010: the cut's first of ten pieces is held, then J90010 is copied.
   it('clears nothing when a copy made during a cut read supersedes it', async () => {
     const view = await mountEditor(farColumn);
@@ -1120,7 +1206,7 @@ describe('XlsxEditor keyboard', () => {
         configurable: true,
         value: {
           readText: async () => 'pasted',
-          writeText: async (text: string) => void calls.written.push(text),
+          write: writeInto(calls.written),
         },
       });
       const paint = () => document.querySelector('[title="Paint format"]') as HTMLButtonElement;

@@ -147,12 +147,28 @@ export interface XlsxEditorCollaborationOptions {
 /**
  * Refusals the host shows: an edit (a clear, cut or paste) whose update could
  * pass the engine's 64 MiB cap, or a copy (or cut) of more cells than
- * {@link XLSX_COPY_MAX_CELLS}. Nothing changed.
+ * {@link XLSX_COPY_MAX_CELLS}. Nothing changed. `copy-failed`: the browser
+ * refused a copy's (or cut's) clipboard write, and a cut cleared nothing.
  */
-export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large';
+export type XlsxEditorNotice = 'edit-too-large' | 'copy-too-large' | 'copy-failed';
 
 /** A copy reads its area in pieces under the engine's 100,000-cell read cap. */
 const COPY_PIECE_CELLS = 100_000;
+
+/**
+ * Writes `text` to the clipboard, the write starting at once (inside the key
+ * press) as a promise-valued ClipboardItem filled once `text` is read, so a
+ * long read keeps the browser's permission; writeText once read where the
+ * browser has no ClipboardItem.
+ */
+function writeClipboard(text: Promise<string>): Promise<void> {
+  if (typeof ClipboardItem === 'undefined')
+    return text.then((value) => navigator.clipboard.writeText(value));
+  const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
+  // a write the browser refuses at once never reads it.
+  blob.catch(() => {});
+  return navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+}
 /**
  * The largest area (rows x columns, from the selection's top-left to the used
  * range's end) a copy or cut takes, set from headless Chromium measurements at
@@ -1911,18 +1927,17 @@ function XlsxEditorContent({
   const copyGenerationRef = useRef(0);
   // whether the clipboard took a copy of `target`: its area from its own
   // top-left up to the used range's end, read in pieces under the engine's
-  // read cap. One past XLSX_COPY_MAX_CELLS is a notice; a denied clipboard
-  // leaves things as they are. A newer copy or cut supersedes it: it stops
-  // reading and writes nothing, so the clipboard holds the latest.
+  // read cap. The write starts in the key press, before the read, so a long
+  // read keeps the browser's permission. One past XLSX_COPY_MAX_CELLS is a
+  // notice, and so is a write the browser refuses. A newer copy or cut
+  // supersedes it: it stops reading and writes nothing, so the clipboard
+  // holds the latest.
   const copySelection = useCallback(
     async (target: Selection | null = selection): Promise<boolean> => {
       const handle = handleRef.current;
       if (!handle || !target) return false;
       const generation = ++copyGenerationRef.current;
-      const superseded = () => generation !== copyGenerationRef.current;
       const r = upToUsedEnd(normalizeRange(target), usedRange());
-      const pieces: string[] = [];
-      // a selection wholly past the used range copies nothing (and asks the worker nothing).
       if (r) {
         const rows = r.bottom - r.top + 1;
         const cols = r.right - r.left + 1;
@@ -1936,8 +1951,15 @@ function XlsxEditorContent({
             );
           return false;
         }
-        const pieceRows = Math.max(1, Math.floor(COPY_PIECE_CELLS / cols));
-        try {
+      }
+      // a text the copy refused itself (superseded, a failed read) leaves the
+      // clipboard as it was, without the copy-failed notice.
+      let refused = false;
+      const text = (async () => {
+        const pieces: string[] = [];
+        // a selection wholly past the used range copies nothing (and asks the worker nothing).
+        if (r) {
+          const pieceRows = Math.max(1, Math.floor(COPY_PIECE_CELLS / (r.right - r.left + 1)));
           for (let top = r.top; top <= r.bottom; top += pieceRows) {
             const bottom = Math.min(r.bottom, top + pieceRows - 1);
             const cells = await handle.onSheet(
@@ -1946,20 +1968,26 @@ function XlsxEditorContent({
               activeSheet,
               `${cellAddress(top, r.left)}:${cellAddress(bottom, r.right)}`
             );
-            if (superseded()) return false;
+            if (generation !== copyGenerationRef.current) throw new Error('copy superseded');
             pieces.push(
               toTsv(cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula }))))
             );
           }
-        } catch (e) {
-          reportError(e);
-          return false;
         }
-      }
+        return joinTsv(pieces);
+      })().catch((e: unknown) => {
+        refused = true;
+        if (generation === copyGenerationRef.current) reportError(e);
+        throw e;
+      });
       try {
-        await navigator.clipboard.writeText(joinTsv(pieces));
+        await writeClipboard(text);
         return true;
-      } catch {
+      } catch (e) {
+        if (!refused) {
+          if (onNotice) onNotice('copy-failed');
+          else reportError(e);
+        }
         return false;
       }
     },
