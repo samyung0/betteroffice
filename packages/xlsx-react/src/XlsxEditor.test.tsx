@@ -1236,6 +1236,22 @@ describe('XlsxEditor keyboard', () => {
     expect([await view.input(10, 1), await view.input(4, 3)]).toEqual(['=B3*2', d5]);
   }, MANY_KEYS_MS);
 
+  // text the engine never refuses: only the busy press refusal keeps it on B2.
+  it('commits a formula-bar text draft typed before sending to its own cell after a press', async () => {
+    const view = await mountEditor(plain);
+    const d5 = await view.input(4, 3);
+    await view.click({ row: 1, col: 1 });
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('hello');
+    await view.setProps({ sending: true });
+    await view.click({ row: 4, col: 3 });
+    expect([view.nameBox().value, view.formula()]).toEqual(['B2', 'hello']);
+    await view.setProps({ sending: false });
+    await act(async () => view.formulaInput().focus());
+    await press(view.formulaInput(), 'Enter');
+    expect([await view.input(1, 1), await view.input(4, 3)]).toEqual(['hello', d5]);
+  }, MANY_KEYS_MS);
+
   it('reveals a far cell on another sheet the name box goes to', async () => {
     const view = await mountEditor(plain);
     await view.click({ row: 0, col: 0 });
@@ -3361,6 +3377,47 @@ describe('XlsxEditor formula entry', () => {
     view.typeFormula('=B3*2');
     await press(view.formulaInput(), 'Enter');
     expect([await view.input(10, 1), await view.input(4, 3)]).toEqual(['=B3*2', d5]);
+  });
+
+  // a refused draft stays open after its blur (a toolbar action gives the grid
+  // the focus): a key in the grid gives the focus back to the bar, moving nothing.
+  it('gives the formula bar back the keys while its refused draft is open', async () => {
+    const view = await mountEditor();
+    await view.click({ row: 10, col: 1 });
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('=B3*/2');
+    await press(view.formulaInput(), 'Enter');
+    await act(async () => view.surface.focus());
+    await press(view.surface, 'ArrowDown');
+    expect([view.nameBox().value, view.formula(), document.activeElement === view.formulaInput()]).toEqual([
+      'B11',
+      '=B3*/2',
+      true,
+    ]);
+    view.typeFormula('=B3*2');
+    await press(view.formulaInput(), 'Enter');
+    expect([await view.input(10, 1), await view.input(11, 1)]).toEqual(['=B3*2', '1000']);
+  });
+
+  // J21 lies outside A1:D62, so the menu's Select all makes A1 the active cell.
+  it('commits a refused formula-bar draft to its own cell after the menu selected all', async () => {
+    const view = await mountEditor();
+    await act(async () => {
+      await view.api().selectCells(0, selectionAt({ row: 20, col: 9 }));
+    });
+    await view.idle();
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('=B3*/2');
+    await press(view.formulaInput(), 'Enter');
+    await view.run('selectAll');
+    expect([view.nameBox().value, view.formula()]).toEqual(['A1', '=B3*/2']);
+    await act(async () => view.formulaInput().focus());
+    view.typeFormula('=B3*2');
+    await press(view.formulaInput(), 'Enter');
+    expect([await view.input(20, 9), await view.input(0, 0)]).toEqual([
+      '=B3*2',
+      'Quarterly Budget Report',
+    ]);
   });
 
   // Excel's Edit mode after a refusal: the arrows fix the formula, not commit it again.

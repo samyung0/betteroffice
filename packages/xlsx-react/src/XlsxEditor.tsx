@@ -750,8 +750,9 @@ function XlsxEditorContent({
   const pendingDraftRef = useRef<(Omit<EditState, 'arrowsPoint'> & { sheet: number }) | null>(
     null
   );
-  // the sheet a formula-bar draft started on.
-  const formulaSheetIdRef = useRef('');
+  // the sheet and cell a formula-bar draft started on, pinned until it closes:
+  // it commits there whatever moved the selection meanwhile.
+  const formulaPinRef = useRef<{ sheetId: string; row: number; col: number } | null>(null);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -896,15 +897,13 @@ function XlsxEditorContent({
   const proposals = shown?.proposals ?? NO_PROPOSALS;
   // overlays follow the frame on screen, so they stay on its pixels.
   const paintedZoom = file && shown ? shown.view.zoom : zoom;
+  // a closed formula-bar draft drops its pin.
+  if (formulaDraft === null) formulaPinRef.current = null;
+  const formulaPin = formulaPinRef.current;
   pendingDraftRef.current = editing
     ? { sheet: activeSheet, ...editing }
-    : selection && formulaDraft !== null
-      ? {
-          sheet: activeSheet,
-          sheetId: formulaSheetIdRef.current,
-          ...activeCell(selection),
-          value: formulaDraft,
-        }
+    : formulaPin && formulaDraft !== null
+      ? { sheet: activeSheet, ...formulaPin, value: formulaDraft }
       : null;
 
   // the editable text of a cell, when the frame on screen is current: it was
@@ -2289,19 +2288,18 @@ function XlsxEditorContent({
     }
   }, [fileName, zoom]);
 
-  // commit the formula bar draft to the active cell; a draft the engine may
-  // refuse stays open until the engine took it, and `after` runs once it closed.
+  // commit the formula bar draft to the cell it started on; a draft the engine
+  // may refuse stays open until the engine took it, and `after` runs once it closed.
   const commitFormula = useCallback(
     (move?: Direction, refocus = false, after?: () => void) => {
       const draft = pendingDraftRef.current;
-      if (!handleRef.current || !selection || formulaDraft == null || !draft || readOnly) return;
+      if (!handleRef.current || formulaDraft == null || !draft || readOnly) return;
       const inFlight = commitInFlightRef.current;
       if (inFlight) {
         if (after) void inFlight.then((landed) => landed && after());
         return;
       }
-      const { row, col } = activeCell(selection);
-      const done = commitCell(draft.sheetId, draft.sheet, row, col, formulaDraft);
+      const done = commitCell(draft.sheetId, draft.sheet, draft.row, draft.col, formulaDraft);
       const focused = document.activeElement;
       const close = (late: boolean) => {
         // the formula bar's blur below must not commit the draft again.
@@ -2318,7 +2316,7 @@ function XlsxEditorContent({
       if (mayBeRefused(formulaDraft)) void awaitCommit(done, close);
       else close(false);
     },
-    [selection, formulaDraft, commitCell, awaitCommit, limits, readOnly, requestReveal, focusContainer]
+    [formulaDraft, commitCell, awaitCommit, limits, readOnly, requestReveal, focusContainer]
   );
 
   flushEditorRef.current = async () => {
@@ -2341,6 +2339,13 @@ function XlsxEditorContent({
     (e: React.KeyboardEvent) => {
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing) return;
+      // an open formula-bar draft (a refused one stays open after its blur)
+      // keeps the keys: the bar takes the focus back and the key does nothing.
+      if (formulaDraft !== null) {
+        formulaInputRef.current?.focus();
+        e.preventDefault();
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
 
@@ -2442,6 +2447,7 @@ function XlsxEditorContent({
       selection,
       sheetInfo,
       editing,
+      formulaDraft,
       limits,
       copySelection,
       pasteSelection,
@@ -3241,7 +3247,8 @@ function XlsxEditorContent({
                 readOnly={readOnly || committing}
                 onChange={(e) => {
                   onPendingChange?.(true);
-                  if (formulaDraft === null) formulaSheetIdRef.current = activeSheetId;
+                  if (!formulaPinRef.current && selection)
+                    formulaPinRef.current = { sheetId: activeSheetId, ...activeCell(selection) };
                   setRefusal(null);
                   // typing ends a pointed reference.
                   setPointed(null);
