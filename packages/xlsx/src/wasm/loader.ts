@@ -371,6 +371,11 @@ export interface WorkbookHandle extends CollaborationReplica {
    * {@link EditTooLargeError}, changing nothing, past the engine's update cap.
    */
   clearContents(sheet: number, range: string): EditResult;
+  /**
+   * throws the {@link EditTooLargeError} `clearContents` would over `range`,
+   * from the count of its filled cells; changes nothing.
+   */
+  checkClearContents(sheet: number, range: string): void;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -693,6 +698,9 @@ export function openWorkbook(
     },
     clearContents(sheet: number, range: string): EditResult {
       return parseJson(() => doc.clearContentsJson(JSON.stringify({ sheet, range })), true);
+    },
+    checkClearContents(sheet: number, range: string): void {
+      wasmCall(() => doc.checkClearContentsJson(JSON.stringify({ sheet, range })));
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

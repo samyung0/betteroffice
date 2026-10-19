@@ -82,6 +82,10 @@ fn edit_update_bytes(edits: &[CellInput]) -> usize {
         })
         .fold(0, usize::saturating_add)
 }
+/// Whether a stored cell lies in `range` and holds a value or a formula.
+fn holds_content(range: CellRange, (at, cell): &(CellRef, &xlsx_model::Cell)) -> bool {
+    range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
+}
 /// Largest browser-safe collaboration client identifier.
 pub const MAX_COLLABORATION_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 /// Maximum client entries accepted in a collaboration state vector.
@@ -1725,11 +1729,29 @@ impl Workbook {
         range: CellRange,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        let filled = |(at, cell): &(CellRef, &xlsx_model::Cell)| {
-            range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
-        };
         // counted first, so a refused clear builds no edit per cell.
-        let cells = self.sheet(sheet)?.iter_cells().filter(filled).count();
+        self.check_clear_contents(sheet, range)?;
+        let edits = self
+            .sheet(sheet)?
+            .iter_cells()
+            .filter(|entry| holds_content(range, entry))
+            .map(|(cell, _)| CellInput {
+                cell,
+                input: String::new(),
+            })
+            .collect::<Vec<_>>();
+        self.edit_cells(sheet, &edits, options)
+    }
+
+    /// Refuses, as [`Self::clear_contents`] would, a clear of `range` whose update
+    /// could exceed [`MAX_COLLABORATION_BYTES`], from the count of its filled cells;
+    /// changes nothing (a cut asks before it copies).
+    pub fn check_clear_contents(&self, sheet: SheetId, range: CellRange) -> Result<()> {
+        let cells = self
+            .sheet(sheet)?
+            .iter_cells()
+            .filter(|entry| holds_content(range, entry))
+            .count();
         let bytes = cells.saturating_mul(EDITED_CELL_UPDATE_BYTES);
         if bytes > MAX_COLLABORATION_BYTES {
             return Err(Error::EditTooLarge {
@@ -1738,16 +1760,7 @@ impl Workbook {
                 max: MAX_COLLABORATION_BYTES as u64,
             });
         }
-        let edits = self
-            .sheet(sheet)?
-            .iter_cells()
-            .filter(filled)
-            .map(|(cell, _)| CellInput {
-                cell,
-                input: String::new(),
-            })
-            .collect::<Vec<_>>();
-        self.edit_cells(sheet, &edits, options)
+        Ok(())
     }
 
     /// Enters a batch of cell inputs as one undo step. Refused with nothing changed
@@ -4728,6 +4741,13 @@ mod tests {
         ));
         // an edit per cell would hold at least `cells` CellInputs (32 bytes each).
         assert!(peak < cells, "a refused clear allocated {peak} bytes");
+        // a cut asks first, from the same count, and nothing changes.
+        assert!(matches!(
+            workbook.check_clear_contents(SheetId(0), range),
+            Err(Error::EditTooLarge { cells: counted, .. }) if counted == cells as u64
+        ));
+        let first_row = CellRange::new(CellRef::new(0, 0), CellRef::new(0, 99));
+        assert!(workbook.check_clear_contents(SheetId(0), first_row).is_ok());
     }
 
     /// The edit bound covers what the edit adds to the update, for the values,

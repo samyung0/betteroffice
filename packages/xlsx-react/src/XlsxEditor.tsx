@@ -169,6 +169,7 @@ function writeClipboard(text: Promise<string>): Promise<void> {
   blob.catch(() => {});
   return navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
 }
+
 /**
  * The largest area (rows x columns, from the selection's top-left to the used
  * range's end) a copy or cut takes, set from headless Chromium measurements at
@@ -1931,9 +1932,12 @@ function XlsxEditorContent({
   // read keeps the browser's permission. One past XLSX_COPY_MAX_CELLS is a
   // notice, and so is a write the browser refuses. A newer copy or cut
   // supersedes it: it stops reading and writes nothing, so the clipboard
-  // holds the latest.
+  // holds the latest. `check` runs before the read: a refusal copies nothing.
   const copySelection = useCallback(
-    async (target: Selection | null = selection): Promise<boolean> => {
+    async (
+      target: Selection | null = selection,
+      check?: () => Promise<unknown>
+    ): Promise<boolean> => {
       const handle = handleRef.current;
       if (!handle || !target) return false;
       const generation = ++copyGenerationRef.current;
@@ -1952,10 +1956,11 @@ function XlsxEditorContent({
           return false;
         }
       }
-      // a text the copy refused itself (superseded, a failed read) leaves the
-      // clipboard as it was, without the copy-failed notice.
+      // a text the copy refused itself (superseded, a failed check or read)
+      // leaves the clipboard as it was, without the copy-failed notice.
       let refused = false;
       const text = (async () => {
+        await check?.();
         const pieces: string[] = [];
         // a selection wholly past the used range copies nothing (and asks the worker nothing).
         if (r) {
@@ -1977,7 +1982,7 @@ function XlsxEditorContent({
         return joinTsv(pieces);
       })().catch((e: unknown) => {
         refused = true;
-        if (generation === copyGenerationRef.current) reportError(e);
+        if (generation === copyGenerationRef.current) reportEditError(e);
         throw e;
       });
       try {
@@ -1991,7 +1996,7 @@ function XlsxEditorContent({
         return false;
       }
     },
-    [selection, activeSheet, activeSheetId, usedRange, reportError, onNotice]
+    [selection, activeSheet, activeSheetId, usedRange, reportError, reportEditError, onNotice]
   );
 
   // a cut reads, then clears the range it copied (nothing once a newer copy
@@ -2003,14 +2008,27 @@ function XlsxEditorContent({
       return;
     }
     const target = selection;
+    // a clear past the engine's update cap is refused before anything is copied.
+    const handle = handleRef.current;
+    const r = inUsedRange(normalizeRange(target), usedRange());
+    const check =
+      handle && r
+        ? () =>
+            handle.onSheet(
+              activeSheetId,
+              'checkClearContents',
+              activeSheet,
+              `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
+            )
+        : undefined;
     setCutReading(true);
     try {
       // a pause begun during the read leaves a copy.
-      if ((await copySelection(target)) && !hostRefusesRef.current) clearRange(target);
+      if ((await copySelection(target, check)) && !hostRefusesRef.current) clearRange(target);
     } finally {
       setCutReading(false);
     }
-  }, [selection, readOnly, copySelection, clearRange]);
+  }, [selection, readOnly, copySelection, clearRange, usedRange, activeSheet, activeSheetId]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;

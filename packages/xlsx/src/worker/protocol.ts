@@ -27,6 +27,7 @@ export const WORKBOOK_METHODS = [
   'editCell',
   'editCells',
   'clearContents',
+  'checkClearContents',
   'applyOps',
   'undo',
   'redo',

@@ -24,6 +24,7 @@ import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import {
   cellRect,
+  EditTooLargeError,
   initWasm,
   MAX_SCROLL_EXTENT_PX,
   openWorkbook,
@@ -1160,6 +1161,46 @@ describe('XlsxEditor keyboard', () => {
       expect(written).toEqual(['Q1']);
     } finally {
       if (item) Object.defineProperty(globalThis, 'ClipboardItem', item);
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
+  // the engine counts the clear's filled cells first: past its update cap the
+  // cut reads, copies and clears nothing.
+  it('copies and clears nothing for a cut whose clear the engine refuses as too large', async () => {
+    const notices: string[] = [];
+    const view = await mountEditor(plain, undefined, undefined, {
+      onNotice: (notice) => notices.push(notice),
+    });
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    const sent: string[] = [];
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+      sent.push(method);
+      return method === 'checkClearContents'
+        ? Promise.reject(new EditTooLargeError('edit too large: 500000 cells'))
+        : forward(sheetId, method, ...args);
+    }) as WorkbookProxy['onSheet']);
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write: writeInto(written) },
+    });
+    try {
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await view.idle();
+      const cut = sent.filter((method) => /^(checkClearContents|rangeCells|clearContents)$/.test(method));
+      expect([notices, cut, written]).toEqual([
+        ['edit-too-large'],
+        ['checkClearContents'],
+        [],
+      ]);
+      expect(await view.input(1, 1)).toBe('Q1');
+    } finally {
+      spy.mockRestore();
       if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
       else Reflect.deleteProperty(navigator, 'clipboard');
     }

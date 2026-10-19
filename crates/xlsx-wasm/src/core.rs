@@ -677,6 +677,14 @@ impl Session {
         self.edit_result(result)
     }
 
+    pub fn check_clear_contents_json(&self, args: &str) -> Result<(), String> {
+        let args: ClearArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad clear args: {error}"))?;
+        self.workbook
+            .check_clear_contents(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn apply_ops_json(
         &mut self,
         transaction_json: &str,
