@@ -138,14 +138,15 @@ describe('home/end and paging', () => {
 describe('select-all, edit, and clear', () => {
   const sel = selectionAt({ row: 3, col: 3 });
 
-  it('cmd/ctrl+A selects the whole used range', () => {
-    expect(moved(press(sel, { key: 'a', metaKey: true }))).toEqual({
-      anchor: { row: 0, col: 0 },
-      focus: { row: 59, col: 19 },
-    });
-    expect(moved(press(sel, { key: 'A', ctrlKey: true }))).toEqual({
-      anchor: { row: 0, col: 0 },
-      focus: { row: 59, col: 19 },
+  // Excel and Sheets keep the active cell where it was.
+  it('cmd/ctrl+A selects the whole used range and keeps the active cell', () => {
+    const all = { anchor: { row: 0, col: 0 }, focus: { row: 59, col: 19 }, active: { row: 3, col: 3 } };
+    expect(moved(press(sel, { key: 'a', metaKey: true }))).toEqual(all);
+    expect(moved(press(sel, { key: 'A', ctrlKey: true }))).toEqual(all);
+    expect(moved(press(all, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 4, col: 3 }));
+    expect(moved(press(all, { key: 'ArrowUp', shiftKey: true }))).toEqual({
+      ...all,
+      focus: { row: 58, col: 19 },
     });
   });
 

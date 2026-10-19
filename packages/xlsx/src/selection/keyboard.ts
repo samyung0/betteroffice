@@ -6,7 +6,7 @@
  * the F2/Enter handlers below.
  */
 
-import { extendTo, moveFocus, selectionAt } from './model';
+import { activeCell, extendTo, moveFocus, selectionAt } from './model';
 import type {
   CellAddr,
   Direction,
@@ -51,6 +51,15 @@ function isPrintable(key: KeyInput): boolean {
   return key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey;
 }
 
+/** The whole used range, keeping the selection's active cell, as Excel does. */
+export function selectAll(state: Selection | null, limits: SelectionLimits): Selection {
+  return {
+    anchor: { row: 0, col: 0 },
+    focus: { row: limits.usedRows - 1, col: limits.usedCols - 1 },
+    active: { ...(state ? activeCell(state) : { row: 0, col: 0 }) },
+  };
+}
+
 /**
  * Reduce a keystroke to a selection action against the current selection and
  * grid limits. Returns `{ type: 'none' }` for keys this layer does not own so
@@ -67,7 +76,7 @@ export function selectionKeyReducer(
       return moveAction(
         key.shiftKey
           ? extendTo(state, edgeInDirection(state.focus, direction, limits), limits)
-          : selectionAt(edgeInDirection(state.anchor, direction, limits))
+          : selectionAt(edgeInDirection(activeCell(state), direction, limits))
       );
     }
     return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits }));
@@ -86,14 +95,14 @@ export function selectionKeyReducer(
 
     case 'Home':
       return moveAction(
-        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.anchor.row, col: 0 })
+        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: activeCell(state).row, col: 0 })
       );
 
     case 'End':
       return moveAction(
         mod(key)
           ? selectionAt({ row: limits.usedRows - 1, col: limits.usedCols - 1 })
-          : selectionAt({ row: state.anchor.row, col: limits.usedCols - 1 })
+          : selectionAt({ row: activeCell(state).row, col: limits.usedCols - 1 })
       );
 
     case 'PageDown':
@@ -115,12 +124,9 @@ export function selectionKeyReducer(
       return { type: 'clear' };
   }
 
-  // cmd/ctrl+A selects the whole used range.
+  // cmd/ctrl+A selects the whole used range, the active cell staying put.
   if ((key.key === 'a' || key.key === 'A') && mod(key)) {
-    return moveAction({
-      anchor: { row: 0, col: 0 },
-      focus: { row: limits.usedRows - 1, col: limits.usedCols - 1 },
-    });
+    return moveAction(selectAll(state, limits));
   }
 
   if (isPrintable(key)) {

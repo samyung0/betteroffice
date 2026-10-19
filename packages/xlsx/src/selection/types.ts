@@ -22,6 +22,8 @@ export interface CellAddr {
 export interface Selection {
   anchor: CellAddr;
   focus: CellAddr;
+  /** The active cell when it is not the anchor: select all keeps it where it was. */
+  active?: CellAddr;
 }
 
 /**
