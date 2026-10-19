@@ -1219,16 +1219,17 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
-  // select all reads A1:J90010 in ten pieces, here 100,000 cells of 100
-  // characters each (about 10.1 MB): the seventh piece passes 64 MB.
-  it('stops a copy whose text passes 64 MB with a notice, a cut clearing nothing', async () => {
+  // select all reads A1:J90010 in ten pieces, here 100,000 cells of 108
+  // characters each (10,909,998 bytes): six come to 65,459,998, past 64 MB but
+  // under 64 MiB, so the seventh is the one that passes the cap.
+  it('stops a copy whose text passes 64 MiB with a notice, a cut clearing nothing', async () => {
     const notices: string[] = [];
     const view = await mountEditor(farColumn, undefined, undefined, {
       onNotice: (notice) => notices.push(notice),
     });
     const proxy = view.workbook();
     const forward = proxy.onSheet.bind(proxy);
-    const long = 'x'.repeat(100);
+    const long = 'x'.repeat(108);
     const piece = Array.from({ length: 10_000 }, () =>
       Array.from({ length: 10 }, () => ({ input: long, isFormula: false }))
     );

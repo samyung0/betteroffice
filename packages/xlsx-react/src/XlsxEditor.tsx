@@ -185,10 +185,10 @@ function writeClipboard(text: Promise<string>): Promise<void> {
 export const XLSX_COPY_MAX_CELLS = 5_000_000;
 
 /**
- * The most text a copy or cut takes, in UTF-8 bytes (64 MB): cells sharing one
- * long string make far more text than their count suggests.
+ * The most text a copy or cut takes, in UTF-8 bytes (64 MiB, as the edit cap):
+ * cells sharing one long string make far more text than their count suggests.
  */
-export const XLSX_COPY_MAX_BYTES = 64_000_000;
+export const XLSX_COPY_MAX_BYTES = 64 * 1024 * 1024;
 
 /** `text`'s size in UTF-8, counted without encoding it. */
 function utf8Bytes(text: string): number {
