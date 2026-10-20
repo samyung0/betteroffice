@@ -42,6 +42,26 @@ describe('arrow navigation', () => {
     expect(out).toEqual({ anchor: { row: 5, col: 5 }, focus: { row: 5, col: 19 } });
   });
 
+  // Excel keeps the active cell (the anchor) where the selection started.
+  it('steps from the active cell, not the far end, once a range is selected', () => {
+    const range = { anchor: { row: 5, col: 5 }, focus: { row: 8, col: 7 } };
+    expect(moved(press(range, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 6, col: 5 }));
+    expect(moved(press(range, { key: 'Enter' }))).toEqual(selectionAt({ row: 6, col: 5 }));
+    expect(moved(press(range, { key: 'Tab' }))).toEqual(selectionAt({ row: 5, col: 6 }));
+    expect(moved(press(range, { key: 'Home' }))).toEqual(selectionAt({ row: 5, col: 0 }));
+    expect(moved(press(range, { key: 'ArrowLeft', ctrlKey: true }))).toEqual(
+      selectionAt({ row: 5, col: 0 })
+    );
+    expect(moved(press(range, { key: 'ArrowDown', shiftKey: true }))).toEqual({
+      anchor: { row: 5, col: 5 },
+      focus: { row: 9, col: 7 },
+    });
+    expect(moved(press(range, { key: 'ArrowRight', ctrlKey: true, shiftKey: true }))).toEqual({
+      anchor: { row: 5, col: 5 },
+      focus: { row: 8, col: 19 },
+    });
+  });
+
   it('moves past the used range to the sheet edge, where ctrl/cmd+arrow stays put', () => {
     const edge = selectionAt({ row: 59, col: 19 });
     expect(moved(press(edge, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 60, col: 19 }));
@@ -118,14 +138,24 @@ describe('home/end and paging', () => {
 describe('select-all, edit, and clear', () => {
   const sel = selectionAt({ row: 3, col: 3 });
 
-  it('cmd/ctrl+A selects the whole used range', () => {
-    expect(moved(press(sel, { key: 'a', metaKey: true }))).toEqual({
-      anchor: { row: 0, col: 0 },
-      focus: { row: 59, col: 19 },
+  // Excel and Sheets keep the active cell where it was.
+  it('cmd/ctrl+A selects the whole used range and keeps the active cell', () => {
+    const all = { anchor: { row: 0, col: 0 }, focus: { row: 59, col: 19 }, active: { row: 3, col: 3 } };
+    expect(moved(press(sel, { key: 'a', metaKey: true }))).toEqual(all);
+    expect(moved(press(sel, { key: 'A', ctrlKey: true }))).toEqual(all);
+    expect(moved(press(all, { key: 'ArrowDown' }))).toEqual(selectionAt({ row: 4, col: 3 }));
+    expect(moved(press(all, { key: 'ArrowUp', shiftKey: true }))).toEqual({
+      ...all,
+      focus: { row: 58, col: 19 },
     });
-    expect(moved(press(sel, { key: 'A', ctrlKey: true }))).toEqual({
+  });
+
+  // the selection always holds the active cell, as in Excel.
+  it('cmd/ctrl+A moves an active cell outside the used range to its first cell', () => {
+    expect(moved(press(selectionAt({ row: 70, col: 3 }), { key: 'a', ctrlKey: true }))).toEqual({
       anchor: { row: 0, col: 0 },
       focus: { row: 59, col: 19 },
+      active: { row: 0, col: 0 },
     });
   });
 

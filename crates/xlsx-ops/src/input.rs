@@ -1,7 +1,8 @@
 //! turning raw editor input into a `CellState`, classified the way excel does:
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
-use xlsx_calc::{EvalContext, evaluate, parse_formula};
+use xlsx_calc::functions::{Func, resolve};
+use xlsx_calc::{EvalContext, Expr, evaluate, parse_formula};
 use xlsx_model::{CellProvider, CellValue, SheetId};
 
 use crate::op::CellState;
@@ -54,7 +55,8 @@ fn parse_number(input: &str) -> Option<f64> {
 }
 
 /// build the `CellState` for a raw editor string, evaluating formulas
-/// immediately against `provider`; unparseable formulas degrade to raw text.
+/// immediately against `provider`; a formula left with open parentheses is
+/// closed, and one that still does not parse degrades to raw text.
 pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: SheetId) -> CellState {
     match parse_input(input) {
         ParsedInput::Clear => CellState::default(),
@@ -70,8 +72,8 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
             value: CellValue::Text { value },
             ..Default::default()
         },
-        ParsedInput::Formula(text) => match parse_formula(&text) {
-            Ok(expr) => {
+        ParsedInput::Formula(text) => match typed_formula(text) {
+            Some((text, expr)) => {
                 let ctx = EvalContext::new(provider, sheet);
                 CellState {
                     value: evaluate(&expr, &ctx),
@@ -79,7 +81,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
                     ..Default::default()
                 }
             }
-            Err(_) => CellState {
+            None => CellState {
                 value: CellValue::Text {
                     value: input.to_string(),
                 },
@@ -106,13 +108,13 @@ pub fn cell_state_for_input_no_eval(input: &str) -> CellState {
             value: CellValue::Text { value },
             ..Default::default()
         },
-        ParsedInput::Formula(text) => match parse_formula(&text) {
-            Ok(_) => CellState {
+        ParsedInput::Formula(text) => match typed_formula(text) {
+            Some((text, _)) => CellState {
                 value: CellValue::Empty,
                 formula: Some(text),
                 ..Default::default()
             },
-            Err(_) => CellState {
+            None => CellState {
                 value: CellValue::Text {
                     value: input.to_string(),
                 },
@@ -120,6 +122,61 @@ pub fn cell_state_for_input_no_eval(input: &str) -> CellState {
             },
         },
     }
+}
+
+/// a typed formula's text and parse: as typed, or with the parentheses it
+/// leaves open closed at its end, as Excel and Sheets complete them.
+fn typed_formula(text: String) -> Option<(String, Expr)> {
+    match parse_formula(&text) {
+        Ok(expr) => Some((text, expr)),
+        Err(_) => {
+            let closed = close_open_parens(&text)?;
+            let expr = parse_formula(&closed).ok()?;
+            Some((closed, expr))
+        }
+    }
+}
+
+/// `text` with a `)` for each `(` it leaves open, or `None` when none is open,
+/// a `)` has no `(`, a string, quoted sheet name or `[` is left open, or the
+/// text ends in a call with no arguments yet whose function takes some
+/// (`=SUM(` is not a finished formula, `=TODAY(` is).
+/// Parentheses inside strings, quoted names and structured references do not count.
+fn close_open_parens(text: &str) -> Option<String> {
+    if let Some(head) = text.trim_end().strip_suffix('(') {
+        let name = head
+            .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+            .next()
+            .unwrap_or_default();
+        if !resolve(name).is_some_and(Func::takes_no_arguments) {
+            return None;
+        }
+    }
+    let mut depth = 0usize;
+    let mut brackets = 0usize;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(open) = quote {
+            if c == open {
+                if chars.peek() == Some(&open) {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' if brackets == 0 => quote = Some(c),
+            '[' => brackets += 1,
+            ']' => brackets = brackets.checked_sub(1)?,
+            '(' if brackets == 0 => depth += 1,
+            ')' if brackets == 0 => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+    (quote.is_none() && brackets == 0 && depth > 0).then(|| format!("{text}{}", ")".repeat(depth)))
 }
 
 #[cfg(test)]
@@ -223,5 +280,49 @@ mod tests {
             }
         );
         assert!(bad.formula.is_none());
+    }
+
+    #[test]
+    fn closes_the_parentheses_a_typed_formula_leaves_open() {
+        for (typed, stored) in [
+            ("=SUM(A1:A2", "SUM(A1:A2)"),
+            ("=ROUND(SUM(A1:A2", "ROUND(SUM(A1:A2))"),
+            ("=IF(A1>1,\"(\",\"b\"", "IF(A1>1,\"(\",\"b\")"),
+            ("=SUM('Q (1)'!A1:A2", "SUM('Q (1)'!A1:A2)"),
+            ("=TODAY(", "TODAY()"),
+            ("=SUM(B3,", "SUM(B3,)"),
+            ("=INT(PI(", "INT(PI())"),
+            ("=row(", "row()"),
+        ] {
+            let state = cell_state_for_input_no_eval(typed);
+            assert_eq!(state.formula.as_deref(), Some(stored), "{typed}");
+        }
+        let wb = wb_with(&[("A1", 2.0), ("A2", 3.0)]);
+        let state = cell_state_for_input("=SUM(A1:A2", &wb, SheetId(0));
+        assert_eq!(state.value, CellValue::Number { value: 5.0 });
+        assert_eq!(state.formula.as_deref(), Some("SUM(A1:A2)"));
+    }
+
+    #[test]
+    fn leaves_a_formula_closing_cannot_fix_as_text() {
+        for typed in [
+            "=",
+            "=A1+",
+            "=SUM(",
+            "=ROUND(A1,ABS(",
+            "=A1)",
+            "=IF(A1=\"x",
+            "=SUM(A1:A2;B1",
+        ] {
+            let state = cell_state_for_input_no_eval(typed);
+            assert!(state.formula.is_none(), "{typed}");
+            assert_eq!(
+                state.value,
+                CellValue::Text {
+                    value: typed.into()
+                },
+                "{typed}"
+            );
+        }
     }
 }

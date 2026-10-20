@@ -114,6 +114,8 @@
     "appLabel": "电子表格编辑器",
     "demoCellText": "OpenOOXML xlsx",
     "openError": "无法打开此工作簿",
+    "formulaRefused": "此公式有问题。请检查括号、引号和运算符。",
+    "cellTextTooLong": "一个单元格最多可容纳 32,767 个字符。",
     "sheetTabsLabel": "工作表"
   },
   "proposals": {

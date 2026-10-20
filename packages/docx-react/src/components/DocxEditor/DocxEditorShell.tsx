@@ -32,8 +32,8 @@ interface HorizontalRulerProps {
   zoom: number;
   unit: 'inch' | 'cm';
   editable: boolean;
-  onLeftMarginChange: (marginTwips: number) => void;
-  onRightMarginChange: (marginTwips: number) => void;
+  onLeftMarginChange: ((marginTwips: number) => void) | undefined;
+  onRightMarginChange: ((marginTwips: number) => void) | undefined;
   indentLeft: number;
   indentRight: number;
   onIndentLeftChange: (twips: number) => void;
@@ -50,8 +50,8 @@ interface VerticalRulerProps {
   zoom: number;
   unit: 'inch' | 'cm';
   editable: boolean;
-  onTopMarginChange: (marginTwips: number) => void;
-  onBottomMarginChange: (marginTwips: number) => void;
+  onTopMarginChange: ((marginTwips: number) => void) | undefined;
+  onBottomMarginChange: ((marginTwips: number) => void) | undefined;
 }
 
 interface OutlineProps {

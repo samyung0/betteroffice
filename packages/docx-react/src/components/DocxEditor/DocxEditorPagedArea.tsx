@@ -150,7 +150,7 @@ export function DocxEditorPagedArea({
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
   onHeaderFooterDoubleClick: (position: 'header' | 'footer', pageNumber?: number) => void;
   onNoteClick: (note: NoteEdit) => void;
-  onRemoveHeaderFooter: () => void;
+  onRemoveHeaderFooter: (() => void) | undefined;
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
@@ -575,7 +575,7 @@ export function DocxEditorPagedArea({
                 pagedEditorRef.current?.focus();
               }}
               onRemove={
-                readOnly
+                readOnly || !onRemoveHeaderFooter
                   ? undefined
                   : () => {
                       onRemoveHeaderFooter();

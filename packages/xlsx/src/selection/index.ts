@@ -15,6 +15,7 @@ export type {
 } from './types';
 
 export {
+  activeCell,
   cellAddress,
   columnLetter,
   selectionAt,
@@ -25,4 +26,4 @@ export {
   moveFocus,
 } from './model';
 
-export { selectionKeyReducer } from './keyboard';
+export { selectAll, selectionKeyReducer } from './keyboard';

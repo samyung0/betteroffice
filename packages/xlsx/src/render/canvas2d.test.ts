@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
 import type { DisplayList, GeometryPathCommand } from '../display-list/types';
-import { paintDisplayList } from './canvas2d';
+import { cellFont, paintDisplayList } from './canvas2d';
 
 interface PathTrace {
   verb: string;
@@ -118,6 +118,48 @@ describe('Canvas2D text', () => {
     expect(transforms[transforms.length - 1]).toEqual([2, 0, 0, 2, 37.5, 37.5]);
     expect(fonts.map((font) => Number.parseFloat(font))).toEqual([
       16, 16, 16, 16, 16, 16,
+    ]);
+  });
+
+  // the in-cell editor sets the same font on DOM text over the grid, at the zoom.
+  it('paints cell text in the font cellFont names', () => {
+    const fonts: string[] = [];
+    const context = {
+      font: '',
+      fillStyle: '',
+      textAlign: '',
+      textBaseline: '',
+      beginPath() {},
+      rect() {},
+      clip() {},
+      save() {},
+      restore() {},
+      setTransform() {},
+      clearRect() {},
+      fillText() {
+        fonts.push(this.font);
+      },
+    };
+    const text = {
+      op: 'text' as const,
+      x: 0,
+      y: 20,
+      text: 'Total',
+      fontSize: 15,
+      fontFamily: 'Georgia',
+      bold: true,
+      italic: true,
+      color: '#c00000',
+    };
+    paintDisplayList(
+      context as unknown as CanvasRenderingContext2D,
+      { width: 120, height: 80, commands: [text] },
+      1
+    );
+    expect(fonts).toEqual([cellFont(text)]);
+    expect([cellFont(text), cellFont(text, 2)]).toEqual([
+      'italic bold 20px "Georgia", sans-serif',
+      'italic bold 40px "Georgia", sans-serif',
     ]);
   });
 });
