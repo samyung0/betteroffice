@@ -9,14 +9,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use docx_edit::{
-    ColorPatch, EditCtx, FontFamilyPatch, FormatPolicy, InlineFormatDelta, OpError, ParaAttrDelta,
-    ParaSelector, Patch, Position, SegmentContent, StoryRange, StorySegment, StrikePatch,
+    ColorPatch, EditCtx, EditingDoc, FontFamilyPatch, FormatPolicy, InlineFormatDelta, OpError,
+    ParaAttrDelta, ParaSelector, Patch, Position, SegmentContent, StoryRange, StrikePatch,
     TableLocator, UnderlinePatch,
 };
+use docx_parse::NumberingDefinitions;
+use docx_parse::numbering::list_button_num_ids;
 use serde_json::{Value, json};
 use yrs::Any;
 
-use super::{DocxSession, Paragraph};
+use super::DocxSession;
+use super::styles::{Numbering, StyleResolver};
 use crate::common::len16;
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
@@ -161,18 +164,69 @@ fn table_cells(payload: &BTreeMap<String, Any>) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// A paragraph's list as the read names it.
-fn list_name(properties: &BTreeMap<String, Any>) -> Option<&'static str> {
-    let numbered = match properties.get("numPr") {
-        Some(Any::Map(num_pr)) => {
-            matches!(num_pr.get("numId"), Some(Any::Number(id)) if *id > 0.0)
+/// The reason the read gives for a paragraph that `replace_text`,
+/// `delete_paragraph` and `format_text` refuse (`docxParagraphs`' `plain`):
+/// an object or tracked change in it, or the table or content control in
+/// its slot.
+fn locked_by(kind: &str) -> String {
+    match kind {
+        "table" => "follows a table".into(),
+        "blockSdt" => "follows a content control".into(),
+        "image" => "holds a picture".into(),
+        "shape" => "holds a drawing".into(),
+        "mathEquation" => "holds an equation".into(),
+        "footnoteRef" | "endnoteRef" => "holds a note reference".into(),
+        "inlineSdt" | "sdt" => "holds a content control".into(),
+        kind => format!("holds a {kind}"),
+    }
+}
+
+/// A Yjs attribute as JavaScript would test it.
+fn truthy(value: Option<&Any>) -> bool {
+    !matches!(
+        value,
+        None | Some(Any::Null | Any::Undefined | Any::Bool(false))
+    )
+}
+
+/// The file's styles and numbering, for the lists paragraph styles give.
+struct Lists {
+    styles: StyleResolver,
+    numbering: Numbering,
+}
+
+impl Lists {
+    /// A paragraph's list as the read names it: its own `numPr` (numId 0
+    /// ends a list its style gives), else its style's.
+    fn name(&self, properties: &BTreeMap<String, Any>) -> Option<&'static str> {
+        if let Some(Any::Map(num_pr)) = properties.get("numPr")
+            && let Some(Any::Number(id)) = num_pr.get("numId")
+        {
+            return (*id > 0.0).then(|| match properties.get("listIsBullet") {
+                Some(Any::Bool(true)) => "bullet",
+                _ => "numbered",
+            });
         }
-        _ => false,
-    };
-    numbered.then(|| match properties.get("listIsBullet") {
-        Some(Any::Bool(true)) => "bullet",
-        _ => "numbered",
-    })
+        let style = match properties.get("pStyle") {
+            Some(Any::String(style)) => V::from(style.as_ref()),
+            _ => V::Undef,
+        };
+        let num_pr = self
+            .styles
+            .resolve_paragraph_style(&style, &V::Undef)
+            .get("numPr");
+        let id = num_pr.get("numId").as_num().filter(|id| *id > 0.0)?;
+        let ilvl = num_pr.get("ilvl").as_num().unwrap_or(0.0);
+        let format = self
+            .numbering
+            .level(&V::Num(id), &V::Num(ilvl))
+            .get("numFmt");
+        Some(if format.as_str().as_deref() == Some("bullet") {
+            "bullet"
+        } else {
+            "numbered"
+        })
+    }
 }
 
 /// A paragraph mark: its story index and properties.
@@ -185,9 +239,9 @@ struct Mark {
 /// Where an insert goes.
 enum Place {
     /// After this body paragraph, as a new one.
-    After(Paragraph),
+    After(Mark),
     /// Into this paragraph: the body's only one, empty.
-    Fill(Paragraph),
+    Fill(Mark),
 }
 
 /// One cell's mark on the paragraphs a read lists.
@@ -200,7 +254,8 @@ struct CellMark {
 
 /// The read's walk: paragraphs counted in order, the window's listed.
 struct Walk<'a> {
-    stories: &'a HashMap<String, Vec<StorySegment>>,
+    doc: &'a EditingDoc,
+    lists: Lists,
     start: usize,
     end: usize,
     index: usize,
@@ -209,18 +264,30 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     /// `story`'s paragraphs in order, each table's cells before the
-    /// paragraph whose slot the table opens.
-    fn story(&mut self, story: &str, cell: Option<&CellMark>) {
-        let stories = self.stories;
-        let Some(segments) = stories.get(story) else {
-            return;
-        };
+    /// paragraph whose slot the table opens; tracked-deleted text is left
+    /// out, and a paragraph the text commands refuse says why (`locked`).
+    fn story(&mut self, story: &str, cell: Option<&CellMark>, control: bool) -> Result<()> {
+        let segments = self.doc.story_segments(story).map_err(Error::engine)?;
         let mut text = String::new();
+        let mut locked: Option<String> = None;
+        // A page or column break a paragraph opens with keeps it editable.
+        let mut leading = true;
         for segment in segments {
-            match &segment.content {
-                SegmentContent::Text(part) => text.push_str(part),
+            match segment.content {
+                SegmentContent::Text(part) => {
+                    leading = false;
+                    let deleted = truthy(segment.attributes.get("del"));
+                    if deleted || truthy(segment.attributes.get("ins")) {
+                        locked.get_or_insert_with(|| "holds tracked changes".into());
+                    }
+                    if !deleted {
+                        text.push_str(&part);
+                    }
+                }
                 SegmentContent::Pilcrow(properties) => {
                     let text = std::mem::take(&mut text);
+                    let locked = locked.take();
+                    leading = true;
                     if (self.start..self.end).contains(&self.index) {
                         let mut entry = json!({
                             "id": format!("{story}:paragraph:{}", properties.para_id),
@@ -228,55 +295,78 @@ impl Walk<'_> {
                                 Some(Any::String(style)) => Value::from(style.to_string()),
                                 _ => Value::Null,
                             },
-                            "list": list_name(&properties.values),
+                            "list": self.lists.name(&properties.values),
                             "text": text,
                         });
                         if let Some(cell) = cell {
                             entry["table"] =
                                 json!({ "id": cell.table, "row": cell.row, "column": cell.column });
                         }
+                        if control {
+                            entry["contentControl"] = Value::Bool(true);
+                        }
+                        if let Some(locked) = locked {
+                            entry["locked"] = Value::from(locked);
+                        }
                         self.listed.push(entry);
                     }
                     self.index += 1;
                 }
-                SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
-                    let cells = table_cells(payload);
-                    // A table is named by its first cell's first paragraph.
-                    let table = cells.first().and_then(|row| row.first()).and_then(|first| {
-                        stories
-                            .get(first)?
-                            .iter()
-                            .find_map(|segment| match &segment.content {
-                                SegmentContent::Pilcrow(properties) => {
-                                    Some(format!("{first}:paragraph:{}", properties.para_id))
-                                }
-                                _ => None,
-                            })
-                    });
-                    for (row, stories) in cells.iter().enumerate() {
-                        for (column, cell) in stories.iter().enumerate() {
-                            let mark = CellMark {
-                                table: table.clone(),
-                                row,
-                                column,
-                            };
-                            self.story(cell, Some(&mark));
-                        }
+                SegmentContent::OtherEmbed { kind, payload } => {
+                    if leading && matches!(kind.as_str(), "pageBreak" | "columnBreak") {
+                        continue;
+                    }
+                    leading = false;
+                    locked.get_or_insert_with(|| locked_by(&kind));
+                    if kind == "table" {
+                        self.table(&table_cells(&payload), control)?;
+                    } else if kind == "blockSdt"
+                        && let Some(Any::String(child)) = payload.get("story")
+                    {
+                        self.story(child, cell, true)?;
                     }
                 }
-                SegmentContent::OtherEmbed { kind, payload } if kind == "blockSdt" => {
-                    if let Some(Any::String(child)) = payload.get("story") {
-                        self.story(child, cell);
-                    }
-                }
-                SegmentContent::OtherEmbed { .. } => {}
             }
         }
+        Ok(())
+    }
+
+    /// A table's cells row by row, each paragraph marked with the table,
+    /// which its first cell's first paragraph names.
+    fn table(&mut self, cells: &[Vec<String>], control: bool) -> Result<()> {
+        let table = match cells.first().and_then(|row| row.first()) {
+            Some(first) => self
+                .doc
+                .story_segments(first)
+                .map_err(Error::engine)?
+                .into_iter()
+                .find_map(|segment| match segment.content {
+                    SegmentContent::Pilcrow(properties) => {
+                        Some(format!("{first}:paragraph:{}", properties.para_id))
+                    }
+                    _ => None,
+                }),
+            None => None,
+        };
+        for (row, stories) in cells.iter().enumerate() {
+            for (column, cell) in stories.iter().enumerate() {
+                let mark = CellMark {
+                    table: table.clone(),
+                    row,
+                    column,
+                };
+                self.story(cell, Some(&mark), control)?;
+            }
+        }
+        Ok(())
     }
 }
 
 impl DocxSession {
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {
+        // No inverse is taken, but tracking keeps deleted items from garbage
+        // collection as it does for replace_text, so the state still holds
+        // what a delete removed.
         self.undo.track(self.engine.doc());
         match command {
             Command::InsertParagraph {
@@ -327,15 +417,19 @@ impl DocxSession {
                     "a DOCX read names a count of 1 to {MAX_PARAGRAPHS} paragraphs"
                 ))
             })?;
-        let stories = self.engine.doc().all_story_segments();
+        let package = self.package();
         let mut walk = Walk {
-            stories: &stories,
+            doc: self.engine.doc(),
+            lists: Lists {
+                styles: StyleResolver::new(&package.get("styles")),
+                numbering: Numbering::new(&package.get("numbering")),
+            },
             start,
             end: start + count,
             index: 0,
             listed: Vec::new(),
         };
-        walk.story(BODY, None);
+        walk.story(BODY, None, false)?;
         let total = walk.index;
         let mut answer = json!({
             "paragraphs": walk.listed,
@@ -392,53 +486,28 @@ impl DocxSession {
         })
     }
 
-    /// The `w:num` ids of the toolbar's bullet and number buttons
-    /// (docx-parse `list_button_num_ids`): the two after the file's own.
-    fn list_ids(&self) -> (f64, f64) {
-        let last = self
-            .package()
-            .get("numbering")
-            .get("nums")
-            .items()
-            .iter()
-            .map(|num| num.get("numId").to_number())
-            .fold(0.0, f64::max);
-        (last + 1.0, last + 2.0)
-    }
-
-    /// The paragraph properties a list sets, as the toolbar's buttons write
-    /// them; `ilvl` is the paragraph's list level.
-    fn list_attrs(&self, list: ListKind, ilvl: f64) -> Vec<(String, Option<Any>)> {
-        let null = || Some(Any::Null);
-        let attrs = match list {
-            ListKind::None => [null(), null(), null(), null()],
-            ListKind::Bullet | ListKind::Numbered => {
-                let bullet = list == ListKind::Bullet;
-                let (bullet_id, number_id) = self.list_ids();
-                let num_pr = HashMap::from([
-                    (
-                        "numId".to_owned(),
-                        Any::Number(if bullet { bullet_id } else { number_id }),
-                    ),
-                    ("ilvl".to_owned(), Any::Number(ilvl)),
-                ]);
-                [
-                    Some(Any::Map(Arc::new(num_pr))),
-                    Some(Any::Bool(bullet)),
-                    if bullet {
-                        null()
-                    } else {
-                        Some(Any::from("decimal"))
-                    },
-                    null(),
-                ]
-            }
+    /// The `w:num` id `list` writes: the toolbar's bullet or number button's
+    /// (the two after the file's own), or 0 for `none`.
+    fn list_num_id(&self, list: ListKind) -> Result<f64> {
+        if list == ListKind::None {
+            return Ok(0.0);
+        }
+        let numbering = self.package().get("numbering");
+        let numbering: Option<NumberingDefinitions> = if numbering.is_undef() {
+            None
+        } else {
+            Some(
+                serde_json::to_value(&numbering)
+                    .and_then(serde_json::from_value)
+                    .map_err(Error::engine)?,
+            )
         };
-        ["numPr", "listIsBullet", "listNumFmt", "listMarker"]
-            .into_iter()
-            .map(str::to_owned)
-            .zip(attrs)
-            .collect()
+        let (bullet, number) = list_button_num_ids(numbering.as_ref());
+        Ok(if list == ListKind::Bullet {
+            bullet
+        } else {
+            number
+        })
     }
 
     /// `w:compatSetting`'s mode (documentToYrs.ts `compatibilityModeFromDocument`).
@@ -477,30 +546,21 @@ impl DocxSession {
         Ok(marks)
     }
 
-    fn mark(&self, story: &str, para_id: &str) -> Result<Mark> {
-        self.marks(story)?
-            .into_iter()
-            .find(|mark| mark.para_id == para_id)
-            .ok_or_else(gone)
-    }
-
     /// Where an insert after `after_id` goes: after that body paragraph and
     /// the paragraphs this call already inserted there (their paraIds are
     /// this session's), so inserts after one paragraph keep their order.
     /// Without `after_id`, after the body's last paragraph, or into it when
     /// it is the body's only one and empty (a new document).
     fn place(&self, after_id: Option<&str>) -> Result<Place> {
-        let mut paragraphs = self.paragraphs(BODY)?;
+        let mut marks = self.marks(BODY)?;
         let index = match after_id {
             None => {
-                if let [only] = &paragraphs[..]
-                    && only.plain
-                    && only.text.is_empty()
-                    && only.start == 0
+                if let [only] = &marks[..]
+                    && only.at == 0
                 {
-                    return Ok(Place::Fill(paragraphs.swap_remove(0)));
+                    return Ok(Place::Fill(marks.swap_remove(0)));
                 }
-                paragraphs
+                marks
                     .len()
                     .checked_sub(1)
                     .ok_or_else(|| Error::engine("the document body has no paragraph"))?
@@ -509,15 +569,15 @@ impl DocxSession {
                 let (story, para_id) = split_id(id)?;
                 if story != BODY {
                     return Err(invalid(
-                        "after_id must be a paragraph of the document body, not of a table, header, footer or note",
+                        "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note",
                     ));
                 }
-                let mut index = paragraphs
+                let mut index = marks
                     .iter()
-                    .position(|paragraph| paragraph.para_id == para_id)
+                    .position(|mark| mark.para_id == para_id)
                     .ok_or_else(gone)?;
                 let minted = format!("{}:", self.engine.doc().client_id());
-                while paragraphs
+                while marks
                     .get(index + 1)
                     .is_some_and(|next| next.para_id.starts_with(&minted))
                 {
@@ -526,33 +586,33 @@ impl DocxSession {
                 index
             }
         };
-        Ok(Place::After(paragraphs.swap_remove(index)))
+        Ok(Place::After(marks.swap_remove(index)))
     }
 
-    /// A new empty body paragraph where `place` puts it; its paraId.
-    fn new_paragraph(&self, place: Place) -> Result<String> {
-        match place {
-            Place::Fill(paragraph) => Ok(paragraph.para_id),
-            Place::After(paragraph) => {
-                let mark = (paragraph.start + paragraph.length) as u32;
-                let split = self
-                    .engine
+    /// A new empty body paragraph where `place` puts it, left with its
+    /// identity, the section it ends, `style` and `list` only (a split
+    /// copies its neighbour's properties, the seed's resolved style values
+    /// among them). Returns its mark's index, where its text starts.
+    fn new_paragraph(
+        &self,
+        place: Place,
+        style: Option<&str>,
+        list: Option<ListKind>,
+    ) -> Result<u32> {
+        let (at, copied) = match place {
+            Place::Fill(mark) => (mark.at, mark.properties),
+            Place::After(mark) => {
+                self.engine
                     .doc()
-                    .split_paragraph(&ctx(), Position::new(BODY, mark))
+                    .split_paragraph(&ctx(), Position::new(BODY, mark.at))
                     .map_err(op)?;
-                Ok(split.second_para_id)
+                // A split at a paragraph's end leaves the new, empty
+                // paragraph's mark right after the old one's, holding the
+                // old one's properties or a copy of them.
+                (mark.at + 1, mark.properties)
             }
-        }
-    }
-
-    /// Leaves body paragraph `para_id` with its identity, the section it
-    /// ends, `style` and `list` only: a split copies its neighbour's
-    /// properties, the seed's resolved style values among them. Returns its
-    /// mark's index, where its text starts while it is empty.
-    fn reset(&self, para_id: &str, style: Option<&str>, list: Option<ListKind>) -> Result<u32> {
-        let mark = self.mark(BODY, para_id)?;
-        let mut other: BTreeMap<String, Option<Any>> = mark
-            .properties
+        };
+        let mut other: BTreeMap<String, Option<Any>> = copied
             .into_keys()
             .filter(|key| !KEPT_KEYS.contains(&key.as_str()))
             .map(|key| (key, None))
@@ -561,20 +621,20 @@ impl DocxSession {
             other.insert("pStyle".to_owned(), Some(Any::from(style)));
         }
         if let Some(list) = list.filter(|list| *list != ListKind::None) {
-            other.extend(self.list_attrs(list, 0.0));
+            other.extend(list_attrs(list, self.list_num_id(list)?, 0.0));
         }
         self.engine
             .doc()
             .set_paragraph_attrs(
                 &ctx(),
-                &ParaSelector::Range(StoryRange::new(BODY, mark.at, mark.at)),
+                &ParaSelector::Range(StoryRange::new(BODY, at, at)),
                 &ParaAttrDelta {
                     other,
                     ..ParaAttrDelta::default()
                 },
             )
             .map_err(op)?;
-        Ok(mark.at)
+        Ok(at)
     }
 
     fn insert_paragraph(
@@ -589,8 +649,7 @@ impl DocxSession {
             self.check_style(style)?;
         }
         let place = self.place(after_id)?;
-        let para_id = self.new_paragraph(place)?;
-        let at = self.reset(&para_id, style, list)?;
+        let at = self.new_paragraph(place, style, list)?;
         if !text.is_empty() {
             self.engine
                 .doc()
@@ -647,13 +706,15 @@ impl DocxSession {
         Ok(())
     }
 
-    /// Each paragraph keeps its list level; `none` ends its list.
+    /// Each paragraph keeps its list level; `none` ends its list, its
+    /// style's too.
     fn set_list(&mut self, ids: &[String], list: ListKind) -> Result<()> {
         if ids.is_empty() || ids.len() > MAX_PARAGRAPHS {
             return Err(invalid(format!(
                 "set_list names 1 to {MAX_PARAGRAPHS} paragraphs"
             )));
         }
+        let num_id = self.list_num_id(list)?;
         let mut stories: HashMap<&str, Vec<Mark>> = HashMap::new();
         let mut targets = Vec::with_capacity(ids.len());
         for id in ids {
@@ -681,7 +742,7 @@ impl DocxSession {
                     &ctx(),
                     &ParaSelector::Range(StoryRange::new(story, at, at)),
                     &ParaAttrDelta {
-                        other: self.list_attrs(list, ilvl).into_iter().collect(),
+                        other: list_attrs(list, num_id, ilvl).into_iter().collect(),
                         ..ParaAttrDelta::default()
                     },
                 )
@@ -707,8 +768,7 @@ impl DocxSession {
             check_text(cell, "a cell")?;
         }
         let place = self.place(after_id)?;
-        let para_id = self.new_paragraph(place)?;
-        let at = self.reset(&para_id, None, None)?;
+        let at = self.new_paragraph(place, None, None)?;
         let doc = self.engine.doc();
         let table = doc
             .insert_table(
@@ -868,6 +928,38 @@ impl DocxSession {
             .map_err(op)?;
         Ok(())
     }
+}
+
+/// The paragraph properties a list writes, as the toolbar's buttons write
+/// them: `num_id` (0 for `none`, which also ends a list the paragraph's
+/// style gives it) at level `ilvl`.
+fn list_attrs(list: ListKind, num_id: f64, ilvl: f64) -> [(String, Option<Any>); 4] {
+    let null = || Some(Any::Null);
+    let mut num_pr = HashMap::from([("numId".to_owned(), Any::Number(num_id))]);
+    if list != ListKind::None {
+        num_pr.insert("ilvl".to_owned(), Any::Number(ilvl));
+    }
+    let bullet = list == ListKind::Bullet;
+    [
+        ("numPr".to_owned(), Some(Any::Map(Arc::new(num_pr)))),
+        (
+            "listIsBullet".to_owned(),
+            if list == ListKind::None {
+                null()
+            } else {
+                Some(Any::Bool(bullet))
+            },
+        ),
+        (
+            "listNumFmt".to_owned(),
+            if list == ListKind::Numbered {
+                Some(Any::from("decimal"))
+            } else {
+                null()
+            },
+        ),
+        ("listMarker".to_owned(), null()),
+    ]
 }
 
 /// `format_text`'s fields as the editor's formatting delta.

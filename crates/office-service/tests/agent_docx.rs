@@ -128,6 +128,23 @@ fn part(package: &[u8], path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The starter with `paragraphs` (body XML) before its section properties.
+fn with_body(paragraphs: &str) -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(starter(Format::Docx).unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| {
+            if name != "word/document.xml" {
+                return (name, bytes);
+            }
+            let xml = String::from_utf8(bytes).unwrap();
+            let xml = xml.replacen("<w:body>", &format!("<w:body>{paragraphs}"), 1);
+            (name, xml.into_bytes())
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn insert(after_id: Option<&str>, text: &str, style: Option<&str>) -> Command {
     Command::InsertParagraph {
         after_id: after_id.map(str::to_owned),
@@ -206,6 +223,11 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
             "||",
             "Done.||",
         ]
+    );
+    // The paragraph a table opens cannot take text commands.
+    assert_eq!(
+        doc.read(None, 200).unwrap()["paragraphs"][9]["locked"],
+        "follows a table"
     );
     let xml = doc.xml();
     assert!(xml.contains(r#"<w:pStyle w:val="Title"/>"#), "{xml}");
@@ -303,7 +325,7 @@ fn insert_paragraph_refuses_an_unknown_style_line_breaks_and_too_many_paragraphs
     assert_eq!(
         doc.apply(&[insert(Some(&cell), "x", None)]).unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table, header, footer or note"
+            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
         )
     );
 }
@@ -420,7 +442,7 @@ fn insert_table_refuses_a_too_large_ragged_or_nested_table() {
     assert_eq!(
         doc.apply(&[table(Some(&cell), &[&["x"]])]).unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table, header, footer or note"
+            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
         )
     );
 }
@@ -585,6 +607,94 @@ fn scoped_reads_page_through_the_paragraphs() {
     assert_eq!(
         doc.read(None, 201).unwrap_err(),
         invalid("a DOCX read names a count of 1 to 200 paragraphs")
+    );
+}
+
+/// The read leaves out tracked-deleted text and says why the text commands
+/// refuse a paragraph (`locked`); a content control's paragraphs are marked,
+/// and one cannot be an `after_id`.
+#[test]
+fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
+    let mut doc = Doc::new(with_body(concat!(
+        r#"<w:p><w:r><w:t xml:space="preserve">Kept </w:t></w:r>"#,
+        r#"<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>"#,
+        r#"<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Inside</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+        r#"<w:p><w:r><w:t>After</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+    )));
+    let read = doc.read(None, 10).unwrap();
+    let marks: Vec<Value> = read["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|paragraph| {
+            json!([
+                paragraph["text"],
+                paragraph["locked"],
+                paragraph["contentControl"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            json!(["Kept ", "holds tracked changes", null]),
+            // A field's shown text is not the paragraph's own.
+            json!(["Page ", "holds a field", null]),
+            json!(["Inside", null, true]),
+            json!(["After", "follows a content control", null]),
+            json!(["Plain", null, null]),
+        ]
+    );
+    assert_eq!(
+        doc.apply(&[insert(Some(&doc.id("Inside")), "x", None)])
+            .unwrap_err(),
+        invalid(
+            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
+        )
+    );
+    // What the read marks locked, the text commands refuse.
+    assert_eq!(
+        doc.apply(&[Command::DeleteParagraph {
+            id: doc.id("After"),
+            expected_text: "After".into(),
+        }])
+        .unwrap_err(),
+        refused(
+            EditCode::UnavailableTarget,
+            "the paragraph holds objects or tracked changes, or follows a table"
+        )
+    );
+}
+
+/// A list a paragraph style gives reads as a list, and `set_list` `none`
+/// ends it with numId 0.
+#[test]
+fn a_style_list_reads_as_a_list_and_none_ends_it() {
+    let mut doc = Doc::created(&[
+        insert(None, "Item", Some("ListBullet")),
+        insert(None, "Step", Some("ListNumber")),
+    ]);
+    assert_eq!(
+        doc.lines(),
+        ["Item|ListBullet|bullet", "Step|ListNumber|numbered"]
+    );
+    doc.apply(&[Command::SetList {
+        ids: vec![doc.id("Item")],
+        list: ListKind::None,
+    }])
+    .unwrap();
+    assert_eq!(
+        doc.lines(),
+        ["Item|ListBullet|", "Step|ListNumber|numbered"]
+    );
+    let xml = doc.xml();
+    assert!(xml.contains(r#"<w:numId w:val="0"/>"#), "{xml}");
+    let reopened = Doc::new(export(&doc.base, doc.checkpoint(), DETERMINISM).unwrap());
+    assert_eq!(
+        reopened.lines(),
+        ["Item|ListBullet|", "Step|ListNumber|numbered"]
     );
 }
 
