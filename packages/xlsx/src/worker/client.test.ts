@@ -136,6 +136,20 @@ describe('workbook worker', () => {
     await proxy.onSheet(first, 'setActiveSheet', 0);
   });
 
+  // Styled is the third sheet: once a peer removes the first, the caller's
+  // index 2 names no sheet, so only the active sheet's own index can answer.
+  it("checks a clear's size on the active sheet after a peer moves it", async () => {
+    const peer = local(48);
+    const peerUpdates: Uint8Array[] = [];
+    peer.onUpdate((update) => peerUpdates.push(update));
+    const proxy = await worker(49, peer.encodeStateAsUpdate());
+    const styled = (await proxy.sheetInfo()).sheetIds[2];
+    await proxy.onSheet(styled, 'setActiveSheet', 2);
+    peer.applyOps([{ type: 'removeSheet', index: 0 }]);
+    await proxy.applyUpdate(peerUpdates[peerUpdates.length - 1]);
+    expect(await proxy.onSheet(styled, 'checkClearContents', 2, 'A1:Z80')).toBeUndefined();
+  });
+
   it('rethrows a stale proposal as StaleProposalError', async () => {
     const proxy = await worker(47);
     if (!proxy.proposalsAvailable) return;
