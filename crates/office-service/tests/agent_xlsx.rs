@@ -510,7 +510,11 @@ fn agent_formulas_pass_the_rules_or_are_refused_naming_one() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Sheet1"));
     model.sheets.push(Sheet::new("Data"));
-    for (name, formula) in [("Rate", "Data!$A$1"), ("Ext", "'[1]Sheet1'!$A$1")] {
+    for (name, formula) in [
+        ("Rate", "Data!$A$1"),
+        ("Ext", "'[1]Sheet1'!$A$1"),
+        ("Exfil", "WEBSERVICE(\"http://example.com\")"),
+    ] {
         model.defined_names.push(DefinedName {
             name: name.into(),
             formula: formula.into(),
@@ -522,7 +526,7 @@ fn agent_formulas_pass_the_rules_or_are_refused_naming_one() {
     let book = Book::new(base);
     let long_formula = format!("={}1", "1+".repeat(1000));
     let long_text = "x".repeat(32_768);
-    let cases: [(&str, Option<&str>); 20] = [
+    let cases: [(&str, Option<&str>); 21] = [
         ("=SUM(Data!A1:A3)+VLOOKUP(1,Data!A1:B3,2,FALSE)", None),
         ("=IF(Rate>1,\"big\",\"small\")", None),
         ("='Data'!A1*Rate+_xlfn.XLOOKUP(1,Data!A:A,Data!B:B)", None),
@@ -590,7 +594,13 @@ fn agent_formulas_pass_the_rules_or_are_refused_naming_one() {
         (
             "=Ext+1",
             Some(
-                "the name Ext refers outside this workbook ('[1]Sheet1'!$A$1), which is not allowed",
+                "the name Ext ('[1]Sheet1'!$A$1) is not allowed: the reference to '[1]Sheet1' names another workbook, which is not allowed",
+            ),
+        ),
+        (
+            "=Exfil",
+            Some(
+                "the name Exfil (WEBSERVICE(\"http://example.com\")) is not allowed: the function WEBSERVICE is not available; use a function the spreadsheet engine supports",
             ),
         ),
         ("=1+", Some("the formula does not parse")),

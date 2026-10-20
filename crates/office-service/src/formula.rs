@@ -3,7 +3,8 @@
 //! functions the engine implements and never `HYPERLINK`, references only
 //! this workbook's sheets and defined names (no `[...]` workbooks, URLs,
 //! paths or DDE), parses, and stays within 2,000 characters; text stays
-//! within Excel's 32,767.
+//! within Excel's 32,767. A defined name the formula uses passes the same
+//! function and reference rules.
 
 use std::collections::BTreeSet;
 
@@ -57,34 +58,25 @@ impl Formulas<'_> {
                 error.message
             ),
         })?;
-        self.walk(&expr, true, &mut BTreeSet::new())
+        self.walk(&expr, &mut BTreeSet::new())
     }
 
-    /// `functions` is false inside a defined name's formula, whose references
-    /// alone are checked; `seen` stops names that refer to each other.
-    fn walk(
-        &self,
-        expr: &Expr,
-        functions: bool,
-        seen: &mut BTreeSet<String>,
-    ) -> std::result::Result<(), String> {
+    /// `seen` stops names that refer to each other.
+    fn walk(&self, expr: &Expr, seen: &mut BTreeSet<String>) -> std::result::Result<(), String> {
         match expr {
             Expr::FuncCall { name, func, args } => {
-                if functions {
-                    match func {
-                        None => {
-                            return Err(format!(
-                                "the function {name} is not available; use a function the spreadsheet engine supports"
-                            ));
-                        }
-                        Some(Func::Hyperlink) => {
-                            return Err("the HYPERLINK function is not allowed".to_owned());
-                        }
-                        Some(_) => {}
+                match func {
+                    None => {
+                        return Err(format!(
+                            "the function {name} is not available; use a function the spreadsheet engine supports"
+                        ));
                     }
+                    Some(Func::Hyperlink) => {
+                        return Err("the HYPERLINK function is not allowed".to_owned());
+                    }
+                    Some(_) => {}
                 }
-                args.iter()
-                    .try_for_each(|arg| self.walk(arg, functions, seen))
+                args.iter().try_for_each(|arg| self.walk(arg, seen))
             }
             Expr::Ref { sheet, .. }
             | Expr::Range { sheet, .. }
@@ -96,18 +88,18 @@ impl Formulas<'_> {
                 }
                 self.name(name, seen)
             }
-            Expr::Unary { expr, .. } | Expr::Percent(expr) => self.walk(expr, functions, seen),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => self.walk(expr, seen),
             Expr::Binary { lhs, rhs, .. } => {
-                self.walk(lhs, functions, seen)?;
-                self.walk(rhs, functions, seen)
+                self.walk(lhs, seen)?;
+                self.walk(rhs, seen)
             }
             Expr::RangeJoin { start, end } => {
-                self.walk(start, functions, seen)?;
-                self.walk(end, functions, seen)
+                self.walk(start, seen)?;
+                self.walk(end, seen)
             }
-            Expr::ArrayLiteral { values, .. } => values
-                .iter()
-                .try_for_each(|value| self.walk(value, functions, seen)),
+            Expr::ArrayLiteral { values, .. } => {
+                values.iter().try_for_each(|value| self.walk(value, seen))
+            }
             Expr::Number(_)
             | Expr::Literal(_)
             | Expr::Text(_)
@@ -156,14 +148,14 @@ impl Formulas<'_> {
             return Err(format!("the name {name} is not defined in this workbook"));
         }
         for defined in defined {
-            let external = || {
+            let formula = &defined.formula;
+            let expr = parse_formula(formula).map_err(|_| {
                 format!(
-                    "the name {name} refers outside this workbook ({}), which is not allowed",
-                    defined.formula
+                    "the name {name} refers outside this workbook ({formula}), which is not allowed"
                 )
-            };
-            let expr = parse_formula(&defined.formula).map_err(|_| external())?;
-            self.walk(&expr, false, seen).map_err(|_| external())?;
+            })?;
+            self.walk(&expr, seen)
+                .map_err(|rule| format!("the name {name} ({formula}) is not allowed: {rule}"))?;
         }
         Ok(())
     }
