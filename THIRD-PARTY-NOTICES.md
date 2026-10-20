@@ -214,7 +214,11 @@ Read-only accessors, for structure walks and guards that compute no index:
   item right of a deleted one, so the DOCX editor finds the field an edit
   ends at) (`src/store.rs`, with unit tests and tests in `crates/docx-edit`);
 - `StickyIndex::get_offsets` (`src/sticky_index.rs`), which resolves many
-  indexes in one walk as `get_offset` resolves each, with unit tests.
+  indexes in one walk as `get_offset` resolves each, with unit tests;
+- `StickyIndex::at_many` (`src/sticky_index.rs`), which places many indexes in
+  one walk as `at` places each, so a DOCX seed anchors all of a story's
+  bookmarks and field boundaries in linear time (tested in
+  `crates/docx-edit/tests/yrs_sticky_batch.rs`).
 
 Its `Cargo.toml` also has a `[lints]` block that allows its upstream warnings.
 

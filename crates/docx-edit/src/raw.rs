@@ -315,7 +315,17 @@ pub(crate) fn apply_raw_ops_to_story(
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
+    // Consecutive boundaries (a seed's come last) are placed in one batch.
+    let mut boundaries: Vec<(u32, Any)> = Vec::new();
     for op in ops {
+        if let RawOp::SetBookmark { index, data } = op {
+            run.flush(&story, txn)?;
+            boundaries.push((index, data));
+            continue;
+        }
+        if !boundaries.is_empty() {
+            crate::bookmarks::set_batch(txn, &story, story_id, std::mem::take(&mut boundaries))?;
+        }
         match op {
             RawOp::Insert { index, text, attrs }
                 if run.is_contiguous(index)
@@ -350,6 +360,9 @@ pub(crate) fn apply_raw_ops_to_story(
         }
     }
     run.flush(&story, txn)?;
+    if !boundaries.is_empty() {
+        crate::bookmarks::set_batch(txn, &story, story_id, boundaries)?;
+    }
     Ok(())
 }
 

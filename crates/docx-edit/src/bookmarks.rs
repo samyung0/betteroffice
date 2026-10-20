@@ -22,64 +22,102 @@ pub(crate) fn set(
     index: u32,
     data: Any,
 ) -> OpResult<()> {
-    let Any::Map(metadata) = &data else {
-        return Err(OpError::InvalidUpdate(
-            "bookmark metadata must be an object".into(),
-        ));
-    };
-    let id = match metadata.get("id") {
-        Some(Any::Number(id)) => id.to_string(),
-        Some(Any::String(id)) => id.to_string(),
-        _ => return Err(OpError::InvalidUpdate("inline boundary needs an id".into())),
-    };
-    let Some(Any::String(kind)) = metadata.get("kind") else {
-        return Err(OpError::InvalidUpdate(
-            "bookmark needs a boundary kind".into(),
-        ));
-    };
-    let mut assoc = match kind.as_ref() {
-        "start" => Assoc::After,
-        "end" | "fieldend" | "fieldseparate" => Assoc::Before,
-        _ => {
-            return Err(OpError::InvalidUpdate(
-                "invalid bookmark boundary kind".into(),
-            ));
-        }
-    };
+    set_batch(txn, story, story_id, vec![(index, data)])
+}
+
+/// [`set`] for boundaries applied one after another with no text change
+/// between them (a seed's): every anchor comes from one walk of the story
+/// ([`StickyIndex::at_many`]) rather than a walk per boundary, and a boundary
+/// collapses onto an opposite one this batch set by comparing their indexes.
+pub(crate) fn set_batch(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    story_id: &str,
+    boundaries: Vec<(u32, Any)>,
+) -> OpResult<()> {
+    struct Planned {
+        data: Any,
+        key: String,
+        other_key: String,
+        collapsed: bool,
+    }
     let root = txn.get_map(ROOT).expect("bookmarks root is declared");
-    let opposite = if kind.as_ref() == "start" {
-        "end"
-    } else {
-        "start"
-    };
-    let other = match root.get(txn, &format!("{story_id}:{id}:{opposite}")) {
-        Some(Out::YMap(entry)) => Some(entry),
-        _ => None,
-    };
-    let collapsed = other.as_ref().is_some_and(|entry| {
-        let Some(Out::Any(Any::Array(anchors))) = entry.get(txn, "anchors") else {
-            return false;
+    let mut set_at: HashMap<String, u32> = HashMap::new();
+    let mut planned = Vec::with_capacity(boundaries.len());
+    let mut requests = Vec::with_capacity(boundaries.len());
+    for (index, data) in boundaries {
+        let Any::Map(metadata) = &data else {
+            return Err(OpError::InvalidUpdate(
+                "bookmark metadata must be an object".into(),
+            ));
         };
-        anchors
-            .first()
-            .and_then(|value| decode_anchor(value).ok())
-            .and_then(|anchor| anchor.start.get_offset(txn))
-            .is_some_and(|offset| offset.index == index)
-    });
-    if collapsed {
-        assoc = Assoc::Before;
+        let id = match metadata.get("id") {
+            Some(Any::Number(id)) => id.to_string(),
+            Some(Any::String(id)) => id.to_string(),
+            _ => return Err(OpError::InvalidUpdate("inline boundary needs an id".into())),
+        };
+        let Some(Any::String(kind)) = metadata.get("kind") else {
+            return Err(OpError::InvalidUpdate(
+                "bookmark needs a boundary kind".into(),
+            ));
+        };
+        let mut assoc = match kind.as_ref() {
+            "start" => Assoc::After,
+            "end" | "fieldend" | "fieldseparate" => Assoc::Before,
+            _ => {
+                return Err(OpError::InvalidUpdate(
+                    "invalid bookmark boundary kind".into(),
+                ));
+            }
+        };
+        let opposite = if kind.as_ref() == "start" {
+            "end"
+        } else {
+            "start"
+        };
+        let other_key = format!("{story_id}:{id}:{opposite}");
+        let collapsed = match set_at.get(&other_key) {
+            Some(at) => *at == index,
+            None => match root.get(txn, &other_key) {
+                Some(Out::YMap(entry)) => match entry.get(txn, "anchors") {
+                    Some(Out::Any(Any::Array(anchors))) => anchors
+                        .first()
+                        .and_then(|value| decode_anchor(value).ok())
+                        .and_then(|anchor| anchor.start.get_offset(txn))
+                        .is_some_and(|offset| offset.index == index),
+                    _ => false,
+                },
+                _ => false,
+            },
+        };
+        if collapsed {
+            assoc = Assoc::Before;
+        }
+        let key = format!("{story_id}:{id}:{kind}");
+        set_at.insert(key.clone(), index);
+        requests.push((index, assoc));
+        planned.push(Planned {
+            data,
+            key,
+            other_key,
+            collapsed,
+        });
     }
-    let anchor = story
-        .sticky_index(txn, index, assoc)
-        .ok_or_else(|| OpError::InvalidUpdate("bookmark position does not resolve".into()))?;
-    let anchors = Any::Array(Arc::from([anchor_value(story_id, &anchor, &anchor)]));
-    if collapsed && let Some(other) = other {
-        other.insert(txn, "anchors", anchors.clone());
+    let branch = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(story));
+    let anchors = StickyIndex::at_many(txn, branch, &requests);
+    for (plan, anchor) in planned.into_iter().zip(anchors) {
+        let anchor = anchor
+            .ok_or_else(|| OpError::InvalidUpdate("bookmark position does not resolve".into()))?;
+        let anchors = Any::Array(Arc::from([anchor_value(story_id, &anchor, &anchor)]));
+        if plan.collapsed
+            && let Some(Out::YMap(other)) = root.get(txn, &plan.other_key)
+        {
+            other.insert(txn, "anchors", anchors.clone());
+        }
+        let entry = root.insert(txn, plan.key, MapPrelim::default());
+        entry.insert(txn, "data", plan.data);
+        entry.insert(txn, "anchors", anchors);
     }
-    let key = format!("{story_id}:{id}:{kind}");
-    let entry = root.insert(txn, key, MapPrelim::default());
-    entry.insert(txn, "data", data);
-    entry.insert(txn, "anchors", anchors);
     Ok(())
 }
 
