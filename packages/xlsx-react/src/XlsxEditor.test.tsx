@@ -639,12 +639,6 @@ describe('XlsxEditor keyboard', () => {
         return Promise.resolve(undefined);
       return forward(sheetId, method, ...args);
     }) as WorkbookProxy['onSheet']);
-    // a cut's clear goes through clearCut.
-    const forwardCut = proxy.clearCut.bind(proxy);
-    const cutSpy = spyOn(proxy, 'clearCut').mockImplementation((sheetId, range) => {
-      sent.push({ method: 'clearCut', args: [sheetId, range] });
-      return forwardCut(sheetId, range);
-    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -656,7 +650,6 @@ describe('XlsxEditor keyboard', () => {
       written,
       restore: () => {
         spy.mockRestore();
-        cutSpy.mockRestore();
         if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
         else Reflect.deleteProperty(navigator, 'clipboard');
       },
@@ -849,7 +842,7 @@ describe('XlsxEditor keyboard', () => {
       await press(view.surface, 'a', { ctrlKey: true });
       await press(view.surface, 'x', { ctrlKey: true });
       // the pieces are read one after another, then the clear goes out.
-      await waitFor(() => expect(calls.sent('clearCut')).toHaveLength(1), { timeout: 20_000 });
+      await waitFor(() => expect(calls.sent('clearContents')).toHaveLength(1), { timeout: 20_000 });
       const ranges = calls.sent('rangeCells').map((args) => args[1]);
       expect(ranges).toHaveLength(10);
       expect([ranges[0], ranges[9]]).toEqual(['A1:J10000', 'A90001:J90010']);
@@ -860,7 +853,7 @@ describe('XlsxEditor keyboard', () => {
         '\t\t\t\t\t\t\t\t\t1',
         '\t\t\t\t\t\t\t\t\t11',
       ]);
-      expect(calls.sent('clearCut').map((args) => args[1])).toEqual(['J90000:J90010']);
+      expect(calls.sent('clearContents').map((args) => args[1])).toEqual(['J90000:J90010']);
       expect(await view.input(89_999, 9)).toBe('');
     } finally {
       calls.restore();
@@ -882,7 +875,7 @@ describe('XlsxEditor keyboard', () => {
       expect(notices).toEqual(['copy-too-large']);
       expect(calls.sent('rangeCells')).toEqual([]);
       expect(calls.written).toEqual([]);
-      expect(calls.sent('clearCut')).toEqual([]);
+      expect(calls.sent('clearContents')).toEqual([]);
       expect(await view.input(0, 0)).toBe('1');
       expect(await view.input(99_999, 51)).toBe('2');
     } finally {
@@ -1014,11 +1007,6 @@ describe('XlsxEditor keyboard', () => {
         return held.then(() => forward(sheetId, method, ...args));
       return forward(sheetId, method, ...args);
     }) as WorkbookProxy['onSheet']);
-    const forwardCut = proxy.clearCut.bind(proxy);
-    const cutSpy = spyOn(proxy, 'clearCut').mockImplementation((sheetId, range) => {
-      sent.push('clearCut');
-      return forwardCut(sheetId, range);
-    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -1034,7 +1022,6 @@ describe('XlsxEditor keyboard', () => {
         }),
       restore: () => {
         spy.mockRestore();
-        cutSpy.mockRestore();
         if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
         else Reflect.deleteProperty(navigator, 'clipboard');
       },
@@ -1052,11 +1039,11 @@ describe('XlsxEditor keyboard', () => {
       await press(view.surface, 'Delete');
       await press(view.surface, '7');
       expect(view.editor()).toBeNull();
-      expect(read.sent.filter((name) => /^(clearContents|clearCut|editCells)$/.test(name))).toEqual([]);
+      expect(read.sent.filter((name) => name === 'clearContents' || name === 'editCells')).toEqual([]);
       await read.release();
       await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull(), { timeout: 20_000 });
       await view.idle();
-      expect(read.sent.filter((name) => name === 'clearCut')).toHaveLength(1);
+      expect(read.sent.filter((name) => name === 'clearContents')).toHaveLength(1);
       expect(await view.input(89_999, 9)).toBe('');
     } finally {
       read.restore();
@@ -1074,7 +1061,7 @@ describe('XlsxEditor keyboard', () => {
       await read.release();
       await waitFor(() => expect(read.written).toHaveLength(1), { timeout: 20_000 });
       await view.idle();
-      expect(read.sent.filter((name) => name === 'clearCut')).toEqual([]);
+      expect(read.sent.filter((name) => name === 'clearContents')).toEqual([]);
       expect(await view.input(89_999, 9)).toBe('1');
     } finally {
       read.restore();
@@ -1147,7 +1134,7 @@ describe('XlsxEditor keyboard', () => {
       await press(view.surface, 'c', { ctrlKey: true });
       await press(view.surface, 'x', { ctrlKey: true });
       await view.idle();
-      expect([notices, calls.sent('clearCut'), await view.input(1, 1)]).toEqual([
+      expect([notices, calls.sent('clearContents'), await view.input(1, 1)]).toEqual([
         ['copy-failed', 'copy-failed'],
         [],
         'Q1',
@@ -1238,7 +1225,6 @@ describe('XlsxEditor keyboard', () => {
       sent.push(method);
       return method === 'rangeCells' ? Promise.resolve(piece) : forward(sheetId, method, ...args);
     }) as WorkbookProxy['onSheet']);
-    const clears = spyOn(proxy, 'clearCut');
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -1254,99 +1240,12 @@ describe('XlsxEditor keyboard', () => {
       await waitFor(() => expect(notices).toHaveLength(2), { timeout: 20_000 });
       await view.idle();
       const reads = sent.filter((method) => method === 'rangeCells').length;
-      expect([reads, clears.mock.calls.length, written]).toEqual([14, 0, []]);
+      expect([reads, sent.filter((method) => method === 'clearContents'), written]).toEqual([14, [], []]);
       expect(await view.input(89_999, 9)).toBe('1');
     } finally {
       spy.mockRestore();
-      clears.mockRestore();
       if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
       else Reflect.deleteProperty(navigator, 'clipboard');
-    }
-  }, MANY_KEYS_MS);
-
-  // a cut of `at` (B2) whose first read is held while a peer makes `change`.
-  const cutWhilePeer = async (
-    change: (peer: ReturnType<typeof openWorkbook>) => void,
-    at: CellAddr = { row: 1, col: 1 }
-  ) => {
-    const notices: string[] = [];
-    const view = await mountEditor(plain, undefined, undefined, {
-      collaboration: { clientId: 3501 },
-      onNotice: (notice) => notices.push(notice),
-    });
-    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3502 });
-    const read = holdFirstRead(view);
-    try {
-      const editor = view.workbook();
-      const before = await editor.encodeStateVector();
-      await view.click(at);
-      await press(view.surface, 'x', { ctrlKey: true });
-      change(peer);
-      await act(async () => {
-        await editor.applyUpdate(peer.encodeStateAsUpdate(before));
-      });
-      await read.release();
-      await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull());
-      await view.idle();
-      return { notices, written: read.written, input: view.input };
-    } finally {
-      read.restore();
-      peer.dispose();
-    }
-  };
-
-  it('skips the clear of a cut, with a notice, when a peer changed a cell inside it during the read', async () => {
-    const { notices, written, input } = await cutWhilePeer((peer) => peer.editCell(0, 1, 1, 'peer'));
-    expect([notices, written, await input(1, 1)]).toEqual([['cut-peer-change'], ['peer'], 'peer']);
-  }, MANY_KEYS_MS);
-
-  it('clears a cut whose read saw a peer change a cell outside it', async () => {
-    const { notices, written, input } = await cutWhilePeer((peer) => peer.editCell(0, 1, 2, 'peer'));
-    expect([notices, written, await input(1, 1), await input(1, 2)]).toEqual([[], ['Q1'], '', 'peer']);
-  }, MANY_KEYS_MS);
-
-  // the peer's row inserted at the top moves B2's Q1 into the cut's B3: the
-  // cells under the range differ by position, so the clear is skipped.
-  it('skips the clear of a cut when a peer inserts a row above it during the read', async () => {
-    const { notices, written, input } = await cutWhilePeer(
-      (peer) => peer.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]),
-      { row: 2, col: 1 }
-    );
-    expect([notices, written, await input(2, 1)]).toEqual([['cut-peer-change'], ['Q1'], 'Q1']);
-  }, MANY_KEYS_MS);
-
-  // the peer's change reaches the worker after the read, while the clipboard
-  // write is still settling, so before the cut's clear in the worker's queue.
-  it('skips the clear of a cut when a peer changes a cell inside it between the read and the clear', async () => {
-    const notices: string[] = [];
-    const view = await mountEditor(plain, undefined, undefined, {
-      collaboration: { clientId: 3503 },
-      onNotice: (notice) => notices.push(notice),
-    });
-    const peer = openWorkbook(plain.bytes.slice(), { collaborative: true, clientId: 3504 });
-    const editor = view.workbook();
-    const before = await editor.encodeStateVector();
-    const written: string[] = [];
-    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: {
-        write: async (items: ClipboardItem[]) => {
-          await writeInto(written)(items);
-          peer.editCell(0, 1, 1, 'peer');
-          void editor.applyUpdate(peer.encodeStateAsUpdate(before));
-        },
-      },
-    });
-    try {
-      await view.click({ row: 1, col: 1 });
-      await press(view.surface, 'x', { ctrlKey: true });
-      await view.idle();
-      expect([notices, written, await view.input(1, 1)]).toEqual([['cut-peer-change'], ['Q1'], 'peer']);
-    } finally {
-      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
-      else Reflect.deleteProperty(navigator, 'clipboard');
-      peer.dispose();
     }
   }, MANY_KEYS_MS);
 
@@ -1406,7 +1305,7 @@ describe('XlsxEditor keyboard', () => {
       await view.idle();
       expect([
         read.sent.filter((name) => name === 'rangeCells').length,
-        read.sent.filter((name) => name === 'clearCut'),
+        read.sent.filter((name) => name === 'clearContents'),
         read.written,
       ]).toEqual([2, [], ['11']]);
       expect(await view.input(89_999, 9)).toBe('1');
@@ -1481,7 +1380,7 @@ describe('XlsxEditor keyboard', () => {
         await settle();
         await view.idle();
         expect(changes).toBe(3);
-        expect([...calls.sent('clearContents'), ...calls.sent('clearCut')]).toEqual([]);
+        expect(calls.sent('clearContents')).toEqual([]);
         expect(calls.sent('editCells')).toEqual([]);
         expect(calls.sent('applyFormat')).toEqual([]);
         expect(calls.sent('applyOps')).toEqual([]);

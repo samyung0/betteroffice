@@ -7,7 +7,6 @@
 
 import type {
   CellEdit,
-  EditResult,
   MergedRange,
   RangeStylePatch,
   SelectionFormatting,
@@ -23,7 +22,6 @@ import {
 import type { GridMeta } from '../display-list/types';
 import { activeCell, cellAddress, normalizeRange } from '../selection/index';
 import {
-  CUT_CHANGED,
   MUTATING_METHODS,
   SHEET_GONE,
   WORKBOOK_METHODS,
@@ -69,18 +67,6 @@ const SHEET_FIRST = new Set<WorkbookMethod>([
 ]);
 
 let workbook: WorkbookHandle | null = null;
-// The range a cut reads and then clears, from its `checkClearContents` (the
-// next cut replaces it): a peer's update that changes a cell inside it marks
-// it, in this queue, so the cut's clear is refused whenever the change landed.
-interface CutWatch {
-  sheetId: string;
-  top: number;
-  left: number;
-  bottom: number;
-  right: number;
-  changed: boolean;
-}
-let cut: CutWatch | null = null;
 let epoch = 0;
 let seq = 0;
 let queue = Promise.resolve();
@@ -110,9 +96,7 @@ scope.onmessage = (event) => {
 async function handle(request: WorkbookWorkerRequest): Promise<void> {
   seq = request.id;
   const changes =
-    request.type === 'toggle' ||
-    request.type === 'clearCut' ||
-    (request.type === 'call' && MUTATING_METHODS.has(request.method));
+    request.type === 'toggle' || (request.type === 'call' && MUTATING_METHODS.has(request.method));
   if (changes) selectionReads = null;
   try {
     const value = await answer(request);
@@ -163,13 +147,6 @@ async function answer(request: WorkbookWorkerRequest): Promise<unknown> {
     patch[request.property] = !open.selectionFormatting(sheet, request.range)[request.property];
     return open.patchRangeStyle(sheet, request.range, patch);
   }
-  if (request.type === 'clearCut') {
-    const watched = cut;
-    cut = null;
-    const sheet = activeSheet(open, request.sheetId);
-    if (watched?.sheetId !== request.sheetId || watched.changed) throw new Error(CUT_CHANGED);
-    return open.clearContents(sheet, request.range);
-  }
   return call(open, request);
 }
 
@@ -189,64 +166,7 @@ function call(open: WorkbookHandle, request: WorkbookCallRequest): unknown {
     }
   }
   const method = open[request.method] as (...values: unknown[]) => unknown;
-  const result = method.apply(open, args);
-  if (request.method === 'checkClearContents' && request.sheetId !== undefined) {
-    const bounds = rangeBounds(args[1] as string);
-    // a range this cannot read leaves no watch, so the cut's clear is refused.
-    cut = bounds && { sheetId: request.sheetId, ...bounds, changed: false };
-  }
-  else if (request.method === 'applyUpdate' && cut) markCut(cut, result as EditResult);
-  return result;
-}
-
-/** Marks the cut when a peer's update changed a cell inside its range. */
-function markCut(watched: CutWatch, result: EditResult): void {
-  if (watched.changed || !result.changed?.length) return;
-  const { sheetIds, sheetNames, activeSheet: active } = result.sheetInfo;
-  const index = sheetIds.indexOf(watched.sheetId);
-  // a removed sheet: its clear is refused anyway.
-  if (index < 0) {
-    watched.changed = true;
-    return;
-  }
-  // `changed` names the active sheet's cells bare, another sheet's as `Name!A1`.
-  watched.changed = result.changed.some((entry) => {
-    const at = entry.lastIndexOf('!');
-    if (at < 0 ? index !== active : entry.slice(0, at) !== sheetNames[index]) return false;
-    const cell = cellOf(entry.slice(at + 1));
-    return (
-      !cell ||
-      (cell.row >= watched.top &&
-        cell.row <= watched.bottom &&
-        cell.col >= watched.left &&
-        cell.col <= watched.right)
-    );
-  });
-}
-
-/** An A1 cell (`B2`) as its zero-based row and column. */
-function cellOf(a1: string): { row: number; col: number } | null {
-  const match = /^([A-Z]+)(\d+)$/.exec(a1);
-  if (!match) return null;
-  let col = 0;
-  for (const letter of match[1]) col = col * 26 + letter.charCodeAt(0) - 64;
-  return { row: Number(match[2]) - 1, col: col - 1 };
-}
-
-/** An A1 range (`B2:C3`) as its bounds. */
-function rangeBounds(
-  range: string
-): { top: number; left: number; bottom: number; right: number } | null {
-  const [from, to = from] = range.split(':');
-  const start = cellOf(from);
-  const end = cellOf(to);
-  if (!start || !end) return null;
-  return {
-    top: Math.min(start.row, end.row),
-    left: Math.min(start.col, end.col),
-    bottom: Math.max(start.row, end.row),
-    right: Math.max(start.col, end.col),
-  };
+  return method.apply(open, args);
 }
 
 /** The active sheet's index while it is still `sheetId`. */

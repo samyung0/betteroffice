@@ -105,7 +105,6 @@ export {
   UnparsedFormulaError,
 } from './wasm/refusals';
 export {
-  CutChangedError,
   openWorkbookWorker,
   SheetGoneError,
 } from './worker/client';

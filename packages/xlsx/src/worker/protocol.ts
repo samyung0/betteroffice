@@ -128,22 +128,9 @@ export interface WorkbookCallRequest {
   /**
    * The active sheet the caller acted on. The call runs on the active sheet
    * only while it is still that one (a peer may have removed or moved it);
-   * otherwise it fails with {@link SHEET_GONE}. A `checkClearContents` with a
-   * sheet id also starts watching its range for a cut ({@link WorkbookClearCutRequest}).
+   * otherwise it fails with {@link SHEET_GONE}.
    */
   sheetId?: string;
-}
-
-/**
- * A cut's clear of `range`: refused with {@link CUT_CHANGED} when a peer's
- * update changed a cell inside the range its `checkClearContents` watched, or
- * when no cut watches one.
- */
-export interface WorkbookClearCutRequest {
-  type: 'clearCut';
-  id: number;
-  sheetId: string;
-  range: string;
 }
 
 export interface WorkbookToggleRequest {
@@ -164,7 +151,6 @@ export type WorkbookWorkerRequest =
   | WorkbookOpenRequest
   | WorkbookCallRequest
   | WorkbookToggleRequest
-  | WorkbookClearCutRequest
   | WorkbookFrameRequest;
 
 export interface WorkbookOpened {
@@ -180,6 +166,3 @@ export type WorkbookWorkerMessage =
 
 /** The error text of a call whose sheet stopped being the active one. */
 export const SHEET_GONE = 'the sheet is no longer the active sheet';
-
-/** The error text of a cut's clear after a peer changed a cell in its range. */
-export const CUT_CHANGED = "a peer changed the cut's cells";
