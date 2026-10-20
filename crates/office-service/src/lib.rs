@@ -319,11 +319,15 @@ pub fn inspect_scoped(
     guard(|| Session::open(checkpoint.format, base, Some(checkpoint))?.inspect_scoped(query))
 }
 
-/// The blank file the agent's `create` and the Create tab start from.
-pub fn starter(format: Format) -> Option<&'static [u8]> {
+/// The blank file the agent's `create` and the Create tab start from; a
+/// format without one is refused as `unsupported_operation`.
+pub fn starter(format: Format) -> Result<&'static [u8]> {
     match format {
-        Format::Xlsx => Some(include_bytes!("../starters/blank.xlsx")),
-        Format::Docx | Format::Pptx => None,
+        Format::Xlsx => Ok(include_bytes!("../starters/blank.xlsx")),
+        Format::Docx | Format::Pptx => Err(Error::edit(
+            EditCode::UnsupportedOperation,
+            format!("{} files cannot be created yet", format.as_str()),
+        )),
     }
 }
 

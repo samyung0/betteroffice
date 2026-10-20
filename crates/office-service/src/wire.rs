@@ -204,9 +204,12 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
         "createOffice" => {
             let format: Format = typed(arg(args, 0))?;
             let commands: Vec<Command> = typed(arg(args, 1))?;
-            let starter = crate::starter(format)
-                .ok_or_else(|| Error::Invalid(format!("no {} starter", format.as_str())))?;
-            let created = crate::create(format, starter, &commands, determinism(arg(args, 2)))?;
+            let created = crate::create(
+                format,
+                crate::starter(format)?,
+                &commands,
+                determinism(arg(args, 2)),
+            )?;
             Ok(json!({ "bytes": to_bytes(&created.bytes), "notice": created.notice }))
         }
         "inspectOffice" => value(crate::inspect(&base()?, checkpoint(1)?.view())?),

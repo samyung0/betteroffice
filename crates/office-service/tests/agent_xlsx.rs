@@ -813,3 +813,31 @@ fn create_office_over_the_wire_answers_the_new_file() {
         ["A1=2→2", "B1==A1*3→6"]
     );
 }
+
+/// DOCX and PPTX have no starter yet: a create is refused as
+/// `unsupported_operation` (409), not an engine fault the server retries.
+#[test]
+fn a_format_without_a_starter_cannot_be_created_yet() {
+    assert_eq!(
+        starter(Format::Docx).unwrap_err(),
+        refusal(
+            EditCode::UnsupportedOperation,
+            "docx files cannot be created yet",
+            None
+        )
+    );
+    let request = json!({
+        "method": "createOffice",
+        "args": ["docx", [], { "seed": DETERMINISM.seed, "now": DETERMINISM.now }],
+    });
+    let answer: Value =
+        serde_json::from_slice(&office_service::wire::call(request.to_string().as_bytes()))
+            .unwrap();
+    assert_eq!(
+        answer,
+        json!({
+            "error": "unsupported_operation: docx files cannot be created yet",
+            "kind": "edit",
+        })
+    );
+}
