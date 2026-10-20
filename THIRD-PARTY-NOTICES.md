@@ -123,6 +123,12 @@ Transactions and updates:
   transactions count it as made before them, so changes to it raise events
   (upstream counted it as new and raised none). Tests are in
   `crates/docx-edit/tests/yrs_transaction_work.rs`, which pins the skip case;
+- a commit merges the blocks around each deleted range as upstream does, then
+  removes every merged block from a client's list in one pass
+  (`ClientBlockList::squash_deleted_ranges` in `src/block_store.rs`, called
+  by `try_squash_with` in `src/id_set.rs`); upstream moved the list's tail
+  once per range, quadratic in a commit that deletes in many places (tested
+  in `crates/docx-edit/tests/yrs_squash_once.rs`);
 - a pending update waits on each client's held state (`BlockStore::get_state`
   in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
   instead of its clock past skips, and on every client its stacked structs

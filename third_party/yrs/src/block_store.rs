@@ -6,9 +6,9 @@ use crate::utils::client_hasher::ClientHasher;
 use crate::*;
 use std::cell::UnsafeCell;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::BuildHasherDefault;
-use std::ops::{Index, Range, RangeInclusive};
+use std::ops::{Index, Range};
 use std::vec::Vec;
 
 /// A resizable list of blocks inserted by a single client.
@@ -52,11 +52,6 @@ impl Work {
     pub(crate) fn over(&self) -> bool {
         self.budget.is_some_and(|budget| self.steps > budget)
     }
-}
-
-struct SquashBlockRange {
-    range: Range<usize>,
-    gc_block: bool,
 }
 
 unsafe impl Send for ClientBlockList {}
@@ -139,120 +134,88 @@ impl ClientBlockList {
         ClientBlockListIter(self.inner.iter())
     }
 
-    /// Attempts to squash multiple blocks within the given range of indices.
-    /// For each block in the `indices_range`, it will check if the block can be squashed with its left neighbor.
-    /// If consecutive blocks are squashable, they are tracked in a range and processed in bulk to compact
-    /// the list efficiently. The function supports both GC and Block cells.
-    ///
-    /// - For GC blocks: If blocks are consecutive, the range is extended and squashing is deferred until
-    ///   all squashable blocks are identified.
-    ///
-    /// - For Block cells: The function attempts to squash the contents of the right block into the left block.
-    ///   If successful, it tracks the blocks to be removed and rewires references in the parent node if necessary.
-    ///   Block cells currently don't support range compaction due to the complexity of squashing Blocks.
-    ///
-    /// The function processes all blocks in reverse order (from the end of the range to the start),
-    /// compacts the list by removing squashed blocks, and updates references for any parent-child relationships
-    /// affected by the squashing.
-    ///
-    /// # Arguments
-    /// * `indices_range` - A range of indices, where each index represents a block in the list to be examined
-    ///   for squashing. The range must be non-empty (`start` must be <= `end`).
-    ///
-    /// # Panics
-    /// * Panics if `indices_range.start()` is greater than `indices_range.end()`.
-    ///
-    pub(crate) fn squash_left_range_compaction(
+    /// Patched for BetterOffice: merges the blocks around each of a commit's
+    /// deleted `ranges` (given from the last) with their left neighbours as
+    /// upstream's per-range `squash_left_range_compaction` did, then removes
+    /// every merged block in one pass. Removing them range by range moved the
+    /// list's tail once per range, quadratic in a commit that deletes in many
+    /// places (a DOCX seed deleted a placeholder in each of thousands of
+    /// stories). Each merged block went into the nearest kept block on its
+    /// left, so the indexes a range reads skip merged ones, as they would be
+    /// once removed.
+    pub(crate) fn squash_deleted_ranges<'a>(
         &mut self,
-        indices_range: RangeInclusive<usize>,
+        ranges: impl Iterator<Item = &'a Range<u32>>,
         work: &mut Work,
     ) {
-        assert!(indices_range.start() <= indices_range.end());
-        let mut squash_intervals: Vec<SquashBlockRange> = Vec::new();
-
-        for right_index in indices_range.rev() {
-            let (l, r) = self.inner.split_at_mut(right_index);
-            let left = unsafe { &mut *l[l.len() - 1].get() };
-            let right = unsafe { &mut *r[0].get() };
-
-            match (left, right) {
-                (Block::GC(_), Block::GC(_)) => {
-                    let mut extended = false;
-                    match squash_intervals.last_mut() {
-                        Some(last_range) if last_range.gc_block => {
-                            // Extend if consecutive
-                            if last_range.range.start - 1 == right_index {
-                                last_range.range.start = right_index;
-                                extended = true;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    if !extended {
-                        // Add new range if no consecutive block found
-                        squash_intervals.push(SquashBlockRange {
-                            range: Range {
-                                start: right_index,
-                                end: right_index,
-                            },
-                            gc_block: true,
-                        });
-                    }
-                }
-                (Block::Item(left), Block::Item(right)) => {
-                    let mut left = ItemPtr::from(left);
-                    let right = ItemPtr::from(right);
-                    if left.try_squash(right) {
-                        // Merge right into left Blocks one by one.
-                        squash_intervals.push(SquashBlockRange {
-                            range: Range {
-                                start: right_index,
-                                end: right_index,
-                            },
-                            gc_block: false,
-                        });
-                    }
-                }
-                _ => { /* cannot squash incompatible types */ }
+        let mut merged: BTreeSet<usize> = BTreeSet::new();
+        let kept_left = |merged: &BTreeSet<usize>, mut at: usize| loop {
+            at -= 1;
+            if !merged.contains(&at) {
+                return at;
             }
-        }
-
-        for squash_range in &squash_intervals {
-            let start_idx = squash_range.range.start;
-            let end_idx = squash_range.range.end;
-            assert!(start_idx <= end_idx);
-
-            let (left_slice, right_slice) = self.inner.split_at_mut(end_idx);
-
-            // The start_idx - 1 element is the one want to squash into.
-            let left = unsafe { &mut *left_slice[start_idx - 1].get() };
-            let right = unsafe { &*right_slice[0].get() };
-
-            match (left, right) {
-                (Block::GC(left), Block::GC(right)) => {
-                    left.len = right.clock - left.clock + right.len;
-                }
-                (Block::Item(left), Block::Item(right)) => {
-                    let left = ItemPtr::from(left);
-                    let right = ItemPtr::from(right.as_ref());
-                    if let Some(key) = right.parent_sub.as_deref() {
-                        if let TypePtr::Branch(mut parent) = right.parent {
-                            if let Some(e) = parent.map.get_mut(key) {
-                                if right == *e {
-                                    *e = ItemPtr::from(left);
+        };
+        for r in ranges {
+            // Past the work budget, merge no more.
+            if work.over() {
+                break;
+            }
+            // Start with the block after the range's last deleted one.
+            let mut found = self.find_index(r.end - 1).unwrap_or_default();
+            while merged.contains(&found) {
+                found -= 1;
+            }
+            let mut si = (found + 1..self.inner.len())
+                .find(|at| !merged.contains(at))
+                .unwrap_or(found);
+            let mut rights = Vec::new();
+            while si > 0 && self[si].clock_start() >= r.start {
+                rights.push(si);
+                si = kept_left(&merged, si);
+            }
+            work.scanned(rights.len());
+            for right_index in rights {
+                let left_index = kept_left(&merged, right_index);
+                let left = unsafe { &mut *self.inner[left_index].get() };
+                let right = unsafe { &mut *self.inner[right_index].get() };
+                match (left, right) {
+                    (Block::GC(left), Block::GC(right)) => {
+                        left.len = right.clock - left.clock + right.len;
+                        merged.insert(right_index);
+                    }
+                    (Block::Item(left), Block::Item(right)) => {
+                        let mut left = ItemPtr::from(left);
+                        let right = ItemPtr::from(right);
+                        if left.try_squash(right) {
+                            if let Some(key) = right.parent_sub.as_deref() {
+                                if let TypePtr::Branch(mut parent) = right.parent {
+                                    if let Some(e) = parent.map.get_mut(key) {
+                                        if right == *e {
+                                            *e = left;
+                                        }
+                                    }
                                 }
                             }
+                            merged.insert(right_index);
                         }
                     }
+                    _ => { /* cannot squash incompatible types */ }
                 }
-                _ => { /* cannot squash incompatible types */ }
             }
-
-            // Finally, remove the BlockCells in bulk.
-            work.moved(self.inner.len() - end_idx - 1);
-            self.inner.drain(start_idx..=end_idx);
         }
+        // Remove the merged blocks, moving each kept one at most once.
+        let Some(&first) = merged.first() else {
+            return;
+        };
+        work.moved(self.inner.len() - first);
+        let mut write = first;
+        for read in first..self.inner.len() {
+            if !merged.contains(&read) {
+                self.inner.swap(write, read);
+                write += 1;
+            }
+        }
+        self.inner.truncate(write);
     }
 
     /// Attempts to squash block at a given `index` with a corresponding block on its left side.
