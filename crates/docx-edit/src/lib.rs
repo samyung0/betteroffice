@@ -486,23 +486,6 @@ impl EditingDoc {
         self.create_story_with_paragraph_id(story_id, para_id, initial_text, p_style, alignment)
     }
 
-    /// Adds empty stories for a seed to fill. They hold no paragraph mark:
-    /// one the seed's ops deleted again cost yrs a block-list compaction per
-    /// story at commit.
-    pub(crate) fn create_empty_stories(&self, story_ids: &[String]) -> EditResult<()> {
-        let mut txn = self.doc.transact_mut_with(self.client_id);
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        for story_id in story_ids {
-            if stories.contains_key(&txn, story_id) {
-                return Err(EditError::StoryExists(story_id.clone()));
-            }
-            stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
-        }
-        Ok(())
-    }
-
     /// Adds a one-paragraph story with a caller-supplied paragraph ID.
     pub fn create_story_with_paragraph_id(
         &self,

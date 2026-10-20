@@ -6,8 +6,8 @@ use std::sync::Arc;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
-    TransactionMut,
+    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim,
+    TextRef, TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -84,13 +84,21 @@ impl EditingDoc {
         apply_raw_ops_to_story(&mut txn, story_id, ops, false)
     }
 
+    /// A story a batch names that does not exist yet starts empty: a seed
+    /// creates every story with an empty batch first, then fills them.
     pub(crate) fn apply_raw_story_batches(
         &self,
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
+        let stories = txn
+            .get_map(crate::STORIES)
+            .expect("stories root is declared by EditingDoc::new");
         for (story_id, ops) in batches {
+            if !stories.contains_key(&txn, &story_id) {
+                stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
+            }
             apply_raw_ops_to_story(&mut txn, &story_id, ops, true)?;
         }
         Ok(())
@@ -1114,11 +1122,11 @@ mod tests {
     fn insert_batch_matches_legacy_for_seed_shaped_ops() {
         let ctx = EditCtx::local(String::new(), String::new());
         let legacy = EditingDoc::new(7);
-        legacy.create_empty_stories(&["body".into()]).unwrap();
+        legacy.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
         apply_raw_ops_legacy_to_doc(&legacy, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let batched = EditingDoc::new(7);
-        batched.create_empty_stories(&["body".into()]).unwrap();
+        batched.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
         batched
             .apply_raw_ops("body", seed_shaped_ops(), &ctx)
             .unwrap();
@@ -1436,7 +1444,7 @@ mod tests {
     fn legacy_seeded_state_loads_and_merges_under_the_batched_applier() {
         let ctx = EditCtx::local(String::new(), String::new());
         let original = EditingDoc::new(1);
-        original.create_empty_stories(&["body".into()]).unwrap();
+        original.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
         apply_raw_ops_legacy_to_doc(&original, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let restored = EditingDoc::new(2);

@@ -1069,7 +1069,10 @@ export interface YrsSession extends CollaborationReplica {
   tableOfContentsCount(): number;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
-  /** Applies seed raw operations with deterministic item ordering. */
+  /**
+   * Applies seed raw operations with deterministic item ordering; a story
+   * that does not exist yet starts empty.
+   */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;

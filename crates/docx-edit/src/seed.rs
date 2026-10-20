@@ -4392,13 +4392,16 @@ pub fn seed_parsed_docx_in_place(
         })
         .collect::<Result<Vec<_>, String>>()?;
     drop(parsed);
+    let ctx = EditCtx::local(String::new(), String::new());
+    // Every story first, empty, then their content (documentToYrs does the same).
     document
-        .create_empty_stories(
-            &context
+        .apply_raw_story_batches(
+            context
                 .plans
                 .iter()
-                .map(|plan| plan.story_id.clone())
-                .collect::<Vec<_>>(),
+                .map(|plan| (plan.story_id.clone(), Vec::new()))
+                .collect(),
+            &ctx,
         )
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
@@ -4409,7 +4412,7 @@ pub fn seed_parsed_docx_in_place(
     }
     batches.push(("body".to_owned(), comment_ops));
     document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .apply_raw_story_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
     Ok(referenced_fonts.into_iter().collect())
 }
@@ -4489,13 +4492,15 @@ mod tests {
             },
         );
         let document = EditingDoc::new(74101);
+        let ctx = EditCtx::local(String::new(), String::new());
         document
-            .create_empty_stories(
-                &context
+            .apply_raw_story_batches(
+                context
                     .plans
                     .iter()
-                    .map(|plan| plan.story_id.clone())
-                    .collect::<Vec<_>>(),
+                    .map(|plan| (plan.story_id.clone(), Vec::new()))
+                    .collect(),
+                &ctx,
             )
             .unwrap();
         let batches = context

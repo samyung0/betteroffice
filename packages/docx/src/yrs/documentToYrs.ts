@@ -1894,7 +1894,7 @@ function visitStory(
 }
 
 function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
-  const ops: YrsRawOp[] = [{ op: 'delete', index: 0, len: 1 }];
+  const ops: YrsRawOp[] = [];
   let index = 0;
   let text = '';
   let attrs: YrsAttrs = {};
@@ -2060,7 +2060,8 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     });
   }
 
-  for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
+  // Every story first, empty (an empty seed batch creates it), as seed.rs does.
+  for (const plan of context.plans) session.applySeedRawOps(plan.storyId, []);
   for (const plan of context.plans) seedPlan(session, plan);
   session.applySeedRawOps(
     'body',
