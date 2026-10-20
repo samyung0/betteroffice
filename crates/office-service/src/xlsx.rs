@@ -24,12 +24,16 @@ use crate::types::{
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
 /// Cells one `set_range` sets or `format_cells` formats, or one row or column
-/// delete removes.
+/// delete removes; also the cells one call writes across its commands (Epo
+/// 2026-10-20, review finding 3).
 const MAX_EDIT_CELLS: u64 = 10_000;
 /// Cells one scoped read covers.
 const MAX_READ_CELLS: u64 = 2_000;
 /// Characters of a refused range's TSV the refusal carries.
 const MAX_SHOWN_CHARS: usize = 2_000;
+/// Cells of a refused band's grid the refusal carries, an empty row counting
+/// as one.
+const MAX_SHOWN_CELLS: usize = 2_000;
 
 pub(crate) fn now_options() -> CalculationOptions {
     CalculationOptions {
@@ -37,8 +41,11 @@ pub(crate) fn now_options() -> CalculationOptions {
     }
 }
 
+/// One call's workbook: `apply_commands` and `create` open one per call.
 pub(crate) struct XlsxSession {
     workbook: Workbook,
+    /// Cells the call's commands wrote so far, toward [`MAX_EDIT_CELLS`].
+    written: u64,
 }
 
 impl XlsxSession {
@@ -52,11 +59,27 @@ impl XlsxSession {
                 .map_err(Error::engine)?;
             workbook.sheet_info().map_err(Error::engine)?;
         }
-        Ok(Self { workbook })
+        Ok(Self {
+            workbook,
+            written: 0,
+        })
     }
 
     pub fn state(&self) -> Vec<u8> {
         self.workbook.encode_state_as_update_v1()
+    }
+
+    /// Counts a command's `cells` toward its call, refused once the call
+    /// passes [`MAX_EDIT_CELLS`]: a range's area, a delete's stored cells.
+    fn write(&mut self, cells: u64) -> Result<()> {
+        self.written += cells;
+        if self.written > MAX_EDIT_CELLS {
+            return Err(invalid(format!(
+                "this call's commands write at least {} cells; a call writes at most {MAX_EDIT_CELLS} cells across its commands, so split the edit into several calls",
+                self.written
+            )));
+        }
+        Ok(())
     }
 
     /// `checkpointProjectionJson` (`full`) or `checkpointCellsJson` without
@@ -296,6 +319,7 @@ impl XlsxSession {
         expected_value: &str,
         value: &str,
     ) -> Result<Applied> {
+        self.write(1)?;
         let cells = self.projection(false)?;
         let (index, found) = find_sheet(&cells, sheet)?;
         let sheet_id = text(found.get("id"));
@@ -388,6 +412,7 @@ impl XlsxSession {
                 )));
             }
         }
+        self.write(rows * columns)?;
         let formulas = self.formulas();
         for (at, value) in cells(area).zip(values.iter().flatten()) {
             formulas.check(&at.to_a1(), value)?;
@@ -471,6 +496,7 @@ impl XlsxSession {
                 rows * columns
             )));
         }
+        self.write(rows * columns)?;
         let patch = &style.patch;
         if let Some(font) = &patch.font_family
             && !(1..=31).contains(&font.chars().count())
@@ -584,7 +610,7 @@ impl XlsxSession {
                     sheet: sheet.id,
                     at: at + 1,
                     count,
-                    expected: String::new(),
+                    expected: Vec::new(),
                 },
             )
         } else {
@@ -598,7 +624,7 @@ impl XlsxSession {
                     sheet: sheet.id,
                     at: column_letters(at),
                     count,
-                    expected: String::new(),
+                    expected: Vec::new(),
                 },
             )
         };
@@ -606,8 +632,15 @@ impl XlsxSession {
     }
 
     /// Refused when the band holds more than [`MAX_EDIT_CELLS`] stored cells
-    /// or its inputs differ from `expected`. No inverse.
-    fn delete_band(&mut self, sheet: &str, band: Band, expected: &str) -> Result<Applied> {
+    /// or its inputs differ from `expected`, a grid of rows whose trailing
+    /// empty cells and rows may be left out (Epo 2026-10-20, review finding
+    /// 6). No inverse.
+    fn delete_band(
+        &mut self,
+        sheet: &str,
+        band: Band,
+        expected: &[Vec<String>],
+    ) -> Result<Applied> {
         let sheet = self.sheet_ref(sheet)?;
         let model = self.workbook.model();
         let stored: Vec<CellRef> = model.sheets[sheet.index]
@@ -622,6 +655,7 @@ impl XlsxSession {
                 stored.len()
             )));
         }
+        self.write(stored.len() as u64)?;
         let mut current: BTreeMap<(u32, u32), (String, String)> = BTreeMap::new();
         for at in stored {
             let cell = self.read(sheet.index, at)?;
@@ -629,53 +663,34 @@ impl XlsxSession {
                 current.insert(band.place(at), cell);
             }
         }
-        let wanted: Vec<Vec<&str>> = expected
-            .split('\n')
-            .map(|line| {
-                line.strip_suffix('\r')
-                    .unwrap_or(line)
-                    .split('\t')
-                    .collect()
-            })
-            .collect();
         let empty = (String::new(), String::new());
-        let wanted_matches = wanted.iter().enumerate().all(|(line, cells)| {
+        let wanted_matches = expected.iter().enumerate().all(|(line, cells)| {
             cells.iter().enumerate().all(|(column, want)| {
                 let (input, shown) = current.get(&(line as u32, column as u32)).unwrap_or(&empty);
                 want == input || want == shown
             })
         });
         let current_covered = current.keys().all(|(line, column)| {
-            wanted
+            expected
                 .get(*line as usize)
                 .is_some_and(|cells| (*column as usize) < cells.len())
         });
         if !wanted_matches || !current_covered {
-            let lines = current.keys().map(|(line, _)| line + 1).max().unwrap_or(0);
-            let rows: Vec<Vec<&str>> = (0..lines)
-                .map(|line| {
-                    let width = current
-                        .range((line, 0)..(line + 1, 0))
-                        .map(|((_, column), _)| column + 1)
-                        .max()
-                        .unwrap_or(0);
-                    (0..width)
-                        .map(|column| {
-                            current
-                                .get(&(line, column))
-                                .map_or("", |(input, _)| input.as_str())
-                        })
-                        .collect()
-                })
-                .collect();
+            // The exact grid to copy into `expected`, and its TSV to read.
+            let (grid, cut) = band_grid(&current);
+            let mut block = serde_json::json!({
+                "id": format!("{}!{}", sheet.name, band.label()),
+                "type": "range",
+                "text": capped(tsv(grid.iter().map(Vec::as_slice))),
+                "grid": grid,
+            });
+            if cut {
+                block["gridCut"] = serde_json::Value::Bool(true);
+            }
             return Err(Error::Edit {
                 code: EditCode::StaleTarget,
                 message: format!("{} differs from expected; read it again", band.label()),
-                details: Some(serde_json::json!({ "block": {
-                    "id": format!("{}!{}", sheet.name, band.label()),
-                    "type": "range",
-                    "text": capped(tsv(rows.iter().map(Vec::as_slice))),
-                }})),
+                details: Some(serde_json::json!({ "block": block })),
             });
         }
         let index = SheetId(sheet.index as u32);
@@ -1058,7 +1073,7 @@ impl Band {
         index >= self.at && index - self.at < self.count
     }
 
-    /// The cell's line and column in the band's TSV: rows list their cells
+    /// The cell's line and column in the band's grid: rows list their cells
     /// from column A, columns list theirs from row 1.
     fn place(&self, cell: CellRef) -> (u32, u32) {
         if self.rows {
@@ -1105,6 +1120,38 @@ fn cells(range: CellRange) -> impl Iterator<Item = CellRef> {
     (range.start.row..=range.end.row).flat_map(move |row| {
         (range.start.col..=range.end.col).map(move |col| CellRef::new(row, col))
     })
+}
+
+/// A band's non-empty inputs by (line, cell) as rows of cells, each to its
+/// last non-empty cell, cut after [`MAX_SHOWN_CELLS`]; `true` when cut.
+fn band_grid(current: &BTreeMap<(u32, u32), (String, String)>) -> (Vec<Vec<&str>>, bool) {
+    let lines = current.keys().next_back().map_or(0, |(line, _)| line + 1);
+    let mut left = MAX_SHOWN_CELLS;
+    let mut grid = Vec::new();
+    for line in 0..lines {
+        if left == 0 {
+            return (grid, true);
+        }
+        let width = current
+            .range((line, 0)..(line + 1, 0))
+            .next_back()
+            .map_or(0, |((_, column), _)| *column as usize + 1);
+        let shown = width.min(left);
+        grid.push(
+            (0..shown as u32)
+                .map(|column| {
+                    current
+                        .get(&(line, column))
+                        .map_or("", |(input, _)| input.as_str())
+                })
+                .collect(),
+        );
+        left -= shown.max(1);
+        if shown < width {
+            return (grid, true);
+        }
+    }
+    (grid, false)
 }
 
 fn tsv<'a>(rows: impl Iterator<Item = &'a [&'a str]>) -> String {

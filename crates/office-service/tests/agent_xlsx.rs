@@ -414,7 +414,7 @@ fn rows_and_columns_are_inserted_and_deleted_when_their_cells_are_as_expected() 
             sheet: "sheet:0".into(),
             at: 2,
             count: 1,
-            expected: String::new(),
+            expected: Vec::new(),
         }])
     );
     book.apply(&insert.inverse.unwrap()).unwrap();
@@ -425,13 +425,15 @@ fn rows_and_columns_are_inserted_and_deleted_when_their_cells_are_as_expected() 
             sheet: "Sheet1".into(),
             at: 1,
             count: 1,
-            expected: "1".into(),
+            expected: grid(&[&["1"]]),
         })
         .unwrap_err(),
         refusal(
             EditCode::StaleTarget,
             "1:1 differs from expected; read it again",
-            Some(json!({ "block": { "id": "Sheet1!1:1", "type": "range", "text": "1\tx" } })),
+            Some(json!({ "block": {
+                "id": "Sheet1!1:1", "type": "range", "text": "1\tx", "grid": [["1", "x"]],
+            } })),
         )
     );
     let delete = book
@@ -439,7 +441,7 @@ fn rows_and_columns_are_inserted_and_deleted_when_their_cells_are_as_expected() 
             sheet: "Sheet1".into(),
             at: 2,
             count: 1,
-            expected: "2\ty".into(),
+            expected: grid(&[&["2", "y"]]),
         }])
         .unwrap();
     assert_eq!(delete.inverse, None);
@@ -453,7 +455,7 @@ fn rows_and_columns_are_inserted_and_deleted_when_their_cells_are_as_expected() 
             sheet: "Sheet1".into(),
             at: "b".into(),
             count: 1,
-            expected: "x".into(),
+            expected: grid(&[&["x"]]),
         },
         Command::InsertColumns {
             sheet: "Sheet1".into(),
@@ -468,38 +470,165 @@ fn rows_and_columns_are_inserted_and_deleted_when_their_cells_are_as_expected() 
             sheet: "Sheet1".into(),
             at: "C".into(),
             count: 1,
-            expected: String::new(),
+            expected: Vec::new(),
         })
         .unwrap_err(),
         refusal(
             EditCode::StaleTarget,
             "C:C differs from expected; read it again",
-            Some(json!({ "block": { "id": "Sheet1!C:C", "type": "range", "text": "1\n3" } })),
+            Some(json!({ "block": {
+                "id": "Sheet1!C:C", "type": "range", "text": "1\n3", "grid": [["1"], ["3"]],
+            } })),
         )
     );
 }
 
 #[test]
 fn a_row_or_column_delete_removes_at_most_ten_thousand_cells() {
-    let column: Vec<Vec<String>> = (1..=10_000).map(|row| vec![row.to_string()]).collect();
-    let mut book = Book::created(&[
-        Command::SetRange {
-            sheet: "Sheet1".into(),
-            range: "A1:A10000".into(),
-            expected: vec![vec![String::new()]; 10_000],
-            values: column,
-        },
-        set_range("Sheet1", "A10001", &[&[""]], &[&["last"]]),
-    ]);
+    let mut book = Book::created(&[column_of(10_000, "A")]);
+    book.apply(&[set_range("Sheet1", "A10001", &[&[""]], &[&["last"]])])
+        .unwrap();
     assert_eq!(
         book.apply(&[Command::DeleteColumns {
             sheet: "Sheet1".into(),
             at: "A".into(),
             count: 1,
-            expected: String::new(),
+            expected: Vec::new(),
         }])
         .unwrap_err(),
         invalid("A:A holds 10001 cells; delete at most 10000 cells per command")
+    );
+}
+
+/// `set_range` filling `letter1:letter<rows>` of an empty sheet with 1, 2, …
+fn column_of(rows: usize, letter: &str) -> Command {
+    Command::SetRange {
+        sheet: "Sheet1".into(),
+        range: format!("{letter}1:{letter}{rows}"),
+        expected: vec![vec![String::new()]; rows],
+        values: (1..=rows).map(|row| vec![row.to_string()]).collect(),
+    }
+}
+
+/// A delete names its band as a grid of rows, so a cell holding a line break
+/// or a tab matches exactly (Epo 2026-10-20, review finding 6).
+#[test]
+fn a_band_holding_tabs_and_line_breaks_is_deleted_with_its_grid() {
+    let mut book = Book::created(&[set_range(
+        "Sheet1",
+        "A1:B3",
+        &[&["", ""], &["", ""], &["", ""]],
+        &[&["a\nb", "x"], &["keep", ""], &["c\td", ""]],
+    )]);
+    book.apply(&[
+        Command::DeleteRows {
+            sheet: "Sheet1".into(),
+            at: 3,
+            count: 1,
+            expected: grid(&[&["c\td"]]),
+        },
+        Command::DeleteRows {
+            sheet: "Sheet1".into(),
+            at: 1,
+            count: 1,
+            expected: grid(&[&["a\nb", "x"]]),
+        },
+    ])
+    .unwrap();
+    assert_eq!(book.cells("Sheet1", "A1:B3"), ["A1=keep→keep"]);
+}
+
+/// A stale band's refusal carries its first 2,000 cells as the grid and says
+/// it is cut.
+#[test]
+fn a_stale_band_carries_its_grid_cut_at_two_thousand_cells() {
+    let mut book = Book::created(&[column_of(2_001, "A")]);
+    let Error::Edit { code, details, .. } = book
+        .apply(&[Command::DeleteColumns {
+            sheet: "Sheet1".into(),
+            at: "A".into(),
+            count: 1,
+            expected: Vec::new(),
+        }])
+        .unwrap_err()
+    else {
+        panic!("an edit refusal");
+    };
+    assert_eq!(code, EditCode::StaleTarget);
+    let block = &details.unwrap()["block"];
+    let rows = block["grid"].as_array().unwrap();
+    assert_eq!((rows.len(), &rows[1999]), (2_000, &json!(["2000"])));
+    assert_eq!(block["gridCut"], json!(true));
+}
+
+/// One call writes at most 10,000 cells across its commands: ranges by area,
+/// deletes by their stored cells, inserts and sheet changes none (Epo
+/// 2026-10-20, review finding 3).
+#[test]
+fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
+    let call_cap = |total: u64| {
+        invalid(&format!(
+            "this call's commands write at least {total} cells; a call writes at most 10000 cells across its commands, so split the edit into several calls"
+        ))
+    };
+    let mut book = Book::created(&[column_of(9_000, "A")]);
+    assert_eq!(
+        book.apply(&[
+            column_of(6_000, "B"),
+            Command::FormatCells {
+                sheet: "Sheet1".into(),
+                range: "C1:C5000".into(),
+                style: CellStyle {
+                    patch: StylePatch {
+                        bold: Some(true),
+                        ..StylePatch::default()
+                    },
+                    number_format: None,
+                },
+            },
+        ])
+        .unwrap_err(),
+        call_cap(11_000)
+    );
+    let column: Vec<Vec<String>> = (1..=9_000).map(|row| vec![row.to_string()]).collect();
+    assert_eq!(
+        book.apply(&[
+            column_of(1_001, "B"),
+            Command::DeleteColumns {
+                sheet: "Sheet1".into(),
+                at: "A".into(),
+                count: 1,
+                expected: column,
+            },
+        ])
+        .unwrap_err(),
+        call_cap(10_001)
+    );
+    book.apply(&[
+        column_of(10_000, "B"),
+        Command::InsertRows {
+            sheet: "Sheet1".into(),
+            at: 1,
+            count: 1,
+        },
+        Command::AddSheet {
+            name: "More".into(),
+            after: None,
+        },
+    ])
+    .unwrap();
+    let Error::Edit { code, message, .. } = create(
+        Format::Xlsx,
+        starter(Format::Xlsx).unwrap(),
+        &[column_of(6_000, "A"), column_of(6_000, "B")],
+        DETERMINISM,
+    )
+    .unwrap_err() else {
+        panic!("an edit refusal");
+    };
+    assert_eq!(
+        (code, message.contains("at least 12000 cells")),
+        (EditCode::InvalidInput, true)
     );
 }
 
@@ -758,9 +887,9 @@ fn commands_parse_from_their_wire_json() {
         { "type": "rename_sheet", "sheet": "sheet:1", "expectedName": "Data", "name": "Grades" },
         { "type": "delete_sheet", "sheet": "sheet:1", "expectedName": "Grades" },
         { "type": "insert_rows", "sheet": "Sheet1", "at": 2, "count": 3 },
-        { "type": "delete_rows", "sheet": "Sheet1", "at": 2, "count": 1, "expected": "2\ty" },
+        { "type": "delete_rows", "sheet": "Sheet1", "at": 2, "count": 1, "expected": [["2", "y"]] },
         { "type": "insert_columns", "sheet": "Sheet1", "at": "B", "count": 1 },
-        { "type": "delete_columns", "sheet": "Sheet1", "at": "B", "count": 1, "expected": "" },
+        { "type": "delete_columns", "sheet": "Sheet1", "at": "B", "count": 1, "expected": [] },
     ]))
     .unwrap();
     assert_eq!(
@@ -787,7 +916,7 @@ fn commands_parse_from_their_wire_json() {
             sheet: "Sheet1".into(),
             at: "B".into(),
             count: 1,
-            expected: String::new(),
+            expected: Vec::new(),
         }
     );
     // A delete names the band it expects (Epo 2026-10-20); the collaboration
