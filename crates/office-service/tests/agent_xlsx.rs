@@ -775,3 +775,25 @@ fn commands_parse_from_their_wire_json() {
         }
     );
 }
+
+#[test]
+fn create_office_over_the_wire_answers_the_new_file() {
+    let request = json!({
+        "method": "createOffice",
+        "args": [
+            "xlsx",
+            [{ "type": "set_range", "sheet": "Sheet1", "range": "A1:B1",
+               "expected": [["", ""]], "values": [["2", "=A1*3"]] }],
+            { "seed": DETERMINISM.seed, "now": DETERMINISM.now },
+        ],
+    });
+    let answer: Value =
+        serde_json::from_slice(&office_service::wire::call(request.to_string().as_bytes()))
+            .unwrap();
+    assert_eq!(answer["value"]["notice"], Value::Null, "{answer}");
+    let bytes = office_service::wire::bytes(&answer["value"]["bytes"]).unwrap();
+    assert_eq!(
+        Book::new(bytes).cells("Sheet1", "A1:B1"),
+        ["A1=2→2", "B1==A1*3→6"]
+    );
+}

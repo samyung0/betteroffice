@@ -1,7 +1,7 @@
 //! The JSON boundary: the Office worker's `{method, args}` messages with
 //! `Uint8Array`s as `{"$bytes": base64}`, answered with `{"value"}` or
-//! `{"error", "kind"}` (and an edit refusal's `"details"`). The parity harness and the benchmark CLI use it;
-//! a server uses the typed API.
+//! `{"error", "kind"}` (and an edit refusal's `"details"`). The parity harness, the benchmark CLI
+//! and Capy's agent playground (`office-service serve`) use it; a server uses the typed API.
 
 use std::sync::OnceLock;
 
@@ -90,6 +90,16 @@ fn typed<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, Error> {
 
 fn value(result: impl serde::Serialize) -> Result<Value, Error> {
     serde_json::to_value(result).map_err(invalid)
+}
+
+/// `{seed, now}` as an export's determinism; missing fields are refused by
+/// the call.
+fn determinism(value: &Value) -> Determinism<'_> {
+    let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
+    Determinism {
+        seed: text("seed"),
+        now: text("now"),
+    }
 }
 
 fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
@@ -187,22 +197,17 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
             }))
         }
         "exportOffice" => {
-            let determinism = arg(args, 2);
-            let text = |key: &str| {
-                determinism
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-            };
-            let exported = crate::export(
-                &base()?,
-                checkpoint(1)?.view(),
-                Determinism {
-                    seed: text("seed"),
-                    now: text("now"),
-                },
-            )?;
+            let exported =
+                crate::export(&base()?, checkpoint(1)?.view(), determinism(arg(args, 2)))?;
             Ok(to_bytes(&exported))
+        }
+        "createOffice" => {
+            let format: Format = typed(arg(args, 0))?;
+            let commands: Vec<Command> = typed(arg(args, 1))?;
+            let starter = crate::starter(format)
+                .ok_or_else(|| Error::Invalid(format!("no {} starter", format.as_str())))?;
+            let created = crate::create(format, starter, &commands, determinism(arg(args, 2)))?;
+            Ok(json!({ "bytes": to_bytes(&created.bytes), "notice": created.notice }))
         }
         "inspectOffice" => value(crate::inspect(&base()?, checkpoint(1)?.view())?),
         "inspectOfficeScoped" => {
