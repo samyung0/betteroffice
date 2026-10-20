@@ -11,7 +11,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::env::{Env, with_env};
-use crate::types::{BaselineEntry, Checkpoint, Command, Determinism, Format, ObjectRef};
+use crate::types::{
+    BaselineEntry, Checkpoint, Command, Determinism, Format, InspectQuery, ObjectRef,
+};
 use crate::{Error, XlsxReplicas};
 
 #[derive(Deserialize)]
@@ -203,6 +205,10 @@ fn dispatch(method: &str, args: &[Value]) -> Result<Value, Error> {
             Ok(to_bytes(&exported))
         }
         "inspectOffice" => value(crate::inspect(&base()?, checkpoint(1)?.view())?),
+        "inspectOfficeScoped" => {
+            let query: InspectQuery = typed(arg(args, 2))?;
+            crate::inspect_scoped(&base()?, checkpoint(1)?.view(), &query)
+        }
         "applyOfficeCommands" => {
             let commands: Vec<Command> = typed(arg(args, 2))?;
             let result = crate::apply_commands(&base()?, checkpoint(1)?.view(), &commands)?;

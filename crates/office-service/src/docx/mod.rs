@@ -590,12 +590,12 @@ impl DocxSession {
         }
         self.projected = None;
         Ok(Applied {
-            id: target_id.clone(),
-            inverse: Command::ReplaceText {
+            ids: vec![target_id.clone()],
+            inverse: Some(Command::ReplaceText {
                 target_id: target_id.clone(),
                 expected_text: text,
                 text: storable_text(&paragraph.text),
-            },
+            }),
         })
     }
 

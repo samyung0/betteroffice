@@ -76,10 +76,11 @@ impl Item {
     }
 }
 
-/// One applied command: the target id and the command that undoes it.
+/// One applied command: the target ids it touched and the command that
+/// undoes it, if it has one.
 pub(crate) struct Applied {
-    pub id: String,
-    pub inverse: Command,
+    pub ids: Vec<String>,
+    pub inverse: Option<Command>,
 }
 
 /// office-checkpoint.ts `compareBaselines`.

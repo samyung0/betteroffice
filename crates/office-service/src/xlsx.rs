@@ -1,21 +1,34 @@
 //! XLSX sessions over `betteroffice_xlsx::Workbook`, as office-checkpoint.ts
 //! drives `XlsxDocument` and `XlsxEffectsReader`.
 
-use betteroffice_xlsx::{CalculationOptions, CellRef, SheetId, Workbook};
+use std::collections::BTreeMap;
+
+use betteroffice_xlsx::{
+    CalculationOptions, CellInput, CellRange, CellRef, MAX_COLS, MAX_ROWS, NumberFormatMutation,
+    Op, SheetId, StylePatch, Workbook,
+};
 use serde::Serialize;
 
 use crate::common::{assert_checkpoint, image_mime_type, sha256_hex, storable_text};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
+use crate::formula::Formulas;
 use crate::js::{J, canonical};
 use crate::session::{Applied, Item};
 use crate::types::{
-    Asset, Checkpoint, Command, EffectKind, Entry, Format, NetEffect, ObjectKind, ObjectRef, Target,
+    Asset, CellStyle, Checkpoint, Command, EffectKind, Entry, Format, InspectQuery, NetEffect,
+    ObjectKind, ObjectRef, Target,
 };
 
 /// Days from the 1900 epoch to 1970-01-01, phantom leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
+/// Cells one `set_range` sets, or one row or column delete removes.
+const MAX_EDIT_CELLS: u64 = 10_000;
+/// Cells one scoped read covers.
+const MAX_READ_CELLS: u64 = 2_000;
+/// Characters of a refused range's TSV the refusal carries.
+const MAX_SHOWN_CHARS: usize = 2_000;
 
 pub(crate) fn now_options() -> CalculationOptions {
     CalculationOptions {
@@ -222,22 +235,71 @@ impl XlsxSession {
     }
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {
-        let Command::SetCell {
-            sheet,
-            cell,
-            expected_value,
-            value,
-        } = command
-        else {
-            return Err(Error::edit(
+        match command {
+            Command::SetCell {
+                sheet,
+                cell,
+                expected_value,
+                value,
+            } => self.set_cell(sheet, cell, expected_value, value),
+            Command::SetRange {
+                sheet,
+                range,
+                expected,
+                values,
+            } => self.set_range(sheet, range, expected, values),
+            Command::FormatCells {
+                sheet,
+                range,
+                style,
+            } => self.format_cells(sheet, range, style),
+            Command::AddSheet { name, after } => self.add_sheet(name, after.as_deref()),
+            Command::RenameSheet {
+                sheet,
+                expected_name,
+                name,
+            } => self.rename_sheet(sheet, expected_name, name),
+            Command::DeleteSheet {
+                sheet,
+                expected_name,
+            } => self.delete_sheet(sheet, expected_name),
+            Command::InsertRows { sheet, at, count } => {
+                self.insert_band(sheet, Band::rows(*at, *count)?)
+            }
+            Command::DeleteRows {
+                sheet,
+                at,
+                count,
+                expected,
+            } => self.delete_band(sheet, Band::rows(*at, *count)?, expected),
+            Command::InsertColumns { sheet, at, count } => {
+                self.insert_band(sheet, Band::columns(at, *count)?)
+            }
+            Command::DeleteColumns {
+                sheet,
+                at,
+                count,
+                expected,
+            } => self.delete_band(sheet, Band::columns(at, *count)?, expected),
+            Command::ReplaceText { .. } => Err(Error::edit(
                 EditCode::UnsupportedOperation,
                 "XLSX sources support set_cell only",
-            ));
-        };
+            )),
+        }
+    }
+
+    fn set_cell(
+        &mut self,
+        sheet: &str,
+        cell: &str,
+        expected_value: &str,
+        value: &str,
+    ) -> Result<Applied> {
         let cells = self.projection(false)?;
         let (index, found) = find_sheet(&cells, sheet)?;
         let sheet_id = text(found.get("id"));
         let (row, col, address) = a1(cell)?;
+        self.formulas().check(&address, value)?;
         let at = CellRef::new(row, col);
         let read_input = |workbook: &Workbook| {
             workbook
@@ -247,8 +309,8 @@ impl XlsxSession {
         };
         let before = self.cell_at(index, &address)?;
         let input = read_input(&self.workbook)?;
-        if *expected_value != input
-            && *expected_value != before.as_ref().map(cell_value).unwrap_or_default()
+        if expected_value != input
+            && expected_value != before.as_ref().map(cell_value).unwrap_or_default()
         {
             // The cell as inspect lists it; an empty cell is not listed.
             return Err(Error::Edit {
@@ -288,38 +350,497 @@ impl XlsxSession {
             }
         };
         Ok(Applied {
-            id: text(cell.get("id")),
-            inverse: Command::SetCell {
+            ids: vec![text(cell.get("id"))],
+            inverse: Some(Command::SetCell {
                 sheet: sheet_id,
                 cell: address,
                 expected_value: read_input(&self.workbook)?,
                 value: storable_text(&input),
-            },
+            }),
         })
     }
 
-    pub fn locate(&self, id: &str) -> Result<Target> {
-        let marker = id.find(":[").filter(|marker| *marker > 0).ok_or_else(|| {
-            Error::edit(EditCode::UnavailableTarget, "target_id is not an XLSX cell")
-        })?;
-        let sheet_id = &id[..marker];
-        let info = self.workbook.sheet_info().map_err(Error::engine)?;
-        if !info.sheet_ids.iter().any(|known| known == sheet_id) {
-            return Err(Error::edit(
-                EditCode::UnavailableTarget,
-                "the sheet is no longer in the workbook",
+    /// One `edit_cells` for the whole range, refused whole when a cell
+    /// differs from `expected`. The inverse swaps the two grids.
+    fn set_range(
+        &mut self,
+        sheet: &str,
+        range: &str,
+        expected: &[Vec<String>],
+        values: &[Vec<String>],
+    ) -> Result<Applied> {
+        let sheet = self.sheet_ref(sheet)?;
+        let area = cell_range(range)?;
+        let (rows, columns) = shape(area);
+        if rows * columns > MAX_EDIT_CELLS {
+            return Err(invalid(format!(
+                "{} has {} cells; set at most {MAX_EDIT_CELLS} cells per command",
+                area.to_a1(),
+                rows * columns
+            )));
+        }
+        for (label, grid) in [("expected", expected), ("values", values)] {
+            if grid.len() as u64 != rows || grid.iter().any(|row| row.len() as u64 != columns) {
+                return Err(invalid(format!(
+                    "{label} must be {rows} rows of {columns} cells, the shape of {}",
+                    area.to_a1()
+                )));
+            }
+        }
+        let formulas = self.formulas();
+        for (at, value) in cells(area).zip(values.iter().flatten()) {
+            formulas.check(&at.to_a1(), value)?;
+        }
+        let before = cells(area)
+            .map(|at| self.read(sheet.index, at))
+            .collect::<Result<Vec<_>>>()?;
+        let stale = before
+            .iter()
+            .zip(expected.iter().flatten())
+            .filter(|((input, shown), want)| *want != input && *want != shown)
+            .count();
+        if stale > 0 {
+            let inputs: Vec<&str> = before.iter().map(|(input, _)| input.as_str()).collect();
+            return Err(Error::Edit {
+                code: EditCode::StaleTarget,
+                message: format!(
+                    "{stale} of the range's cells differ from expected; read the range again"
+                ),
+                details: Some(serde_json::json!({ "block": {
+                    "id": format!("{}!{}", sheet.name, area.to_a1()),
+                    "type": "range",
+                    "text": capped(tsv(inputs.chunks(columns as usize))),
+                }})),
+            });
+        }
+        let at = SheetId(sheet.index as u32);
+        let edits: Vec<CellInput> = cells(area)
+            .zip(values.iter().flatten())
+            .map(|(cell, input)| CellInput {
+                cell,
+                input: input.clone(),
+            })
+            .collect();
+        self.workbook
+            .edit_cells(at, &edits, now_options())
+            .map_err(refused)?;
+        let after = cells(area)
+            .map(|cell| self.workbook.cell(at, cell).map(|cell| cell.input))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(refused)?;
+        let changed: Vec<(SheetId, CellRef)> = cells(area)
+            .zip(before.iter().zip(&after))
+            .filter(|(_, ((old, _), new))| old != *new)
+            .map(|(cell, _)| (at, cell))
+            .collect();
+        let grid = |inputs: Vec<String>| -> Vec<Vec<String>> {
+            inputs
+                .chunks(columns as usize)
+                .map(<[String]>::to_vec)
+                .collect()
+        };
+        Ok(Applied {
+            ids: self
+                .workbook
+                .cell_identities(changed)
+                .map_err(Error::engine)?,
+            inverse: Some(Command::SetRange {
+                sheet: sheet.id,
+                range: area.to_a1(),
+                expected: grid(after),
+                values: grid(
+                    before
+                        .iter()
+                        .map(|(input, _)| storable_text(input))
+                        .collect(),
+                ),
+            }),
+        })
+    }
+
+    /// One `apply_ops` for the style and the number format. No inverse.
+    fn format_cells(&mut self, sheet: &str, range: &str, style: &CellStyle) -> Result<Applied> {
+        let sheet = SheetId(self.sheet_ref(sheet)?.index as u32);
+        let range = cell_range(range)?;
+        let patch = &style.patch;
+        if let Some(font) = &patch.font_family
+            && !(1..=31).contains(&font.chars().count())
+        {
+            return Err(invalid("fontFamily must be 1 to 31 characters"));
+        }
+        for (field, color) in [
+            ("textColor", patch.text_color.as_ref()),
+            ("fillColor", patch.fill_color.as_ref()),
+            (
+                "border color",
+                patch
+                    .border
+                    .as_ref()
+                    .and_then(|border| border.color.as_ref()),
+            ),
+        ] {
+            if let Some(color) = color
+                && !(color.len() == 7
+                    && color.starts_with('#')
+                    && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+            {
+                return Err(invalid(format!(
+                    "{field} {color:?} must be a #RRGGBB colour"
+                )));
+            }
+        }
+        if let Some(NumberFormatMutation::Custom { pattern }) = &style.number_format
+            && !(1..=255).contains(&pattern.chars().count())
+        {
+            return Err(invalid(
+                "a custom numberFormat pattern must be 1 to 255 characters",
             ));
         }
-        Ok(Target {
-            id: id.to_owned(),
-            path: vec![
-                "xlsx:sheets".into(),
-                sheet_id.into(),
-                "contents".into(),
-                id[marker + 1..].into(),
-            ],
-            range: None,
+        let mut ops = Vec::new();
+        if *patch != StylePatch::default() {
+            ops.push(Op::PatchRangeStyle {
+                sheet,
+                range,
+                patch: patch.clone(),
+            });
+        }
+        if let Some(format) = &style.number_format {
+            ops.push(Op::SetRangeNumberFormat {
+                sheet,
+                range,
+                format: format.clone(),
+            });
+        }
+        if ops.is_empty() {
+            return Err(invalid(
+                "style sets nothing; set bold, italic, strikethrough, fontFamily, fontSize, textColor, fillColor, border, horizontalAlignment, verticalAlignment, textWrapping, clear or numberFormat",
+            ));
+        }
+        self.apply_ops(ops, None)
+    }
+
+    fn add_sheet(&mut self, name: &str, after: Option<&str>) -> Result<Applied> {
+        let index = match after {
+            Some(after) => self.sheet_ref(after)?.index + 1,
+            None => self.workbook.sheet_count(),
+        };
+        self.apply_ops(
+            vec![Op::AddSheet {
+                index,
+                name: name.to_owned(),
+            }],
+            None,
+        )
+    }
+
+    /// The inverse renames it back.
+    fn rename_sheet(&mut self, sheet: &str, expected_name: &str, name: &str) -> Result<Applied> {
+        let sheet = self.named_sheet(sheet, expected_name)?;
+        self.apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(sheet.index as u32),
+                name: name.to_owned(),
+            }],
+            Some(Command::RenameSheet {
+                sheet: sheet.id,
+                expected_name: name.to_owned(),
+                name: sheet.name,
+            }),
+        )
+    }
+
+    fn delete_sheet(&mut self, sheet: &str, expected_name: &str) -> Result<Applied> {
+        let sheet = self.named_sheet(sheet, expected_name)?;
+        if self.workbook.sheet_count() == 1 {
+            return Err(invalid(format!(
+                "{:?} is the workbook's only sheet; a workbook keeps at least one",
+                sheet.name
+            )));
+        }
+        self.apply_ops(vec![Op::RemoveSheet { index: sheet.index }], None)
+    }
+
+    /// The inverse deletes the new band, expecting it still empty.
+    fn insert_band(&mut self, sheet: &str, band: Band) -> Result<Applied> {
+        let sheet = self.sheet_ref(sheet)?;
+        let (index, at, count) = (SheetId(sheet.index as u32), band.at, band.count);
+        let (op, inverse) = if band.rows {
+            (
+                Op::InsertRows {
+                    sheet: index,
+                    at,
+                    count,
+                },
+                Command::DeleteRows {
+                    sheet: sheet.id,
+                    at: at + 1,
+                    count,
+                    expected: String::new(),
+                },
+            )
+        } else {
+            (
+                Op::InsertCols {
+                    sheet: index,
+                    at,
+                    count,
+                },
+                Command::DeleteColumns {
+                    sheet: sheet.id,
+                    at: column_letters(at),
+                    count,
+                    expected: String::new(),
+                },
+            )
+        };
+        self.apply_ops(vec![op], Some(inverse))
+    }
+
+    /// Refused when the band holds more than [`MAX_EDIT_CELLS`] stored cells
+    /// or its inputs differ from `expected`. No inverse.
+    fn delete_band(&mut self, sheet: &str, band: Band, expected: &str) -> Result<Applied> {
+        let sheet = self.sheet_ref(sheet)?;
+        let model = self.workbook.model();
+        let stored: Vec<CellRef> = model.sheets[sheet.index]
+            .iter_cells()
+            .map(|(at, _)| at)
+            .filter(|at| band.holds(*at))
+            .collect();
+        if stored.len() as u64 > MAX_EDIT_CELLS {
+            return Err(invalid(format!(
+                "{} holds {} cells; delete at most {MAX_EDIT_CELLS} cells per command",
+                band.label(),
+                stored.len()
+            )));
+        }
+        let mut current: BTreeMap<(u32, u32), (String, String)> = BTreeMap::new();
+        for at in stored {
+            let cell = self.read(sheet.index, at)?;
+            if !cell.0.is_empty() || !cell.1.is_empty() {
+                current.insert(band.place(at), cell);
+            }
+        }
+        let wanted: Vec<Vec<&str>> = expected
+            .split('\n')
+            .map(|line| {
+                line.strip_suffix('\r')
+                    .unwrap_or(line)
+                    .split('\t')
+                    .collect()
+            })
+            .collect();
+        let empty = (String::new(), String::new());
+        let wanted_matches = wanted.iter().enumerate().all(|(line, cells)| {
+            cells.iter().enumerate().all(|(column, want)| {
+                let (input, shown) = current.get(&(line as u32, column as u32)).unwrap_or(&empty);
+                want == input || want == shown
+            })
+        });
+        let current_covered = current.keys().all(|(line, column)| {
+            wanted
+                .get(*line as usize)
+                .is_some_and(|cells| (*column as usize) < cells.len())
+        });
+        if !wanted_matches || !current_covered {
+            let lines = current.keys().map(|(line, _)| line + 1).max().unwrap_or(0);
+            let rows: Vec<Vec<&str>> = (0..lines)
+                .map(|line| {
+                    let width = current
+                        .range((line, 0)..(line + 1, 0))
+                        .map(|((_, column), _)| column + 1)
+                        .max()
+                        .unwrap_or(0);
+                    (0..width)
+                        .map(|column| {
+                            current
+                                .get(&(line, column))
+                                .map_or("", |(input, _)| input.as_str())
+                        })
+                        .collect()
+                })
+                .collect();
+            return Err(Error::Edit {
+                code: EditCode::StaleTarget,
+                message: format!("{} differs from expected; read it again", band.label()),
+                details: Some(serde_json::json!({ "block": {
+                    "id": format!("{}!{}", sheet.name, band.label()),
+                    "type": "range",
+                    "text": capped(tsv(rows.iter().map(Vec::as_slice))),
+                }})),
+            });
+        }
+        let index = SheetId(sheet.index as u32);
+        let op = if band.rows {
+            Op::DeleteRows {
+                sheet: index,
+                at: band.at,
+                count: band.count,
+            }
+        } else {
+            Op::DeleteCols {
+                sheet: index,
+                at: band.at,
+                count: band.count,
+            }
+        };
+        self.apply_ops(vec![op], None)
+    }
+
+    /// `ops` as one engine edit; touched ids are left to the cells' commands.
+    fn apply_ops(&mut self, ops: Vec<Op>, inverse: Option<Command>) -> Result<Applied> {
+        self.workbook
+            .apply_ops(ops, now_options())
+            .map_err(refused)?;
+        Ok(Applied {
+            ids: Vec::new(),
+            inverse,
         })
+    }
+
+    /// Scoped reads without projecting the workbook: the sheet list, or the
+    /// non-empty cells of a range of at most [`MAX_READ_CELLS`].
+    pub fn inspect_scoped(&self, query: &InspectQuery) -> Result<serde_json::Value> {
+        let Some(range) = &query.range else {
+            let info = self.workbook.sheet_info().map_err(Error::engine)?;
+            let sheets: Vec<_> = info
+                .sheet_ids
+                .iter()
+                .zip(&info.sheet_names)
+                .enumerate()
+                .map(|(index, (id, name))| self.summary(index, id, name))
+                .collect();
+            return Ok(serde_json::json!({ "sheets": sheets }));
+        };
+        let sheet = query
+            .sheet
+            .as_deref()
+            .ok_or_else(|| invalid("a range read names its sheet"))?;
+        let sheet = self.sheet_ref(sheet)?;
+        let area = cell_range(range)?;
+        let (rows, columns) = shape(area);
+        if rows * columns > MAX_READ_CELLS {
+            return Err(invalid(format!(
+                "{} has {} cells; read at most {MAX_READ_CELLS} cells at a time, as a smaller range",
+                area.to_a1(),
+                rows * columns
+            )));
+        }
+        let model = self.workbook.model();
+        let mut cells = Vec::new();
+        for (at, _) in model.sheets[sheet.index].iter_cells_in_rect(
+            area.start.row..area.end.row + 1,
+            area.start.col..area.end.col + 1,
+        ) {
+            let (input, value) = self.read(sheet.index, at)?;
+            if !input.is_empty() {
+                cells.push(serde_json::json!({
+                    "address": at.to_a1(),
+                    "input": input,
+                    "value": value,
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "sheet": self.summary(sheet.index, &sheet.id, &sheet.name),
+            "range": area.to_a1(),
+            "cells": cells,
+        }))
+    }
+
+    /// `rows` and `columns` reach the used range's last row and column.
+    fn summary(&self, index: usize, id: &str, name: &str) -> serde_json::Value {
+        let used = self.workbook.model().sheets[index].used_range();
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "usedRange": used.map(|used| used.to_a1()),
+            "rows": used.map_or(0, |used| used.end.row + 1),
+            "columns": used.map_or(0, |used| used.end.col + 1),
+        })
+    }
+
+    /// A cell's input as typed and its text as the grid shows it.
+    fn read(&self, index: usize, at: CellRef) -> Result<(String, String)> {
+        let input = self
+            .workbook
+            .cell(SheetId(index as u32), at)
+            .map_err(refused)?
+            .input;
+        let model = self.workbook.model();
+        let shown = model.sheets[index]
+            .cell(at)
+            .map(|cell| xlsx_render::display_text(&model.styles, model.date_system, cell))
+            .unwrap_or_default();
+        Ok((input, shown))
+    }
+
+    fn formulas(&self) -> Formulas<'_> {
+        let model = self.workbook.model();
+        Formulas {
+            sheets: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.as_str())
+                .collect(),
+            names: &model.defined_names,
+        }
+    }
+
+    /// A sheet by id, name or index, as `xlsxSheet` finds one; an unknown one
+    /// is refused with the workbook's sheets.
+    fn sheet_ref(&self, sheet: &str) -> Result<SheetRef> {
+        let info = self.workbook.sheet_info().map_err(Error::engine)?;
+        let wanted = js_trim(sheet).to_lowercase();
+        let found = info
+            .sheet_ids
+            .iter()
+            .zip(&info.sheet_names)
+            .enumerate()
+            .find(|(index, (id, name))| {
+                *id == sheet || name.to_lowercase() == wanted || index.to_string() == wanted
+            });
+        match found {
+            Some((index, (id, name))) => Ok(SheetRef {
+                index,
+                id: id.clone(),
+                name: name.clone(),
+            }),
+            None => Err(Error::Edit {
+                code: EditCode::UnavailableTarget,
+                message: format!("the workbook has no sheet {sheet:?}"),
+                details: Some(serde_json::json!({
+                    "blocks": info
+                        .sheet_ids
+                        .iter()
+                        .zip(&info.sheet_names)
+                        .map(|(id, name)| serde_json::json!({ "id": id, "type": "sheet", "text": name }))
+                        .collect::<Vec<_>>(),
+                })),
+            }),
+        }
+    }
+
+    /// [`Self::sheet_ref`] refused as stale unless it is named `expected`.
+    fn named_sheet(&self, sheet: &str, expected: &str) -> Result<SheetRef> {
+        let sheet = self.sheet_ref(sheet)?;
+        if sheet.name != expected {
+            return Err(Error::Edit {
+                code: EditCode::StaleTarget,
+                message: format!("the sheet is named {:?}, not {expected:?}", sheet.name),
+                details: Some(serde_json::json!({
+                    "block": { "id": sheet.id, "type": "sheet", "text": sheet.name }
+                })),
+            });
+        }
+        Ok(sheet)
+    }
+
+    /// Each cell id's Yrs location, against one sheet list.
+    pub fn locate_all(&self, ids: &[String]) -> Result<Vec<Target>> {
+        let info = self.workbook.sheet_info().map_err(Error::engine)?;
+        ids.iter()
+            .map(|id| cell_target(&info.sheet_ids, id))
+            .collect()
     }
 
     /// `saveBytesAt(Date.parse(now) / 86_400_000 + 25569)`.
@@ -455,17 +976,182 @@ fn cell_value(cell: &J) -> String {
     }
 }
 
-/// The workbook's refusal of a cell or value the agent chose (outside the
-/// grid, over Excel's limits, not a worksheet) is an edit refusal with its
-/// sentence; any other failure stays the engine's.
+/// The workbook's refusal of a cell, value, style or structure change the
+/// agent chose (outside the grid, over Excel's limits, not a worksheet, a
+/// reference it cannot rewrite) is an edit refusal with its sentence; any
+/// other failure stays the engine's.
 fn refused(error: betteroffice_xlsx::Error) -> Error {
+    use betteroffice_xlsx::Error as Xlsx;
     match error {
-        betteroffice_xlsx::Error::CellOutOfRange(_)
-        | betteroffice_xlsx::Error::InvalidOperation(_) => {
-            Error::edit(EditCode::InvalidInput, error.to_string())
-        }
+        Xlsx::CellOutOfRange(_)
+        | Xlsx::InvalidOperation(_)
+        | Xlsx::NoSheets
+        | Xlsx::Operation(xlsx_ops::OpError::InvalidStyle(_)) => invalid(error.to_string()),
+        Xlsx::RangeTooLarge { rows, cols, max } => invalid(format!(
+            "the range is {rows} by {cols} cells; an edit covers at most {max} cells"
+        )),
+        Xlsx::Operation(_) => Error::edit(EditCode::UnsupportedOperation, error.to_string()),
         error => Error::engine(error),
     }
+}
+
+fn invalid(message: impl Into<String>) -> Error {
+    Error::edit(EditCode::InvalidInput, message)
+}
+
+/// A sheet an agent command names.
+struct SheetRef {
+    index: usize,
+    id: String,
+    name: String,
+}
+
+/// Rows or columns `at..at + count`, 0-based.
+struct Band {
+    rows: bool,
+    at: u32,
+    count: u32,
+}
+
+impl Band {
+    /// `at` is 1-based, as rows are numbered.
+    fn rows(at: u32, count: u32) -> Result<Self> {
+        if !(1..=MAX_ROWS).contains(&at) {
+            return Err(invalid(format!(
+                "row {at} is outside the sheet (rows 1 to {MAX_ROWS})"
+            )));
+        }
+        Self::counted(true, at - 1, count)
+    }
+
+    fn columns(at: &str, count: u32) -> Result<Self> {
+        Self::counted(false, column(at)?, count)
+    }
+
+    fn counted(rows: bool, at: u32, count: u32) -> Result<Self> {
+        if count == 0 {
+            return Err(invalid("count must be at least 1"));
+        }
+        Ok(Self { rows, at, count })
+    }
+
+    fn holds(&self, cell: CellRef) -> bool {
+        let index = if self.rows { cell.row } else { cell.col };
+        index >= self.at && index - self.at < self.count
+    }
+
+    /// The cell's line and column in the band's TSV: rows list their cells
+    /// from column A, columns list theirs from row 1.
+    fn place(&self, cell: CellRef) -> (u32, u32) {
+        if self.rows {
+            (cell.row - self.at, cell.col)
+        } else {
+            (cell.row, cell.col - self.at)
+        }
+    }
+
+    /// `5:6` or `C:D`, as Excel names whole rows and columns.
+    fn label(&self) -> String {
+        let last = self.at.saturating_add(self.count - 1);
+        if self.rows {
+            format!("{}:{}", self.at + 1, u64::from(last) + 1)
+        } else {
+            format!("{}:{}", column_letters(self.at), column_letters(last))
+        }
+    }
+}
+
+/// `A1` or `A1:C3` (any corner order, `$` anchors ignored) inside the grid.
+fn cell_range(range: &str) -> Result<CellRange> {
+    let parsed = CellRange::parse_a1(&js_trim(range).to_ascii_uppercase()).map_err(|_| {
+        invalid(format!(
+            "range {range:?} must be a cell such as B2 or a range such as A1:C3 inside the sheet"
+        ))
+    })?;
+    Ok(CellRange::new(
+        CellRef::new(parsed.start.row, parsed.start.col),
+        CellRef::new(parsed.end.row, parsed.end.col),
+    ))
+}
+
+/// Rows and columns.
+fn shape(range: CellRange) -> (u64, u64) {
+    (
+        u64::from(range.end.row - range.start.row) + 1,
+        u64::from(range.end.col - range.start.col) + 1,
+    )
+}
+
+/// The range's cells, row by row.
+fn cells(range: CellRange) -> impl Iterator<Item = CellRef> {
+    (range.start.row..=range.end.row).flat_map(move |row| {
+        (range.start.col..=range.end.col).map(move |col| CellRef::new(row, col))
+    })
+}
+
+fn tsv<'a>(rows: impl Iterator<Item = &'a [&'a str]>) -> String {
+    rows.map(|row| row.join("\t"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// At most [`MAX_SHOWN_CHARS`] characters, a cut marked with `…`.
+fn capped(text: String) -> String {
+    match text.char_indices().nth(MAX_SHOWN_CHARS) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text,
+    }
+}
+
+/// A column letter (`C`, `AA`) as a 0-based index.
+fn column(letters: &str) -> Result<u32> {
+    let text = js_trim(letters).to_ascii_uppercase();
+    let refused = || {
+        invalid(format!(
+            "column {letters:?} must be a column letter from A to {}",
+            column_letters(MAX_COLS - 1)
+        ))
+    };
+    if !(1..=3).contains(&text.len()) || !text.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return Err(refused());
+    }
+    let col = text
+        .bytes()
+        .fold(0_u32, |col, letter| col * 26 + u32::from(letter - b'A' + 1));
+    if col > MAX_COLS {
+        return Err(refused());
+    }
+    Ok(col - 1)
+}
+
+fn column_letters(col: u32) -> String {
+    let address = CellRef::new(0, col).to_a1();
+    address.trim_end_matches('1').to_owned()
+}
+
+/// The Yrs location of cell id `<sheet key>:<cell key>` (its contents entry).
+fn cell_target(sheet_ids: &[String], id: &str) -> Result<Target> {
+    let marker = id
+        .find(":[")
+        .filter(|marker| *marker > 0)
+        .ok_or_else(|| Error::edit(EditCode::UnavailableTarget, "target_id is not an XLSX cell"))?;
+    let sheet_id = &id[..marker];
+    if !sheet_ids.iter().any(|known| known == sheet_id) {
+        return Err(Error::edit(
+            EditCode::UnavailableTarget,
+            "the sheet is no longer in the workbook",
+        ));
+    }
+    Ok(Target {
+        id: id.to_owned(),
+        path: vec![
+            "xlsx:sheets".into(),
+            sheet_id.into(),
+            "contents".into(),
+            id[marker + 1..].into(),
+        ],
+        range: None,
+    })
 }
 
 /// office-checkpoint.ts `xlsxSheet`.
