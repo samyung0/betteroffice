@@ -303,6 +303,21 @@ fn format_cells_patches_the_style_and_number_format_without_an_inverse() {
         format(CellStyle::default()).unwrap_err(),
         Error::Edit { code: EditCode::InvalidInput, message, .. } if message.starts_with("style sets nothing")
     ));
+    assert_eq!(
+        book.clone_apply(&Command::FormatCells {
+            sheet: "Sheet1".into(),
+            range: "A1:B5001".into(),
+            style: CellStyle {
+                patch: StylePatch {
+                    bold: Some(true),
+                    ..StylePatch::default()
+                },
+                number_format: None,
+            },
+        })
+        .unwrap_err(),
+        invalid("A1:B5001 has 10002 cells; format at most 10000 cells per command")
+    );
 }
 
 #[test]

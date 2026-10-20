@@ -23,7 +23,8 @@ use crate::types::{
 /// Days from the 1900 epoch to 1970-01-01, phantom leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
-/// Cells one `set_range` sets, or one row or column delete removes.
+/// Cells one `set_range` sets or `format_cells` formats, or one row or column
+/// delete removes.
 const MAX_EDIT_CELLS: u64 = 10_000;
 /// Cells one scoped read covers.
 const MAX_READ_CELLS: u64 = 2_000;
@@ -462,6 +463,14 @@ impl XlsxSession {
     fn format_cells(&mut self, sheet: &str, range: &str, style: &CellStyle) -> Result<Applied> {
         let sheet = SheetId(self.sheet_ref(sheet)?.index as u32);
         let range = cell_range(range)?;
+        let (rows, columns) = shape(range);
+        if rows * columns > MAX_EDIT_CELLS {
+            return Err(invalid(format!(
+                "{} has {} cells; format at most {MAX_EDIT_CELLS} cells per command",
+                range.to_a1(),
+                rows * columns
+            )));
+        }
         let patch = &style.patch;
         if let Some(font) = &patch.font_family
             && !(1..=31).contains(&font.chars().count())
