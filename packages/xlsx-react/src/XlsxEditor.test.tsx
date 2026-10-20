@@ -1341,6 +1341,46 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
+  // 'é中😀' is 4 UTF-16 units and 9 UTF-8 bytes (2 + 3 + 4). Cells of it 13
+  // times make pieces of 11,809,998 bytes, so the sixth passes 64 MiB; counted
+  // in UTF-16 units none would, and the é, the CJK character or the emoji
+  // counted wrong moves the stop to the fifth or seventh.
+  it("counts a copy's text in UTF-8 against 64 MiB, accents, CJK and emoji included", async () => {
+    const notices: string[] = [];
+    const view = await mountEditor(farColumn, undefined, undefined, {
+      onNotice: (notice) => notices.push(notice),
+    });
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    const text = 'é中😀'.repeat(13);
+    const piece = Array.from({ length: 10_000 }, () =>
+      Array.from({ length: 10 }, () => ({ input: text, isFormula: false }))
+    );
+    let reads = 0;
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+      if (method !== 'rangeCells') return forward(sheetId, method, ...args);
+      reads += 1;
+      return Promise.resolve(piece);
+    }) as WorkbookProxy['onSheet']);
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { write: writeInto(written) },
+    });
+    try {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'a', { ctrlKey: true });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await waitFor(() => expect(notices).toEqual(['copy-too-large']), { timeout: 20_000 });
+      expect([reads, written]).toEqual([6, []]);
+    } finally {
+      spy.mockRestore();
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  }, MANY_KEYS_MS);
+
   // J90000:J90010: the cut's first of ten pieces is held, then J90010 is copied.
   it('clears nothing when a copy made during a cut read supersedes it', async () => {
     const view = await mountEditor(farColumn);
