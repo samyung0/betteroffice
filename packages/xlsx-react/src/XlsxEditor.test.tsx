@@ -1264,8 +1264,11 @@ describe('XlsxEditor keyboard', () => {
     }
   }, MANY_KEYS_MS);
 
-  // a cut of B2 whose first read is held while a peer edits `cell`.
-  const cutWhilePeerEdits = async (cell: CellAddr) => {
+  // a cut of `at` (B2) whose first read is held while a peer makes `change`.
+  const cutWhilePeer = async (
+    change: (peer: ReturnType<typeof openWorkbook>) => void,
+    at: CellAddr = { row: 1, col: 1 }
+  ) => {
     const notices: string[] = [];
     const view = await mountEditor(plain, undefined, undefined, {
       collaboration: { clientId: 3501 },
@@ -1276,16 +1279,16 @@ describe('XlsxEditor keyboard', () => {
     try {
       const editor = view.workbook();
       const before = await editor.encodeStateVector();
-      await view.click({ row: 1, col: 1 });
+      await view.click(at);
       await press(view.surface, 'x', { ctrlKey: true });
-      peer.editCell(0, cell.row, cell.col, 'peer');
+      change(peer);
       await act(async () => {
         await editor.applyUpdate(peer.encodeStateAsUpdate(before));
       });
       await read.release();
       await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull());
       await view.idle();
-      return { notices, written: read.written, b2: await view.input(1, 1), c2: await view.input(1, 2) };
+      return { notices, written: read.written, input: view.input };
     } finally {
       read.restore();
       peer.dispose();
@@ -1293,17 +1296,23 @@ describe('XlsxEditor keyboard', () => {
   };
 
   it('skips the clear of a cut, with a notice, when a peer changed a cell inside it during the read', async () => {
-    const { notices, written, b2 } = await cutWhilePeerEdits({ row: 1, col: 1 });
-    expect([notices, written, b2]).toEqual([['cut-peer-change'], ['peer'], 'peer']);
+    const { notices, written, input } = await cutWhilePeer((peer) => peer.editCell(0, 1, 1, 'peer'));
+    expect([notices, written, await input(1, 1)]).toEqual([['cut-peer-change'], ['peer'], 'peer']);
   }, MANY_KEYS_MS);
 
   it('clears a cut whose read saw a peer change a cell outside it', async () => {
-    expect(await cutWhilePeerEdits({ row: 1, col: 2 })).toEqual({
-      notices: [],
-      written: ['Q1'],
-      b2: '',
-      c2: 'peer',
-    });
+    const { notices, written, input } = await cutWhilePeer((peer) => peer.editCell(0, 1, 2, 'peer'));
+    expect([notices, written, await input(1, 1), await input(1, 2)]).toEqual([[], ['Q1'], '', 'peer']);
+  }, MANY_KEYS_MS);
+
+  // the peer's row inserted at the top moves B2's Q1 into the cut's B3: the
+  // cells under the range differ by position, so the clear is skipped.
+  it('skips the clear of a cut when a peer inserts a row above it during the read', async () => {
+    const { notices, written, input } = await cutWhilePeer(
+      (peer) => peer.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]),
+      { row: 2, col: 1 }
+    );
+    expect([notices, written, await input(2, 1)]).toEqual([['cut-peer-change'], ['Q1'], 'Q1']);
   }, MANY_KEYS_MS);
 
   // the peer's change reaches the worker after the read, while the clipboard
