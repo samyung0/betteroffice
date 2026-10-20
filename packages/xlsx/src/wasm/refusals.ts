@@ -1,11 +1,12 @@
 /**
- * Thrown by {@link WorkbookHandle.clearContents} when the clear's collaboration
- * update could exceed the limit it was given; the workbook did not change.
+ * Thrown when an edit's collaboration update could exceed the engine's cap
+ * (64 MiB, one action's most): a clear, a paste or another batch of cell
+ * inputs. The workbook did not change.
  */
-export class ClearTooLargeError extends Error {
+export class EditTooLargeError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'ClearTooLargeError';
+    this.name = 'EditTooLargeError';
   }
 }
 
@@ -20,9 +21,30 @@ export class RangeTooLargeError extends Error {
   }
 }
 
+/**
+ * Thrown by a typed {@link WorkbookHandle.editCell} whose formula does not
+ * parse, even with its open parentheses closed; nothing changed.
+ */
+export class UnparsedFormulaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnparsedFormulaError';
+  }
+}
+
+/** Thrown by an edit whose cell text exceeds Excel's 32,767-character limit; nothing changed. */
+export class CellTextTooLongError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CellTextTooLongError';
+  }
+}
+
 /** The engine refusal an error message names, as its typed error, else null. */
 export function refusalOf(message: string): Error | null {
-  if (message.startsWith('clear too large')) return new ClearTooLargeError(message);
+  if (message.startsWith('edit too large')) return new EditTooLargeError(message);
+  if (message === "there's a problem with this formula") return new UnparsedFormulaError(message);
+  if (message === "cell text exceeds Excel's length limit") return new CellTextTooLongError(message);
   if (/^range \d+x\d+ exceeds the \d+-cell copy cap$/.test(message))
     return new RangeTooLargeError(message);
   return null;

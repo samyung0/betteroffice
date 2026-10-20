@@ -44,12 +44,15 @@ pub enum Error {
         cols: u64,
         max: u64,
     },
-    /// A clear whose collaboration update could exceed the caller's limit; nothing changed.
-    ClearTooLarge {
+    /// An edit whose collaboration update could exceed [`crate::MAX_COLLABORATION_BYTES`];
+    /// nothing changed.
+    EditTooLarge {
         cells: u64,
         bytes: u64,
         max: u64,
     },
+    /// A typed formula that does not parse; nothing changed.
+    UnparsedFormula,
     InvalidViewport,
     DisplayTooLarge {
         cells: u64,
@@ -125,10 +128,11 @@ impl fmt::Display for Error {
             Self::RangeTooLarge { rows, cols, max } => {
                 write!(f, "range {rows}x{cols} exceeds the {max}-cell copy cap")
             }
-            Self::ClearTooLarge { cells, bytes, max } => write!(
+            Self::EditTooLarge { cells, bytes, max } => write!(
                 f,
-                "clear too large: {cells} cells may take {bytes} bytes, over the {max}-byte limit"
+                "edit too large: {cells} cells may take {bytes} bytes, over the {max}-byte limit"
             ),
+            Self::UnparsedFormula => f.write_str("there's a problem with this formula"),
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,

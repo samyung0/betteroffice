@@ -80,6 +80,15 @@ describe('moveFocus', () => {
     expect(out).toEqual({ anchor: { row: 5, col: 4 }, focus: { row: 5, col: 4 } });
   });
 
+  it('collapses next to the anchor, the active cell, when a range is selected', () => {
+    const range: Selection = { anchor: { row: 4, col: 4 }, focus: { row: 9, col: 6 } };
+    expect(moveFocus(range, 'down', { limits })).toEqual(selectionAt({ row: 5, col: 4 }));
+    expect(moveFocus(range, 'down', { extend: true, limits })).toEqual({
+      anchor: { row: 4, col: 4 },
+      focus: { row: 10, col: 6 },
+    });
+  });
+
   it('holds the anchor when extending', () => {
     const out = moveFocus(sel, 'right', { extend: true, limits });
     expect(out).toEqual({ anchor: { row: 4, col: 4 }, focus: { row: 4, col: 5 } });

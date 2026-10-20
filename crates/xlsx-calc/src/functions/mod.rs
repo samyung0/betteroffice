@@ -414,6 +414,21 @@ pub fn resolve(name: &str) -> Option<Func> {
 }
 
 impl Func {
+    /// Whether a call with no arguments is complete: `TODAY()`, `ROW()`.
+    pub fn takes_no_arguments(self) -> bool {
+        matches!(
+            self,
+            Func::Pi
+                | Func::Today
+                | Func::Now
+                | Func::True
+                | Func::False
+                | Func::Row
+                | Func::Column
+                | Func::Na
+        )
+    }
+
     /// invoke the implementation with unevaluated arguments.
     pub fn call(self, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         match self {

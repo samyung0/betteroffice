@@ -22,6 +22,7 @@ export const xlsxdocument_captureFormatJson: (a: number, b: number, c: number) =
 export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_checkClearContentsJson: (a: number, b: number, c: number) => [number, number];
 export const xlsxdocument_checkpointCellsJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_checkpointProjectionJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_clearContentsJson: (a: number, b: number, c: number) => [number, number, number, number];

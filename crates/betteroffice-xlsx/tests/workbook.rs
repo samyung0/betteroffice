@@ -1,10 +1,10 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    AnchorCell, AnchorEditAs, AnchorExtent, CLEARED_CELL_UPDATE_BYTES, CalculationOptions, Cell,
-    CellInput, CellRange, CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind,
-    ColStyle, DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane,
-    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EDITED_CELL_UPDATE_BYTES, EditProfile, Error,
+    FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_COLS, MAX_ROWS, NumberFormatKind,
     NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId,
     StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
@@ -137,33 +137,46 @@ fn clearing_a_sparse_range_touches_only_its_stored_cells() {
         .unwrap();
     let range = CellRange::new(cell("A1"), cell("Z100000"));
     let options = CalculationOptions::default();
-    // 3 cells may take 3 x CLEARED_CELL_UPDATE_BYTES: refused under that, nothing changed.
-    let refused = workbook.clear_contents(SheetId(0), range, Some(300), options);
-    assert!(matches!(
-        refused,
-        Err(Error::ClearTooLarge {
-            cells: 3,
-            bytes: 384,
-            max: 300
-        })
-    ));
-    assert!(updates.lock().unwrap().is_empty());
-    assert_eq!(
-        workbook.sheet_info().unwrap().used_range,
-        Some(range),
-        "a refused clear changes nothing"
-    );
-
-    workbook
-        .clear_contents(SheetId(0), range, Some(384), options)
-        .unwrap();
+    workbook.clear_contents(SheetId(0), range, options).unwrap();
     let sheet = workbook.sheet(SheetId(0)).unwrap();
     assert_eq!(sheet.iter_cells().count(), 0);
     // one update, within the bound the limit is checked against.
     let updates = updates.lock().unwrap();
     assert_eq!(updates.len(), 1);
-    assert!(updates[0].len() <= 3 * CLEARED_CELL_UPDATE_BYTES);
+    assert!(updates[0].len() <= 3 * EDITED_CELL_UPDATE_BYTES);
     assert_eq!(workbook.history_state().undo_depth, 1);
+}
+
+#[test]
+fn an_edit_past_the_update_cap_changes_nothing() {
+    let mut workbook = Workbook::from_model_collaborative(
+        WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..Default::default()
+        },
+        7102,
+    )
+    .unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let sink = updates.clone();
+    let _subscription = workbook
+        .observe_update_v1(move |event| sink.lock().unwrap().push(event.update))
+        .unwrap();
+    // 80,000 formulas may take 896 bytes each: over 64 MiB.
+    let edits = (0..80_000)
+        .map(|row| CellInput {
+            cell: CellRef::new(row, 0),
+            input: "=B1".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let refused = workbook.edit_cells(SheetId(0), &edits, CalculationOptions::default());
+    assert!(matches!(
+        refused,
+        Err(Error::EditTooLarge { cells: 80_000, max, .. }) if max == MAX_COLLABORATION_BYTES as u64
+    ));
+    assert!(updates.lock().unwrap().is_empty());
+    assert_eq!(workbook.sheet(SheetId(0)).unwrap().iter_cells().count(), 0);
+    assert_eq!(workbook.history_state().undo_depth, 0);
 }
 
 #[test]
@@ -7650,4 +7663,59 @@ fn profiled_mutations_time_each_stage_once() {
             .as_deref(),
         Some("A2*2")
     );
+}
+
+#[test]
+fn a_typed_formula_is_closed_or_refused_while_other_input_stores_it_as_text() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = CalculationOptions::default();
+    let input = |workbook: &Workbook, address: &str| {
+        workbook.cell(SheetId(0), cell(address)).unwrap().input
+    };
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D1"), "=SUM(A1:A2", options)
+        .unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("D2"), "=ROUND(SUM(A1:A2", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D1"), "=SUM(A1:A2)");
+    assert_eq!(input(&workbook, "D2"), "=ROUND(SUM(A1:A2))");
+    // a call whose function takes no arguments is complete once closed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D5"), "=TODAY(", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D5"), "=TODAY()");
+    // an unfinished argument list is repaired by closing it, as typed.
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D7"), "=SUM(A1,", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D7"), "=SUM(A1,)");
+    assert!(matches!(
+        workbook.edit_typed_cell(SheetId(0), cell("D6"), "=SUM(", options),
+        Err(Error::UnparsedFormula)
+    ));
+
+    assert!(matches!(
+        workbook.edit_typed_cell(SheetId(0), cell("D3"), "=A1+", options),
+        Err(Error::UnparsedFormula)
+    ));
+    assert_eq!(input(&workbook, "D3"), "");
+    workbook
+        .edit_cell(SheetId(0), cell("D3"), "=A1+", options)
+        .unwrap();
+    assert_eq!(input(&workbook, "D3"), "'=A1+");
+
+    // a Text-formatted cell takes what is typed as text, as in Excel.
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(cell("D4"), cell("D4")),
+            NumberFormatMutation::PlainText,
+            options,
+        )
+        .unwrap();
+    workbook
+        .edit_typed_cell(SheetId(0), cell("D4"), "=A1+", options)
+        .unwrap();
+    assert!(!workbook.cell(SheetId(0), cell("D4")).unwrap().is_formula);
 }

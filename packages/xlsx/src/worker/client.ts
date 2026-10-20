@@ -50,6 +50,16 @@ export interface WorkbookProxy extends WorkbookCalls {
     method: K,
     ...args: Parameters<WorkbookHandle[K]>
   ): Promise<ReturnType<WorkbookHandle[K]>>;
+  /**
+   * `method` on the sheet `sheetId` names, active or not (a copy or cut reads
+   * and clears its own sheet whichever is shown), else a {@link SheetGoneError}
+   * once it is removed.
+   */
+  inSheet<K extends WorkbookMethod>(
+    sheetId: string,
+    method: K,
+    ...args: Parameters<WorkbookHandle[K]>
+  ): Promise<ReturnType<WorkbookHandle[K]>>;
   /** Flips bold, italic or strikethrough over `range` from its current state. */
   toggle(
     sheetId: string,
@@ -159,11 +169,17 @@ export async function openWorkbookWorker(
     });
   };
 
-  const call = (method: WorkbookMethod, args: unknown[], sheetId?: string) => {
+  const call = (method: WorkbookMethod, args: unknown[], sheetId?: string, ownSheet = false) => {
     const owned = args.map((arg) => (arg instanceof Uint8Array ? arg.slice() : arg));
     const transfer = owned.flatMap((arg) => (arg instanceof Uint8Array ? [arg.buffer] : []));
     return send(
-      { type: 'call', method, args: owned, ...(sheetId === undefined ? {} : { sheetId }) },
+      {
+        type: 'call',
+        method,
+        args: owned,
+        ...(sheetId === undefined ? {} : { sheetId }),
+        ...(ownSheet ? { ownSheet } : {}),
+      },
       transfer,
       MUTATING_METHODS.has(method)
     );
@@ -213,6 +229,11 @@ export async function openWorkbookWorker(
       method: K,
       ...args: Parameters<WorkbookHandle[K]>
     ) => call(method, args, sheetId) as Promise<ReturnType<WorkbookHandle[K]>>,
+    inSheet: <K extends WorkbookMethod>(
+      sheetId: string,
+      method: K,
+      ...args: Parameters<WorkbookHandle[K]>
+    ) => call(method, args, sheetId, true) as Promise<ReturnType<WorkbookHandle[K]>>,
     toggle: (sheetId, range, property) =>
       send<EditResult>({ type: 'toggle', sheetId, range, property }, [], true),
     onUpdate(listener) {
