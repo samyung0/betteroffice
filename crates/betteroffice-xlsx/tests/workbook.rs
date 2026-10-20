@@ -7651,3 +7651,63 @@ fn profiled_mutations_time_each_stage_once() {
         Some("A2*2")
     );
 }
+
+/// A format changes no value, so it keeps an exact calculation: a volatile
+/// cell still holds the last recalculation's value until another edit runs one.
+#[test]
+fn style_only_ops_keep_an_exact_calculation() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            formula: Some("NOW()".into()),
+            ..Cell::default()
+        },
+    );
+    let bytes = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap()
+    .save()
+    .unwrap();
+    let at = |serial| CalculationOptions {
+        now_serial: Some(serial),
+    };
+    let mut workbook = Workbook::open_collaborative_recalculated(&bytes, 9, at(100.0)).unwrap();
+    let now = |workbook: &Workbook| {
+        workbook.model().sheets[0]
+            .cell(cell("A1"))
+            .unwrap()
+            .value
+            .clone()
+    };
+    let range = CellRange::new(cell("A1"), cell("B2"));
+    let patched = workbook
+        .patch_range_style(
+            SheetId(0),
+            range,
+            StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+            at(200.0),
+        )
+        .unwrap();
+    workbook
+        .set_range_number_format(SheetId(0), range, NumberFormatMutation::Number, at(200.0))
+        .unwrap();
+    assert!(patched.applied && patched.changed.is_empty());
+    assert_eq!(now(&workbook), CellValue::Number { value: 100.0 });
+    workbook
+        .apply_ops(
+            vec![Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 0,
+                width: Some(20.0),
+            }],
+            at(200.0),
+        )
+        .unwrap();
+    assert_eq!(now(&workbook), CellValue::Number { value: 200.0 });
+}
