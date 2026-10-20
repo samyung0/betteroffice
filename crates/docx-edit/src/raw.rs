@@ -1122,11 +1122,15 @@ mod tests {
     fn insert_batch_matches_legacy_for_seed_shaped_ops() {
         let ctx = EditCtx::local(String::new(), String::new());
         let legacy = EditingDoc::new(7);
-        legacy.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
+        legacy
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         apply_raw_ops_legacy_to_doc(&legacy, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let batched = EditingDoc::new(7);
-        batched.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
+        batched
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         batched
             .apply_raw_ops("body", seed_shaped_ops(), &ctx)
             .unwrap();
@@ -1444,7 +1448,9 @@ mod tests {
     fn legacy_seeded_state_loads_and_merges_under_the_batched_applier() {
         let ctx = EditCtx::local(String::new(), String::new());
         let original = EditingDoc::new(1);
-        original.apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx).unwrap();
+        original
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         apply_raw_ops_legacy_to_doc(&original, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let restored = EditingDoc::new(2);
