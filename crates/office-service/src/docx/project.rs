@@ -223,6 +223,8 @@ pub(crate) struct SaveContext<'a> {
     projected_stories: HashSet<String>,
     referenced_comments: Option<HashSet<u64>>,
     hooks: Hooks,
+    /// Every story's bookmarks, read once rather than once per story.
+    bookmarks: docx_edit::BookmarkPositions,
 }
 
 /// One story's projection state (`storyToBlocks` locals).
@@ -288,6 +290,7 @@ impl<'a> SaveContext<'a> {
             projected_stories: HashSet::new(),
             referenced_comments: None,
             hooks,
+            bookmarks: doc.bookmark_positions(),
         })
     }
 
@@ -519,7 +522,9 @@ impl<'a> SaveContext<'a> {
             let mut stories: Vec<&String> = self.story_ids.iter().collect();
             stories.sort();
             for story in stories {
-                for segment in read::story_segments(self.doc, story).unwrap_or_default() {
+                for segment in
+                    read::story_segments_with(self.doc, story, &self.bookmarks).unwrap_or_default()
+                {
                     if segment.get("kind").as_str().as_deref() == Some("embed")
                         && segment.get("payload").get("modelKind").as_str().as_deref()
                             == Some("commentReference")
@@ -560,7 +565,7 @@ impl<'a> SaveContext<'a> {
                 .cloned()
                 .collect()
         });
-        let segments = read::story_segments(self.doc, story_id)?;
+        let segments = read::story_segments_with(self.doc, story_id, &self.bookmarks)?;
         let mut state = StoryState {
             blocks: Vec::new(),
             slot_breaks: Vec::new(),

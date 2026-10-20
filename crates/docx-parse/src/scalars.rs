@@ -6,9 +6,11 @@ use crate::xml::XmlElement;
 
 pub use ooxml_drawingml::{ColorValue, parse_color_value};
 
+crate::boxed!(ShadingProperties(ShadingPropertiesFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShadingProperties {
+pub struct ShadingPropertiesFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,7 +188,14 @@ mod tests {
         assert_eq!(parsed.color.unwrap().rgb.as_deref(), Some("bad-hex"));
         assert_eq!(parsed.highlight.as_deref(), Some("yellow"));
         assert_eq!(
-            parsed.shading.unwrap().fill.unwrap().theme_tint.as_deref(),
+            parsed
+                .shading
+                .unwrap()
+                .0
+                .fill
+                .unwrap()
+                .theme_tint
+                .as_deref(),
             Some("80")
         );
         assert_eq!(parsed.font_size, Some(24.0));

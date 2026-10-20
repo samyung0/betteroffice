@@ -10,6 +10,8 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use std::collections::HashSet;
+use std::hash::BuildHasherDefault;
 
 use crate::js::{number_to_string, quote};
 
@@ -31,7 +33,136 @@ pub enum V {
 pub struct Arr(Rc<RefCell<Vec<V>>>);
 
 #[derive(Clone, Default)]
-pub struct Obj(Rc<RefCell<IndexMap<Str, V>>>);
+pub struct Obj(Rc<RefCell<Map>>);
+
+/// An object's entries in insertion order: a vector while small (linear
+/// lookup, a fraction of a hash map's size), a hash index once large.
+pub enum Map {
+    Small(Vec<(Str, V)>),
+    Large(IndexMap<Str, V, BuildHasherDefault<std::collections::hash_map::DefaultHasher>>),
+}
+
+const SMALL_MAP: usize = 12;
+
+impl Default for Map {
+    fn default() -> Self {
+        Map::Small(Vec::new())
+    }
+}
+
+impl Map {
+    pub fn get(&self, key: &str) -> Option<&V> {
+        match self {
+            Map::Small(entries) => entries.iter().find(|(k, _)| &**k == key).map(|(_, v)| v),
+            Map::Large(map) => map.get(key),
+        }
+    }
+    fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+        match self {
+            Map::Small(entries) => entries
+                .iter_mut()
+                .find(|(k, _)| &**k == key)
+                .map(|(_, v)| v),
+            Map::Large(map) => map.get_mut(key),
+        }
+    }
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+    pub fn len(&self) -> usize {
+        match self {
+            Map::Small(entries) => entries.len(),
+            Map::Large(map) => map.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn grow(&mut self) {
+        if let Map::Small(entries) = self
+            && entries.len() >= SMALL_MAP
+        {
+            let large = std::mem::take(entries).into_iter().collect();
+            *self = Map::Large(large);
+        }
+    }
+    fn insert(&mut self, key: Str, value: V) {
+        self.grow();
+        match self {
+            Map::Small(entries) => {
+                entries.reserve_exact(1);
+                entries.push((key, value));
+            }
+            Map::Large(map) => {
+                map.insert(key, value);
+            }
+        }
+    }
+    fn shift_insert(&mut self, at: usize, key: Str, value: V) {
+        self.grow();
+        match self {
+            Map::Small(entries) => {
+                entries.reserve_exact(1);
+                entries.insert(at, (key, value));
+            }
+            Map::Large(map) => {
+                map.shift_insert(at, key, value);
+            }
+        }
+    }
+    fn shift_remove(&mut self, key: &str) {
+        match self {
+            Map::Small(entries) => {
+                if let Some(at) = entries.iter().position(|(k, _)| &**k == key) {
+                    entries.remove(at);
+                }
+            }
+            Map::Large(map) => {
+                map.shift_remove(key);
+            }
+        }
+    }
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (&Str, &V)> + '_> {
+        match self {
+            Map::Small(entries) => Box::new(entries.iter().map(|(k, v)| (k, v))),
+            Map::Large(map) => Box::new(map.iter()),
+        }
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &Str> + '_ {
+        self.iter().map(|(k, _)| k)
+    }
+    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.iter().map(|(_, v)| v)
+    }
+}
+
+thread_local! {
+    static INTERNED: RefCell<HashSet<Str>> = RefCell::new(HashSet::new());
+}
+
+/// One allocation per distinct short key or string value: a DOCX tree repeats
+/// the same names and small values hundreds of thousands of times.
+pub fn intern(text: &str) -> Str {
+    if text.len() > 24 {
+        return Str::from(text);
+    }
+    INTERNED.with(|set| {
+        let mut set = set.borrow_mut();
+        if let Some(found) = set.get(text) {
+            return found.clone();
+        }
+        let made = Str::from(text);
+        set.insert(made.clone());
+        made
+    })
+}
+
+/// Lets go of the interned strings the values no longer use; every engine
+/// call ends with it, so an engine process serving many calls does not keep
+/// the strings of every document it has seen.
+pub fn forget_interned() {
+    INTERNED.with(|set| set.take());
+}
 
 fn array_index(key: &str) -> Option<u32> {
     if key.is_empty() || key.len() > 10 || (key.len() > 1 && key.starts_with('0')) {
@@ -83,10 +214,10 @@ impl Obj {
                     .keys()
                     .position(|other| array_index(other).is_none_or(|other| other > index))
                     .unwrap_or(map.len());
-                map.shift_insert(at, Str::from(key), value);
+                map.shift_insert(at, intern(key), value);
             }
             None => {
-                map.insert(Str::from(key), value);
+                map.insert(intern(key), value);
             }
         }
     }
@@ -146,7 +277,7 @@ impl Obj {
         copy
     }
 
-    pub fn borrow(&self) -> Ref<'_, IndexMap<Str, V>> {
+    pub fn borrow(&self) -> Ref<'_, Map> {
         self.0.borrow()
     }
 }
@@ -245,13 +376,13 @@ impl From<Arr> for V {
 
 impl From<&str> for V {
     fn from(text: &str) -> Self {
-        V::Str(Str::from(text))
+        V::Str(intern(text))
     }
 }
 
 impl From<String> for V {
     fn from(text: String) -> Self {
-        V::Str(Str::from(text))
+        V::Str(intern(&text))
     }
 }
 
@@ -511,7 +642,7 @@ impl From<&serde_json::Value> for V {
             serde_json::Value::Null => V::Null,
             serde_json::Value::Bool(value) => V::Bool(*value),
             serde_json::Value::Number(number) => V::Num(number.as_f64().unwrap_or(f64::NAN)),
-            serde_json::Value::String(text) => V::str(text.as_str()),
+            serde_json::Value::String(text) => V::Str(intern(text.as_str())),
             serde_json::Value::Array(items) => V::array(items.iter().map(V::from).collect()),
             serde_json::Value::Object(map) => {
                 let object = Obj::new();
@@ -545,7 +676,7 @@ impl<'de> Deserialize<'de> for V {
                 Ok(V::Num(value))
             }
             fn visit_str<E: de::Error>(self, value: &str) -> Result<V, E> {
-                Ok(V::str(value))
+                Ok(V::Str(intern(value)))
             }
             fn visit_unit<E: de::Error>(self) -> Result<V, E> {
                 Ok(V::Null)

@@ -72,7 +72,9 @@ pub fn document_roots(format: Format) -> &'static [&'static str] {
 
 /// Runs an engine call, turning a panic into [`Error::Panic`].
 fn guard<T>(call: impl FnOnce() -> Result<T>) -> Result<T> {
-    catch_unwind(AssertUnwindSafe(call)).unwrap_or_else(|panic| {
+    let result = catch_unwind(AssertUnwindSafe(call));
+    jsv::forget_interned();
+    result.unwrap_or_else(|panic| {
         let message = panic
             .downcast_ref::<&str>()
             .map(|text| (*text).to_owned())
@@ -150,10 +152,11 @@ impl Session {
         }
     }
 
-    fn export(&mut self, determinism: Determinism) -> Result<Vec<u8>> {
+    /// Ends the session (a DOCX export frees it as it goes).
+    fn export(self, determinism: Determinism) -> Result<Vec<u8>> {
         match self {
             Session::Docx(session) => session.export(determinism),
-            Session::Xlsx(session) => session.export(determinism.now),
+            Session::Xlsx(mut session) => session.export(determinism.now),
             Session::Pptx(session) => session.export(),
         }
     }

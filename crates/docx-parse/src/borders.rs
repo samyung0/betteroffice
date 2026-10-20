@@ -21,9 +21,11 @@ pub struct BorderSpec {
     pub frame: Option<bool>,
 }
 
+crate::boxed!(Borders(BordersFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Borders {
+pub struct BordersFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top: Option<BorderSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,7 +86,7 @@ pub fn parse_border_spec(element: Option<&XmlElement>) -> Option<BorderSpec> {
 
 pub fn parse_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
     let element = element?;
-    let borders = Borders {
+    let borders = Borders::from(BordersFields {
         top: parse_border_spec(element.child("w", "top")),
         bottom: parse_border_spec(element.child("w", "bottom")),
         left: parse_border_spec(
@@ -99,22 +101,22 @@ pub fn parse_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
         ),
         inside_h: parse_border_spec(element.child("w", "insideH")),
         inside_v: parse_border_spec(element.child("w", "insideV")),
-        ..Borders::default()
-    };
+        ..BordersFields::default()
+    });
     (borders != Borders::default()).then_some(borders)
 }
 
 pub fn parse_paragraph_borders(element: Option<&XmlElement>) -> Option<Borders> {
     let element = element?;
-    let borders = Borders {
+    let borders = Borders::from(BordersFields {
         top: parse_border_spec(element.child("w", "top")),
         bottom: parse_border_spec(element.child("w", "bottom")),
         left: parse_border_spec(element.child("w", "left")),
         right: parse_border_spec(element.child("w", "right")),
         between: parse_border_spec(element.child("w", "between")),
         bar: parse_border_spec(element.child("w", "bar")),
-        ..Borders::default()
-    };
+        ..BordersFields::default()
+    });
     (borders != Borders::default()).then_some(borders)
 }
 
@@ -137,7 +139,7 @@ mod tests {
         let borders = root(
             r#"<w:tblBorders><w:top w:val="nil"/><w:start w:val="single" w:sz="4px" w:color="auto" w:themeTint="80"/><w:end/></w:tblBorders>"#,
         );
-        let parsed = parse_table_borders(Some(&borders)).unwrap();
+        let parsed = *parse_table_borders(Some(&borders)).unwrap().0;
         assert_eq!(parsed.top.unwrap().style, "nil");
         let left = parsed.left.unwrap();
         assert_eq!(left.size, Some(4.0));

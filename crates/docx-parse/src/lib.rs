@@ -27,6 +27,37 @@
 
 //! Safe DOCX parsing and serialization.
 
+/// `$name` holds the large, mostly absent `$fields` behind one pointer, so a
+/// struct holding it as an `Option` stays small (a `Paragraph` was 8 KB with
+/// every optional inline). It serializes as `$fields` and derefs to it.
+macro_rules! boxed {
+    ($name:ident($fields:ident)) => {
+        #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(pub Box<$fields>);
+
+        impl std::ops::Deref for $name {
+            type Target = $fields;
+            fn deref(&self) -> &$fields {
+                &self.0
+            }
+        }
+
+        impl std::ops::DerefMut for $name {
+            fn deref_mut(&mut self) -> &mut $fields {
+                &mut self.0
+            }
+        }
+
+        impl From<$fields> for $name {
+            fn from(fields: $fields) -> Self {
+                Self(Box::new(fields))
+            }
+        }
+    };
+}
+pub(crate) use boxed;
+
 pub mod block;
 pub mod borders;
 pub mod canonical;

@@ -229,6 +229,11 @@ pub struct StorySegment {
     pub attributes: BTreeMap<String, Any>,
 }
 
+/// Every story's bookmark and field-boundary positions from one scan of the
+/// bookmarks map, for [`EditingDoc::story_segments_with`] while the document
+/// does not change.
+pub struct BookmarkPositions(HashMap<String, Vec<(u32, Any)>>);
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphSnapshot {
     pub para_id: ParagraphId,
@@ -731,6 +736,25 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
+        Ok(segments_of(&txn, &story, &bookmarks))
+    }
+
+    /// [`Self::story_segments`] for a reader of many stories: one story's read
+    /// scans every bookmark of the document, this scan serves them all.
+    pub fn bookmark_positions(&self) -> BookmarkPositions {
+        BookmarkPositions(bookmarks::positions_by_story(&self.doc.transact()))
+    }
+
+    /// [`Self::story_segments`] with `positions` read since the last change.
+    pub fn story_segments_with(
+        &self,
+        story_id: &str,
+        positions: &BookmarkPositions,
+    ) -> EditResult<Vec<StorySegment>> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let markers = positions.0.get(story_id).map_or(&[][..], Vec::as_slice);
+        let bookmarks = bookmarks::paragraph_properties_at(&txn, &story, markers);
         Ok(segments_of(&txn, &story, &bookmarks))
     }
 

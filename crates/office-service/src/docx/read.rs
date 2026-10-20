@@ -31,6 +31,18 @@ pub(crate) fn story_segments(doc: &EditingDoc, story: &str) -> Result<Vec<V>> {
     segment_values(doc.story_segments(story).map_err(Error::engine)?)
 }
 
+/// `story_segments` with bookmark positions read once for many stories.
+pub(crate) fn story_segments_with(
+    doc: &EditingDoc,
+    story: &str,
+    positions: &docx_edit::BookmarkPositions,
+) -> Result<Vec<V>> {
+    segment_values(
+        doc.story_segments_with(story, positions)
+            .map_err(Error::engine)?,
+    )
+}
+
 /// `story_segments` of every story by id, reading the bookmarks once.
 pub(crate) fn all_story_segments(doc: &EditingDoc) -> Result<HashMap<String, Vec<V>>> {
     doc.all_story_segments()

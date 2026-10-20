@@ -767,7 +767,7 @@ fn write_paragraph_mark_properties(
     deletion: Option<&TrackedChangeInfo>,
 ) {
     let formatting = formatting
-        .and_then(|formatting| formatting.run_properties.as_ref())
+        .and_then(|formatting| formatting.run_properties.as_deref())
         .map(|formatting| serialize_text_formatting(Some(formatting)))
         .unwrap_or_default();
     let inner = formatting

@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::borders::{BorderSpec, Borders, parse_border_spec, parse_paragraph_borders};
+use crate::borders::{
+    BorderSpec, Borders, BordersFields, parse_border_spec, parse_paragraph_borders,
+};
 use crate::scalars::{
     ColorValue, ShadingProperties, UnderlineValue, parse_color_value, parse_shading_properties,
     parse_underline,
@@ -118,9 +120,11 @@ pub struct TextOutline {
     pub no_fill: Option<bool>,
 }
 
+crate::boxed!(TextModernEffects(TextModernEffectsFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TextModernEffects {
+pub struct TextModernEffectsFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glow: Option<TextGlow>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -457,9 +461,11 @@ pub struct SpacingExplicit {
     pub after: Option<bool>,
 }
 
+crate::boxed!(ParagraphFrame(ParagraphFrameFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ParagraphFrame {
+pub struct ParagraphFrameFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,7 +586,7 @@ pub struct ParagraphFormatting {
     #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
     pub auto_space_dn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_properties: Option<TextFormatting>,
+    pub run_properties: Option<Box<TextFormatting>>,
     /// The pPr children the model has no field for ([`UNMODELED_PPR`]), by
     /// local name, with their attributes by local name, so a save re-emits them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -697,7 +703,7 @@ pub fn parse_paragraph_properties(
     value.auto_space_de = boolean_child(p_pr, "autoSpaceDE");
     value.auto_space_dn = boolean_child(p_pr, "autoSpaceDN");
     let run_properties_element = p_pr.child("w", "rPr");
-    value.run_properties = parse_run_properties(run_properties_element, theme);
+    value.run_properties = parse_run_properties(run_properties_element, theme).map(Box::new);
     (value != ParagraphFormatting::default()
         || shading_element.is_some()
         || tabs_element.is_some()
@@ -790,9 +796,10 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             result.extra_children.extend(source.extra_children.clone());
             result.run_properties = merge_text_formatting(
-                target.run_properties.as_ref(),
-                source.run_properties.as_ref(),
-            );
+                target.run_properties.as_deref(),
+                source.run_properties.as_deref(),
+            )
+            .map(Box::new);
             Some(result)
         }
     }
@@ -1122,7 +1129,7 @@ fn parse_cell_margins(element: Option<&XmlElement>) -> Option<CellMargins> {
 
 fn parse_style_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
     let element = element?;
-    let value = Borders {
+    let value = Borders::from(BordersFields {
         top: parse_border_spec(element.child("w", "top")),
         bottom: parse_border_spec(element.child("w", "bottom")),
         left: parse_border_spec(element.child("w", "left")),
@@ -1133,8 +1140,8 @@ fn parse_style_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
         end: parse_border_spec(element.child("w", "end")),
         tl2br: parse_border_spec(element.child("w", "tl2br")),
         tr2bl: parse_border_spec(element.child("w", "tr2bl")),
-        ..Borders::default()
-    };
+        ..BordersFields::default()
+    });
     (value != Borders::default()).then_some(value)
 }
 
