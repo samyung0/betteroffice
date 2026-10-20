@@ -226,3 +226,17 @@ crates.io depend on the registry crate.
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 
 License: MIT (`third_party/yrs/LICENSE`).
+
+---
+
+## xlsx-populate blank workbook
+
+`crates/office-service/starters/blank.xlsx` is the blank workbook Microsoft
+Excel saved for xlsx-populate (https://github.com/dtjohnson/xlsx-populate,
+`blank/blank.xlsx`), with the saving machine's path (`x15ac:absPath`) removed
+from `xl/workbook.xml`. It is compiled into the `betteroffice-office-service`
+crate via `include_bytes!` as the workbook the agent's `create` starts from.
+
+Copyright (c) 2015 Dave Johnson.
+
+License: MIT (`crates/office-service/starters/NOTICE.md`).

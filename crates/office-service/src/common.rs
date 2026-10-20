@@ -200,11 +200,25 @@ pub(crate) fn storable_text(text: &str) -> String {
 /// as an Office file can store it, each dropped character added to `removed`.
 pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Command {
     let mut command = command.clone();
-    let (Command::ReplaceText { text, .. } | Command::SetCell { value: text, .. }) = &mut command;
-    let before = removed.len();
-    removed.extend(text.chars().filter(|&ch| !storable(ch)));
-    if removed.len() > before {
-        *text = storable_text(text);
+    let mut keep = |text: &mut String| {
+        let before = removed.len();
+        removed.extend(text.chars().filter(|&ch| !storable(ch)));
+        if removed.len() > before {
+            *text = storable_text(text);
+        }
+    };
+    match &mut command {
+        Command::ReplaceText { text, .. }
+        | Command::SetCell { value: text, .. }
+        | Command::AddSheet { name: text, .. }
+        | Command::RenameSheet { name: text, .. } => keep(text),
+        Command::SetRange { values, .. } => values.iter_mut().flatten().for_each(keep),
+        Command::FormatCells { .. }
+        | Command::DeleteSheet { .. }
+        | Command::InsertRows { .. }
+        | Command::DeleteRows { .. }
+        | Command::InsertColumns { .. }
+        | Command::DeleteColumns { .. } => {}
     }
     command
 }

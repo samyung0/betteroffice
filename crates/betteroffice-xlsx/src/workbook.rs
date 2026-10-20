@@ -1904,6 +1904,15 @@ impl Workbook {
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
         }
+        let formats_only = ops.iter().all(|op| {
+            matches!(
+                op,
+                Op::PatchRangeStyle { .. }
+                    | Op::SetRangeNumberFormat { .. }
+                    | Op::ApplyRangeFormat { .. }
+            )
+        });
+        let exact = self.is_exact();
         let active_name = self.active_sheet_name();
         self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         self.restore_active_sheet(active_name.as_deref());
@@ -1911,6 +1920,15 @@ impl Workbook {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
+        // A format changes no value, so an exact calculation stands, as in Excel.
+        if formats_only && exact {
+            self.exact_epoch = Some(self.model_epoch);
+            mark(EditStage::Recalculated);
+            return Ok(MutationResult {
+                applied: true,
+                ..MutationResult::default()
+            });
+        }
         let result = self.rebuild_and_recalculate(options);
         mark(EditStage::Recalculated);
         Ok(MutationResult {

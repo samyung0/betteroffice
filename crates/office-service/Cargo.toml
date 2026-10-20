@@ -33,4 +33,9 @@ ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Agent formulas are checked against the engine's parser and function list,
+# and inputs classified and cells shown as the editor does.
+xlsx-calc.workspace = true
+xlsx-ops.workspace = true
+xlsx-render.workspace = true
 yrs = "0.27.3"

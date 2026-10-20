@@ -189,7 +189,7 @@ fn docx_replace_text_replaces_its_one_occurrence_keeping_the_runs_formatting() {
     let undone = apply_commands(
         &base,
         checkpoint(Format::Docx, &sha, &edit.state),
-        &edit.inverse,
+        edit.inverse.as_deref().unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -216,7 +216,7 @@ fn an_empty_expected_text_fills_an_empty_paragraph_and_an_overlapping_one_counts
     let undone = apply_commands(
         &base,
         checkpoint(Format::Docx, &sha, &edit.state),
-        &edit.inverse,
+        edit.inverse.as_deref().unwrap(),
     )
     .unwrap();
     assert_eq!(value(&base, Format::Docx, &undone.state, &empty.id), "");
@@ -305,7 +305,7 @@ fn pptx_replace_text_replaces_its_one_occurrence_in_the_style_it_replaces() {
     let undone = apply_commands(
         DECK,
         checkpoint(Format::Pptx, &sha, &edit.state),
-        &edit.inverse,
+        edit.inverse.as_deref().unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -476,8 +476,12 @@ fn undo_restores_a_paragraph_without_a_character_the_file_cannot_store() {
             &[replace(&target, expected, text)],
         )
         .unwrap();
-        let undone =
-            apply_commands(&base, checkpoint(format, &sha, &edit.state), &edit.inverse).unwrap();
+        let undone = apply_commands(
+            &base,
+            checkpoint(format, &sha, &edit.state),
+            edit.inverse.as_deref().unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             value(&base, format, &undone.state, &target.id),
             target.value.replace('\u{1}', ""),

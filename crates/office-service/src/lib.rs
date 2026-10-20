@@ -13,6 +13,7 @@ mod docx;
 mod effects_tests;
 pub mod env;
 mod error;
+mod formula;
 pub mod js;
 pub mod jsv;
 mod pptx;
@@ -23,7 +24,7 @@ mod types;
 pub mod wire;
 mod xlsx;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub use common::sha256_hex;
@@ -131,11 +132,21 @@ impl Session {
         }
     }
 
-    fn locate(&mut self, id: &str) -> Result<Target> {
+    fn locate(&mut self, ids: &[String]) -> Result<Vec<Target>> {
         match self {
-            Session::Docx(session) => session.locate(id),
-            Session::Xlsx(session) => session.locate(id),
-            Session::Pptx(session) => session.locate(id),
+            Session::Docx(session) => ids.iter().map(|id| session.locate(id)).collect(),
+            Session::Xlsx(session) => session.locate_all(ids),
+            Session::Pptx(session) => ids.iter().map(|id| session.locate(id)).collect(),
+        }
+    }
+
+    fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<serde_json::Value> {
+        match self {
+            Session::Xlsx(session) => session.inspect_scoped(query),
+            Session::Docx(_) | Session::Pptx(_) => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "scoped reads cover XLSX files for now",
+            )),
         }
     }
 
@@ -265,37 +276,99 @@ fn ref_json(object_ref: &ObjectRef) -> js::J {
 
 pub fn export(base: &[u8], checkpoint: Checkpoint, determinism: Determinism) -> Result<Vec<u8>> {
     guard(|| {
-        let hex = determinism.seed.len() == 64
-            && determinism
-                .seed
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        let now = determinism.now.as_bytes();
-        let iso = now.len() == 24
-            && now.iter().enumerate().all(|(index, byte)| match index {
-                4 | 7 => *byte == b'-',
-                10 => *byte == b'T',
-                13 | 16 => *byte == b':',
-                19 => *byte == b'.',
-                23 => *byte == b'Z',
-                _ => byte.is_ascii_digit(),
-            });
-        if !hex || !iso {
-            return Err(Error::Invalid(
-                "Expected deterministic SHA-256 seed and ISO UTC millisecond time".into(),
-            ));
-        }
+        check_determinism(determinism)?;
         Session::open(checkpoint.format, base, Some(checkpoint))?.export(determinism)
     })
+}
+
+fn check_determinism(determinism: Determinism) -> Result<()> {
+    let hex = determinism.seed.len() == 64
+        && determinism
+            .seed
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let now = determinism.now.as_bytes();
+    let iso = now.len() == 24
+        && now.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'T',
+            13 | 16 => *byte == b':',
+            19 => *byte == b'.',
+            23 => *byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        });
+    if !hex || !iso {
+        return Err(Error::Invalid(
+            "Expected deterministic SHA-256 seed and ISO UTC millisecond time".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
     guard(|| Session::open(checkpoint.format, base, Some(checkpoint))?.editable())
 }
 
-/// Applies content commands in order; the inverse list is in undo order and
-/// the targets describe the post-edit state. Characters an Office file cannot
-/// store leave the commands' text first and the result's notice names them.
+/// What the agent reads of an Office file without projecting all of it
+/// (XLSX: the sheet list, or a range's non-empty cells).
+pub fn inspect_scoped(
+    base: &[u8],
+    checkpoint: Checkpoint,
+    query: &InspectQuery,
+) -> Result<serde_json::Value> {
+    guard(|| Session::open(checkpoint.format, base, Some(checkpoint))?.inspect_scoped(query))
+}
+
+/// The blank file the agent's `create` and the Create tab start from; a
+/// format without one is refused as `unsupported_operation`.
+pub fn starter(format: Format) -> Result<&'static [u8]> {
+    match format {
+        Format::Xlsx => Ok(include_bytes!("../starters/blank.xlsx")),
+        Format::Docx | Format::Pptx => Err(Error::edit(
+            EditCode::UnsupportedOperation,
+            format!("{} files cannot be created yet", format.as_str()),
+        )),
+    }
+}
+
+/// A new file: `starter` seeded, `commands` applied in one session, exported.
+pub fn create(
+    format: Format,
+    starter: &[u8],
+    commands: &[Command],
+    determinism: Determinism,
+) -> Result<Created> {
+    guard(|| {
+        check_determinism(determinism)?;
+        assert_checkpoint(format, starter, None)?;
+        let state = match format {
+            Format::Docx => docx::seed(starter),
+            Format::Xlsx => xlsx::seed(starter),
+            Format::Pptx => pptx::seed(starter),
+        }?;
+        let sha = sha256_hex(starter);
+        let checkpoint = Checkpoint {
+            format,
+            schema_version: 1,
+            base_sha256: &sha,
+            state: &state,
+        };
+        let mut session = Session::open(format, starter, Some(checkpoint))?;
+        let mut removed = Vec::new();
+        for command in commands {
+            session.apply(&storable_command(command, &mut removed))?;
+        }
+        Ok(Created {
+            bytes: session.export(determinism)?,
+            notice: removed_notice(&removed),
+        })
+    })
+}
+
+/// Applies content commands in order; the inverse list is in undo order (none
+/// when a command has none) and the targets describe the post-edit state.
+/// Characters an Office file cannot store leave the commands' text first and
+/// the result's notice names them.
 pub fn apply_commands(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -306,21 +379,24 @@ pub fn apply_commands(
             return Err(Error::edit(EditCode::InvalidInput, "no commands"));
         }
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
-        let mut inverse = Vec::with_capacity(commands.len());
+        let mut inverse = Some(Vec::with_capacity(commands.len()));
         let mut ids: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
         let mut removed = Vec::new();
         for command in commands {
             let applied = session.apply(&storable_command(command, &mut removed))?;
-            inverse.insert(0, applied.inverse);
-            if !ids.contains(&applied.id) {
-                ids.push(applied.id);
+            inverse = inverse.zip(applied.inverse).map(|(mut list, command)| {
+                list.insert(0, command);
+                list
+            });
+            for id in applied.ids {
+                if seen.insert(id.clone()) {
+                    ids.push(id);
+                }
             }
         }
         let state = session.state();
-        let targets = ids
-            .iter()
-            .map(|id| session.locate(id))
-            .collect::<Result<Vec<_>>>()?;
+        let targets = session.locate(&ids)?;
         Ok(CommandResult {
             state,
             inverse,
@@ -331,10 +407,7 @@ pub fn apply_commands(
 }
 
 pub fn locate_targets(base: &[u8], checkpoint: Checkpoint, ids: &[String]) -> Result<Vec<Target>> {
-    guard(|| {
-        let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
-        ids.iter().map(|id| session.locate(id)).collect()
-    })
+    guard(|| Session::open(checkpoint.format, base, Some(checkpoint))?.locate(ids))
 }
 
 /// The build's identity, in place of the WASM asset hashes.
