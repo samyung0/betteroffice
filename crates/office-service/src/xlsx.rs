@@ -989,17 +989,26 @@ fn cell_value(cell: &J) -> String {
 /// agent chose (outside the grid, over Excel's limits, not a worksheet, a
 /// reference it cannot rewrite) is an edit refusal with its sentence; any
 /// other failure stays the engine's.
+/// An agent edit the workbook refused. Faults valid agent input cannot reach
+/// once [`XlsxSession::sheet_ref`] found the sheet (no sheets, a missing
+/// sheet or chart frame) stay engine errors, so they reach Sentry.
 fn refused(error: betteroffice_xlsx::Error) -> Error {
     use betteroffice_xlsx::Error as Xlsx;
+    use xlsx_ops::OpError as Op;
     match error {
         Xlsx::CellOutOfRange(_)
         | Xlsx::InvalidOperation(_)
-        | Xlsx::NoSheets
-        | Xlsx::Operation(xlsx_ops::OpError::InvalidStyle(_)) => invalid(error.to_string()),
+        | Xlsx::Operation(Op::InvalidStyle(_)) => invalid(error.to_string()),
         Xlsx::RangeTooLarge { rows, cols, max } => invalid(format!(
             "the range is {rows} by {cols} cells; an edit covers at most {max} cells"
         )),
-        Xlsx::Operation(_) => Error::edit(EditCode::UnsupportedOperation, error.to_string()),
+        Xlsx::Operation(
+            Op::FormulaNotRewritable { .. }
+            | Op::DefinedNameNotRewritable { .. }
+            | Op::ChartRefNotRewritable { .. }
+            | Op::ChartAnchorNotMovable { .. }
+            | Op::NumFmtTableFull,
+        ) => Error::edit(EditCode::UnsupportedOperation, error.to_string()),
         error => Error::engine(error),
     }
 }
@@ -1370,6 +1379,79 @@ fn projection_json(workbook: &Workbook, full: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which workbook errors an agent edit gets back as a refusal (409) and
+    /// which stay engine faults (503, Sentry).
+    #[test]
+    fn workbook_errors_map_to_refusals_or_engine_faults() {
+        use betteroffice_xlsx::Error as Xlsx;
+        use xlsx_ops::OpError as Op;
+        let cell = CellRef::new(0, 0);
+        let part = || "xl/charts/chart1.xml".to_owned();
+        let frame = || "Chart 1".to_owned();
+        let cases = [
+            (Xlsx::CellOutOfRange(cell), "invalid_input"),
+            (Xlsx::InvalidOperation("bad".into()), "invalid_input"),
+            (
+                Xlsx::Operation(Op::InvalidStyle("bad".into())),
+                "invalid_input",
+            ),
+            (
+                Xlsx::RangeTooLarge {
+                    rows: 200,
+                    cols: 200,
+                    max: 10_000,
+                },
+                "invalid_input",
+            ),
+            (
+                Xlsx::Operation(Op::FormulaNotRewritable {
+                    sheet: SheetId(0),
+                    cell,
+                }),
+                "unsupported_operation",
+            ),
+            (
+                Xlsx::Operation(Op::DefinedNameNotRewritable {
+                    name: "Rate".into(),
+                }),
+                "unsupported_operation",
+            ),
+            (
+                Xlsx::Operation(Op::ChartRefNotRewritable { part: part() }),
+                "unsupported_operation",
+            ),
+            (
+                Xlsx::Operation(Op::ChartAnchorNotMovable { part: part() }),
+                "unsupported_operation",
+            ),
+            (
+                Xlsx::Operation(Op::NumFmtTableFull),
+                "unsupported_operation",
+            ),
+            (Xlsx::NoSheets, "engine"),
+            (Xlsx::Operation(Op::SheetNotFound(SheetId(3))), "engine"),
+            (Xlsx::Operation(Op::SheetIndexOutOfRange(3)), "engine"),
+            (
+                Xlsx::Operation(Op::ChartNotFound { frame: frame() }),
+                "engine",
+            ),
+            (
+                Xlsx::Operation(Op::ChartFrameShifted { frame: frame() }),
+                "engine",
+            ),
+            (Xlsx::SheetOutOfRange(SheetId(3)), "engine"),
+        ];
+        for (error, expected) in cases {
+            let shown = error.to_string();
+            let kind = match refused(error) {
+                Error::Edit { code, .. } => code.as_str(),
+                Error::Engine(_) => "engine",
+                other => panic!("{shown}: {other:?}"),
+            };
+            assert_eq!(kind, expected, "{shown}");
+        }
+    }
 
     #[test]
     fn a1_addresses_parse_as_the_ts_regex_does() {
