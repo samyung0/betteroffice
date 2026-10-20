@@ -2,6 +2,7 @@
 //! drives the docx-edit WASM session, with the save projection
 //! (yrsToDocument.ts) ported in `project`.
 
+pub(crate) mod agent;
 mod comments;
 mod format;
 mod item;
@@ -552,10 +553,7 @@ impl DocxSession {
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {
         let Command::ReplaceText { target_id, .. } = command else {
-            return Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "DOCX sources support replace_text only",
-            ));
+            return self.apply_agent(command);
         };
         let (story, paragraph) = self.paragraph(target_id)?;
         if !paragraph.plain {

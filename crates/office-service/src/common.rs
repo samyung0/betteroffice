@@ -211,9 +211,17 @@ pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Co
         Command::ReplaceText { text, .. }
         | Command::SetCell { value: text, .. }
         | Command::AddSheet { name: text, .. }
-        | Command::RenameSheet { name: text, .. } => keep(text),
-        Command::SetRange { values, .. } => values.iter_mut().flatten().for_each(keep),
-        Command::FormatCells { .. }
+        | Command::RenameSheet { name: text, .. }
+        | Command::InsertParagraph { text, .. } => keep(text),
+        Command::SetRange { values, .. } | Command::InsertTable { rows: values, .. } => {
+            values.iter_mut().flatten().for_each(keep)
+        }
+        Command::DeleteParagraph { .. }
+        | Command::SetList { .. }
+        | Command::DeleteTable { .. }
+        | Command::FormatText { .. }
+        | Command::SetAlignment { .. }
+        | Command::FormatCells { .. }
         | Command::DeleteSheet { .. }
         | Command::InsertRows { .. }
         | Command::DeleteRows { .. }

@@ -62,6 +62,7 @@ impl Book {
             &InspectQuery {
                 sheet: sheet.map(str::to_owned),
                 range: range.map(str::to_owned),
+                ..InspectQuery::default()
             },
         )
     }
@@ -953,21 +954,21 @@ fn create_office_over_the_wire_answers_the_new_file() {
     );
 }
 
-/// DOCX and PPTX have no starter yet: a create is refused as
-/// `unsupported_operation` (409), not an engine fault the server retries.
+/// PPTX has no starter: a create is refused as `unsupported_operation`
+/// (409), not an engine fault the server retries.
 #[test]
 fn a_format_without_a_starter_cannot_be_created_yet() {
     assert_eq!(
-        starter(Format::Docx).unwrap_err(),
+        starter(Format::Pptx).unwrap_err(),
         refusal(
             EditCode::UnsupportedOperation,
-            "docx files cannot be created yet",
+            "pptx files cannot be created yet",
             None
         )
     );
     let request = json!({
         "method": "createOffice",
-        "args": ["docx", [], { "seed": DETERMINISM.seed, "now": DETERMINISM.now }],
+        "args": ["pptx", [], { "seed": DETERMINISM.seed, "now": DETERMINISM.now }],
     });
     let answer: Value =
         serde_json::from_slice(&office_service::wire::call(request.to_string().as_bytes()))
@@ -975,7 +976,7 @@ fn a_format_without_a_starter_cannot_be_created_yet() {
     assert_eq!(
         answer,
         json!({
-            "error": "unsupported_operation: docx files cannot be created yet",
+            "error": "unsupported_operation: pptx files cannot be created yet",
             "kind": "edit",
         })
     );

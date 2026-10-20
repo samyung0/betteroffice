@@ -240,3 +240,17 @@ crate via `include_bytes!` as the workbook the agent's `create` starts from.
 Copyright (c) 2015 Dave Johnson.
 
 License: MIT (`crates/office-service/starters/NOTICE.md`).
+
+---
+
+## python-docx default template
+
+`crates/office-service/starters/blank.docx` is python-docx's default template
+(https://github.com/python-openxml/python-docx,
+`src/docx/templates/default.docx`), unchanged. It is compiled into the
+`betteroffice-office-service` crate via `include_bytes!` as the document the
+agent's `create` starts from.
+
+Copyright (c) 2013 Steve Canny.
+
+License: MIT (`crates/office-service/starters/NOTICE.md`).

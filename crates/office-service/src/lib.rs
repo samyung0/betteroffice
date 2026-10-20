@@ -143,9 +143,10 @@ impl Session {
     fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<serde_json::Value> {
         match self {
             Session::Xlsx(session) => session.inspect_scoped(query),
-            Session::Docx(_) | Session::Pptx(_) => Err(Error::edit(
+            Session::Docx(session) => session.inspect_scoped(query),
+            Session::Pptx(_) => Err(Error::edit(
                 EditCode::UnsupportedOperation,
-                "scoped reads cover XLSX files for now",
+                "scoped reads cover XLSX and DOCX files for now",
             )),
         }
     }
@@ -310,7 +311,8 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 }
 
 /// What the agent reads of an Office file without projecting all of it
-/// (XLSX: the sheet list, or a range's non-empty cells).
+/// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a window of
+/// paragraphs).
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -324,7 +326,8 @@ pub fn inspect_scoped(
 pub fn starter(format: Format) -> Result<&'static [u8]> {
     match format {
         Format::Xlsx => Ok(include_bytes!("../starters/blank.xlsx")),
-        Format::Docx | Format::Pptx => Err(Error::edit(
+        Format::Docx => Ok(include_bytes!("../starters/blank.docx")),
+        Format::Pptx => Err(Error::edit(
             EditCode::UnsupportedOperation,
             format!("{} files cannot be created yet", format.as_str()),
         )),
@@ -341,6 +344,7 @@ pub fn create(
     guard(|| {
         check_determinism(determinism)?;
         assert_checkpoint(format, starter, None)?;
+        docx::agent::check_call(commands)?;
         let state = match format {
             Format::Docx => docx::seed(starter),
             Format::Xlsx => xlsx::seed(starter),
@@ -378,6 +382,7 @@ pub fn apply_commands(
         if commands.is_empty() {
             return Err(Error::edit(EditCode::InvalidInput, "no commands"));
         }
+        docx::agent::check_call(commands)?;
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
         let mut inverse = Some(Vec::with_capacity(commands.len()));
         let mut ids: Vec<String> = Vec::new();

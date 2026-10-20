@@ -194,6 +194,96 @@ pub enum Command {
         count: u32,
         expected: Vec<Vec<String>>,
     },
+    /// DOCX: one paragraph after the body paragraph `after_id` and after the
+    /// paragraphs and tables this call already put there, so inserts after
+    /// one paragraph keep their order; without `after_id`, at the body's end
+    /// (into its only paragraph when that is empty). `style` is a paragraph
+    /// style id of the file.
+    #[serde(rename_all = "camelCase")]
+    InsertParagraph {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_id: Option<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<ListKind>,
+    },
+    /// DOCX: a plain paragraph reading exactly `expected_text`.
+    #[serde(rename_all = "camelCase")]
+    DeleteParagraph { id: String, expected_text: String },
+    #[serde(rename_all = "camelCase")]
+    SetList { ids: Vec<String>, list: ListKind },
+    /// DOCX: a table of `rows` placed as [`Command::InsertParagraph`] places
+    /// a paragraph, followed by an empty paragraph of its own.
+    #[serde(rename_all = "camelCase")]
+    InsertTable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_id: Option<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// DOCX: the table holding paragraph `id`, its cells' text as `expected`
+    /// (a cell's paragraphs joined by line breaks).
+    #[serde(rename_all = "camelCase")]
+    DeleteTable {
+        id: String,
+        expected: Vec<Vec<String>>,
+    },
+    /// DOCX: formats the one occurrence of `expected_text` in a paragraph.
+    #[serde(rename_all = "camelCase")]
+    FormatText {
+        target_id: String,
+        expected_text: String,
+        #[serde(flatten)]
+        format: TextFormat,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetAlignment {
+        target_id: String,
+        alignment: Alignment,
+    },
+}
+
+/// A DOCX paragraph's list: the document's one bullet or one numbered list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Alignment {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+/// What `format_text` sets; fields left out stay as they are. `color` is a
+/// hex colour, `highlight` one of Word's highlight colours or `none`,
+/// `font_size` in points.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFormat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
 }
 
 /// What `format_cells` sets: the editor's style patch and a number format.
@@ -207,7 +297,8 @@ pub struct CellStyle {
 }
 
 /// A scoped read. XLSX: no `range` lists the sheets; `sheet` and `range`
-/// read that range's cells.
+/// read that range's cells. DOCX: `count` paragraphs from `start` (0 when
+/// left out).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectQuery {
@@ -215,6 +306,10 @@ pub struct InspectQuery {
     pub sheet: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
 }
 
 /// Yrs location of an edited target: root map name, nested keys, and the

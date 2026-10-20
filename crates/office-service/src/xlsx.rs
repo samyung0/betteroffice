@@ -309,6 +309,16 @@ impl XlsxSession {
                 EditCode::UnsupportedOperation,
                 "XLSX sources support set_cell only",
             )),
+            Command::InsertParagraph { .. }
+            | Command::DeleteParagraph { .. }
+            | Command::SetList { .. }
+            | Command::InsertTable { .. }
+            | Command::DeleteTable { .. }
+            | Command::FormatText { .. }
+            | Command::SetAlignment { .. } => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "this command edits DOCX files",
+            )),
         }
     }
 
