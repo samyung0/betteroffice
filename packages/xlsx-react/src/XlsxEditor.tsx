@@ -1987,7 +1987,8 @@ function XlsxEditorContent({
           const pieceRows = Math.max(1, Math.floor(COPY_PIECE_CELLS / (r.right - r.left + 1)));
           for (let top = r.top; top <= r.bottom; top += pieceRows) {
             const bottom = Math.min(r.bottom, top + pieceRows - 1);
-            const cells = await handle.onSheet(
+            // the copy's own sheet, whichever is shown by now.
+            const cells = await handle.inSheet(
               activeSheetId,
               'rangeCells',
               activeSheet,
@@ -2026,8 +2027,9 @@ function XlsxEditorContent({
     [selection, activeSheet, activeSheetId, usedRange, reportError, reportEditError, onNotice]
   );
 
-  // a cut reads, then clears the range it copied (nothing once a newer copy
-  // superseded its read); edits wait while it reads. Read-only, it copies.
+  // a cut reads, then clears the range it copied on its own sheet, shown or
+  // not (nothing once a newer copy superseded its read, or once that sheet is
+  // removed); edits wait while it reads. Read-only, it copies.
   const cutSelection = useCallback(async () => {
     if (!selection) return;
     if (readOnly) {
@@ -2035,27 +2037,38 @@ function XlsxEditorContent({
       return;
     }
     const target = selection;
-    // a clear past the engine's update cap is refused before anything is copied.
     const handle = handleRef.current;
+    const sheetId = activeSheetId;
     const r = inUsedRange(normalizeRange(target), usedRange());
+    const range = r && `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+    // a clear past the engine's update cap is refused before anything is copied.
     const check =
-      handle && r
-        ? () =>
-            handle.onSheet(
-              activeSheetId,
-              'checkClearContents',
-              activeSheet,
-              `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`
-            )
+      handle && range
+        ? () => handle.inSheet(sheetId, 'checkClearContents', activeSheet, range)
         : undefined;
     setCutReading(true);
     try {
       // a pause begun during the read leaves a copy.
-      if ((await copySelection(target, check)) && !hostRefusesRef.current) clearRange(target);
+      if (!(await copySelection(target, check)) || hostRefusesRef.current) return;
+      if (!handle || !range || handleRef.current !== handle) return;
+      track(handle, handle.inSheet(sheetId, 'clearContents', activeSheet, range)).then(
+        applyResult,
+        reportEditError
+      );
     } finally {
       setCutReading(false);
     }
-  }, [selection, readOnly, copySelection, clearRange, usedRange, activeSheet, activeSheetId]);
+  }, [
+    selection,
+    readOnly,
+    copySelection,
+    usedRange,
+    activeSheet,
+    activeSheetId,
+    track,
+    applyResult,
+    reportEditError,
+  ]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;

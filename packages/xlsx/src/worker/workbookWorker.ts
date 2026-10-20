@@ -155,11 +155,11 @@ function call(open: WorkbookHandle, request: WorkbookCallRequest): unknown {
   let args = request.args;
   if (request.sheetId !== undefined) {
     if (request.method === 'setActiveSheet') {
-      const index = open.sheetInfo().sheetIds.indexOf(request.sheetId);
-      if (index < 0) throw new Error(SHEET_GONE);
-      args = [index];
+      args = [sheetIndex(open, request.sheetId)];
     } else {
-      const sheet = activeSheet(open, request.sheetId);
+      const sheet = request.ownSheet
+        ? sheetIndex(open, request.sheetId)
+        : activeSheet(open, request.sheetId);
       if (SHEET_FIRST.has(request.method)) args = [sheet, ...args.slice(1)];
       else if (request.method === 'applyOps')
         args = [(args[0] as Record<string, unknown>[]).map((op) => withSheet(op, sheet))];
@@ -167,6 +167,13 @@ function call(open: WorkbookHandle, request: WorkbookCallRequest): unknown {
   }
   const method = open[request.method] as (...values: unknown[]) => unknown;
   return method.apply(open, args);
+}
+
+/** The index of the sheet `sheetId` names, until it is removed. */
+function sheetIndex(open: WorkbookHandle, sheetId: string): number {
+  const index = open.sheetInfo().sheetIds.indexOf(sheetId);
+  if (index < 0) throw new Error(SHEET_GONE);
+  return index;
 }
 
 /** The active sheet's index while it is still `sheetId`. */

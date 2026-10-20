@@ -131,6 +131,8 @@ export interface WorkbookCallRequest {
    * otherwise it fails with {@link SHEET_GONE}.
    */
   sheetId?: string;
+  /** With `sheetId`: the call runs on that sheet, shown or not, until it is removed. */
+  ownSheet?: boolean;
 }
 
 export interface WorkbookToggleRequest {

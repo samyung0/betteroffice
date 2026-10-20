@@ -212,6 +212,28 @@ function countEngine(proxy: WorkbookProxy) {
 // the workbook of the editor mounted last.
 let currentWorkbook: WorkbookProxy | null = null;
 
+type Forward = (sheetId: string, method: string, ...args: unknown[]) => Promise<unknown>;
+
+// spies on a proxy's two sheet calls, `onSheet` (the shown sheet) and `inSheet`
+// (a copy's or cut's own sheet), through one implementation given the call's
+// own forward.
+function spySheetCalls(
+  proxy: WorkbookProxy,
+  through: (forward: Forward, sheetId: string, method: string, ...args: unknown[]) => Promise<unknown>
+) {
+  const wrap = (forward: Forward) =>
+    ((sheetId: string, method: string, ...args: unknown[]) =>
+      through(forward, sheetId, method, ...args)) as unknown as WorkbookProxy['onSheet'];
+  // the originals, taken before the spies replace them.
+  const onSheet = wrap(proxy.onSheet.bind(proxy) as unknown as Forward);
+  const inSheet = wrap(proxy.inSheet.bind(proxy) as unknown as Forward);
+  const spies = [
+    spyOn(proxy, 'onSheet').mockImplementation(onSheet),
+    spyOn(proxy, 'inSheet').mockImplementation(inSheet),
+  ];
+  return { mockRestore: () => spies.forEach((spy) => spy.mockRestore()) };
+}
+
 // a clipboard `write` that records the text of each ClipboardItem it takes.
 function writeInto(written: string[]) {
   return async ([item]: ClipboardItem[]) => {
@@ -630,15 +652,14 @@ describe('XlsxEditor keyboard', () => {
   // column is recorded but kept from the worker) and what reaches the clipboard.
   const watch = (view: Awaited<ReturnType<typeof mountEditor>>) => {
     const proxy = view.workbook();
-    const forward = proxy.onSheet.bind(proxy);
     const sent: Array<{ method: string; args: unknown[] }> = [];
-    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+    const spy = spySheetCalls(proxy, (forward, sheetId, method, ...args) => {
       sent.push({ method, args });
       if (method === 'rangeCells' && /\d{7}$/.test(String(args[1]))) return Promise.resolve([]);
       if (method === 'editCells' && (args[1] as unknown[]).length > 10_000)
         return Promise.resolve(undefined);
       return forward(sheetId, method, ...args);
-    }) as WorkbookProxy['onSheet']);
+    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -995,18 +1016,17 @@ describe('XlsxEditor keyboard', () => {
   // reaches the clipboard.
   const holdFirstRead = (view: Awaited<ReturnType<typeof mountEditor>>) => {
     const proxy = view.workbook();
-    const forward = proxy.onSheet.bind(proxy);
     let open!: () => void;
     const held = new Promise<void>((resolve) => {
       open = resolve;
     });
     const sent: string[] = [];
-    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+    const spy = spySheetCalls(proxy, (forward, sheetId, method, ...args) => {
       sent.push(method);
       if (method === 'rangeCells' && sent.filter((name) => name === 'rangeCells').length === 1)
         return held.then(() => forward(sheetId, method, ...args));
       return forward(sheetId, method, ...args);
-    }) as WorkbookProxy['onSheet']);
+    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -1063,6 +1083,29 @@ describe('XlsxEditor keyboard', () => {
       await view.idle();
       expect(read.sent.filter((name) => name === 'clearContents')).toEqual([]);
       expect(await view.input(89_999, 9)).toBe('1');
+    } finally {
+      read.restore();
+    }
+  }, MANY_KEYS_MS);
+
+  // the cut's read, check and clear name its own sheet: Summary shown by the
+  // end of the read leaves Budget's B2 cleared.
+  it('clears a cut on its own sheet when another sheet is shown by the end of its read', async () => {
+    const view = await mountEditor(plain);
+    const read = holdFirstRead(view);
+    const tabs = () => [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')];
+    try {
+      await view.click({ row: 1, col: 1 });
+      await press(view.surface, 'x', { ctrlKey: true });
+      await act(async () => {
+        fireEvent.click(tabs()[1]);
+      });
+      await view.idle();
+      expect(tabs()[1].getAttribute('aria-selected')).toBe('true');
+      await read.release();
+      await waitFor(() => expect(view.surface.getAttribute('aria-busy')).toBeNull());
+      await view.idle();
+      expect([read.written, (await view.workbook().cell(0, 1, 1)).input]).toEqual([['Q1'], '']);
     } finally {
       read.restore();
     }
@@ -1174,14 +1217,13 @@ describe('XlsxEditor keyboard', () => {
       onNotice: (notice) => notices.push(notice),
     });
     const proxy = view.workbook();
-    const forward = proxy.onSheet.bind(proxy);
     const sent: string[] = [];
-    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+    const spy = spySheetCalls(proxy, (forward, sheetId, method, ...args) => {
       sent.push(method);
       return method === 'checkClearContents'
         ? Promise.reject(new EditTooLargeError('edit too large: 500000 cells'))
         : forward(sheetId, method, ...args);
-    }) as WorkbookProxy['onSheet']);
+    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -1215,16 +1257,15 @@ describe('XlsxEditor keyboard', () => {
       onNotice: (notice) => notices.push(notice),
     });
     const proxy = view.workbook();
-    const forward = proxy.onSheet.bind(proxy);
     const long = 'x'.repeat(108);
     const piece = Array.from({ length: 10_000 }, () =>
       Array.from({ length: 10 }, () => ({ input: long, isFormula: false }))
     );
     const sent: string[] = [];
-    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+    const spy = spySheetCalls(proxy, (forward, sheetId, method, ...args) => {
       sent.push(method);
       return method === 'rangeCells' ? Promise.resolve(piece) : forward(sheetId, method, ...args);
-    }) as WorkbookProxy['onSheet']);
+    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
@@ -1259,17 +1300,16 @@ describe('XlsxEditor keyboard', () => {
       onNotice: (notice) => notices.push(notice),
     });
     const proxy = view.workbook();
-    const forward = proxy.onSheet.bind(proxy);
     const text = 'é中😀'.repeat(13);
     const piece = Array.from({ length: 10_000 }, () =>
       Array.from({ length: 10 }, () => ({ input: text, isFormula: false }))
     );
     let reads = 0;
-    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) => {
+    const spy = spySheetCalls(proxy, (forward, sheetId, method, ...args) => {
       if (method !== 'rangeCells') return forward(sheetId, method, ...args);
       reads += 1;
       return Promise.resolve(piece);
-    }) as WorkbookProxy['onSheet']);
+    });
     const written: string[] = [];
     const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', {
