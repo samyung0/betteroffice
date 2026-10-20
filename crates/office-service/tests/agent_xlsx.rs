@@ -720,29 +720,20 @@ fn create_applies_commands_to_the_starter_and_exports_a_workbook() {
     );
 }
 
-/// The committed starter is what the engine writes for a one-sheet workbook
-/// (regenerate with `OFFICE_SERVICE_BLESS=1`), and it seeds and exports.
+/// The committed starter (the blank workbook Excel saved, starters/NOTICE.md)
+/// seeds, exports and reopens as one empty sheet "Sheet1", and `create`
+/// builds on it.
 #[test]
-fn the_xlsx_starter_is_the_engines_blank_workbook() {
-    let mut model = WorkbookModel::default();
-    model.sheets.push(Sheet::new("Sheet1"));
-    let written = Workbook::from_model(model).unwrap().save().unwrap();
-    if std::env::var_os("OFFICE_SERVICE_BLESS").is_some() {
-        std::fs::write(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/starters/blank.xlsx"),
-            &written,
-        )
-        .unwrap();
-    }
-    assert!(
-        written == starter(Format::Xlsx).unwrap(),
-        "starters/blank.xlsx is not what the engine writes"
-    );
-
-    let exported = Workbook::open(&blank_with(&[])).unwrap();
+fn the_xlsx_starter_seeds_exports_and_reopens_as_one_empty_sheet() {
+    let book = Book::new(starter(Format::Xlsx).unwrap().to_vec());
+    let exported =
+        Workbook::open(&export(&book.base, book.checkpoint(), DETERMINISM).unwrap()).unwrap();
     assert_eq!(exported.sheet_count(), 1);
     assert_eq!(exported.model().sheets[0].name, "Sheet1");
     assert_eq!(exported.model().sheets[0].iter_cells().count(), 0);
+
+    let created = Book::created(&[set_range("Sheet1", "A1", &[&[""]], &[&["=1+1"]])]);
+    assert_eq!(created.cells("Sheet1", "A1"), ["A1==1+1→2"]);
 }
 
 /// The wire shapes Capy sends: snake_case `type`, camelCase fields.
