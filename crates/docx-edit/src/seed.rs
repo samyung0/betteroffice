@@ -3953,7 +3953,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
 ) -> Result<Vec<RawOp>, String> {
-    let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
+    let mut ops = Vec::new();
     let mut index = 0u32;
     let mut text = String::new();
     let mut attrs = JsonObject::new();
@@ -4416,8 +4416,7 @@ pub fn seed_parsed_docx_in_place(
 
 /// The raw ops that seed `blocks` (paragraphs the editor wrote) into an empty
 /// story with `package`'s styles, as the seed of a file holding them would:
-/// their units, then their bookmarks and field boundaries. The delete of the
-/// empty story's own pilcrow is left out.
+/// their units, then their bookmarks and field boundaries.
 pub(crate) fn fragment_ops(
     blocks: &[docx_parse::BlockContent],
     package: Option<&PackageContext>,
@@ -4445,8 +4444,7 @@ pub(crate) fn fragment_ops(
         },
     );
     let plan = context.plans.swap_remove(0);
-    let (_, mut ops, _) = seed_plan(plan, &HashMap::new())?;
-    ops.remove(0);
+    let (_, ops, _) = seed_plan(plan, &HashMap::new())?;
     Ok(ops)
 }
 

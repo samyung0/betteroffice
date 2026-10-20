@@ -805,7 +805,7 @@ mod tests {
         ops
     }
 
-    /// What `seed_parsed_docx` emits: placeholder delete, appending inserts, trailing comment.
+    /// What `seed_parsed_docx` emits: appending inserts, trailing comment.
     fn seed_shaped_ops() -> Vec<RawOp> {
         let font = attrs(&[(
             "fontFamily",
@@ -837,7 +837,7 @@ mod tests {
             }
         }
         let mut builder = Builder {
-            ops: vec![RawOp::Delete { index: 0, len: 1 }],
+            ops: Vec::new(),
             index: 0,
         };
         builder.text("Heading with stars ★★", &bold);
