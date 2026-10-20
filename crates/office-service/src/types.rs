@@ -168,13 +168,12 @@ pub enum Command {
     #[serde(rename_all = "camelCase")]
     InsertRows { sheet: String, at: u32, count: u32 },
     /// `expected` is the band's inputs as TSV (rows from `at`, cells from
-    /// column A); absent or `""` expects an empty band.
+    /// column A), required; `""` expects an empty band.
     #[serde(rename_all = "camelCase")]
     DeleteRows {
         sheet: String,
         at: u32,
         count: u32,
-        #[serde(default)]
         expected: String,
     },
     /// `at` is the column letter the first new column takes.
@@ -185,13 +184,12 @@ pub enum Command {
         count: u32,
     },
     /// `expected` is the band's inputs as TSV (rows from row 1, cells from
-    /// column `at`); absent or `""` expects an empty band.
+    /// column `at`), required; `""` expects an empty band.
     #[serde(rename_all = "camelCase")]
     DeleteColumns {
         sheet: String,
         at: String,
         count: u32,
-        #[serde(default)]
         expected: String,
     },
 }

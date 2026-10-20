@@ -759,7 +759,7 @@ fn commands_parse_from_their_wire_json() {
         { "type": "insert_rows", "sheet": "Sheet1", "at": 2, "count": 3 },
         { "type": "delete_rows", "sheet": "Sheet1", "at": 2, "count": 1, "expected": "2\ty" },
         { "type": "insert_columns", "sheet": "Sheet1", "at": "B", "count": 1 },
-        { "type": "delete_columns", "sheet": "Sheet1", "at": "B", "count": 1 },
+        { "type": "delete_columns", "sheet": "Sheet1", "at": "B", "count": 1, "expected": "" },
     ]))
     .unwrap();
     assert_eq!(
@@ -788,6 +788,16 @@ fn commands_parse_from_their_wire_json() {
             count: 1,
             expected: String::new(),
         }
+    );
+    // A delete names the band it expects (Epo 2026-10-20); the collaboration
+    // server answers a command that does not parse as invalid_input.
+    let missing = serde_json::from_value::<Command>(
+        json!({ "type": "delete_rows", "sheet": "Sheet1", "at": 2, "count": 1 }),
+    )
+    .unwrap_err();
+    assert!(
+        missing.to_string().contains("missing field `expected`"),
+        "{missing}"
     );
 }
 
