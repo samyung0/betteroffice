@@ -369,14 +369,26 @@ impl EditingDoc {
     /// new paragraph restores the document.
     ///
     /// Errors when `at` does not address a position inside a story.
-    pub fn split_paragraph(&self, ctx: &EditCtx, mut at: Position) -> OpResult<SplitReceipt> {
+    pub fn split_paragraph(&self, ctx: &EditCtx, at: Position) -> OpResult<SplitReceipt> {
+        self.split_at(ctx, at, false)
+    }
+
+    /// An empty paragraph at the start of `story`, as the split puts one
+    /// before a slot that opens with a block: the new mark takes a fresh
+    /// paraId and the first paragraph's properties, and the first paragraph
+    /// keeps its own. Its receipt's `first_para_id` is the new paragraph's.
+    pub fn insert_paragraph_at_start(&self, ctx: &EditCtx, story: &str) -> OpResult<SplitReceipt> {
+        self.split_at(ctx, Position::new(story, 0), true)
+    }
+
+    fn split_at(&self, ctx: &EditCtx, mut at: Position, before: bool) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
         let slot = self
             .segment_index(&at.story)?
             .para_at(at.index)
             .filter(|para| para.start == at.index && para.node_start > at.index)
             .map(|para| (para.node_start, para.pilcrow));
-        let mut before_block = slot.is_some();
+        let mut before_block = before || slot.is_some();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
@@ -399,9 +411,10 @@ impl EditingDoc {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        if snapshot_range(&story, &txn, at.index, orig_index)
-            .iter()
-            .all(|chunk| is_comment_reference(chunk, &txn))
+        if !before
+            && snapshot_range(&story, &txn, at.index, orig_index)
+                .iter()
+                .all(|chunk| is_comment_reference(chunk, &txn))
         {
             at.index = orig_index;
         }

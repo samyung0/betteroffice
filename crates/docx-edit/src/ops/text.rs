@@ -367,6 +367,43 @@ impl EditingDoc {
         })
     }
 
+    /// Removes paragraph `para_id` of `story` whole, its slot and mark, as a
+    /// plain edit: the paragraphs around it keep their marks, ids and
+    /// properties, where a [`Self::delete_range`] across a mark joins two
+    /// paragraphs and the survivor adopts the first mark. Errors when the
+    /// story has no such paragraph and on its final paragraph, whose mark the
+    /// story keeps.
+    pub fn remove_paragraph(&self, ctx: &EditCtx, story: &str, para_id: &str) -> OpResult<Receipt> {
+        let mut txn = self.transact_for(ctx);
+        let text = story_ref(&txn, story)?;
+        let chunks = crate::ops::snapshot(&text, &txn);
+        let marks: Vec<(u32, bool)> = chunks
+            .iter()
+            .filter_map(|chunk| match &chunk.kind {
+                ChunkKind::Pilcrow(map) => Some((
+                    chunk.start,
+                    crate::map_string(map, &txn, crate::PARA_ID).as_deref() == Some(para_id),
+                )),
+                _ => None,
+            })
+            .collect();
+        let index = marks
+            .iter()
+            .position(|(_, found)| *found)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        if index + 1 == marks.len() {
+            return Err(OpError::CannotMergeFinalParagraph(para_id.to_owned()));
+        }
+        let start = index
+            .checked_sub(1)
+            .map_or(0, |previous| marks[previous].0 + 1);
+        let end = marks[index].0 + 1;
+        release_children(&mut txn, &text, &chunks, start, end);
+        text.remove_range(&mut txn, start, end - start);
+        refresh_shown(&mut txn, &text, &child_owners(&chunks, start, end));
+        Ok(Receipt::default())
+    }
+
     /// Replaces a range with plain text in ONE transaction — the primitive behind
     /// type-over-selection, paste, find-replace, and agent proposeChange. In suggesting mode the
     /// delete and insert stamps share one revision ID. The inserted text adopts the formatting of

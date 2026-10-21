@@ -1,0 +1,544 @@
+//! The chat agent's paragraph commands (Epo 2026-10-21): `insert_paragraph`
+//! after or before a paragraph (a DOCX one in the body, with a paragraph
+//! style of the file) and `delete_paragraph` of a paragraph reading its
+//! expected text, never its story's last; the DOCX read lists the file's
+//! paragraph styles.
+
+use office_service::{
+    Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format, InspectQuery,
+    apply_commands, export, inspect, inspect_scoped, seed, sha256_hex,
+};
+use serde_json::{Value, json};
+
+const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+/// The demo deck's first story: "Office files," then "without the office.".
+const DECK_STORY: [&str; 2] = ["Office files,", "without the office."];
+
+/// A document and its latest state.
+struct Doc {
+    format: Format,
+    base: Vec<u8>,
+    sha: String,
+    state: Vec<u8>,
+}
+
+impl Doc {
+    fn new(format: Format, base: Vec<u8>) -> Self {
+        let state = seed(format, &base).unwrap();
+        Self {
+            format,
+            sha: sha256_hex(&base),
+            base,
+            state,
+        }
+    }
+
+    fn checkpoint(&self) -> Checkpoint<'_> {
+        Checkpoint {
+            format: self.format,
+            schema_version: 1,
+            base_sha256: &self.sha,
+            state: &self.state,
+        }
+    }
+
+    /// Applies `commands`, keeping the state only when they land.
+    fn apply(&mut self, commands: &[Command]) -> Result<CommandResult, Error> {
+        let result = apply_commands(&self.base, self.checkpoint(), commands)?;
+        self.state = result.state.clone();
+        Ok(result)
+    }
+
+    /// The editable paragraphs as (id, text).
+    fn paragraphs(&self) -> Vec<(String, String)> {
+        inspect(&self.base, self.checkpoint())
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.id, entry.value))
+            .collect()
+    }
+
+    /// The editable paragraphs' text, a DOCX's of its body only.
+    fn texts(&self) -> Vec<String> {
+        self.paragraphs()
+            .into_iter()
+            .filter(|(id, _)| self.format != Format::Docx || id.starts_with("body:paragraph:"))
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    fn id(&self, text: &str) -> String {
+        self.paragraphs()
+            .into_iter()
+            .find(|(_, value)| value == text)
+            .unwrap_or_else(|| panic!("no paragraph reads {text:?}"))
+            .0
+    }
+
+    /// `word/document.xml` of the exported file.
+    fn xml(&self) -> String {
+        let saved = export(
+            &self.base,
+            self.checkpoint(),
+            Determinism {
+                seed: &"0".repeat(64),
+                now: "2026-10-21T00:00:00.000Z",
+            },
+        )
+        .unwrap();
+        ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+            .unwrap()
+    }
+
+    /// The paragraph of the exported document whose text is `text`, as XML.
+    fn paragraph_xml(&self, text: &str) -> String {
+        let xml = self.xml();
+        let chunk = xml
+            .split("</w:p>")
+            .find(|chunk| chunk.contains(&format!(">{text}</w:t>")))
+            .unwrap_or_else(|| panic!("no exported paragraph reads {text:?}: {xml}"));
+        let start = chunk
+            .rfind("<w:p ")
+            .into_iter()
+            .chain(chunk.rfind("<w:p>"))
+            .max()
+            .unwrap();
+        chunk[start..].to_owned()
+    }
+}
+
+/// A DOCX with paragraph styles Normal, Heading1 and Title (and a character
+/// style), and a body of: a title, a centred paragraph, a paragraph with a
+/// tracked insertion, one ending a section, a table, the paragraph after it
+/// and a last paragraph.
+fn docx() -> Vec<u8> {
+    let p = |id: &str, ppr: &str, text: &str| {
+        format!(
+            r#"<w:p w14:paraId="{id}"><w:pPr>{ppr}</w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let body = [
+        p("0000000A", r#"<w:pStyle w:val="Title"/>"#, "Lab report"),
+        p("0000000B", r#"<w:jc w:val="center"/>"#, "We timed it."),
+        r#"<w:p w14:paraId="0000000C"><w:r><w:t xml:space="preserve">Kept </w:t></w:r><w:ins w:id="1" w:author="Ada"><w:r><w:t>added</w:t></w:r></w:ins></w:p>"#.to_owned(),
+        p("0000000D", "<w:sectPr/>", "Section end"),
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0000000E"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#.to_owned(),
+        p("0000000F", "", "After the table"),
+        p("00000010", "", "Last"),
+    ]
+    .concat();
+    let files = [
+        (
+            "[Content_Types].xml",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_owned(),
+        ),
+        (
+            "_rels/.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned(),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_owned(),
+        ),
+        (
+            "word/styles.xml",
+            format!(
+                r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style></w:styles>"#
+            ),
+        ),
+        (
+            "word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr/></w:body></w:document>"#
+            ),
+        ),
+    ];
+    let files: Vec<(String, Vec<u8>)> = files
+        .into_iter()
+        .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&files).unwrap()
+}
+
+fn after(id: &str, text: &str) -> Command {
+    Command::InsertParagraph {
+        after_id: Some(id.to_owned()),
+        before_id: None,
+        text: text.into(),
+        style: None,
+    }
+}
+
+fn before(id: &str, text: &str) -> Command {
+    Command::InsertParagraph {
+        after_id: None,
+        before_id: Some(id.to_owned()),
+        text: text.into(),
+        style: None,
+    }
+}
+
+fn styled(command: Command, name: &str) -> Command {
+    let Command::InsertParagraph {
+        after_id,
+        before_id,
+        text,
+        ..
+    } = command
+    else {
+        unreachable!()
+    };
+    Command::InsertParagraph {
+        after_id,
+        before_id,
+        text,
+        style: Some(name.into()),
+    }
+}
+
+fn delete(id: &str, expected: &str) -> Command {
+    Command::DeleteParagraph {
+        target_id: id.to_owned(),
+        expected_text: expected.into(),
+    }
+}
+
+fn refused(code: EditCode, message: &str) -> Error {
+    Error::Edit {
+        code,
+        message: message.into(),
+        details: None,
+    }
+}
+
+fn invalid(message: &str) -> Error {
+    refused(EditCode::InvalidInput, message)
+}
+
+fn read(doc: &Doc, start: Option<u32>, count: Option<u32>) -> Result<Value, Error> {
+    inspect_scoped(
+        &doc.base,
+        doc.checkpoint(),
+        &InspectQuery {
+            start,
+            count,
+            ..InspectQuery::default()
+        },
+    )
+}
+
+#[test]
+fn the_docx_read_pages_the_paragraphs_and_lists_the_paragraph_styles_first() {
+    let doc = Doc::new(Format::Docx, docx());
+    let first = read(&doc, None, Some(2)).unwrap();
+    let entries = inspect(&doc.base, doc.checkpoint()).unwrap();
+    assert_eq!(first["entries"], json!(&entries[..2]));
+    assert_eq!(first["total"], entries.len());
+    assert_eq!(first["nextStart"], 2);
+    assert_eq!(
+        first["styles"],
+        json!([
+            { "id": "Normal", "name": "Normal" },
+            { "id": "Heading1", "name": "heading 1" },
+            { "id": "Title", "name": "Title" },
+        ])
+    );
+    let rest = read(&doc, Some(2), Some(200)).unwrap();
+    assert_eq!(rest["entries"], json!(&entries[2..]));
+    assert_eq!(rest["nextStart"], Value::Null);
+    assert!(rest.get("styles").is_none());
+    assert_eq!(
+        read(&doc, None, None).unwrap_err(),
+        invalid("a DOCX read names a count of 1 to 200 paragraphs")
+    );
+}
+
+/// Inserts after one paragraph, and before one, land in call order; a new
+/// paragraph takes the style named and nothing of its neighbour's
+/// formatting, and the paragraphs around it keep their ids. The inverse
+/// deletes them.
+#[test]
+fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let original = doc.paragraphs();
+    let (title, timed) = (doc.id("Lab report"), doc.id("We timed it."));
+    let edit = doc
+        .apply(&[
+            after(&timed, "First."),
+            styled(after(&timed, "Method"), "Heading1"),
+            before(&title, "Draft"),
+            before(&title, "v2"),
+            before(&timed, "Aim"),
+        ])
+        .unwrap();
+    assert_eq!(
+        doc.texts()[..8],
+        [
+            "Draft",
+            "v2",
+            "Lab report",
+            "Aim",
+            "We timed it.",
+            "First.",
+            "Method",
+            "Section end"
+        ]
+    );
+    assert_eq!(
+        (doc.id("Lab report"), doc.id("We timed it.")),
+        (title, timed)
+    );
+    let method = doc.paragraph_xml("Method");
+    assert!(
+        method.contains(r#"<w:pStyle w:val="Heading1"/>"#),
+        "{method}"
+    );
+    for text in ["First.", "Draft", "Aim"] {
+        let xml = doc.paragraph_xml(text);
+        assert!(
+            !xml.contains("<w:pStyle") && !xml.contains("<w:jc"),
+            "{xml}"
+        );
+    }
+    assert!(
+        doc.paragraph_xml("We timed it.")
+            .contains(r#"<w:jc w:val="center"/>"#)
+    );
+    assert_eq!(edit.targets.len(), 5);
+
+    doc.apply(edit.inverse.as_deref().unwrap()).unwrap();
+    assert_eq!(doc.paragraphs(), original);
+}
+
+/// A paragraph inserted after the body's last one is the body's last, which
+/// delete_paragraph refuses: the edit has no inverse.
+#[test]
+fn an_insert_after_the_last_paragraph_has_no_inverse() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let last = doc.id("Last");
+    let edit = doc.apply(&[after(&last, "Done.")]).unwrap();
+    assert_eq!(doc.texts().last().unwrap(), "Done.");
+    assert_eq!(edit.inverse, None);
+}
+
+#[test]
+fn docx_insert_refuses_unknown_styles_line_breaks_and_over_limit_input() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let timed = doc.id("We timed it.");
+    let cases = [
+        (
+            vec![styled(after(&timed, "x"), "Heading 1")],
+            invalid(
+                r#"the document has no paragraph style "Heading 1"; use a style id inspect_office_document lists"#,
+            ),
+        ),
+        (
+            vec![styled(after(&timed, "x"), "Strong")],
+            invalid(
+                r#"the document has no paragraph style "Strong"; use a style id inspect_office_document lists"#,
+            ),
+        ),
+        (
+            vec![after(&timed, "one\ntwo")],
+            invalid(
+                "text must be one paragraph without line breaks; insert one paragraph a command",
+            ),
+        ),
+        (
+            vec![after(&timed, &"x".repeat(5_001))],
+            invalid("text holds 5001 characters; a paragraph holds at most 5000"),
+        ),
+        (
+            (0..21).map(|_| after(&timed, "x")).collect(),
+            invalid("the call inserts 21 paragraphs; insert at most 20 a call"),
+        ),
+        (
+            vec![Command::InsertParagraph {
+                after_id: Some(timed.clone()),
+                before_id: Some(timed.clone()),
+                text: "x".into(),
+                style: None,
+            }],
+            invalid("insert_paragraph names exactly one of after_id and before_id"),
+        ),
+        (
+            vec![after(&doc.id("Cell"), "x")],
+            invalid(
+                "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note",
+            ),
+        ),
+        (
+            vec![after("body:paragraph:nope", "x")],
+            refused(
+                EditCode::UnavailableTarget,
+                "the paragraph is no longer in the document",
+            ),
+        ),
+    ];
+    let before = doc.state.clone();
+    for (commands, error) in cases {
+        assert_eq!(doc.apply(&commands).unwrap_err(), error);
+        assert_eq!(doc.state, before);
+    }
+    // Exactly at the bounds it lands.
+    let mut bounded: Vec<Command> = (0..19).map(|_| after(&timed, "x")).collect();
+    bounded.push(after(&timed, &"y".repeat(5_000)));
+    doc.apply(&bounded).unwrap();
+}
+
+/// A delete names the paragraph's whole text; the paragraphs around a
+/// deleted one keep their ids and formatting, the first one's included.
+#[test]
+fn docx_delete_removes_a_plain_paragraph_reading_its_expected_text() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let (title, timed) = (doc.id("Lab report"), doc.id("We timed it."));
+    assert_eq!(
+        doc.apply(&[delete(&title, "Lab")]).unwrap_err(),
+        Error::Edit {
+            code: EditCode::StaleTarget,
+            message: "the paragraph's text differs from expected_text".into(),
+            details: Some(json!({
+                "block": { "id": title, "type": "paragraph", "text": "Lab report" }
+            })),
+        }
+    );
+    let edit = doc.apply(&[delete(&title, "Lab report")]).unwrap();
+    assert_eq!(edit.inverse, None);
+    assert_eq!(doc.texts()[0], "We timed it.");
+    assert_eq!(doc.id("We timed it."), timed);
+    let xml = doc.paragraph_xml("We timed it.");
+    assert!(xml.contains(r#"<w:jc w:val="center"/>"#), "{xml}");
+    assert!(!xml.contains("Title"), "{xml}");
+}
+
+#[test]
+fn docx_delete_refuses_tracked_section_ending_and_last_paragraphs() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let tracked = format!("body:paragraph:{}", "0000000C");
+    let cases = [
+        (
+            delete(&tracked, "Kept added"),
+            refused(
+                EditCode::UnavailableTarget,
+                "the paragraph holds objects, fields or tracked changes, or follows a table or content control; it cannot be deleted",
+            ),
+        ),
+        (
+            delete(&doc.id("Section end"), "Section end"),
+            invalid("the paragraph ends a section; deleting it would join two sections"),
+        ),
+        (
+            delete(&doc.id("Last"), "Last"),
+            invalid("a story's last paragraph cannot be deleted; replace its text instead"),
+        ),
+        (
+            delete(&doc.id("Cell"), "Cell"),
+            invalid("a story's last paragraph cannot be deleted; replace its text instead"),
+        ),
+    ];
+    for (command, error) in cases {
+        assert_eq!(doc.apply(&[command]).unwrap_err(), error);
+    }
+}
+
+/// In a shape's text, inserts after and before a paragraph land in call
+/// order with its neighbours' ids kept; the inverse deletes them; a delete
+/// keeps the paragraph after it as it was.
+#[test]
+fn pptx_inserts_and_deletes_paragraphs_in_a_shapes_text() {
+    let mut doc = Doc::new(Format::Pptx, DECK.to_vec());
+    let original = doc.paragraphs();
+    let (first, second) = (doc.id(DECK_STORY[0]), doc.id(DECK_STORY[1]));
+    let edit = doc
+        .apply(&[
+            after(&first, "A"),
+            after(&first, "B"),
+            before(&first, "Top"),
+            before(&second, "C"),
+        ])
+        .unwrap();
+    let story: Vec<String> = doc
+        .paragraphs()
+        .into_iter()
+        .map(|(_, text)| text)
+        .skip_while(|text| text != "Top")
+        .take(6)
+        .collect();
+    assert_eq!(story, ["Top", DECK_STORY[0], "A", "B", "C", DECK_STORY[1]]);
+    assert_eq!(
+        (doc.id(DECK_STORY[0]), doc.id(DECK_STORY[1])),
+        (first.clone(), second.clone())
+    );
+    doc.apply(edit.inverse.as_deref().unwrap()).unwrap();
+    assert_eq!(doc.paragraphs(), original);
+
+    assert_eq!(
+        doc.apply(&[delete(&first, "Office")]).unwrap_err(),
+        Error::Edit {
+            code: EditCode::StaleTarget,
+            message: "the paragraph's text differs from expected_text".into(),
+            details: Some(json!({
+                "block": { "id": first, "type": "paragraph", "text": DECK_STORY[0] }
+            })),
+        }
+    );
+    assert_eq!(
+        doc.apply(&[delete(&second, DECK_STORY[1])]).unwrap_err(),
+        invalid("a shape's last paragraph cannot be deleted; replace its text instead")
+    );
+    let edit = doc.apply(&[delete(&first, DECK_STORY[0])]).unwrap();
+    assert_eq!(edit.inverse, None);
+    assert!(!doc.texts().iter().any(|text| text == DECK_STORY[0]));
+    assert_eq!(doc.id(DECK_STORY[1]), second);
+}
+
+#[test]
+fn pptx_insert_takes_no_style() {
+    let mut doc = Doc::new(Format::Pptx, DECK.to_vec());
+    let first = doc.id(DECK_STORY[0]);
+    assert_eq!(
+        doc.apply(&[styled(after(&first, "x"), "Title")])
+            .unwrap_err(),
+        invalid(
+            "style names a DOCX paragraph style; a new PPTX paragraph takes its neighbour's formatting"
+        )
+    );
+}
+
+#[test]
+fn paragraph_commands_are_refused_on_a_workbook() {
+    let workbook = office_service::starter(Format::Xlsx).unwrap().to_vec();
+    let mut doc = Doc::new(Format::Xlsx, workbook);
+    for command in [after("x", "y"), delete("x", "y")] {
+        assert_eq!(
+            doc.apply(&[command]).unwrap_err(),
+            refused(
+                EditCode::UnsupportedOperation,
+                "this command edits DOCX and PPTX files"
+            )
+        );
+    }
+}
+
+#[test]
+fn paragraph_commands_parse_from_their_wire_json() {
+    let commands: Vec<Command> = serde_json::from_value(json!([
+        { "type": "insert_paragraph", "afterId": "body:paragraph:1", "text": "Hi", "style": "Heading1" },
+        { "type": "insert_paragraph", "beforeId": "body:paragraph:1", "text": "" },
+        { "type": "delete_paragraph", "targetId": "body:paragraph:1", "expectedText": "Hi" },
+    ]))
+    .unwrap();
+    assert_eq!(
+        commands,
+        [
+            styled(after("body:paragraph:1", "Hi"), "Heading1"),
+            before("body:paragraph:1", ""),
+            delete("body:paragraph:1", "Hi"),
+        ]
+    );
+}

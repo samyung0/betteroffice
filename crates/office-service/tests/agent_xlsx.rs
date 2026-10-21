@@ -62,6 +62,7 @@ impl Book {
             &InspectQuery {
                 sheet: sheet.map(str::to_owned),
                 range: range.map(str::to_owned),
+                ..InspectQuery::default()
             },
         )
     }

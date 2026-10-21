@@ -2,6 +2,7 @@
 //! drives the docx-edit WASM session, with the save projection
 //! (yrsToDocument.ts) ported in `project`.
 
+mod agent;
 mod comments;
 mod format;
 mod item;
@@ -12,7 +13,7 @@ pub(crate) mod read;
 mod sdt;
 mod styles;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use docx_edit::{EditCtx, EngineSession, OpError, StoryRange, UndoSession};
 
@@ -39,6 +40,8 @@ pub(crate) struct DocxSession {
     /// The materialized source package (`materializeDocx`), read on first use.
     document: Option<V>,
     projected: Option<Projected>,
+    /// The paraIds of the paragraphs this session's commands inserted.
+    inserted: HashSet<String>,
 }
 
 struct Projected {
@@ -242,6 +245,7 @@ impl DocxSession {
             undo: UndoSession::new(),
             base: base.to_vec(),
             projected: None,
+            inserted: HashSet::new(),
         })
     }
 
@@ -558,10 +562,7 @@ impl DocxSession {
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {
         let Command::ReplaceText { target_id, .. } = command else {
-            return Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "DOCX sources support replace_text only",
-            ));
+            return self.apply_paragraphs(command);
         };
         let (story, paragraph) = self.paragraph(target_id)?;
         if !paragraph.plain {

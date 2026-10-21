@@ -181,6 +181,80 @@ pub(crate) fn check_replacement(
     Ok((span, after))
 }
 
+/// Paragraphs one call inserts and characters a new paragraph holds (the
+/// engine survey's bounds for DOCX, Epo 2026-10-21; PPTX takes the same).
+const MAX_INSERTED_PARAGRAPHS: usize = 20;
+const MAX_PARAGRAPH_CHARS: usize = 5_000;
+
+/// A call inserts at most [`MAX_INSERTED_PARAGRAPHS`] paragraphs.
+pub(crate) fn check_inserts(commands: &[Command]) -> Result<()> {
+    let inserts = commands
+        .iter()
+        .filter(|command| matches!(command, Command::InsertParagraph { .. }))
+        .count();
+    if inserts > MAX_INSERTED_PARAGRAPHS {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            format!(
+                "the call inserts {inserts} paragraphs; insert at most {MAX_INSERTED_PARAGRAPHS} a call"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A new paragraph's text: one paragraph of at most [`MAX_PARAGRAPH_CHARS`]
+/// characters.
+pub(crate) fn check_paragraph_text(text: &str) -> Result<()> {
+    if text.contains(['\n', '\r', '\u{b}', '\u{2028}', '\u{2029}']) {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            "text must be one paragraph without line breaks; insert one paragraph a command",
+        ));
+    }
+    let chars = text.chars().count();
+    if chars > MAX_PARAGRAPH_CHARS {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            format!(
+                "text holds {chars} characters; a paragraph holds at most {MAX_PARAGRAPH_CHARS}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `delete_paragraph`'s check: the paragraph reads `expected` whole, else a
+/// `stale_target` carrying it as it reads now.
+pub(crate) fn check_expected_paragraph(id: &str, current: &str, expected: &str) -> Result<()> {
+    if current == expected {
+        return Ok(());
+    }
+    Err(Error::Edit {
+        code: EditCode::StaleTarget,
+        message: "the paragraph's text differs from expected_text".into(),
+        details: Some(serde_json::json!({
+            "block": { "id": id, "type": "paragraph", "text": current }
+        })),
+    })
+}
+
+/// `insert_paragraph`'s anchor: exactly one of `after_id` and `before_id`,
+/// as (id, after).
+pub(crate) fn insert_anchor<'a>(
+    after_id: Option<&'a str>,
+    before_id: Option<&'a str>,
+) -> Result<(&'a str, bool)> {
+    match (after_id, before_id) {
+        (Some(id), None) => Ok((id, true)),
+        (None, Some(id)) => Ok((id, false)),
+        _ => Err(Error::edit(
+            EditCode::InvalidInput,
+            "insert_paragraph names exactly one of after_id and before_id",
+        )),
+    }
+}
+
 /// Whether an Office file can store `ch`: XML 1.0's `Char` (no control
 /// character but tab, line feed and carriage return; no U+FFFE or U+FFFF).
 fn storable(ch: char) -> bool {
@@ -211,9 +285,11 @@ pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Co
         Command::ReplaceText { text, .. }
         | Command::SetCell { value: text, .. }
         | Command::AddSheet { name: text, .. }
-        | Command::RenameSheet { name: text, .. } => keep(text),
+        | Command::RenameSheet { name: text, .. }
+        | Command::InsertParagraph { text, .. } => keep(text),
         Command::SetRange { values, .. } => values.iter_mut().flatten().for_each(keep),
-        Command::FormatCells { .. }
+        Command::DeleteParagraph { .. }
+        | Command::FormatCells { .. }
         | Command::DeleteSheet { .. }
         | Command::InsertRows { .. }
         | Command::DeleteRows { .. }

@@ -309,6 +309,10 @@ impl XlsxSession {
                 EditCode::UnsupportedOperation,
                 "XLSX sources support set_cell only",
             )),
+            Command::InsertParagraph { .. } | Command::DeleteParagraph { .. } => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "this command edits DOCX and PPTX files",
+            )),
         }
     }
 

@@ -194,6 +194,26 @@ pub enum Command {
         count: u32,
         expected: Vec<Vec<String>>,
     },
+    /// DOCX, PPTX: a new paragraph right after `after_id` or right before
+    /// `before_id` (exactly one), in the DOCX body or the PPTX paragraph's
+    /// text. DOCX `style` is a paragraph style id of the file; without it the
+    /// paragraph takes the default style.
+    #[serde(rename_all = "camelCase")]
+    InsertParagraph {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_id: Option<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
+    },
+    /// DOCX, PPTX: removes a paragraph whose whole text is `expected_text`.
+    #[serde(rename_all = "camelCase")]
+    DeleteParagraph {
+        target_id: String,
+        expected_text: String,
+    },
 }
 
 /// What `format_cells` sets: the editor's style patch and a number format.
@@ -207,7 +227,8 @@ pub struct CellStyle {
 }
 
 /// A scoped read. XLSX: no `range` lists the sheets; `sheet` and `range`
-/// read that range's cells.
+/// read that range's cells. DOCX: `count` (1 to 200) editable paragraphs
+/// from `start`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectQuery {
@@ -215,6 +236,10 @@ pub struct InspectQuery {
     pub sheet: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
 }
 
 /// Yrs location of an edited target: root map name, nested keys, and the

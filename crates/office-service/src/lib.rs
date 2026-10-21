@@ -33,7 +33,7 @@ pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxRepli
 pub use session::{compare_baselines, unshifted_effects};
 pub use types::*;
 
-use common::{assert_checkpoint, removed_notice, storable_command};
+use common::{assert_checkpoint, check_inserts, removed_notice, storable_command};
 use docx::DocxSession;
 use pptx::PptxSession;
 use session::{Applied, Item};
@@ -145,9 +145,10 @@ impl Session {
     fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<serde_json::Value> {
         match self {
             Session::Xlsx(session) => session.inspect_scoped(query),
-            Session::Docx(_) | Session::Pptx(_) => Err(Error::edit(
+            Session::Docx(session) => session.inspect_scoped(query),
+            Session::Pptx(_) => Err(Error::edit(
                 EditCode::UnsupportedOperation,
-                "scoped reads cover XLSX files for now",
+                "scoped reads cover XLSX and DOCX files for now",
             )),
         }
     }
@@ -313,7 +314,8 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 }
 
 /// What the agent reads of an Office file without projecting all of it
-/// (XLSX: the sheet list, or a range's non-empty cells).
+/// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a page of its
+/// editable paragraphs, the first with the file's paragraph styles).
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -381,6 +383,7 @@ pub fn apply_commands(
         if commands.is_empty() {
             return Err(Error::edit(EditCode::InvalidInput, "no commands"));
         }
+        check_inserts(commands)?;
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
         let mut inverse = Some(Vec::with_capacity(commands.len()));
         let mut ids: Vec<String> = Vec::new();
