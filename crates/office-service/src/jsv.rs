@@ -11,7 +11,6 @@ use indexmap::IndexMap;
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use std::collections::HashSet;
-use std::hash::BuildHasherDefault;
 
 use crate::js::{number_to_string, quote};
 
@@ -36,10 +35,13 @@ pub struct Arr(Rc<RefCell<Vec<V>>>);
 pub struct Obj(Rc<RefCell<Map>>);
 
 /// An object's entries in insertion order: a vector while small (linear
-/// lookup, a fraction of a hash map's size), a hash index once large.
+/// lookup, a fraction of a hash map's size), a hash index once large, boxed
+/// so a small object does not pay for it. The index keeps the randomly keyed
+/// hasher: its keys come from the file, which could otherwise pick ones that
+/// share a bucket.
 pub enum Map {
     Small(Vec<(Str, V)>),
-    Large(IndexMap<Str, V, BuildHasherDefault<std::collections::hash_map::DefaultHasher>>),
+    Large(Box<IndexMap<Str, V>>),
 }
 
 const SMALL_MAP: usize = 12;
@@ -83,7 +85,7 @@ impl Map {
             && entries.len() >= SMALL_MAP
         {
             let large = std::mem::take(entries).into_iter().collect();
-            *self = Map::Large(large);
+            *self = Map::Large(Box::new(large));
         }
     }
     fn insert(&mut self, key: Str, value: V) {
@@ -880,5 +882,30 @@ fn write_canonical(out: &mut String, value: &V) {
             out.push('}');
         }
         other => write(out, other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::hash::BuildHasher;
+
+    use super::*;
+
+    /// A large object's index hashes with keys of its own: with a fixed-key
+    /// hasher a file could choose object keys that all share one bucket.
+    #[test]
+    fn large_objects_hash_with_keys_of_their_own() {
+        let large = || {
+            let object = Obj::new();
+            for at in 0..=SMALL_MAP {
+                object.set(&format!("key{at}"), V::Null);
+            }
+            object
+        };
+        let hash = |object: &Obj| match &*object.borrow() {
+            Map::Large(map) => map.hasher().hash_one("key"),
+            Map::Small(_) => panic!("an object past {SMALL_MAP} entries is large"),
+        };
+        assert_ne!(hash(&large()), hash(&large()));
     }
 }
