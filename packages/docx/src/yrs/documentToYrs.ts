@@ -2060,7 +2060,13 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     });
   }
 
-  // Every story first, empty (an empty seed batch creates it), as seed.rs does.
+  // Every story first, empty (an empty seed batch creates it), as seed.rs does;
+  // a story the document names twice (two notes with one id) fails the seed.
+  const storyIds = new Set<string>();
+  for (const plan of context.plans) {
+    if (storyIds.has(plan.storyId)) throw new Error(`story "${plan.storyId}" already exists`);
+    storyIds.add(plan.storyId);
+  }
   for (const plan of context.plans) session.applySeedRawOps(plan.storyId, []);
   for (const plan of context.plans) seedPlan(session, plan);
   session.applySeedRawOps(

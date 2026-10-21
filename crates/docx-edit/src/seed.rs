@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -4393,7 +4393,14 @@ pub fn seed_parsed_docx_in_place(
         .collect::<Result<Vec<_>, String>>()?;
     drop(parsed);
     let ctx = EditCtx::local(String::new(), String::new());
-    // Every story first, empty, then their content (documentToYrs does the same).
+    // Every story first, empty, then their content (documentToYrs does the
+    // same). A story the package names twice (two notes with one id) fails.
+    let mut story_ids = HashSet::new();
+    for plan in &context.plans {
+        if !story_ids.insert(plan.story_id.as_str()) {
+            return Err(crate::EditError::StoryExists(plan.story_id.clone()).to_string());
+        }
+    }
     document
         .apply_raw_story_batches(
             context
