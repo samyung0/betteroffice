@@ -311,9 +311,11 @@ impl XlsxSession {
                 EditCode::UnsupportedOperation,
                 "XLSX sources support set_cell only",
             )),
-            Command::InsertParagraph { .. }
-            | Command::DeleteParagraph { .. }
-            | Command::SetList { .. }
+            Command::InsertParagraph { .. } | Command::DeleteParagraph { .. } => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "this command edits DOCX and PPTX files",
+            )),
+            Command::SetList { .. }
             | Command::InsertTable { .. }
             | Command::DeleteTable { .. }
             | Command::FormatText { .. }

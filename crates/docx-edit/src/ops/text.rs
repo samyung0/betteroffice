@@ -367,56 +367,32 @@ impl EditingDoc {
         })
     }
 
-    /// Removes one paragraph: `range` is its text after the tables and breaks
-    /// its slot opens with, then its mark. Unlike [`Self::delete_range`]'s
-    /// survival rule, the next paragraph keeps its own properties and paraId
-    /// rather than adopting the removed mark's, and its slot takes the removed
-    /// paragraph's tables and breaks (the chat agent's `delete_paragraph`,
-    /// office-service `docx/agent.rs`, Epo 2026-10-21). Plain mode only;
-    /// refuses a range holding anything but plain text before the mark, and
-    /// the story's last mark.
-    pub fn remove_paragraph(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
-        let len = crate::format::range_len(&range)?;
-        if len == 0 {
-            return Err(OpError::EmptyRange);
+    /// Removes paragraph `para_id` of `story`, its content and mark, as a
+    /// plain edit: the paragraphs around it keep their marks, ids and
+    /// properties, where a [`Self::delete_range`] across a mark joins two
+    /// paragraphs and the survivor adopts the first mark. The blocks its slot
+    /// opens with (tables, block content controls, page and column breaks)
+    /// stay, opening the next paragraph's slot. Errors when the story has no
+    /// such paragraph and on its final paragraph, whose mark the story keeps.
+    pub fn remove_paragraph(&self, ctx: &EditCtx, story: &str, para_id: &str) -> OpResult<Receipt> {
+        let index = self.segment_index(story)?;
+        let (_, pilcrow) = index
+            .para_span(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        if index.para_at(pilcrow + 1).is_none() {
+            return Err(OpError::CannotMergeFinalParagraph(para_id.to_owned()));
         }
-        if ctx.is_suggesting() {
-            return Err(OpError::InvalidUpdate(
-                "remove_paragraph applies in plain mode only".into(),
-            ));
-        }
+        let start = index
+            .para_at(pilcrow)
+            .map_or(pilcrow, |para| para.node_start);
+        let end = pilcrow + 1;
         let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &range.story)?;
-        check_range(&story, &txn, range.start, len)?;
-        let mark = range.end - 1;
-        let chunks = snapshot_range(&story, &txn, range.start, range.end);
-        let one_paragraph = chunks.last().is_some_and(|chunk| {
-            matches!(chunk.kind, ChunkKind::Pilcrow(_)) && chunk.start == mark
-        }) && chunks.iter().all(|chunk| match chunk.kind {
-            ChunkKind::Text(_) => chunk.end() <= mark && !chunk.attr_active(FIELD_RESULT),
-            ChunkKind::Pilcrow(_) => chunk.start == mark,
-            ChunkKind::Embed(_) => false,
-        });
-        if !one_paragraph {
-            return Err(OpError::ExpectedPilcrow {
-                story: range.story.clone(),
-                index: mark,
-            });
-        }
-        if let Some((index, map)) = last_pilcrow(&story, &txn)
-            && index == mark
-        {
-            return Err(OpError::CannotMergeFinalParagraph(
-                crate::map_string(&map, &txn, crate::PARA_ID).unwrap_or_default(),
-            ));
-        }
-        story.remove_range(&mut txn, range.start, len);
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, range.start)?;
-        Ok(Receipt {
-            new_para_ids: Vec::new(),
-            revision_ids: Vec::new(),
-            range: Some(loc_range),
-        })
+        let text = story_ref(&txn, story)?;
+        let chunks = snapshot_range(&text, &txn, start, end);
+        release_children(&mut txn, &text, &chunks, start, end);
+        text.remove_range(&mut txn, start, end - start);
+        refresh_shown(&mut txn, &text, &child_owners(&chunks, start, end));
+        Ok(Receipt::default())
     }
 
     /// Replaces a range with plain text in ONE transaction — the primitive behind

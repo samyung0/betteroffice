@@ -2,7 +2,7 @@
 //! drives the docx-edit WASM session, with the save projection
 //! (yrsToDocument.ts) ported in `project`.
 
-pub(crate) mod agent;
+mod agent;
 mod comments;
 mod format;
 mod item;
@@ -40,6 +40,9 @@ pub(crate) struct DocxSession {
     /// The materialized source package (`materializeDocx`), read on first use.
     document: Option<V>,
     projected: Option<Projected>,
+    /// For each paragraph an insert went after, the paraId of the last
+    /// paragraph this session put there, so the next lands after it.
+    after: HashMap<String, String>,
 }
 
 struct Projected {
@@ -243,6 +246,7 @@ impl DocxSession {
             undo: UndoSession::new(),
             base: base.to_vec(),
             projected: None,
+            after: HashMap::new(),
         })
     }
 

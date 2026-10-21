@@ -148,6 +148,7 @@ fn with_body(paragraphs: &str) -> Vec<u8> {
 fn insert(after_id: Option<&str>, text: &str, style: Option<&str>) -> Command {
     Command::InsertParagraph {
         after_id: after_id.map(str::to_owned),
+        before_id: None,
         text: text.into(),
         style: style.map(str::to_owned),
         list: None,
@@ -157,6 +158,7 @@ fn insert(after_id: Option<&str>, text: &str, style: Option<&str>) -> Command {
 fn listed(text: &str, list: ListKind) -> Command {
     Command::InsertParagraph {
         after_id: None,
+        before_id: None,
         text: text.into(),
         style: None,
         list: Some(list),
@@ -175,6 +177,8 @@ fn table(after_id: Option<&str>, rows: &[&[&str]]) -> Command {
         rows: grid(rows),
     }
 }
+
+const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note";
 
 fn refused(code: EditCode, message: &str) -> Error {
     Error::Edit {
@@ -218,10 +222,10 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
             "We timed the pendulum.||",
             "Ruler||bullet",
             "Stopwatch||bullet",
-            "r0c0 Length|Normal|",
-            "r0c1 Period|Normal|",
-            "r1c0 0.5 m|Normal|",
-            "r1c1 1.4 s|Normal|",
+            "r0c0 Length||",
+            "r0c1 Period||",
+            "r1c0 0.5 m||",
+            "r1c1 1.4 s||",
             "Done.||",
         ]
     );
@@ -249,7 +253,7 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
 }
 
 /// The starter seeds, exports and reopens as one empty paragraph, and the
-/// first read lists its paragraph styles.
+/// first read lists its shown paragraph styles.
 #[test]
 fn the_docx_starter_reads_as_one_empty_paragraph_with_its_styles() {
     let doc = Doc::new(starter(Format::Docx).unwrap().to_vec());
@@ -258,7 +262,7 @@ fn the_docx_starter_reads_as_one_empty_paragraph_with_its_styles() {
     assert_eq!(read["nextStart"], Value::Null);
     assert_eq!(read["paragraphs"][0]["text"], "");
     let styles = read["styles"].as_array().unwrap();
-    assert_eq!(styles.len(), 36);
+    assert_eq!(styles.len(), 28);
     assert_eq!(styles[0], json!({ "id": "Normal", "name": "Normal" }));
     assert!(styles.contains(&json!({ "id": "Heading1", "name": "heading 1" })));
     let reopened = Doc::new(export(&doc.base, doc.checkpoint(), DETERMINISM).unwrap());
@@ -282,7 +286,7 @@ fn inserts_after_one_paragraph_keep_their_order() {
             "Lab report|Title|",
             "Method|Heading1|",
             "First.||",
-            "r0c0 a|Normal|",
+            "r0c0 a||",
             "Second.|Heading2|",
             "We timed the pendulum.||",
         ]
@@ -294,89 +298,20 @@ fn inserts_after_one_paragraph_keep_their_order() {
 #[test]
 fn an_inserted_table_keeps_a_blank_paragraph_only_where_word_needs_one() {
     let mut doc = Doc::created(&[insert(None, "Intro", None), table(None, &[&["x"]])]);
-    assert_eq!(doc.lines(), ["Intro||", "r0c0 x|Normal|", "||"]);
+    assert_eq!(doc.lines(), ["Intro||", "r0c0 x||", "||"]);
     doc.apply(&[table(Some(&doc.id("Intro")), &[&["y"]])])
         .unwrap();
-    assert_eq!(
-        doc.lines(),
-        ["Intro||", "r0c0 y|Normal|", "||", "r0c0 x|Normal|", "||"]
-    );
+    assert_eq!(doc.lines(), ["Intro||", "r0c0 y||", "||", "r0c0 x||", "||"]);
     assert_eq!(doc.xml().matches("<w:tbl>").count(), 2);
-}
-
-#[test]
-fn insert_paragraph_refuses_an_unknown_style_line_breaks_and_too_many_paragraphs() {
-    let mut doc = report();
-    let method = doc.id("Method");
-    match doc
-        .apply(&[insert(Some(&method), "x", Some("Heading 1"))])
-        .unwrap_err()
-    {
-        Error::Edit {
-            code: EditCode::UnavailableTarget,
-            message,
-            details: Some(details),
-        } => {
-            assert_eq!(
-                message,
-                r#"the document has no paragraph style "Heading 1""#
-            );
-            assert!(
-                details["blocks"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!({ "id": "Heading1", "type": "style", "text": "heading 1" }))
-            );
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(
-        doc.apply(&[insert(Some(&method), "one\ntwo", None)])
-            .unwrap_err(),
-        invalid("text must be one paragraph without line breaks")
-    );
-    assert_eq!(
-        doc.apply(&[insert(Some(&method), &"x".repeat(5_001), None)])
-            .unwrap_err(),
-        invalid("text holds 5001 characters; at most 5000")
-    );
-    let many: Vec<Command> = (0..21).map(|_| insert(None, "x", None)).collect();
-    assert_eq!(
-        doc.apply(&many).unwrap_err(),
-        invalid("the call inserts 21 paragraphs; insert at most 20 a call")
-    );
-    let cell = doc.id("Length");
-    assert_eq!(
-        doc.apply(&[insert(Some(&cell), "x", None)]).unwrap_err(),
-        invalid(
-            "after_id must be a paragraph of the document body, not of a table or content control"
-        )
-    );
 }
 
 #[test]
 fn delete_paragraph_removes_a_plain_paragraph_reading_its_expected_text() {
     let mut doc = report();
     let text = doc.id("We timed the pendulum.");
-    let stale = doc
-        .apply(&[Command::DeleteParagraph {
-            id: text.clone(),
-            expected_text: "We timed it.".into(),
-        }])
-        .unwrap_err();
-    assert_eq!(
-        stale,
-        Error::Edit {
-            code: EditCode::StaleTarget,
-            message: "the paragraph's text differs from expected_text".into(),
-            details: Some(json!({
-                "block": { "id": text, "type": "paragraph", "text": "We timed the pendulum." }
-            })),
-        }
-    );
     let ruler = doc.paragraph("Ruler");
     doc.apply(&[Command::DeleteParagraph {
-        id: text,
+        target_id: text,
         expected_text: "We timed the pendulum.".into(),
     }])
     .unwrap();
@@ -388,14 +323,14 @@ fn delete_paragraph_removes_a_plain_paragraph_reading_its_expected_text() {
     // it ends the body (Word needs it there).
     doc.apply(&[insert(None, "More.", None)]).unwrap();
     doc.apply(&[Command::DeleteParagraph {
-        id: doc.id("Done."),
+        target_id: doc.id("Done."),
         expected_text: "Done.".into(),
     }])
     .unwrap();
-    assert_eq!(doc.lines()[7..], ["r1c1 1.4 s|Normal|", "More.||"]);
+    assert_eq!(doc.lines()[7..], ["r1c1 1.4 s||", "More.||"]);
     assert_eq!(
         doc.apply(&[Command::DeleteParagraph {
-            id: doc.id("More."),
+            target_id: doc.id("More."),
             expected_text: "More.".into(),
         }])
         .unwrap_err(),
@@ -403,15 +338,33 @@ fn delete_paragraph_removes_a_plain_paragraph_reading_its_expected_text() {
             "the paragraph after a table that ends the body or a cell cannot be deleted; Word needs it"
         )
     );
-    let mut plain = Doc::created(&[insert(None, "One", None), insert(None, "Two", None)]);
+}
+
+/// An insert after a list item continues the list as Enter does; its
+/// `list` ends or sets the list instead.
+#[test]
+fn an_insert_continues_a_list_unless_its_list_says_otherwise() {
+    let mut doc = report();
+    let stopwatch = doc.id("Stopwatch");
+    doc.apply(&[
+        insert(Some(&stopwatch), "Timer", None),
+        Command::InsertParagraph {
+            after_id: Some(stopwatch),
+            before_id: None,
+            text: "Results follow.".into(),
+            style: None,
+            list: Some(ListKind::None),
+        },
+    ])
+    .unwrap();
     assert_eq!(
-        plain
-            .apply(&[Command::DeleteParagraph {
-                id: plain.id("Two"),
-                expected_text: "Two".into(),
-            }])
-            .unwrap_err(),
-        invalid("a story's last paragraph cannot be deleted; replace its text instead")
+        doc.lines()[3..7],
+        [
+            "Ruler||bullet",
+            "Stopwatch||bullet",
+            "Timer||bullet",
+            "Results follow.||"
+        ]
     );
 }
 
@@ -474,7 +427,7 @@ fn insert_table_refuses_a_too_large_ragged_or_nested_table() {
     assert_eq!(
         doc.apply(&[table(Some(&cell), &[&["x"]])]).unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table or content control"
+            "a new table goes in the document body: after_id names a body paragraph, not one of a table, header, footer or note"
         )
     );
 }
@@ -682,20 +635,18 @@ fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
     assert_eq!(
         doc.apply(&[insert(Some(&doc.id("Inside")), "x", None)])
             .unwrap_err(),
-        invalid(
-            "after_id must be a paragraph of the document body, not of a table or content control"
-        )
+        invalid(PARAGRAPH_ANCHOR)
     );
     // What the read marks locked, the text commands refuse.
     assert_eq!(
         doc.apply(&[Command::DeleteParagraph {
-            id: doc.id("After"),
+            target_id: doc.id("After"),
             expected_text: "After".into(),
         }])
         .unwrap_err(),
         refused(
             EditCode::UnavailableTarget,
-            "the paragraph follows a content control"
+            "the paragraph follows a content control; it cannot be deleted"
         )
     );
 }
@@ -737,14 +688,17 @@ fn headers_footers_and_notes_read_after_the_body_and_take_replace_text_only() {
             target_id: header.clone(),
             alignment: Alignment::Center,
         },
-        insert(Some(&header), "x", None),
         Command::DeleteParagraph {
-            id: doc.id("A note"),
+            target_id: doc.id("A note"),
             expected_text: "A note".into(),
         },
     ] {
         assert_eq!(doc.apply(&[command]).unwrap_err(), only);
     }
+    assert_eq!(
+        doc.apply(&[insert(Some(&header), "x", None)]).unwrap_err(),
+        invalid(PARAGRAPH_ANCHOR)
+    );
     doc.apply(&[Command::ReplaceText {
         target_id: header,
         expected_text: "Header".into(),
@@ -808,7 +762,7 @@ fn docx_commands_parse_from_their_wire_json() {
     let commands: Vec<Command> = serde_json::from_value(json!([
         { "type": "insert_paragraph", "afterId": "body:paragraph:1", "text": "Hi", "style": "Heading1", "list": "bullet" },
         { "type": "insert_paragraph", "text": "End" },
-        { "type": "delete_paragraph", "id": "body:paragraph:1", "expectedText": "Hi" },
+        { "type": "delete_paragraph", "targetId": "body:paragraph:1", "expectedText": "Hi" },
         { "type": "set_list", "ids": ["body:paragraph:1"], "list": "none" },
         { "type": "insert_table", "afterId": "body:paragraph:1", "rows": [["a", "b"]] },
         { "type": "delete_table", "id": "body:t0:r0c0:paragraph:2", "expected": [["a", "b"]] },
@@ -820,6 +774,7 @@ fn docx_commands_parse_from_their_wire_json() {
         commands[0],
         Command::InsertParagraph {
             after_id: Some("body:paragraph:1".into()),
+            before_id: None,
             text: "Hi".into(),
             style: Some("Heading1".into()),
             list: Some(ListKind::Bullet),

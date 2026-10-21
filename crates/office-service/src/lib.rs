@@ -33,7 +33,7 @@ pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxRepli
 pub use session::{compare_baselines, unshifted_effects};
 pub use types::*;
 
-use common::{assert_checkpoint, removed_notice, storable_command};
+use common::{assert_checkpoint, check_inserts, removed_notice, storable_command};
 use docx::DocxSession;
 use pptx::PptxSession;
 use session::{Applied, Item};
@@ -323,8 +323,9 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 }
 
 /// What the agent reads of an Office file without projecting all of it
-/// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a window of
-/// paragraphs).
+/// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a page of its
+/// paragraphs, the body's then the headers', footers' and notes', the first
+/// with the file's paragraph styles).
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -361,7 +362,7 @@ fn check_call(commands: &[Command]) -> Result<()> {
             ),
         ));
     }
-    docx::agent::check_call(commands)
+    check_inserts(commands)
 }
 
 /// A new file: `starter` seeded, `commands` applied in one session, exported.

@@ -194,24 +194,31 @@ pub enum Command {
         count: u32,
         expected: Vec<Vec<String>>,
     },
-    /// DOCX: one paragraph after the body paragraph `after_id` and after the
-    /// paragraphs and tables this call already put there, so inserts after
-    /// one paragraph keep their order; without `after_id`, at the body's end
-    /// (into its only paragraph when that is empty). `style` is a paragraph
-    /// style id of the file.
+    /// DOCX, PPTX: a new paragraph right after `after_id` or right before
+    /// `before_id` (at most one), in the DOCX body or the PPTX paragraph's
+    /// text; inserts after one paragraph land in call order. DOCX without
+    /// either: at the body's end (into its only paragraph when that is
+    /// empty, as in a new file). DOCX `style` is a paragraph style id of the
+    /// file and `list` sets or ends the paragraph's list; without them the
+    /// paragraph continues the one before it as Enter does.
     #[serde(rename_all = "camelCase")]
     InsertParagraph {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_id: Option<String>,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         list: Option<ListKind>,
     },
-    /// DOCX: a plain paragraph reading exactly `expected_text`.
+    /// DOCX, PPTX: removes a paragraph whose whole text is `expected_text`.
     #[serde(rename_all = "camelCase")]
-    DeleteParagraph { id: String, expected_text: String },
+    DeleteParagraph {
+        target_id: String,
+        expected_text: String,
+    },
     #[serde(rename_all = "camelCase")]
     SetList { ids: Vec<String>, list: ListKind },
     /// DOCX: a table of `rows` placed as [`Command::InsertParagraph`] places
@@ -297,8 +304,8 @@ pub struct CellStyle {
 }
 
 /// A scoped read. XLSX: no `range` lists the sheets; `sheet` and `range`
-/// read that range's cells. DOCX: `count` paragraphs from `start` (0 when
-/// left out).
+/// read that range's cells. DOCX: `count` (1 to 200) paragraphs from
+/// `start`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectQuery {

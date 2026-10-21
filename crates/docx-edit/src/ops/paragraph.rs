@@ -369,18 +369,41 @@ impl EditingDoc {
     /// new paragraph restores the document.
     ///
     /// Errors when `at` does not address a position inside a story.
-    pub fn split_paragraph(&self, ctx: &EditCtx, mut at: Position) -> OpResult<SplitReceipt> {
+    pub fn split_paragraph(&self, ctx: &EditCtx, at: Position) -> OpResult<SplitReceipt> {
+        self.split_at(ctx, at, false)
+    }
+
+    /// An empty paragraph right before `para_id` of `story`, as the split
+    /// puts one before a slot that opens with a block: the new mark takes a
+    /// fresh paraId and that paragraph's properties but its section, and the
+    /// paragraph keeps its own. Its receipt's `first_para_id` is the new
+    /// paragraph's. Errors when the story has no such paragraph.
+    pub fn insert_paragraph_before(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+    ) -> OpResult<SplitReceipt> {
+        let (start, _) = self
+            .segment_index(story)?
+            .para_span(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        self.split_at(ctx, Position::new(story, start), true)
+    }
+
+    fn split_at(&self, ctx: &EditCtx, mut at: Position, before: bool) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
         let slot = self
             .segment_index(&at.story)?
             .para_at(at.index)
             .filter(|para| para.start == at.index && para.node_start > at.index)
             .map(|para| (para.node_start, para.pilcrow));
-        let mut before_block = slot.is_some();
+        let mut before_block = before || slot.is_some();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         if let Some((text_start, end)) = slot
+            && !before
             && at.index > 0
             && text_start < end
         {
@@ -399,9 +422,10 @@ impl EditingDoc {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        if snapshot_range(&story, &txn, at.index, orig_index)
-            .iter()
-            .all(|chunk| is_comment_reference(chunk, &txn))
+        if !before
+            && snapshot_range(&story, &txn, at.index, orig_index)
+                .iter()
+                .all(|chunk| is_comment_reference(chunk, &txn))
         {
             at.index = orig_index;
         }

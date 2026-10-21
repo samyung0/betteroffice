@@ -1,11 +1,10 @@
-//! The chat agent's DOCX commands and scoped read (Epo 2026-10-20,
-//! 2026-10-21): insert and delete paragraphs and tables, lists, text
-//! formatting and alignment in the body, and a window of the body's
-//! paragraphs followed by the headers', footers' and notes' (which only
-//! `replace_text` edits), with the file's paragraph styles. Paragraphs get a
-//! style id and direct formatting only, never resolved style values (fix 9
-//! makes the seed hold only direct formatting). No command has an inverse:
-//! the live Undo replaces inverses.
+//! The chat agent's DOCX commands and scoped read (Epo 2026-10-20 to
+//! 2026-10-22): insert and delete paragraphs and tables, lists, text
+//! formatting and alignment in the body; and a page of the paragraphs, the
+//! body's then the headers', footers' and notes' (which only `replace_text`
+//! edits), each with its style when not the default, the first page with the
+//! file's paragraph styles. A new paragraph continues its anchor as Enter
+//! does; a named style takes the place of the anchor style's next style.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -22,25 +21,27 @@ use yrs::Any;
 
 use super::DocxSession;
 use super::styles::{Numbering, StyleResolver, map_entries};
-use crate::common::len16;
+use crate::common::{check_expected_paragraph, check_paragraph_text, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
 use crate::session::Applied;
 use crate::types::{Alignment, Command, InspectQuery, ListKind, TextFormat};
 
 const BODY: &str = "body";
-/// Paragraphs a call inserts (Epo 2026-10-21). The pipeline sends a call's
-/// commands only up to this, so the refusal guards other callers.
-const MAX_INSERTED_PARAGRAPHS: usize = 20;
-/// Characters a new paragraph or cell holds.
-const MAX_TEXT_CHARS: usize = 5_000;
-const MAX_TABLE_ROWS: usize = 20;
-const MAX_TABLE_COLUMNS: usize = 10;
-/// Paragraphs a read or a `set_list` covers.
-const MAX_PARAGRAPHS: usize = 200;
 /// Paragraph-mark keys a new paragraph keeps from the one it was split off:
 /// its identity and the section it ends.
 const KEPT_KEYS: [&str; 4] = ["paraId", "_kind", "sectPr", "sectionBreakType"];
+const SECTION_KEYS: [&str; 2] = ["sectPr", "sectionBreakType"];
+/// A mark's tracked insertion, deletion or property change.
+const TRACKED_KEYS: [&str; 3] = ["pPrIns", "pPrDel", "pPrChange"];
+/// Paragraphs a read lists and a `set_list` names.
+const MAX_PARAGRAPHS: u32 = 200;
+/// Styles the first page lists.
+const MAX_STYLES: usize = 50;
+/// Characters a new table cell holds.
+const MAX_CELL_CHARS: usize = 5_000;
+const MAX_TABLE_ROWS: usize = 20;
+const MAX_TABLE_COLUMNS: usize = 10;
 /// Word's highlight colours (docx-edit `HIGHLIGHT_HEX_TO_NAME`).
 const HIGHLIGHTS: [&str; 16] = [
     "yellow",
@@ -60,20 +61,8 @@ const HIGHLIGHTS: [&str; 16] = [
     "black",
     "white",
 ];
-
-/// A call inserts at most [`MAX_INSERTED_PARAGRAPHS`] paragraphs.
-pub(crate) fn check_call(commands: &[Command]) -> Result<()> {
-    let inserts = commands
-        .iter()
-        .filter(|command| matches!(command, Command::InsertParagraph { .. }))
-        .count();
-    if inserts > MAX_INSERTED_PARAGRAPHS {
-        return Err(invalid(format!(
-            "the call inserts {inserts} paragraphs; insert at most {MAX_INSERTED_PARAGRAPHS} a call"
-        )));
-    }
-    Ok(())
-}
+const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note";
+const TABLE_ANCHOR: &str = "a new table goes in the document body: after_id names a body paragraph, not one of a table, header, footer or note";
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::edit(EditCode::InvalidInput, message)
@@ -91,6 +80,13 @@ fn op(error: OpError) -> Error {
     }
 }
 
+fn gone() -> Error {
+    Error::edit(
+        EditCode::UnavailableTarget,
+        "the paragraph is no longer in the document",
+    )
+}
+
 /// A refusal carrying the paragraph as it reads now.
 fn paragraph_refusal(code: EditCode, message: String, id: &str, text: &str) -> Error {
     Error::Edit {
@@ -100,17 +96,15 @@ fn paragraph_refusal(code: EditCode, message: String, id: &str, text: &str) -> E
     }
 }
 
-/// New text is one paragraph of at most [`MAX_TEXT_CHARS`] characters.
-fn check_text(text: &str, what: &str) -> Result<()> {
+/// A new cell's text: one paragraph of at most [`MAX_CELL_CHARS`] characters.
+fn check_cell(text: &str) -> Result<()> {
     if text.contains(['\n', '\r', '\u{b}', '\u{2028}', '\u{2029}']) {
-        return Err(invalid(format!(
-            "{what} must be one paragraph without line breaks"
-        )));
+        return Err(invalid("a cell must be one paragraph without line breaks"));
     }
     let chars = text.chars().count();
-    if chars > MAX_TEXT_CHARS {
+    if chars > MAX_CELL_CHARS {
         return Err(invalid(format!(
-            "{what} holds {chars} characters; at most {MAX_TEXT_CHARS}"
+            "a cell holds {chars} characters; at most {MAX_CELL_CHARS}"
         )));
     }
     Ok(())
@@ -138,13 +132,6 @@ fn in_body(story: &str) -> Result<()> {
         EditCode::UnsupportedOperation,
         "header, footer and note paragraphs take replace_text only",
     ))
-}
-
-fn gone() -> Error {
-    Error::edit(
-        EditCode::UnavailableTarget,
-        "the paragraph is no longer in the document",
-    )
 }
 
 /// A cell story's table story: `<story>:t<n>:r<row>c<column>` names a cell.
@@ -212,7 +199,8 @@ struct Para {
     mark: u32,
     /// Its text, without tracked deletions.
     text: String,
-    /// Why the text commands refuse it: an object or a tracked change in it.
+    /// Why the text commands refuse it: an object or a tracked change in it
+    /// or on its mark.
     locked: Option<String>,
     /// The tables and content controls its slot opens with, in order.
     blocks: Vec<(String, BTreeMap<String, Any>)>,
@@ -233,6 +221,19 @@ impl Para {
 
     fn follows_control(&self) -> bool {
         self.blocks.iter().any(|(kind, _)| kind == "blockSdt")
+    }
+
+    fn ends_section(&self) -> bool {
+        SECTION_KEYS
+            .iter()
+            .any(|key| self.properties.contains_key(*key))
+    }
+
+    fn style(&self) -> Option<&str> {
+        match self.properties.get("pStyle") {
+            Some(Any::String(style)) => Some(style),
+            _ => None,
+        }
     }
 }
 
@@ -259,6 +260,15 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 }
             }
             SegmentContent::Pilcrow(properties) => {
+                let tracked = ["ins", "del"]
+                    .iter()
+                    .any(|key| truthy(segment.attributes.get(*key)))
+                    || TRACKED_KEYS
+                        .iter()
+                        .any(|key| properties.values.contains_key(*key));
+                if tracked {
+                    locked.get_or_insert_with(|| "holds tracked changes".into());
+                }
                 paras.push(Para {
                     para_id: properties.para_id,
                     start,
@@ -362,12 +372,33 @@ impl Lists {
     }
 }
 
-/// Where an insert goes.
+/// A paragraph style of the file.
+struct ParagraphStyle {
+    id: String,
+    name: String,
+    /// Shown in Word's style lists: neither hidden nor semi-hidden.
+    shown: bool,
+    default: bool,
+    /// The style Enter at a paragraph's end gives the next one (`w:next`).
+    next: Option<String>,
+}
+
+/// Where a new body paragraph goes.
 enum Place {
-    /// After this body paragraph, as a new one.
-    After(Para),
-    /// Into this paragraph: the body's only one, empty.
-    Fill(Para),
+    /// Split off after the body paragraph at this index.
+    After(usize),
+    /// Split off before the body paragraph at this index.
+    Before(usize),
+    /// Into the body's only paragraph, empty, as a new file's is.
+    Fill,
+}
+
+/// A new body paragraph's place, the body paragraph it continues as Enter
+/// does, and the anchor whose last insert it becomes.
+struct Placement {
+    place: Place,
+    continued: usize,
+    after: Option<String>,
 }
 
 /// One cell's mark on the paragraphs a read lists.
@@ -378,10 +409,12 @@ struct CellMark {
     column: usize,
 }
 
-/// The read's walk: paragraphs counted in order, the window's listed.
+/// The read's walk: paragraphs counted in order, the page's listed.
 struct Walk<'a> {
     doc: &'a EditingDoc,
     lists: Lists,
+    /// The file's default paragraph style, which the read does not name.
+    default: Option<String>,
     /// The header, footer or note being walked; `None` in the body.
     part: Option<String>,
     start: usize,
@@ -406,13 +439,16 @@ impl Walk<'_> {
             if (self.start..self.end).contains(&self.index) {
                 let mut entry = json!({
                     "id": format!("{story}:paragraph:{}", para.para_id),
-                    "style": match para.properties.get("pStyle") {
-                        Some(Any::String(style)) => Value::from(style.to_string()),
-                        _ => Value::Null,
-                    },
-                    "list": self.lists.name(&para.properties),
                     "text": para.text,
                 });
+                if let Some(style) = para.style()
+                    && Some(style) != self.default.as_deref()
+                {
+                    entry["style"] = Value::from(style);
+                }
+                if let Some(list) = self.lists.name(&para.properties) {
+                    entry["list"] = Value::from(list);
+                }
                 if let Some(part) = &self.part {
                     entry["part"] = Value::from(part.as_str());
                 }
@@ -458,42 +494,52 @@ impl Walk<'_> {
 
 impl DocxSession {
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {
-        // No inverse is taken, but tracking keeps deleted items from garbage
-        // collection as it does for replace_text, so the state still holds
-        // what a delete removed.
+        // Tracking keeps deleted items from garbage collection, as for
+        // replace_text.
         self.undo.track(self.engine.doc());
-        match command {
+        let none = |()| Applied {
+            ids: Vec::new(),
+            inverse: None,
+        };
+        let applied = match command {
             Command::InsertParagraph {
                 after_id,
+                before_id,
                 text,
                 style,
                 list,
-            } => self.insert_paragraph(after_id.as_deref(), text, style.as_deref(), *list),
-            Command::DeleteParagraph { id, expected_text } => {
-                self.delete_paragraph(id, expected_text)
+            } => self.insert_paragraph(
+                after_id.as_deref(),
+                before_id.as_deref(),
+                text,
+                style.as_deref(),
+                *list,
+            ),
+            Command::DeleteParagraph {
+                target_id,
+                expected_text,
+            } => self.delete_paragraph(target_id, expected_text).map(none),
+            Command::SetList { ids, list } => self.set_list(ids, *list).map(none),
+            Command::InsertTable { after_id, rows } => {
+                self.insert_table(after_id.as_deref(), rows).map(none)
             }
-            Command::SetList { ids, list } => self.set_list(ids, *list),
-            Command::InsertTable { after_id, rows } => self.insert_table(after_id.as_deref(), rows),
-            Command::DeleteTable { id, expected } => self.delete_table(id, expected),
+            Command::DeleteTable { id, expected } => self.delete_table(id, expected).map(none),
             Command::FormatText {
                 target_id,
                 expected_text,
                 format,
-            } => self.format_text(target_id, expected_text, format),
+            } => self.format_text(target_id, expected_text, format).map(none),
             Command::SetAlignment {
                 target_id,
                 alignment,
-            } => self.set_alignment(target_id, *alignment),
+            } => self.set_alignment(target_id, *alignment).map(none),
             _ => Err(Error::edit(
                 EditCode::UnsupportedOperation,
                 "this command edits XLSX files",
             )),
         }?;
         self.projected = None;
-        Ok(Applied {
-            ids: Vec::new(),
-            inverse: None,
-        })
+        Ok(applied)
     }
 
     /// After a call's commands: the empty paragraph each table the call
@@ -510,8 +556,7 @@ impl DocxSession {
         let doc = self.engine.doc();
         let minted = format!("{}:", doc.client_id());
         let body = paras(doc, BODY)?;
-        // Back to front, so each removal leaves the marks before it in place.
-        for (index, para) in body.iter().enumerate().rev() {
+        for (index, para) in body.iter().enumerate() {
             let Some(next) = body.get(index + 1) else {
                 continue;
             };
@@ -530,11 +575,9 @@ impl DocxSession {
                 && para.start == para.mark
                 && para.locked.is_none()
                 && next.blocks.is_empty()
-                && !KEPT_KEYS[2..]
-                    .iter()
-                    .any(|key| para.properties.contains_key(*key))
+                && !para.ends_section()
             {
-                doc.remove_paragraph(&ctx(), StoryRange::new(BODY, para.mark, para.mark + 1))
+                doc.remove_paragraph(&ctx(), BODY, &para.para_id)
                     .map_err(op)?;
             }
         }
@@ -545,26 +588,31 @@ impl DocxSession {
     /// `count` paragraphs from `start`: the body's, each table's cells
     /// listed before the paragraph that follows it and marked with the
     /// table, row and column, then each header's, footer's and note's,
-    /// marked with its part; the first window also lists the paragraph
-    /// styles.
+    /// marked with its part. A paragraph names its style when not the
+    /// default; the first page also lists the file's shown paragraph
+    /// styles, at most [`MAX_STYLES`].
     pub(crate) fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<Value> {
         let start = query.start.unwrap_or(0) as usize;
         let count = query
             .count
-            .map(|count| count as usize)
             .filter(|count| (1..=MAX_PARAGRAPHS).contains(count))
             .ok_or_else(|| {
                 invalid(format!(
                     "a DOCX read names a count of 1 to {MAX_PARAGRAPHS} paragraphs"
                 ))
-            })?;
+            })? as usize;
         let package = self.package();
+        let styles = self.paragraph_styles();
         let mut walk = Walk {
             doc: self.engine.doc(),
             lists: Lists {
                 styles: StyleResolver::new(&package.get("styles")),
                 numbering: Numbering::new(&package.get("numbering")),
             },
+            default: styles
+                .iter()
+                .find(|style| style.default)
+                .map(|style| style.id.clone()),
             part: None,
             start,
             end: start + count,
@@ -581,17 +629,22 @@ impl DocxSession {
             walk.story(&story, None, false)?;
         }
         let total = walk.index;
+        let end = (start + count).min(total);
         let mut answer = json!({
             "paragraphs": walk.listed,
             "total": total,
-            "nextStart": (start + count < total).then_some(start + count),
+            "nextStart": (end < total).then_some(end),
         });
         if start == 0 {
-            answer["styles"] = self
-                .paragraph_styles()
-                .into_iter()
-                .map(|(id, name)| json!({ "id": id, "name": name }))
+            let shown: Vec<&ParagraphStyle> = styles.iter().filter(|style| style.shown).collect();
+            answer["styles"] = shown
+                .iter()
+                .take(MAX_STYLES)
+                .map(|style| json!({ "id": style.id, "name": style.name }))
                 .collect();
+            if shown.len() > MAX_STYLES {
+                answer["stylesMore"] = json!(shown.len() - MAX_STYLES);
+            }
         }
         Ok(answer)
     }
@@ -600,8 +653,8 @@ impl DocxSession {
         self.base_document().get("package")
     }
 
-    /// The file's paragraph styles, id and name, in its styles part's order.
-    fn paragraph_styles(&self) -> Vec<(String, String)> {
+    /// The file's paragraph styles in its styles part's order.
+    fn paragraph_styles(&self) -> Vec<ParagraphStyle> {
         self.package()
             .get("styles")
             .get("styles")
@@ -614,26 +667,34 @@ impl DocxSession {
                     .get("name")
                     .as_str()
                     .map_or_else(|| id.clone(), |name| name.to_string());
-                Some((id, name))
+                Some(ParagraphStyle {
+                    id,
+                    name,
+                    shown: !style.get("hidden").truthy() && !style.get("semiHidden").truthy(),
+                    default: style.get("default").truthy(),
+                    next: style.get("next").as_str().map(|next| next.to_string()),
+                })
             })
             .collect()
     }
 
-    fn check_style(&self, style: &str) -> Result<()> {
+    /// The style Enter at the end of a paragraph styled `style` (none: the
+    /// default) gives the next one: the style's next style when the file has
+    /// it, else the style itself; none for the default style.
+    fn next_style(&self, style: Option<&str>) -> Option<String> {
         let styles = self.paragraph_styles();
-        if styles.iter().any(|(id, _)| id == style) {
-            return Ok(());
-        }
-        Err(Error::Edit {
-            code: EditCode::UnavailableTarget,
-            message: format!("the document has no paragraph style {style:?}"),
-            details: Some(json!({
-                "blocks": styles
-                    .iter()
-                    .map(|(id, name)| json!({ "id": id, "type": "style", "text": name }))
-                    .collect::<Vec<_>>(),
-            })),
-        })
+        let default = styles
+            .iter()
+            .find(|known| known.default)
+            .map(|known| known.id.as_str());
+        let style = style.or(default)?;
+        let next = styles
+            .iter()
+            .find(|known| known.id == style)
+            .and_then(|known| known.next.as_deref())
+            .filter(|next| styles.iter().any(|known| known.id == *next))
+            .unwrap_or(style);
+        (Some(next) != default).then(|| next.to_owned())
     }
 
     /// The `w:num` id `list` writes: the toolbar's bullet or number button's
@@ -683,122 +744,216 @@ impl DocxSession {
         Ok((story.to_owned(), index, paras))
     }
 
-    /// Where an insert after `after_id` goes: after that body paragraph and
-    /// the paragraphs this call already inserted there (their paraIds are
-    /// this session's), so inserts after one paragraph keep their order.
-    /// Without `after_id`, after the body's last paragraph, or into it when
-    /// it is the body's only one and empty (a new document).
-    fn place(&self, after_id: Option<&str>) -> Result<Place> {
-        let (index, mut body) = match after_id {
-            None => {
-                let mut body = paras(self.engine.doc(), BODY)?;
-                if let [only] = &body[..]
-                    && only.mark == 0
-                {
-                    return Ok(Place::Fill(body.swap_remove(0)));
-                }
-                let last = body
-                    .len()
-                    .checked_sub(1)
-                    .ok_or_else(|| Error::engine("the document body has no paragraph"))?;
-                (last, body)
-            }
-            Some(id) => {
-                let (story, _) = split_id(id)?;
-                in_body(story)?;
-                if story != BODY {
-                    return Err(invalid(
-                        "after_id must be a paragraph of the document body, not of a table or content control",
-                    ));
-                }
-                let (_, mut index, body) = self.find(id)?;
-                let minted = format!("{}:", self.engine.doc().client_id());
-                while body
-                    .get(index + 1)
-                    .is_some_and(|next| next.para_id.starts_with(&minted))
-                {
-                    index += 1;
-                }
-                (index, body)
+    /// Where a new body paragraph goes: right after `after_id`, after what
+    /// this call already put there, so inserts after one paragraph land in
+    /// call order; right before `before_id`; without either at the body's
+    /// end, or into its only paragraph when that is empty. It continues the
+    /// paragraph `after_id` names, else the one before it, at the body's
+    /// start the one it goes before.
+    fn place(
+        &self,
+        body: &[Para],
+        after_id: Option<&str>,
+        before_id: Option<&str>,
+        refusal: &str,
+    ) -> Result<Placement> {
+        let index = |id: &str| -> Result<usize> {
+            let para_id = id
+                .strip_prefix("body:paragraph:")
+                .ok_or_else(|| invalid(refusal))?;
+            body.iter()
+                .position(|para| para.para_id == para_id)
+                .ok_or_else(gone)
+        };
+        let after = |named: usize| {
+            let at = self
+                .after
+                .get(&body[named].para_id)
+                .and_then(|id| body.iter().position(|para| para.para_id == *id))
+                .unwrap_or(named);
+            Placement {
+                place: Place::After(at),
+                continued: named,
+                after: Some(body[named].para_id.clone()),
             }
         };
-        Ok(Place::After(body.swap_remove(index)))
+        Ok(match (after_id, before_id) {
+            (Some(_), Some(_)) => {
+                return Err(invalid(
+                    "insert_paragraph names at most one of after_id and before_id",
+                ));
+            }
+            (Some(id), None) => after(index(id)?),
+            (None, Some(id)) => {
+                let at = index(id)?;
+                Placement {
+                    place: Place::Before(at),
+                    continued: at.saturating_sub(1),
+                    after: None,
+                }
+            }
+            (None, None) => match body {
+                [only] if only.mark == 0 => Placement {
+                    place: Place::Fill,
+                    continued: 0,
+                    after: None,
+                },
+                [.., _] => after(body.len() - 1),
+                [] => return Err(Error::engine("the document body has no paragraph")),
+            },
+        })
     }
 
-    /// A new empty body paragraph where `place` puts it, left with its
-    /// identity, the section it ends, `style` and `list` only (a split
-    /// copies its neighbour's properties, the seed's resolved style values
-    /// among them). Returns its mark's index, where its text starts.
+    /// A new empty body paragraph where `placement` puts it, its mark
+    /// holding `kept` besides the identity and section of the mark it
+    /// copies; only what differs from that copy is written. Returns its id,
+    /// where its text starts and whether deleting it undoes the insert.
     fn new_paragraph(
-        &self,
-        place: Place,
-        style: Option<&str>,
-        list: Option<ListKind>,
-    ) -> Result<u32> {
-        let (at, copied) = match place {
-            Place::Fill(para) => (para.mark, para.properties),
-            Place::After(para) => {
-                self.engine
-                    .doc()
+        &mut self,
+        body: &[Para],
+        placement: Placement,
+        kept: BTreeMap<String, Any>,
+    ) -> Result<(String, u32, bool)> {
+        let doc = self.engine.doc();
+        let (new_id, at, neighbour, undoable) = match placement.place {
+            Place::After(index) => {
+                let para = &body[index];
+                let receipt = doc
                     .split_paragraph(&ctx(), Position::new(BODY, para.mark))
                     .map_err(op)?;
-                // A split at a paragraph's end leaves the new, empty
-                // paragraph's mark right after the old one's, holding the
-                // old one's properties or a copy of them.
-                (para.mark + 1, para.properties)
+                // A split at a section's end leaves the section mark on the
+                // new paragraph, as Enter does; deleting it would join two
+                // sections.
+                let undoable = index + 1 < body.len() && !para.ends_section();
+                (receipt.second_para_id, para.mark + 1, para, undoable)
             }
+            Place::Before(index) => {
+                let receipt = doc
+                    .insert_paragraph_before(&ctx(), BODY, &body[index].para_id)
+                    .map_err(op)?;
+                let at = index
+                    .checked_sub(1)
+                    .map_or(0, |previous| body[previous].mark + 1);
+                (receipt.first_para_id, at, &body[index], true)
+            }
+            Place::Fill => (body[0].para_id.clone(), body[0].mark, &body[0], false),
         };
-        let mut other: BTreeMap<String, Option<Any>> = copied
-            .into_keys()
-            .filter(|key| !KEPT_KEYS.contains(&key.as_str()))
-            .map(|key| (key, None))
-            .collect();
-        if let Some(style) = style {
-            other.insert("pStyle".to_owned(), Some(Any::from(style)));
+        let mut other: BTreeMap<String, Option<Any>> = BTreeMap::new();
+        for (key, value) in &neighbour.properties {
+            if !KEPT_KEYS.contains(&key.as_str()) && kept.get(key) != Some(value) {
+                other.insert(key.clone(), kept.get(key).cloned());
+            }
         }
-        if let Some(list) = list.filter(|list| *list != ListKind::None) {
-            other.extend(list_attrs(list, self.list_num_id(list)?, 0.0));
+        for (key, value) in kept {
+            if !neighbour.properties.contains_key(&key) {
+                other.insert(key, Some(value));
+            }
         }
-        self.engine
-            .doc()
-            .set_paragraph_attrs(
+        if !other.is_empty() {
+            doc.set_paragraph_attrs(
                 &ctx(),
-                &ParaSelector::Range(StoryRange::new(BODY, at, at)),
+                &ParaSelector::One(new_id.clone()),
                 &ParaAttrDelta {
                     other,
                     ..ParaAttrDelta::default()
                 },
             )
             .map_err(op)?;
-        Ok(at)
+        }
+        if let Some(anchor) = placement.after {
+            self.after.insert(anchor, new_id.clone());
+        }
+        Ok((new_id, at, undoable))
     }
 
+    /// A body paragraph placed by [`Self::place`]. Without a style it
+    /// continues its anchor as Enter at the anchor's end does (Epo
+    /// 2026-10-21): the anchor's paragraph properties (list, indent) and its
+    /// style's next style. A named style keeps those properties and takes
+    /// the place of the next style (Epo 2026-10-22). `list` sets or ends the
+    /// paragraph's list at the anchor's level. The inverse deletes it,
+    /// unless delete_paragraph would refuse that.
     fn insert_paragraph(
         &mut self,
         after_id: Option<&str>,
+        before_id: Option<&str>,
         text: &str,
         style: Option<&str>,
         list: Option<ListKind>,
-    ) -> Result<()> {
-        check_text(text, "text")?;
-        if let Some(style) = style {
-            self.check_style(style)?;
+    ) -> Result<Applied> {
+        check_paragraph_text(text)?;
+        if let Some(style) = style
+            && !self
+                .paragraph_styles()
+                .iter()
+                .any(|known| known.id == style)
+        {
+            return Err(invalid(format!(
+                "the document has no paragraph style {style:?}; use a style id inspect_office_document lists"
+            )));
         }
-        let place = self.place(after_id)?;
-        let at = self.new_paragraph(place, style, list)?;
+        let body = paras(self.engine.doc(), BODY)?;
+        let placement = self.place(&body, after_id, before_id, PARAGRAPH_ANCHOR)?;
+        let continued = &body[placement.continued];
+        // Source and save bookkeeping (`_` keys) and tracked changes are not
+        // kept; the style is set below.
+        let mut kept: BTreeMap<String, Any> = continued
+            .properties
+            .iter()
+            .filter(|(key, _)| {
+                !KEPT_KEYS.contains(&key.as_str())
+                    && !TRACKED_KEYS.contains(&key.as_str())
+                    && !key.starts_with('_')
+                    && *key != "pStyle"
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let style = match (style, &placement.place) {
+            (Some(style), _) => Some(style.to_owned()),
+            // A new file's empty paragraph keeps its own style.
+            (None, Place::Fill) => continued.style().map(str::to_owned),
+            (None, _) => self.next_style(continued.style()),
+        };
+        if let Some(style) = style {
+            kept.insert("pStyle".to_owned(), Any::from(style));
+        }
+        if let Some(list) = list {
+            let ilvl = match continued.properties.get("numPr") {
+                Some(Any::Map(num_pr)) => match num_pr.get("ilvl") {
+                    Some(Any::Number(ilvl)) => *ilvl,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            for (key, value) in list_attrs(list, self.list_num_id(list)?, ilvl) {
+                match value {
+                    Some(Any::Null) | None => kept.remove(&key),
+                    Some(value) => kept.insert(key, value),
+                };
+            }
+        }
+        let (new_id, at, undoable) = self.new_paragraph(&body, placement, kept)?;
         if !text.is_empty() {
             self.engine
                 .doc()
                 .insert_text(&ctx(), Position::new(BODY, at), text, FormatPolicy::Plain)
                 .map_err(op)?;
         }
-        Ok(())
+        let target_id = format!("{BODY}:paragraph:{new_id}");
+        Ok(Applied {
+            ids: vec![target_id.clone()],
+            inverse: undoable.then(|| Command::DeleteParagraph {
+                target_id,
+                expected_text: text.to_owned(),
+            }),
+        })
     }
 
     /// Refused when the paragraph holds an object or a tracked change,
     /// follows a content control, ends its story or a section, or reads
     /// other than `expected_text`. One that follows a table hands the table
-    /// to the paragraph after it.
+    /// to the paragraph after it, unless Word needs it there. No inverse:
+    /// putting it back exactly is the live Undo's.
     fn delete_paragraph(&mut self, id: &str, expected_text: &str) -> Result<()> {
         let (story, index, paras) = self.find(id)?;
         let para = &paras[index];
@@ -808,17 +963,10 @@ impl DocxSession {
         }) {
             return Err(Error::edit(
                 EditCode::UnavailableTarget,
-                format!("the paragraph {reason}"),
+                format!("the paragraph {reason}; it cannot be deleted"),
             ));
         }
-        if para.text != expected_text {
-            return Err(paragraph_refusal(
-                EditCode::StaleTarget,
-                "the paragraph's text differs from expected_text".into(),
-                id,
-                &para.text,
-            ));
-        }
+        check_expected_paragraph(id, &para.text, expected_text)?;
         if index + 1 == paras.len() {
             return Err(invalid(if para.blocks.is_empty() {
                 "a story's last paragraph cannot be deleted; replace its text instead"
@@ -831,10 +979,7 @@ impl DocxSession {
                 "the paragraph separates two tables or content controls; Word needs it",
             ));
         }
-        if KEPT_KEYS[2..]
-            .iter()
-            .any(|key| para.properties.contains_key(*key))
-        {
+        if para.ends_section() {
             return Err(invalid(
                 "the paragraph ends a section; deleting it would join two sections",
             ));
@@ -842,7 +987,7 @@ impl DocxSession {
         // The paragraphs around it keep their own properties and ids.
         self.engine
             .doc()
-            .remove_paragraph(&ctx(), StoryRange::new(story, para.start, para.mark + 1))
+            .remove_paragraph(&ctx(), &story, &para.para_id)
             .map_err(op)?;
         Ok(())
     }
@@ -850,7 +995,7 @@ impl DocxSession {
     /// Each paragraph keeps its list level; `none` ends its list, its
     /// style's too.
     fn set_list(&mut self, ids: &[String], list: ListKind) -> Result<()> {
-        if ids.is_empty() || ids.len() > MAX_PARAGRAPHS {
+        if ids.is_empty() || ids.len() > MAX_PARAGRAPHS as usize {
             return Err(invalid(format!(
                 "set_list names 1 to {MAX_PARAGRAPHS} paragraphs"
             )));
@@ -893,9 +1038,9 @@ impl DocxSession {
         Ok(())
     }
 
-    /// A table of `rows` in the slot of a new empty paragraph placed as
-    /// [`Self::insert_paragraph`] places a paragraph; [`Self::finish_agent`]
-    /// removes that paragraph where Word does not need it.
+    /// A table of `rows` in the slot of a new plain empty paragraph placed
+    /// as [`Self::place`] places one; [`Self::finish_agent`] removes that
+    /// paragraph where Word does not need it.
     fn insert_table(&mut self, after_id: Option<&str>, rows: &[Vec<String>]) -> Result<()> {
         let columns = rows.first().map_or(0, Vec::len);
         if rows.is_empty()
@@ -908,10 +1053,11 @@ impl DocxSession {
             )));
         }
         for cell in rows.iter().flatten() {
-            check_text(cell, "a cell")?;
+            check_cell(cell)?;
         }
-        let place = self.place(after_id)?;
-        let at = self.new_paragraph(place, None, None)?;
+        let body = paras(self.engine.doc(), BODY)?;
+        let placement = self.place(&body, after_id, None, TABLE_ANCHOR)?;
+        let (_, at, _) = self.new_paragraph(&body, placement, BTreeMap::new())?;
         let doc = self.engine.doc();
         let table = doc
             .insert_table(
