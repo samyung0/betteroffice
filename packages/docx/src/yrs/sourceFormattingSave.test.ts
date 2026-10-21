@@ -2,11 +2,13 @@ import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { parseDocx } from '../docx';
+import { createHash } from 'node:crypto';
+
+import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import type { Document, Paragraph, Run, Table } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { documentToYrs } from './documentToYrs';
+import { unzipContainer } from '../wasm/opc';
 import { createYrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -31,7 +33,11 @@ const cell = (text: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
 
 /** A red bold heading, a plain paragraph with an italic run, and a table styled with borders and margins. */
-async function styled(): Promise<Document> {
+const STYLED = `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Plain words </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>slanted</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl><w:p/>`;
+const STYLES = `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:color w:val="FF0000"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders>${borders}</w:tblBorders><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`;
+
+/** A package of `body` with `styles`. */
+function pack(styles: string, body: string): Uint8Array {
   const parts: PartsMap = new Map();
   parts.set(
     '[Content_Types].xml',
@@ -45,19 +51,28 @@ async function styled(): Promise<Document> {
       `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`
     )
   );
-  parts.set(
-    'word/styles.xml',
-    toBytes(
-      `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:color w:val="FF0000"/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="table" w:styleId="Grid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders>${borders}</w:tblBorders><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`
-    )
-  );
+  parts.set('word/styles.xml', toBytes(styles));
   parts.set(
     'word/document.xml',
     toBytes(
-      `<w:document xmlns:w="${W}"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t xml:space="preserve">Plain words </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>slanted</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblStyle w:val="Grid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr>${cell('A')}${cell('B')}</w:tr><w:tr>${cell('C')}${cell('D')}</w:tr></w:tbl><w:p/><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`
+      `<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`
     )
   );
-  return parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false });
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+/** As Capy opens a file: the native seed, with the base materialized from the source. */
+async function opened(bytes: Uint8Array, clientId: number) {
+  const session = await createYrsSession({ clientId });
+  session.openDocx(bytes, true);
+  return { session, base: session.materializeDocx()! };
+}
+
+/** Each run's `w:rPr` in document.xml order, '' for a run without one (as the native test reads it). */
+async function savedRunProperties(session: Awaited<ReturnType<typeof createYrsSession>>, base: Document) {
+  const saved = new Uint8Array(await repackDocx(yrsToDocument(session, base)));
+  const xml = new TextDecoder().decode(unzipContainer(saved)['word/document.xml']);
+  return [...xml.matchAll(/<w:r(?:\s[^>]*)?>(<w:rPr>.*?<\/w:rPr>)?/g)].map((match) => match[1] ?? '');
 }
 
 const paragraphs = (document: Document) =>
@@ -70,10 +85,8 @@ const cells = (document: Document) =>
   );
 
 test('runs and cells the session left save what the source wrote', async () => {
-  const source = await styled();
-  const session = await createYrsSession({ clientId: 61021 });
+  const { session, base: source } = await opened(pack(STYLES, STYLED), 61021);
   try {
-    documentToYrs(session, source);
     const saved = yrsToDocument(session, source);
     paragraphs(saved).forEach((paragraph, index) => {
       expect(runs(paragraph).map((run) => run.formatting)).toEqual(
@@ -89,10 +102,8 @@ test('runs and cells the session left save what the source wrote', async () => {
 });
 
 test('an edited run and cell save their edits', async () => {
-  const source = await styled();
-  const session = await createYrsSession({ clientId: 61022 });
+  const { session, base: source } = await opened(pack(STYLES, STYLED), 61022);
   try {
-    documentToYrs(session, source);
     const { paraId } = session.paragraphs('body')[1]!;
     session.formatRange(
       { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 5 } },
@@ -110,6 +121,55 @@ test('an edited run and cell save their edits', async () => {
     expect(Object.keys(first!.formatting?.borders ?? {})).toEqual(['top']);
     expect(first!.formatting?.borders?.top).toMatchObject({ style: 'double' });
     for (const other of others) expect(other.formatting?.borders).toBeUndefined();
+  } finally {
+    session.destroy();
+  }
+});
+
+interface CrossPortCases {
+  styles: string;
+  cases: Array<{ name: string; body: string; runs: string[] }>;
+  fixtures: Array<{ name: string; path: string; runs: string }>;
+}
+
+test('both saves write these run properties', async () => {
+  const root = resolve(import.meta.dir, '../../../..');
+  const cases = JSON.parse(
+    readFileSync(resolve(root, 'crates/office-service/tests/fixtures/source-formatting-cases.json'), 'utf8')
+  ) as CrossPortCases;
+  for (const [index, { name, body, runs: expected }] of cases.cases.entries()) {
+    const { session, base } = await opened(pack(cases.styles, body), 61100 + index);
+    try {
+      expect(await savedRunProperties(session, base), name).toEqual(expected);
+    } finally {
+      session.destroy();
+    }
+  }
+  for (const [index, { name, path, runs: expected }] of cases.fixtures.entries()) {
+    const { session, base } = await opened(new Uint8Array(readFileSync(resolve(root, path))), 61200 + index);
+    try {
+      const written = (await savedRunProperties(session, base)).join('\n');
+      expect(createHash('sha256').update(written).digest('hex'), name).toBe(expected);
+    } finally {
+      session.destroy();
+    }
+  }
+});
+
+test('a restyled paragraph saves what the editor shows', async () => {
+  const { session, base } = await opened(pack(STYLES, STYLED), 61023);
+  try {
+    const { paraId } = session.paragraphs('body')[0]!;
+    session.applyParagraphStyle(
+      { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } },
+      'Normal',
+      {},
+      { Heading1: {} }
+    );
+    // The editor keeps showing the heading's bold red 16 pt under Normal;
+    // making the text follow the new style is the seed-side todo.
+    const [title] = runs(paragraphs(yrsToDocument(session, base))[0]!);
+    expect(title!.formatting).toMatchObject({ bold: true, color: { rgb: 'FF0000' }, fontSize: 32 });
   } finally {
     session.destroy();
   }

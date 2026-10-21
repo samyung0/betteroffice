@@ -17,10 +17,10 @@ use super::format::{
 };
 use super::item::{
     attrs_to_text_formatting, build_paragraph_content, content_control_value, formatting_attrs, is,
-    is_kind, o, ordinary_content_for_item, tracked_info, ty,
+    is_kind, o, ordinary_content_for_item, stable_stringify, tracked_info, ty,
 };
 use super::paragraph::{
-    FlowToken, SlotBreak, TokenKind, comment_marker, flow_tokens, nested_runs,
+    FlowToken, SlotBreak, SourceRun, TokenKind, comment_marker, flow_tokens, nested_runs,
     page_break_paragraph, paragraph_from_story, place_trailing, restore_note_marks,
     slot_break_content, sort_boundaries, split_flow, split_slot_bookmarks, tracked_kind,
     without_breaks,
@@ -228,8 +228,9 @@ pub(crate) struct SaveContext<'a> {
     bookmarks: docx_edit::BookmarkPositions,
     /// What the seed resolved for source runs and cells.
     resolution: docx_edit::SeedResolution,
-    /// The formatting the seed resolved for a run, by paragraph style and source formatting.
-    seeded_runs: HashMap<String, V>,
+    /// The text attributes (and those as a key) and formatting the seed
+    /// resolves for a run, by paragraph style and source formatting.
+    seeded_runs: HashMap<String, (V, std::rc::Rc<str>, V)>,
     /// Each source table's seeded cell borders and margins, by table story.
     cell_frames: HashMap<String, Vec<Vec<(V, V)>>>,
 }
@@ -310,10 +311,11 @@ impl<'a> SaveContext<'a> {
         })
     }
 
-    /// Each run of a source paragraph (see `nested_runs`) as the
-    /// formatting the seed resolved for it, with its own source formatting.
-    fn source_runs(&mut self, paragraph: &V) -> Vec<(V, V)> {
-        let style = paragraph.get("formatting").get("styleId").as_str();
+    /// Each run of a source paragraph (see `nested_runs`) with what the seed
+    /// resolves for it under the paragraph's current style `style`: an
+    /// unchanged style gives what the seed stored, a changed one makes the
+    /// runs save as the editor shows them.
+    fn source_runs(&mut self, paragraph: &V, style: Option<&str>) -> Vec<SourceRun> {
         let mut runs = Vec::new();
         nested_runs(&paragraph.get("content").items(), &mut runs);
         runs.iter()
@@ -321,18 +323,32 @@ impl<'a> SaveContext<'a> {
                 let formatting = run.get("formatting");
                 let key = format!(
                     "{}|{}",
-                    style.as_deref().unwrap_or_default(),
+                    style.unwrap_or_default(),
                     stringify(&formatting).unwrap_or_default()
                 );
                 let resolution = &self.resolution;
-                let seeded = self.seeded_runs.entry(key).or_insert_with(|| {
-                    let source = (!formatting.nullish())
-                        .then(|| serde_json::to_value(&formatting).ok())
-                        .flatten();
-                    let attrs = V::from(&resolution.run_attrs(style.as_deref(), source.as_ref()));
-                    V::Obj(attrs_to_text_formatting(&formatting_attrs(&attrs)))
-                });
-                (seeded.clone(), formatting)
+                let (attrs, attrs_key, resolved) =
+                    self.seeded_runs.entry(key).or_insert_with(|| {
+                        let source = (!formatting.nullish())
+                            .then(|| serde_json::to_value(&formatting).ok())
+                            .flatten();
+                        let attrs = V::from(&resolution.run_attrs(style, source.as_ref()));
+                        let resolved = V::Obj(attrs_to_text_formatting(&formatting_attrs(&attrs)));
+                        (attrs.clone(), stable_stringify(&attrs).into(), resolved)
+                    });
+                let content = run.get("content").items();
+                SourceRun {
+                    attrs: attrs.clone(),
+                    key: attrs_key.clone(),
+                    formatting: resolved.clone(),
+                    source: formatting,
+                    text: content.iter().all(|entry| is(entry, "text")).then(|| {
+                        content
+                            .iter()
+                            .map(|entry| entry.get("text").to_js_string())
+                            .collect()
+                    }),
+                }
             })
             .collect()
     }
@@ -702,9 +718,10 @@ impl<'a> SaveContext<'a> {
                 let (properties, slot_bookmarks) =
                     split_slot_bookmarks(&segment.get("properties"), !state.slot_breaks.is_empty());
                 let story = story_id.to_owned();
+                let style = properties.get("pStyle").as_str();
                 let source_runs = base_paragraph
                     .as_ref()
-                    .map(|base| self.source_runs(base))
+                    .map(|base| self.source_runs(base, style.as_deref()))
                     .unwrap_or_default();
                 let paragraph = paragraph_from_story(
                     &saved,

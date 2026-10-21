@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use docx_edit::{
-    CanonicalItem, CellLoc, EditCtx, EditingDoc, InlineFormatDelta, Patch, StoryRange, TableRange,
-    project_story,
+    CanonicalItem, CellLoc, EditCtx, EditingDoc, InlineFormatDelta, ParaSelector, Patch,
+    StoryRange, TableRange, project_story,
 };
 use office_service::{Checkpoint, Determinism, Format, export, seed, sha256_hex};
 use serde_json::Value;
@@ -38,6 +38,11 @@ fn styled_package() -> Vec<u8> {
         cell("C"),
         cell("D")
     );
+    package(&styles, &body)
+}
+
+/// A package of `body` with `styles`.
+fn package(styles: &str, body: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&[
         (
             "[Content_Types].xml".to_owned(),
@@ -60,7 +65,7 @@ fn styled_package() -> Vec<u8> {
             )
             .into_bytes(),
         ),
-        ("word/styles.xml".to_owned(), styles.into_bytes()),
+        ("word/styles.xml".to_owned(), styles.as_bytes().to_vec()),
         (
             "word/document.xml".to_owned(),
             format!(
@@ -160,6 +165,93 @@ fn marks_of(doc: &EditingDoc, story: &str, text: &str) -> Vec<BTreeMap<String, V
         .take(text.chars().count())
         .map(|(_, marks)| marks)
         .collect()
+}
+
+/// Each run's `w:rPr` in `xml` in order, "" for a run without one.
+fn run_properties(xml: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = xml[at..].find("<w:r") {
+        let start = at + offset;
+        at = start + 4;
+        if !matches!(xml.as_bytes().get(at), Some(b'>' | b' ')) {
+            continue;
+        }
+        let rest = &xml[start + xml[start..].find('>').unwrap() + 1..];
+        found.push(if rest.starts_with("<w:rPr>") {
+            rest[..rest.find("</w:rPr>").unwrap() + "</w:rPr>".len()].to_owned()
+        } else {
+            String::new()
+        });
+    }
+    found
+}
+
+/// The cases both saves must write the same run properties for
+/// (`packages/docx/src/yrs/sourceFormattingSave.test.ts` reads it too).
+fn cross_port_cases() -> Value {
+    serde_json::from_str(include_str!("fixtures/source-formatting-cases.json")).unwrap()
+}
+
+#[test]
+fn both_saves_write_these_run_properties() {
+    let cases = cross_port_cases();
+    let styles = cases["styles"].as_str().unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let base = package(styles, case["body"].as_str().unwrap());
+        let written = run_properties(&part(&saved(&base, &opened(&base)), "word/document.xml"));
+        assert_eq!(
+            serde_json::to_value(&written).unwrap(),
+            case["runs"],
+            "{}",
+            case["name"]
+        );
+    }
+    for fixture in cases["fixtures"].as_array().unwrap() {
+        let file = format!(
+            "{}/../../{}",
+            env!("CARGO_MANIFEST_DIR"),
+            fixture["path"].as_str().unwrap()
+        );
+        let base = std::fs::read(file).unwrap();
+        let written = run_properties(&part(&saved(&base, &opened(&base)), "word/document.xml"));
+        assert_eq!(
+            sha256_hex(written.join("\n").as_bytes()),
+            fixture["runs"].as_str().unwrap(),
+            "{}",
+            fixture["name"]
+        );
+    }
+}
+
+#[test]
+fn a_restyled_paragraph_saves_what_the_editor_shows() {
+    let base = styled_package();
+    let doc = opened(&base);
+    let ctx = EditCtx::local("", "");
+    let previous = BTreeMap::from([("Heading1".to_owned(), BTreeMap::<String, Any>::new())]);
+    doc.apply_paragraph_style(
+        &ctx,
+        &ParaSelector::Range(StoryRange::new("body", 0, 1)),
+        "Normal",
+        &BTreeMap::new(),
+        &previous,
+    )
+    .unwrap();
+    // The editor keeps showing the heading's bold red 16 pt under Normal;
+    // making the text follow the new style is the seed-side todo.
+    let heading = |marks: &BTreeMap<String, Value>| {
+        marks.contains_key("bold")
+            && marks["textColor"]["rgb"] == "FF0000"
+            && marks["fontSize"]["size"] == 32
+    };
+    assert!(marks_of(&doc, "body", "Title").iter().all(heading));
+    let saved = saved(&base, &doc);
+    assert!(
+        marks_of(&opened(&saved), "body", "Title")
+            .iter()
+            .all(heading)
+    );
 }
 
 #[test]

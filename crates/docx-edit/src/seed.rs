@@ -4284,6 +4284,9 @@ impl SeedResolution {
     /// (the `r{row}c{cell}` of its story id).
     pub fn cell_frames(&self, table: &Value) -> Vec<Vec<(Value, Value)>> {
         let frame = |attrs: &JsonObject, key: &str| attrs.get(key).cloned().unwrap_or(Value::Null);
+        // No theme and compatibility mode 15: in `project_table` they feed only
+        // a cell's shading and the table's `compatibilityMode`, never borders
+        // or margins. Pass the seed's own if that changes.
         project_table(table, &self.styles, None, 15)
             .rows
             .into_iter()

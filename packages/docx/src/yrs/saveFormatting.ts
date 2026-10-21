@@ -322,9 +322,28 @@ function changedSides<T extends object>(live: T | undefined, seeded: unknown): T
   if (seeded === undefined) return live;
   const changed: Record<string, unknown> = {};
   for (const [side, value] of Object.entries(live ?? {})) {
-    if (canonical(value) !== canonical(asRecord(seeded)?.[side])) changed[side] = value;
+    if (!sameCanonical(value, asRecord(seeded)?.[side])) changed[side] = value;
   }
   return Object.keys(changed).length > 0 ? (changed as T) : undefined;
+}
+
+/** `canonical(a) === canonical(b)` without building the strings (a cell compares about eight sides). */
+function sameCanonical(a: unknown, b: unknown): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((entry, index) => sameCanonical(entry, b[index]))
+    );
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const left = Object.entries(a).filter(([, entry]) => entry != null);
+  return (
+    left.length === Object.values(b).filter((entry) => entry != null).length &&
+    left.every(([key, entry]) => sameCanonical(entry, (b as Record<string, unknown>)[key]))
+  );
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>

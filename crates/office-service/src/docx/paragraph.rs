@@ -924,11 +924,111 @@ fn as_written(formatting: &V) -> V {
     copy
 }
 
-/// A run whose formatting is what the seed resolved for one of its source
-/// paragraph's runs saves that run's own formatting, so what it inherited
-/// from styles keeps following them in Word (Epo 2026-10-21); a run whose
-/// formatting changed saves it resolved.
-fn with_source_run_formatting(content: Vec<V>, source_runs: &[(V, V)]) -> Vec<V> {
+/// A run of a source paragraph: the text attributes the seed resolves for it
+/// under the paragraph's current style (and those as `key`, compared with a
+/// live item's), those as formatting, its own rPr (`source`) and, when it
+/// holds only text, that text.
+pub(crate) struct SourceRun {
+    pub attrs: V,
+    pub key: std::rc::Rc<str>,
+    pub formatting: V,
+    pub source: V,
+    pub text: Option<String>,
+}
+
+/// A paragraph whose text and runs are as its source had them, each run with
+/// the attributes the seed resolved for it, saves its source runs, each with
+/// its own rPr: runs the seed resolved alike (an explicit `w:color auto` under
+/// a red heading, character shading, `w:cs`) are neither merged nor given each
+/// other's properties. Returns whether it did.
+fn restore_source_runs(
+    content: Vec<V>,
+    items: &[V],
+    base: Option<&V>,
+    source_runs: &[SourceRun],
+) -> (Vec<V>, bool) {
+    let base_content = base
+        .map(|base| base.get("content").items())
+        .unwrap_or_default();
+    if base_content.is_empty()
+        || base_content.len() != source_runs.len()
+        || !base_content.iter().all(|child| is(child, "run"))
+        || source_runs
+            .iter()
+            .any(|run| run.text.as_deref().is_none_or(str::is_empty))
+        || !content.iter().all(|child| {
+            is(child, "run")
+                && child
+                    .get("content")
+                    .items()
+                    .iter()
+                    .all(|entry| is(entry, "text"))
+        })
+        || items
+            .iter()
+            .any(|item| !is_kind(item, "text") || item.get("attributes").get("hyperlink").truthy())
+    {
+        return (content, false);
+    }
+    let full: String = items
+        .iter()
+        .map(|item| joined_text(&item.get("text")))
+        .collect();
+    let joined: String = source_runs
+        .iter()
+        .filter_map(|run| run.text.as_deref())
+        .collect();
+    if full != joined {
+        return (content, false);
+    }
+    let keys: Vec<String> = items
+        .iter()
+        .map(|item| stable_stringify(&formatting_attrs(&item.get("attributes"))))
+        .collect();
+    let (mut item_index, mut item_offset) = (0, 0);
+    for run in source_runs {
+        let mut remaining = text::len(run.text.as_deref().unwrap_or_default());
+        while remaining > 0 {
+            let Some(item) = items.get(item_index) else {
+                return (content, false);
+            };
+            if keys[item_index] != *run.key {
+                return (content, false);
+            }
+            let length = text::len(&item.get("text").to_js_string());
+            let consumed = remaining.min(length - item_offset);
+            remaining -= consumed;
+            item_offset += consumed;
+            if item_offset == length {
+                item_index += 1;
+                item_offset = 0;
+            }
+        }
+    }
+    let runs = source_runs
+        .iter()
+        .map(|run| {
+            let resolved = attrs_to_text_formatting(&run.attrs);
+            let text = run.text.as_deref().unwrap_or_default();
+            let saved =
+                obj! { "type": "run", "content": V::array(run_content_for_text(text, &resolved)) };
+            if let Some(object) = saved.obj()
+                && o(&run.source).is_some_and(|source| !source.is_empty())
+            {
+                object.set("formatting", as_written(&run.source));
+            }
+            saved
+        })
+        .collect();
+    (runs, true)
+}
+
+/// A run whose formatting is what the seed resolved for its source
+/// paragraph's runs saves their own rPr when they all have the same one, so
+/// what it inherited from styles keeps following them in Word (Epo
+/// 2026-10-21); a run whose formatting changed, or that matches runs with
+/// different rPr, saves it resolved.
+fn with_source_run_formatting(content: Vec<V>, source_runs: &[SourceRun]) -> Vec<V> {
     if source_runs.is_empty() {
         return content;
     }
@@ -937,15 +1037,19 @@ fn with_source_run_formatting(content: Vec<V>, source_runs: &[(V, V)]) -> Vec<V>
     for run in runs {
         let Some(object) = run.obj() else { continue };
         let live = run.get("formatting").or_else(|| V::Obj(Obj::new()));
-        if let Some((_, source)) = source_runs
+        let mut matching = source_runs
             .iter()
-            .find(|(seeded, _)| same_json(seeded, &live))
-        {
-            if o(source).is_some_and(|source| !source.is_empty()) {
-                object.set("formatting", as_written(source));
-            } else {
-                object.delete("formatting");
-            }
+            .filter(|source| same_json(&source.formatting, &live));
+        let Some(first) = matching.next() else {
+            continue;
+        };
+        if !matching.all(|other| same_json(&other.source, &first.source)) {
+            continue;
+        }
+        if o(&first.source).is_some_and(|source| !source.is_empty()) {
+            object.set("formatting", as_written(&first.source));
+        } else {
+            object.delete("formatting");
         }
     }
     content
@@ -957,7 +1061,7 @@ pub(crate) fn paragraph_from_story(
     items: Vec<V>,
     comment_boundaries: &[V],
     base_paragraph: Option<&V>,
-    source_runs: &[(V, V)],
+    source_runs: &[SourceRun],
     seeded: &mut dyn FnMut(&V) -> Result<V>,
 ) -> Result<V> {
     let attrs = paragraph_attrs(properties);
@@ -971,7 +1075,12 @@ pub(crate) fn paragraph_from_story(
             .map(|runs| runs.items()),
     );
     content = restore_raw_inlines(content, base_paragraph);
-    content = with_source_run_formatting(content, source_runs);
+    let (restored, whole) = restore_source_runs(content, &items, base_paragraph, source_runs);
+    content = if whole {
+        restored
+    } else {
+        with_source_run_formatting(restored, source_runs)
+    };
     content = insert_boundaries(
         content,
         comment_boundaries,

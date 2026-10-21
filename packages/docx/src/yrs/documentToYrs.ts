@@ -1702,6 +1702,9 @@ export function seededCellFrames(
   table: Table,
   styleResolver: StyleResolver | null
 ): Array<Array<{ borders: unknown; margins: unknown }>> {
+  // No theme and compatibility mode 15: in projectTable they feed only a cell's
+  // shading and the table's compatibilityMode, never borders or margins. Pass
+  // the seed's own if that changes.
   return projectTable(table, styleResolver, null, 15).rows.map((row) =>
     row.cells.map((cell) => ({ borders: cell.attrs.borders, margins: cell.attrs.margins }))
   );

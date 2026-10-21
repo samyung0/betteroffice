@@ -1411,14 +1411,82 @@ function asWritten(formatting: TextFormatting): TextFormatting {
   return { ...formatting, fontFamily: written };
 }
 
-/** A source run as the formatting the seed resolved for it, with its own formatting. */
-type SourceRun = readonly [seeded: TextFormatting, source: TextFormatting | undefined];
+/**
+ * A run of a source paragraph: the text attributes the seed resolves for it
+ * under the paragraph's current style, those as formatting, its own rPr
+ * (`source`) and, when it holds only text, that text.
+ */
+interface SourceRun {
+  attrs: Attrs;
+  /** `attrs` as compared with a live item's. */
+  key: string;
+  formatting: TextFormatting;
+  source: TextFormatting | undefined;
+  text: string | undefined;
+}
 
 /**
- * A run whose formatting is what the seed resolved for one of its source
- * paragraph's runs saves that run's own formatting, so what it inherited from
- * styles keeps following them in Word (Epo 2026-10-21); a run whose formatting
- * changed saves it resolved.
+ * A paragraph whose text and runs are as its source had them, each run with
+ * the attributes the seed resolved for it, saves its source runs, each with
+ * its own rPr: runs the seed resolved alike (an explicit `w:color auto` under
+ * a red heading, character shading, `w:cs`) are neither merged nor given each
+ * other's properties. Undefined when it does not apply.
+ */
+function restoreSourceRuns(
+  content: ParagraphContent[],
+  items: InlineItem[],
+  base: Paragraph | undefined,
+  sourceRuns: readonly SourceRun[]
+): ParagraphContent[] | undefined {
+  const baseContent = base?.content ?? [];
+  if (
+    baseContent.length === 0 ||
+    baseContent.length !== sourceRuns.length ||
+    !baseContent.every((child) => child.type === 'run') ||
+    sourceRuns.some((run) => !run.text) ||
+    !content.every(
+      (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
+    ) ||
+    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink)
+  ) {
+    return undefined;
+  }
+  const fullText = items.map((item) => (item.kind === 'text' ? item.text : '')).join('');
+  if (fullText !== sourceRuns.map((run) => run.text).join('')) return undefined;
+  const keys = items.map((item) => stableStringify(formattingAttrs(item.attributes)));
+  let itemIndex = 0;
+  let itemOffset = 0;
+  for (const run of sourceRuns) {
+    let remaining = run.text!.length;
+    while (remaining > 0) {
+      const item = items[itemIndex];
+      if (item?.kind !== 'text') return undefined;
+      if (keys[itemIndex] !== run.key) return undefined;
+      const consumed = Math.min(remaining, item.text.length - itemOffset);
+      remaining -= consumed;
+      itemOffset += consumed;
+      if (itemOffset === item.text.length) {
+        itemIndex += 1;
+        itemOffset = 0;
+      }
+    }
+  }
+  return sourceRuns.map((run) => {
+    const saved: Run = {
+      type: 'run',
+      content: runContentForText(run.text!, attrsToTextFormatting(run.attrs)),
+    };
+    if (run.source && Object.keys(run.source).length > 0) saved.formatting = asWritten(run.source);
+    return saved;
+  });
+}
+
+/**
+ * A run whose formatting is what the seed resolved for its source paragraph's
+ * runs saves their own rPr when they all have the same one, so what it
+ * inherited from styles keeps following them in Word (Epo 2026-10-21); a run
+ * whose formatting changed, or that matches runs with different rPr, saves it
+ * resolved.
  */
 function withSourceRunFormatting(
   content: ParagraphContent[],
@@ -1427,10 +1495,9 @@ function withSourceRunFormatting(
   if (sourceRuns.length === 0) return content;
   for (const run of nestedRuns(content)) {
     const live = run.formatting ?? {};
-    const match = sourceRuns.find(([seeded]) => sameJson(seeded, live));
-    if (!match) continue;
-    const [, source] = match;
-    if (source && Object.keys(source).length > 0) run.formatting = asWritten(source);
+    const [first, ...others] = sourceRuns.filter((source) => sameJson(source.formatting, live));
+    if (!first || !others.every((other) => sameJson(other.source, first.source))) continue;
+    if (first.source && Object.keys(first.source).length > 0) run.formatting = asWritten(first.source);
     else delete run.formatting;
   }
   return content;
@@ -1837,7 +1904,9 @@ function paragraphFromStory(
       : undefined
   );
   content = restoreRawInlines(content, baseParagraph);
-  content = withSourceRunFormatting(content, sourceRuns);
+  content =
+    restoreSourceRuns(content, items, baseParagraph, sourceRuns) ??
+    withSourceRunFormatting(content, sourceRuns);
   content = insertBoundaries(content, commentBoundaries, storyUnits);
 
   const paragraph: Paragraph = {
@@ -2654,6 +2723,8 @@ class SaveContext {
   private readonly stylePprs = new Map<string, ParagraphFormatting | undefined>();
   /** Each source table's seeded cell borders and margins, by table story. */
   private readonly cellFrames = new Map<string, ReturnType<typeof seededCellFrames>>();
+  /** What the seed resolves for a run, by paragraph style and source formatting. */
+  private readonly seededRuns = new Map<string, Pick<SourceRun, 'attrs' | 'key' | 'formatting'>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
@@ -2706,13 +2777,34 @@ class SaveContext {
     return value.toString(16).toUpperCase().padStart(8, '0');
   }
 
-  /** Each run of a source paragraph (see {@link nestedRuns}) as the formatting the seed resolved for it, with its own. */
-  private sourceRuns(paragraph: Paragraph): SourceRun[] {
+  /**
+   * Each run of a source paragraph (see {@link nestedRuns}) with what the seed
+   * resolves for it under the paragraph's current style `styleId`: an
+   * unchanged style gives what the seed stored, a changed one makes the runs
+   * save as the editor shows them.
+   */
+  private sourceRuns(paragraph: Paragraph, styleId: string | undefined): SourceRun[] {
     const { styles } = this.seedSources;
-    return nestedRuns(paragraph.content).map((run) => [
-      attrsToTextFormatting(formattingAttrs(seededRunAttrs(paragraph.formatting?.styleId, run, styles))),
-      run.formatting,
-    ]);
+    return nestedRuns(paragraph.content).map((run) => {
+      const cacheKey = `${styleId ?? ''}|${JSON.stringify(run.formatting ?? null)}`;
+      let seeded = this.seededRuns.get(cacheKey);
+      if (!seeded) {
+        const attrs = seededRunAttrs(styleId, run, styles);
+        seeded = {
+          attrs,
+          key: stableStringify(attrs),
+          formatting: attrsToTextFormatting(formattingAttrs(attrs)),
+        };
+        this.seededRuns.set(cacheKey, seeded);
+      }
+      return {
+        ...seeded,
+        source: run.formatting,
+        text: run.content.every((entry) => entry.type === 'text')
+          ? run.content.map((entry) => (entry.type === 'text' ? entry.text : '')).join('')
+          : undefined,
+      };
+    });
   }
 
   /** The borders and margins the seed resolved for source cell `story`. */
@@ -3204,7 +3296,12 @@ class SaveContext {
             items,
             boundaries,
             baseParagraph,
-            baseParagraph ? this.sourceRuns(baseParagraph) : [],
+            baseParagraph
+              ? this.sourceRuns(
+                  baseParagraph,
+                  typeof properties.pStyle === 'string' ? properties.pStyle : undefined
+                )
+              : [],
             (attrs) => this.seededProperties(storyId, attrs)
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
