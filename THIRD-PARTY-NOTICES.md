@@ -247,7 +247,8 @@ License: MIT (`crates/office-service/starters/NOTICE.md`).
 
 `crates/office-service/starters/blank.docx` is python-docx's default template
 (https://github.com/python-openxml/python-docx,
-`src/docx/templates/default.docx`), unchanged. It is compiled into the
+`src/docx/templates/default.docx`), with its core properties emptied
+(`docProps/core.xml`). It is compiled into the
 `betteroffice-office-service` crate via `include_bytes!` as the document the
 agent's `create` starts from.
 

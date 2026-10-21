@@ -30,7 +30,9 @@ SOFTWARE.
 
 `blank.docx` is python-docx's default template
 (https://github.com/python-openxml/python-docx,
-`src/docx/templates/default.docx`), unchanged.
+`src/docx/templates/default.docx`), with its core properties
+(`docProps/core.xml`: python-docx as creator and description, a revision
+and 2013 dates) emptied (Epo 2026-10-21); everything else is unchanged.
 
 python-docx is MIT licensed:
 

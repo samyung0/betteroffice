@@ -204,7 +204,9 @@ fn report() -> Doc {
 
 /// A new document from the starter holds what its commands wrote, in order,
 /// from its first paragraph on; reopened, the read shows the styles, the
-/// list and the table's cells before the paragraph that follows it.
+/// list and the table's cells before the paragraph that follows it, with no
+/// blank paragraph between (Epo 2026-10-21), and the file carries no
+/// python-docx core properties.
 #[test]
 fn create_builds_a_document_from_the_starter_and_it_reopens() {
     let doc = report();
@@ -220,7 +222,6 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
             "r0c1 Period|Normal|",
             "r1c0 0.5 m|Normal|",
             "r1c1 1.4 s|Normal|",
-            "||",
             "Done.||",
         ]
     );
@@ -228,6 +229,16 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
     assert_eq!(
         doc.read(None, 200).unwrap()["paragraphs"][9]["locked"],
         "follows a table"
+    );
+    let core = part(
+        &export(&doc.base, doc.checkpoint(), DETERMINISM).unwrap(),
+        "docProps/core.xml",
+    );
+    assert!(
+        core.contains("<cp:coreProperties")
+            && !core.contains("python-docx")
+            && !core.contains("2013"),
+        "{core}"
     );
     let xml = doc.xml();
     assert!(xml.contains(r#"<w:pStyle w:val="Title"/>"#), "{xml}");
@@ -254,8 +265,7 @@ fn the_docx_starter_reads_as_one_empty_paragraph_with_its_styles() {
     assert_eq!(reopened.lines(), ["||"]);
 }
 
-/// Inserts after one paragraph land in the order given, tables too, each
-/// table followed by an empty paragraph of its own.
+/// Inserts after one paragraph land in the order given, tables too.
 #[test]
 fn inserts_after_one_paragraph_keep_their_order() {
     let mut doc = report();
@@ -267,17 +277,31 @@ fn inserts_after_one_paragraph_keep_their_order() {
     ])
     .unwrap();
     assert_eq!(
-        doc.lines()[..7],
+        doc.lines()[..6],
         [
             "Lab report|Title|",
             "Method|Heading1|",
             "First.||",
             "r0c0 a|Normal|",
-            "||",
             "Second.|Heading2|",
             "We timed the pendulum.||",
         ]
     );
+}
+
+/// An inserted table keeps the blank paragraph after it only where Word
+/// needs one: at the body's end and before another table (Epo 2026-10-21).
+#[test]
+fn an_inserted_table_keeps_a_blank_paragraph_only_where_word_needs_one() {
+    let mut doc = Doc::created(&[insert(None, "Intro", None), table(None, &[&["x"]])]);
+    assert_eq!(doc.lines(), ["Intro||", "r0c0 x|Normal|", "||"]);
+    doc.apply(&[table(Some(&doc.id("Intro")), &[&["y"]])])
+        .unwrap();
+    assert_eq!(
+        doc.lines(),
+        ["Intro||", "r0c0 y|Normal|", "||", "r0c0 x|Normal|", "||"]
+    );
+    assert_eq!(doc.xml().matches("<w:tbl>").count(), 2);
 }
 
 #[test]
@@ -325,7 +349,7 @@ fn insert_paragraph_refuses_an_unknown_style_line_breaks_and_too_many_paragraphs
     assert_eq!(
         doc.apply(&[insert(Some(&cell), "x", None)]).unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
+            "after_id must be a paragraph of the document body, not of a table or content control"
         )
     );
 }
@@ -350,35 +374,43 @@ fn delete_paragraph_removes_a_plain_paragraph_reading_its_expected_text() {
             })),
         }
     );
+    let ruler = doc.paragraph("Ruler");
     doc.apply(&[Command::DeleteParagraph {
         id: text,
         expected_text: "We timed the pendulum.".into(),
     }])
     .unwrap();
     assert!(!doc.lines().iter().any(|line| line.starts_with("We timed")));
+    // The next paragraph keeps its own id and list.
+    assert_eq!(doc.paragraph("Ruler"), ruler);
 
-    // The paragraph after a table holds the table; the last cannot go.
-    let after_table = doc.read(None, 200).unwrap()["paragraphs"][8]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    // A paragraph after a table goes, the next one taking the table, unless
+    // it ends the body (Word needs it there).
+    doc.apply(&[insert(None, "More.", None)]).unwrap();
+    doc.apply(&[Command::DeleteParagraph {
+        id: doc.id("Done."),
+        expected_text: "Done.".into(),
+    }])
+    .unwrap();
+    assert_eq!(doc.lines()[7..], ["r1c1 1.4 s|Normal|", "More.||"]);
     assert_eq!(
         doc.apply(&[Command::DeleteParagraph {
-            id: after_table,
-            expected_text: String::new(),
+            id: doc.id("More."),
+            expected_text: "More.".into(),
         }])
         .unwrap_err(),
-        refused(
-            EditCode::UnavailableTarget,
-            "the paragraph holds objects or tracked changes, or follows a table"
+        invalid(
+            "the paragraph after a table that ends the body or a cell cannot be deleted; Word needs it"
         )
     );
+    let mut plain = Doc::created(&[insert(None, "One", None), insert(None, "Two", None)]);
     assert_eq!(
-        doc.apply(&[Command::DeleteParagraph {
-            id: doc.id("Done."),
-            expected_text: "Done.".into(),
-        }])
-        .unwrap_err(),
+        plain
+            .apply(&[Command::DeleteParagraph {
+                id: plain.id("Two"),
+                expected_text: "Two".into(),
+            }])
+            .unwrap_err(),
         invalid("a story's last paragraph cannot be deleted; replace its text instead")
     );
 }
@@ -442,7 +474,7 @@ fn insert_table_refuses_a_too_large_ragged_or_nested_table() {
     assert_eq!(
         doc.apply(&[table(Some(&cell), &[&["x"]])]).unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
+            "after_id must be a paragraph of the document body, not of a table or content control"
         )
     );
 }
@@ -588,7 +620,7 @@ fn set_alignment_aligns_one_paragraph() {
 fn scoped_reads_page_through_the_paragraphs() {
     let doc = report();
     let first = doc.read(None, 4).unwrap();
-    assert_eq!(first["total"], 11);
+    assert_eq!(first["total"], 10);
     assert_eq!(first["nextStart"], 4);
     assert_eq!(first["paragraphs"].as_array().unwrap().len(), 4);
     assert!(first["styles"].is_array());
@@ -602,7 +634,7 @@ fn scoped_reads_page_through_the_paragraphs() {
             .iter()
             .map(|paragraph| paragraph["text"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["1.4 s", "", "Done."]
+        ["1.4 s", "Done."]
     );
     assert_eq!(
         doc.read(None, 201).unwrap_err(),
@@ -651,7 +683,7 @@ fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
         doc.apply(&[insert(Some(&doc.id("Inside")), "x", None)])
             .unwrap_err(),
         invalid(
-            "after_id must be a paragraph of the document body, not of a table, content control, header, footer or note"
+            "after_id must be a paragraph of the document body, not of a table or content control"
         )
     );
     // What the read marks locked, the text commands refuse.
@@ -663,9 +695,81 @@ fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
         .unwrap_err(),
         refused(
             EditCode::UnavailableTarget,
-            "the paragraph holds objects or tracked changes, or follows a table"
+            "the paragraph follows a content control"
         )
     );
+}
+
+/// Header, footer and note paragraphs read after the body, each marked with
+/// its part, and take `replace_text` only (Epo 2026-10-21).
+#[test]
+fn headers_footers_and_notes_read_after_the_body_and_take_replace_text_only() {
+    let mut doc = Doc::new(include_bytes!("fixtures/stories.docx").to_vec());
+    let parts: Vec<(String, String)> = doc.read(None, 200).unwrap()["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|paragraph| !paragraph["part"].is_null())
+        .map(|paragraph| {
+            (
+                paragraph["part"].as_str().unwrap().to_owned(),
+                paragraph["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("header (default)".to_owned(), "Header".to_owned()),
+            ("footer (default)".to_owned(), "Footer".to_owned()),
+            ("footnote 1".to_owned(), "A note".to_owned()),
+        ]
+    );
+    assert!(doc.paragraph("End")["part"].is_null());
+    let header = doc.id("Header");
+    assert!(header.starts_with("hf:"), "{header}");
+    let only = refused(
+        EditCode::UnsupportedOperation,
+        "header, footer and note paragraphs take replace_text only",
+    );
+    for command in [
+        Command::SetAlignment {
+            target_id: header.clone(),
+            alignment: Alignment::Center,
+        },
+        insert(Some(&header), "x", None),
+        Command::DeleteParagraph {
+            id: doc.id("A note"),
+            expected_text: "A note".into(),
+        },
+    ] {
+        assert_eq!(doc.apply(&[command]).unwrap_err(), only);
+    }
+    doc.apply(&[Command::ReplaceText {
+        target_id: header,
+        expected_text: "Header".into(),
+        text: "Lab 3".into(),
+    }])
+    .unwrap();
+    assert_eq!(doc.paragraph("Lab 3")["part"], "header (default)");
+}
+
+/// A call holds at most 50 commands; the pipeline sends no more, so this
+/// refusal guards other callers.
+#[test]
+fn a_call_holds_at_most_50_commands() {
+    let mut doc = report();
+    let alignments: Vec<Command> = (0..51)
+        .map(|_| Command::SetAlignment {
+            target_id: doc.id("Done."),
+            alignment: Alignment::Left,
+        })
+        .collect();
+    assert_eq!(
+        doc.apply(&alignments).unwrap_err(),
+        invalid("the call holds 51 commands; a call holds at most 50")
+    );
+    doc.apply(&alignments[..50]).unwrap();
 }
 
 /// A list a paragraph style gives reads as a list, and `set_list` `none`

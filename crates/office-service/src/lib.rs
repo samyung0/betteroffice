@@ -132,6 +132,15 @@ impl Session {
         }
     }
 
+    /// After a call's commands (DOCX: the empty paragraphs its tables no
+    /// longer need).
+    fn finish(&mut self, commands: &[Command]) -> Result<()> {
+        match self {
+            Session::Docx(session) => session.finish_agent(commands),
+            Session::Xlsx(_) | Session::Pptx(_) => Ok(()),
+        }
+    }
+
     fn locate(&mut self, ids: &[String]) -> Result<Vec<Target>> {
         match self {
             Session::Docx(session) => ids.iter().map(|id| session.locate(id)).collect(),
@@ -334,6 +343,24 @@ pub fn starter(format: Format) -> Result<&'static [u8]> {
     }
 }
 
+/// Commands one call holds (Epo 2026-10-21). The pipeline sends a call's
+/// commands only up to this and DOCX's inserted-paragraph limit, so these
+/// refusals guard other callers.
+const MAX_CALL_COMMANDS: usize = 50;
+
+fn check_call(commands: &[Command]) -> Result<()> {
+    if commands.len() > MAX_CALL_COMMANDS {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            format!(
+                "the call holds {} commands; a call holds at most {MAX_CALL_COMMANDS}",
+                commands.len()
+            ),
+        ));
+    }
+    docx::agent::check_call(commands)
+}
+
 /// A new file: `starter` seeded, `commands` applied in one session, exported.
 pub fn create(
     format: Format,
@@ -344,7 +371,7 @@ pub fn create(
     guard(|| {
         check_determinism(determinism)?;
         assert_checkpoint(format, starter, None)?;
-        docx::agent::check_call(commands)?;
+        check_call(commands)?;
         let state = match format {
             Format::Docx => docx::seed(starter),
             Format::Xlsx => xlsx::seed(starter),
@@ -362,6 +389,7 @@ pub fn create(
         for command in commands {
             session.apply(&storable_command(command, &mut removed))?;
         }
+        session.finish(commands)?;
         Ok(Created {
             bytes: session.export(determinism)?,
             notice: removed_notice(&removed),
@@ -382,7 +410,7 @@ pub fn apply_commands(
         if commands.is_empty() {
             return Err(Error::edit(EditCode::InvalidInput, "no commands"));
         }
-        docx::agent::check_call(commands)?;
+        check_call(commands)?;
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
         let mut inverse = Some(Vec::with_capacity(commands.len()));
         let mut ids: Vec<String> = Vec::new();
@@ -400,6 +428,7 @@ pub fn apply_commands(
                 }
             }
         }
+        session.finish(commands)?;
         let state = session.state();
         let targets = session.locate(&ids)?;
         Ok(CommandResult {

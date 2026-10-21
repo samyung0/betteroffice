@@ -24,8 +24,8 @@ use crate::types::{
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
 /// Cells one `set_range` sets or `format_cells` formats, or one row or column
-/// delete removes; also the cells one call writes across its commands (Epo
-/// 2026-10-20, review finding 3).
+/// delete removes; also the cells one call's commands name across them (a
+/// range's area, a delete's expected cells; Epo 2026-10-20, review finding 3).
 const MAX_EDIT_CELLS: u64 = 10_000;
 /// Cells one scoped read covers.
 const MAX_READ_CELLS: u64 = 2_000;
@@ -70,7 +70,9 @@ impl XlsxSession {
     }
 
     /// Counts a command's `cells` toward its call, refused once the call
-    /// passes [`MAX_EDIT_CELLS`]: a range's area, a delete's stored cells.
+    /// passes [`MAX_EDIT_CELLS`]: a range's area, a delete's expected cells.
+    /// The pipeline sends a call's commands only up to the limit, so the
+    /// refusal guards other callers.
     fn write(&mut self, cells: u64) -> Result<()> {
         self.written += cells;
         if self.written > MAX_EDIT_CELLS {
@@ -665,7 +667,9 @@ impl XlsxSession {
                 stored.len()
             )));
         }
-        self.write(stored.len() as u64)?;
+        // The call's count takes the cells the delete names, as the pipeline
+        // counts them before it sends a call (Epo 2026-10-21).
+        self.write(expected.iter().map(|row| row.len() as u64).sum())?;
         let mut current: BTreeMap<(u32, u32), (String, String)> = BTreeMap::new();
         for at in stored {
             let cell = self.read(sheet.index, at)?;

@@ -367,6 +367,58 @@ impl EditingDoc {
         })
     }
 
+    /// Removes one paragraph: `range` is its text after the tables and breaks
+    /// its slot opens with, then its mark. Unlike [`Self::delete_range`]'s
+    /// survival rule, the next paragraph keeps its own properties and paraId
+    /// rather than adopting the removed mark's, and its slot takes the removed
+    /// paragraph's tables and breaks (the chat agent's `delete_paragraph`,
+    /// office-service `docx/agent.rs`, Epo 2026-10-21). Plain mode only;
+    /// refuses a range holding anything but plain text before the mark, and
+    /// the story's last mark.
+    pub fn remove_paragraph(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
+        let len = crate::format::range_len(&range)?;
+        if len == 0 {
+            return Err(OpError::EmptyRange);
+        }
+        if ctx.is_suggesting() {
+            return Err(OpError::InvalidUpdate(
+                "remove_paragraph applies in plain mode only".into(),
+            ));
+        }
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &range.story)?;
+        check_range(&story, &txn, range.start, len)?;
+        let mark = range.end - 1;
+        let chunks = snapshot_range(&story, &txn, range.start, range.end);
+        let one_paragraph = chunks.last().is_some_and(|chunk| {
+            matches!(chunk.kind, ChunkKind::Pilcrow(_)) && chunk.start == mark
+        }) && chunks.iter().all(|chunk| match chunk.kind {
+            ChunkKind::Text(_) => chunk.end() <= mark && !chunk.attr_active(FIELD_RESULT),
+            ChunkKind::Pilcrow(_) => chunk.start == mark,
+            ChunkKind::Embed(_) => false,
+        });
+        if !one_paragraph {
+            return Err(OpError::ExpectedPilcrow {
+                story: range.story.clone(),
+                index: mark,
+            });
+        }
+        if let Some((index, map)) = last_pilcrow(&story, &txn)
+            && index == mark
+        {
+            return Err(OpError::CannotMergeFinalParagraph(
+                crate::map_string(&map, &txn, crate::PARA_ID).unwrap_or_default(),
+            ));
+        }
+        story.remove_range(&mut txn, range.start, len);
+        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, range.start)?;
+        Ok(Receipt {
+            new_para_ids: Vec::new(),
+            revision_ids: Vec::new(),
+            range: Some(loc_range),
+        })
+    }
+
     /// Replaces a range with plain text in ONE transaction — the primitive behind
     /// type-over-selection, paste, find-replace, and agent proposeChange. In suggesting mode the
     /// delete and insert stamps share one revision ID. The inserted text adopts the formatting of
