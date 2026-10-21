@@ -4,8 +4,8 @@
 
 use office_service::{
     Alignment, Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format,
-    InspectQuery, ListKind, TextFormat, apply_commands, create, export, inspect_scoped, seed,
-    sha256_hex, starter,
+    InspectQuery, ListKind, TextFormat, Touched, apply_commands, create, export, inspect_scoped,
+    seed, sha256_hex, starter,
 };
 use serde_json::{Value, json};
 
@@ -728,10 +728,12 @@ fn an_insert_into_the_only_empty_paragraph_keeps_its_tracked_change() {
     );
 }
 
-/// `touched` grows with the runs a command covers and the format it writes
-/// to each; Capy sizes the edit's Undo with it (review H1).
+/// `touched` is the target paragraph's Yjs items before the command (a
+/// text item a run, their format markers, the mark and its keys) and their
+/// bytes; Capy sizes the edit's Undo with it (the Editor's design,
+/// 2026-10-22).
 #[test]
-fn touched_counts_the_runs_a_command_covers() {
+fn touched_counts_the_items_of_the_target_paragraph() {
     let run =
         |props: &str, text: &str| format!("<w:r><w:rPr>{props}</w:rPr><w:t>{text}</w:t></w:r>");
     let many: String = (0..12)
@@ -768,7 +770,12 @@ fn touched_counts_the_runs_a_command_covers() {
         .collect();
     let (many, one) = (ids[0].clone(), ids[1].clone());
     let formatted = touched(&mut doc, &[format(many.clone()), format(one.clone())]);
-    assert!(formatted[0] > 6 * formatted[1], "{formatted:?}");
+    // Twelve runs, each a text item opened by a format marker, against one.
+    assert!(
+        formatted[0].items >= formatted[1].items + 2 * 11,
+        "{formatted:?}"
+    );
+    assert!(formatted[1].content > 48, "{formatted:?}");
     let deleted = touched(
         &mut doc,
         &[Command::DeleteParagraph {
@@ -776,8 +783,11 @@ fn touched_counts_the_runs_a_command_covers() {
             expected_text: "abcd".repeat(12),
         }],
     );
-    assert!(deleted[0] > formatted[1], "{deleted:?}");
-    assert_eq!(touched(&mut doc, &[insert(None, "x", None)]), [0]);
+    assert_eq!(deleted[0], formatted[0]);
+    assert_eq!(
+        touched(&mut doc, &[insert(None, "x", None)]),
+        [Touched::default()]
+    );
 }
 
 /// Header, footer and note paragraphs read after the body, each marked with

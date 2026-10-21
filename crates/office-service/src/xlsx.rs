@@ -15,6 +15,7 @@ use crate::error::{EditCode, Error, Result};
 use crate::formula::Formulas;
 use crate::js::{J, canonical};
 use crate::session::{Applied, Item};
+use crate::touched::Touched;
 use crate::types::{
     Asset, CellStyle, Checkpoint, Command, EffectKind, Entry, Format, InspectQuery, NetEffect,
     ObjectKind, ObjectRef, Target,
@@ -61,6 +62,23 @@ impl XlsxSession {
 
     pub fn state(&self) -> Vec<u8> {
         self.workbook.encode_state_as_update_v1()
+    }
+
+    /// [`crate::CommandResult::touched`]: a deleted sheet's key in the sheet
+    /// order, all `delete_sheet` removes (the sheet's map and cells stay in
+    /// Yjs, as a row or column delete only adds an axis change); nothing for
+    /// the rest.
+    pub fn touched(&self, command: &Command) -> Touched {
+        match command {
+            Command::DeleteSheet { sheet, .. } => self.sheet_ref(sheet).map_or_else(
+                |_| Touched::default(),
+                |sheet| Touched {
+                    content: sheet.id.len() as u64 + 2,
+                    items: 1,
+                },
+            ),
+            _ => Touched::default(),
+        }
     }
 
     /// `checkpointProjectionJson` (`full`) or `checkpointCellsJson` without

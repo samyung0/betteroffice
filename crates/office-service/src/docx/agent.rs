@@ -25,6 +25,7 @@ use crate::common::{check_expected_paragraph, check_paragraph_text, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
 use crate::session::Applied;
+use crate::touched::{self, Touched};
 use crate::types::{Alignment, Command, InspectQuery, ListKind, TextFormat};
 
 const BODY: &str = "body";
@@ -63,9 +64,8 @@ const HIGHLIGHTS: [&str; 16] = [
 ];
 const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, content control, header, footer or note";
 const TABLE_ANCHOR: &str = "a new table goes in the document body: after_id names a body paragraph, not one of a table, content control, header, footer or note";
-/// Bytes a text run or paragraph mark costs beyond its attributes' JSON: its
-/// Yjs items' ids and keys ([`DocxSession::touched`]).
-const RUN_BYTES: u64 = 32;
+/// The root map of DOCX stories (`crate::document_roots`).
+const STORIES: &str = "stories";
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::edit(EditCode::InvalidInput, message)
@@ -319,41 +319,44 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
     Ok(paras)
 }
 
-/// The JSON length of a run's or mark's attributes.
-fn attrs_len(attributes: &BTreeMap<String, Any>) -> u64 {
-    let mut json = String::new();
-    attributes
-        .iter()
-        .map(|(key, value)| {
-            json.clear();
-            value.to_json(&mut json);
-            (key.len() + json.len() + 4) as u64
-        })
-        .sum()
-}
-
-/// The text runs of `story` overlapping `[start, end)` (UTF-16): how many,
-/// and their attributes' JSON plus [`RUN_BYTES`] each.
-fn runs(doc: &EditingDoc, story: &str, start: u32, end: u32) -> Result<(u64, u64)> {
+/// The `ordinal`-th table embed of `story` and the format markers at it.
+fn table_embed(doc: &EditingDoc, story: &str, ordinal: u32) -> Result<Touched> {
     let segments = doc
         .story_segments(story)
         .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
-    let (mut at, mut count, mut bytes) = (0, 0, 0);
+    let (mut at, mut seen) = (0, 0);
     for segment in segments {
-        if at >= end {
-            break;
+        match segment.content {
+            SegmentContent::Text(text) => at += len16(&text),
+            SegmentContent::OtherEmbed { kind, .. } if kind == "table" => {
+                if seen == ordinal {
+                    return Ok(touched::story_range(doc.yrs_doc(), STORIES, story, at, at));
+                }
+                seen += 1;
+                at += 1;
+            }
+            _ => at += 1,
         }
-        let len = match &segment.content {
-            SegmentContent::Text(text) => len16(text),
-            _ => 1,
-        };
-        if at + len > start && matches!(segment.content, SegmentContent::Text(_)) {
-            count += 1;
-            bytes += attrs_len(&segment.attributes) + RUN_BYTES;
-        }
-        at += len;
     }
-    Ok((count, bytes))
+    Ok(Touched::default())
+}
+
+/// Story `story` whole, with the cells' stories of each table in it.
+fn story_tree(doc: &EditingDoc, story: &str) -> Result<Touched> {
+    let mut sum = touched::story(doc.yrs_doc(), STORIES, story);
+    let segments = doc
+        .story_segments(story)
+        .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
+    for segment in segments {
+        if let SegmentContent::OtherEmbed { kind, payload } = segment.content
+            && kind == "table"
+        {
+            for cell in table_cells(&payload).iter().flatten() {
+                sum += story_tree(doc, cell)?;
+            }
+        }
+    }
+    Ok(sum)
 }
 
 /// Whether `story` holds a table or a content control (H2: delete_table's
@@ -568,63 +571,64 @@ impl Walk<'_> {
 
 impl DocxSession {
     /// [`crate::CommandResult::touched`], read before `command` applies: the
-    /// runs a `replace_text` or `format_text` expected text covers (with the
-    /// format written to each), a deleted paragraph's runs and mark, a
-    /// deleted table's cells and table; 0 for the rest, and where the target
-    /// is not found (the command's own refusal says why).
-    pub(crate) fn touched(&self, command: &Command) -> u64 {
+    /// paragraph a `replace_text`, `format_text`, `delete_paragraph` or
+    /// `set_alignment` names, each paragraph of a `set_list`, a deleted
+    /// table's embed and cells; nothing for the rest, nor where the target is
+    /// not found (the command's own refusal says why).
+    pub(crate) fn touched(&self, command: &Command) -> Touched {
         let doc = self.engine.doc();
-        let in_text = |id: &str, expected: &str| -> Result<(u64, u64)> {
-            let (story, para_id) = split_id(id)?;
-            let para = paras(doc, story)?
-                .into_iter()
-                .find(|para| para.para_id == para_id)
-                .ok_or_else(gone)?;
-            let at = para
-                .text
-                .find(expected)
-                .map_or(0, |at| len16(&para.text[..at]));
-            let start = para.start + at;
-            runs(doc, story, start, start + len16(expected).max(1))
+        let paragraph = |id: &str| -> Result<Touched> {
+            let (story, index, paras) = self.find(id)?;
+            let para = &paras[index];
+            Ok(touched::story_range(
+                doc.yrs_doc(),
+                STORIES,
+                &story,
+                para.start,
+                para.mark,
+            ))
         };
-        let touched = || -> Result<u64> {
+        let measured = || -> Result<Touched> {
             Ok(match command {
-                Command::ReplaceText {
-                    target_id,
-                    expected_text,
-                    ..
-                } => in_text(target_id, expected_text)?.1,
-                Command::FormatText {
-                    target_id,
-                    expected_text,
-                    format,
-                } => {
-                    let (count, bytes) = in_text(target_id, expected_text)?;
-                    let format = serde_json::to_string(format).map_err(Error::engine)?;
-                    bytes + count * format.len() as u64
-                }
-                Command::DeleteParagraph { target_id, .. } => {
-                    let (story, index, paras) = self.find(target_id)?;
-                    let para = &paras[index];
-                    runs(doc, &story, para.start, para.mark)?.1
-                        + attrs_len(&para.properties)
-                        + RUN_BYTES
+                Command::ReplaceText { target_id, .. }
+                | Command::FormatText { target_id, .. }
+                | Command::DeleteParagraph { target_id, .. }
+                | Command::SetAlignment { target_id, .. } => paragraph(target_id)?,
+                Command::SetList { ids, .. } => {
+                    // Each story read once: a list may name 200 paragraphs.
+                    let mut read: HashMap<&str, Vec<Para>> = HashMap::new();
+                    let mut sum = Touched::default();
+                    for id in ids {
+                        let (story, para_id) = split_id(id)?;
+                        if !read.contains_key(story) {
+                            read.insert(story, paras(doc, story)?);
+                        }
+                        let para = read[story]
+                            .iter()
+                            .find(|para| para.para_id == para_id)
+                            .ok_or_else(gone)?;
+                        sum += touched::story_range(
+                            doc.yrs_doc(),
+                            STORIES,
+                            story,
+                            para.start,
+                            para.mark,
+                        );
+                    }
+                    sum
                 }
                 Command::DeleteTable { id, .. } => {
-                    let (_, _, cells, payload) = self.table(id)?;
-                    let mut bytes = attrs_len(&payload);
+                    let (story, ordinal, cells, _) = self.table(id)?;
+                    let mut sum = table_embed(doc, &story, ordinal)?;
                     for cell in cells.iter().flatten() {
-                        bytes += runs(doc, cell, 0, u32::MAX)?.1;
-                        for para in paras(doc, cell)? {
-                            bytes += attrs_len(&para.properties) + RUN_BYTES;
-                        }
+                        sum += story_tree(doc, cell)?;
                     }
-                    bytes
+                    sum
                 }
-                _ => 0,
+                _ => Touched::default(),
             })
         };
-        touched().unwrap_or(0)
+        measured().unwrap_or_default()
     }
 
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {

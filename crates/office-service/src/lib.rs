@@ -21,6 +21,7 @@ mod pptx;
 mod rebase;
 mod replicas;
 mod session;
+mod touched;
 mod types;
 pub mod wire;
 mod xlsx;
@@ -32,6 +33,7 @@ pub use common::sha256_hex;
 pub use error::{EditCode, Error, Result};
 pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxReplicas};
 pub use session::{compare_baselines, unshifted_effects};
+pub use touched::Touched;
 pub use types::*;
 
 use common::{assert_checkpoint, removed_notice, storable_command};
@@ -136,11 +138,11 @@ impl Session {
     }
 
     /// [`CommandResult::touched`] for `command`, read before it applies.
-    fn touched(&mut self, command: &Command) -> u64 {
+    fn touched(&mut self, command: &Command) -> Touched {
         match self {
             Session::Docx(session) => session.touched(command),
             Session::Pptx(session) => session.touched(command),
-            Session::Xlsx(_) => 0,
+            Session::Xlsx(session) => session.touched(command),
         }
     }
 
