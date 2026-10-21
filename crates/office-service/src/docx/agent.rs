@@ -1,8 +1,8 @@
 //! The chat agent's DOCX paragraph commands (Epo 2026-10-21): insert a
-//! paragraph in the document body with a paragraph style of the file, delete
-//! a plain paragraph; and its scoped read, the editable paragraphs (each with
-//! its style when not the default) and the file's paragraph styles. A new
-//! paragraph gets a style id and no direct formatting.
+//! paragraph in the document body, delete a plain paragraph; and its scoped
+//! read, the editable paragraphs (each with its style when not the default)
+//! and the file's paragraph styles. A new paragraph continues its anchor as
+//! Enter does, or takes the paragraph style named and no direct formatting.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -68,6 +68,8 @@ struct ParagraphStyle {
     /// Shown in Word's style lists: neither hidden nor semi-hidden.
     shown: bool,
     default: bool,
+    /// The style Enter at a paragraph's end gives the next one (`w:next`).
+    next: Option<String>,
 }
 
 /// A paragraph mark: its story index, properties and whether it is tracked.
@@ -192,6 +194,7 @@ impl DocxSession {
                     name,
                     shown: !style.get("hidden").truthy() && !style.get("semiHidden").truthy(),
                     default: style.get("default").truthy(),
+                    next: style.get("next").as_str().map(|next| next.to_string()),
                 })
             })
             .collect()
@@ -230,12 +233,36 @@ impl DocxSession {
         Ok(marks)
     }
 
-    /// A body paragraph right after or before `anchor`, its paragraph style
-    /// `style` and nothing else of its neighbour's. Several inserts after one
-    /// paragraph land in call order. The inverse deletes it, unless
-    /// delete_paragraph would refuse that: a new last paragraph, or one that
-    /// ends the section its anchor ended (a split at a section's end leaves
-    /// the section mark on the new paragraph, as Enter does).
+    /// The style Enter at the end of a paragraph styled `style` (none: the
+    /// default) gives the next one: the style's next style when the file has
+    /// it, else the style itself; none for the default style.
+    fn next_style(&self, style: Option<&str>) -> Option<String> {
+        let styles = self.paragraph_styles();
+        let default = styles
+            .iter()
+            .find(|known| known.default)
+            .map(|known| known.id.as_str());
+        let style = style.or(default)?;
+        let next = styles
+            .iter()
+            .find(|known| known.id == style)
+            .and_then(|known| known.next.as_deref())
+            .filter(|next| styles.iter().any(|known| known.id == *next))
+            .unwrap_or(style);
+        (Some(next) != default).then(|| next.to_owned())
+    }
+
+    /// A body paragraph right after or before `anchor`. Without a style it
+    /// continues its anchor as Enter at the anchor's end does (Epo
+    /// 2026-10-21): the anchor's paragraph properties (list, indent) and its
+    /// style's next style; the anchor is the paragraph `after_id` names, else
+    /// the one before the new paragraph, at the body's start the one it goes
+    /// before. A named style replaces that: the new paragraph takes it and
+    /// no direct formatting. Several inserts after one paragraph land in call
+    /// order. The inverse deletes it, unless delete_paragraph would refuse
+    /// that: a new last paragraph, or one that ends the section its anchor
+    /// ended (a split at a section's end leaves the section mark on the new
+    /// paragraph, as Enter does).
     fn insert_paragraph(
         &mut self,
         anchor: &str,
@@ -268,11 +295,13 @@ impl DocxSession {
         // this call last put there; before one it takes that paragraph's
         // mark, which keeps its id and section. Either copies its
         // neighbour's mark.
-        let (new_id, at, neighbour, undoable) = if after {
-            let index = match self.after.get(para_id).and_then(|id| position(id)) {
-                Some(index) => index,
-                None => position(para_id).ok_or_else(gone)?,
-            };
+        let (new_id, at, neighbour, continued, undoable) = if after {
+            let named = position(para_id).ok_or_else(gone)?;
+            let index = self
+                .after
+                .get(para_id)
+                .and_then(|id| position(id))
+                .unwrap_or(named);
             let mark = &marks[index];
             let receipt = doc
                 .split_paragraph(&ctx(), Position::new(BODY, mark.at))
@@ -284,6 +313,7 @@ impl DocxSession {
                 receipt.second_para_id,
                 mark.at + 1,
                 mark,
+                &marks[named],
                 index + 1 < marks.len() && !ends_section,
             )
         } else {
@@ -291,20 +321,44 @@ impl DocxSession {
             let receipt = doc
                 .insert_paragraph_before(&ctx(), BODY, para_id)
                 .map_err(op)?;
-            let at = index
-                .checked_sub(1)
-                .map_or(0, |previous| marks[previous].at + 1);
-            (receipt.first_para_id, at, &marks[index], true)
+            let previous = index.checked_sub(1);
+            let at = previous.map_or(0, |previous| marks[previous].at + 1);
+            let continued = &marks[previous.unwrap_or(index)];
+            (receipt.first_para_id, at, &marks[index], continued, true)
         };
-        let mut other: BTreeMap<String, Option<Any>> = neighbour
+        // The new mark copies `neighbour`'s: every key but its identity and
+        // section goes, then the properties it keeps come back. Source and
+        // save bookkeeping (`_` keys) and tracked changes are not kept.
+        let kept: BTreeMap<String, Any> = match style {
+            Some(style) => BTreeMap::from([("pStyle".to_owned(), Any::from(style))]),
+            None => {
+                let mut kept: BTreeMap<String, Any> = continued
+                    .properties
+                    .iter()
+                    .filter(|(key, _)| {
+                        !KEPT_KEYS.contains(&key.as_str())
+                            && !TRACKED_KEYS.contains(&key.as_str())
+                            && !key.starts_with('_')
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                let style = match kept.remove("pStyle") {
+                    Some(Any::String(style)) => Some(style),
+                    _ => None,
+                };
+                if let Some(next) = self.next_style(style.as_deref()) {
+                    kept.insert("pStyle".to_owned(), Any::from(next));
+                }
+                kept
+            }
+        };
+        let other: BTreeMap<String, Option<Any>> = neighbour
             .properties
             .keys()
             .filter(|key| !KEPT_KEYS.contains(&key.as_str()))
             .map(|key| (key.clone(), None))
+            .chain(kept.into_iter().map(|(key, value)| (key, Some(value))))
             .collect();
-        if let Some(style) = style {
-            other.insert("pStyle".to_owned(), Some(Any::from(style)));
-        }
         doc.set_paragraph_attrs(
             &ctx(),
             &ParaSelector::One(new_id.clone()),

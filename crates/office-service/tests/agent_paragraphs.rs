@@ -121,11 +121,12 @@ fn paragraph_in(xml: &str, ns: &str, text: &str) -> String {
     chunk[start..].to_owned()
 }
 
-/// A DOCX with shown paragraph styles Normal, Heading1 and Title, a hidden
-/// and a semi-hidden one and a character style, and a body of: a title, a
-/// centred paragraph, a paragraph with a tracked insertion, one ending a
-/// section, the next one, a table, the paragraph after it, Word's
-/// page-break paragraph, a heading and a last paragraph styled Normal.
+/// A DOCX with shown paragraph styles Normal, Heading1 (next: Normal) and
+/// Title, a hidden and a semi-hidden one and a character style, and a body
+/// of: a title, a centred paragraph, a paragraph with a tracked insertion,
+/// one ending a section, the next one, a table, the paragraph after it,
+/// Word's page-break paragraph, a heading, a bulleted list item and a last
+/// paragraph styled Normal.
 fn docx() -> Vec<u8> {
     docx_with_styles("")
 }
@@ -151,13 +152,18 @@ fn docx_with_styles(extra: &str) -> Vec<u8> {
         p("0000000F", "", "After the table"),
         r#"<w:p w14:paraId="00000011"><w:r><w:br w:type="page"/></w:r></w:p>"#.to_owned(),
         p("00000012", r#"<w:pStyle w:val="Heading1"/>"#, "Chapter"),
+        p(
+            "00000014",
+            r#"<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>"#,
+            "Item one",
+        ),
         p("00000010", r#"<w:pStyle w:val="Normal"/>"#, "Last"),
     ]
     .concat();
     let files = [
         (
             "[Content_Types].xml",
-            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_owned(),
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_owned(),
         ),
         (
             "_rels/.rels",
@@ -165,12 +171,18 @@ fn docx_with_styles(extra: &str) -> Vec<u8> {
         ),
         (
             "word/_rels/document.xml.rels",
-            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_owned(),
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_owned(),
         ),
         (
             "word/styles.xml",
             format!(
-                r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style><w:style w:type="paragraph" w:styleId="Hidden"><w:name w:val="Hidden"/><w:hidden/></w:style><w:style w:type="paragraph" w:styleId="Quiet"><w:name w:val="Quiet"/><w:semiHidden/></w:style>{extra}</w:styles>"#
+                r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style><w:style w:type="paragraph" w:styleId="Hidden"><w:name w:val="Hidden"/><w:hidden/></w:style><w:style w:type="paragraph" w:styleId="Quiet"><w:name w:val="Quiet"/><w:semiHidden/></w:style>{extra}</w:styles>"#
+            ),
+        ),
+        (
+            "word/numbering.xml",
+            format!(
+                r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="-"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
             ),
         ),
         (
@@ -318,9 +330,10 @@ fn the_docx_read_caps_its_style_list() {
 
 /// Inserts after one paragraph, and before one, land in call order, one
 /// after a paragraph right after it even past one inserted before the next;
-/// a new paragraph takes the style named and nothing of its neighbour's
-/// formatting, and the paragraphs around it keep their ids. The inverse
-/// deletes them.
+/// a new paragraph continues its anchor (the centring of "We timed it.", the
+/// Title of "Lab report", which names no next style) unless it names a
+/// style, and the paragraphs around it keep their ids. The inverse deletes
+/// them.
 #[test]
 fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
     let mut doc = Doc::new(Format::Docx, docx());
@@ -356,15 +369,17 @@ fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
     );
     let method = doc.paragraph_xml("Method");
     assert!(
-        method.contains(r#"<w:pStyle w:val="Heading1"/>"#),
+        method.contains(r#"<w:pStyle w:val="Heading1"/>"#) && !method.contains("<w:jc"),
         "{method}"
     );
-    for text in ["First.", "Draft", "Aim", "Sub"] {
+    let first = doc.paragraph_xml("First.");
+    assert!(
+        first.contains(r#"<w:jc w:val="center"/>"#) && !first.contains("<w:pStyle"),
+        "{first}"
+    );
+    for text in ["Draft", "v2", "Sub", "Aim"] {
         let xml = doc.paragraph_xml(text);
-        assert!(
-            !xml.contains("<w:pStyle") && !xml.contains("<w:jc"),
-            "{xml}"
-        );
+        assert!(xml.contains(r#"<w:pStyle w:val="Title"/>"#), "{xml}");
     }
     assert!(
         doc.paragraph_xml("We timed it.")
@@ -385,6 +400,41 @@ fn an_insert_after_the_last_paragraph_has_no_inverse() {
     let edit = doc.apply(&[after(&last, "Done.")]).unwrap();
     assert_eq!(doc.texts().last().unwrap(), "Done.");
     assert_eq!(edit.inverse, None);
+}
+
+/// Without a style an insert continues its anchor as Enter at its end does
+/// (Epo 2026-10-21): after a list item the list goes on, after a heading the
+/// heading's next style (Normal) follows; before a paragraph the one before
+/// it is the anchor. A named style wins: no list, the style named.
+#[test]
+fn a_docx_insert_without_a_style_continues_its_anchor_as_enter_does() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let (chapter, item) = (doc.id("Chapter"), doc.id("Item one"));
+    doc.apply(&[
+        before(&item, "Lead"),
+        after(&item, "Item two"),
+        after(&chapter, "Body"),
+        styled(after(&item, "Heading"), "Heading1"),
+    ])
+    .unwrap();
+    assert_eq!(
+        doc.texts()[doc.texts().len() - 7..],
+        [
+            "Chapter", "Body", "Lead", "Item one", "Item two", "Heading", "Last"
+        ]
+    );
+    let list = r#"<w:numId w:val="1"/>"#;
+    let two = doc.paragraph_xml("Item two");
+    assert!(two.contains(list) && !two.contains("<w:pStyle"), "{two}");
+    for text in ["Body", "Lead"] {
+        let xml = doc.paragraph_xml(text);
+        assert!(!xml.contains("<w:pStyle") && !xml.contains(list), "{xml}");
+    }
+    let heading = doc.paragraph_xml("Heading");
+    assert!(
+        heading.contains(r#"<w:pStyle w:val="Heading1"/>"#) && !heading.contains(list),
+        "{heading}"
+    );
 }
 
 /// A split at a section's end leaves the section mark on the new paragraph,
