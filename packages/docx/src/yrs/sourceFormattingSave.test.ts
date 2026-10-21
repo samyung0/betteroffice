@@ -128,7 +128,12 @@ test('an edited run and cell save their edits', async () => {
 
 interface CrossPortCases {
   styles: string;
-  cases: Array<{ name: string; body: string; runs: string[] }>;
+  cases: Array<{
+    name: string;
+    body: string;
+    edit?: { start: number; end: number; clear: 'bold' | 'italic' };
+    runs: string[];
+  }>;
   fixtures: Array<{ name: string; path: string; runs: string }>;
 }
 
@@ -137,9 +142,17 @@ test('both saves write these run properties', async () => {
   const cases = JSON.parse(
     readFileSync(resolve(root, 'crates/office-service/tests/fixtures/source-formatting-cases.json'), 'utf8')
   ) as CrossPortCases;
-  for (const [index, { name, body, runs: expected }] of cases.cases.entries()) {
+  for (const [index, { name, body, edit, runs: expected }] of cases.cases.entries()) {
     const { session, base } = await opened(pack(cases.styles, body), 61100 + index);
     try {
+      if (edit) {
+        // As the toolbar's toggle clears bold or italic.
+        const { paraId } = session.paragraphs('body')[0]!;
+        session.formatRange(
+          { story: 'body', start: { paraId, offset: edit.start }, end: { paraId, offset: edit.end } },
+          { [edit.clear]: false }
+        );
+      }
       expect(await savedRunProperties(session, base), name).toEqual(expected);
     } finally {
       session.destroy();

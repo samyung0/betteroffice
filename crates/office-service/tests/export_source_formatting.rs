@@ -193,13 +193,40 @@ fn cross_port_cases() -> Value {
     serde_json::from_str(include_str!("fixtures/source-formatting-cases.json")).unwrap()
 }
 
+/// A case's edit: clears `clear` (bold or italic) over `[start, end)` of the
+/// body, as the toolbar's toggle does.
+fn edit_case(doc: &EditingDoc, edit: &Value) {
+    let delta = match edit["clear"].as_str().unwrap() {
+        "bold" => InlineFormatDelta {
+            bold: Patch::Clear,
+            ..InlineFormatDelta::default()
+        },
+        "italic" => InlineFormatDelta {
+            italic: Patch::Clear,
+            ..InlineFormatDelta::default()
+        },
+        other => panic!("no case clears {other}"),
+    };
+    let at = |key: &str| edit[key].as_u64().unwrap() as u32;
+    doc.format_range(
+        &EditCtx::local("", ""),
+        StoryRange::new("body", at("start"), at("end")),
+        &delta,
+    )
+    .unwrap();
+}
+
 #[test]
 fn both_saves_write_these_run_properties() {
     let cases = cross_port_cases();
     let styles = cases["styles"].as_str().unwrap();
     for case in cases["cases"].as_array().unwrap() {
         let base = package(styles, case["body"].as_str().unwrap());
-        let written = run_properties(&part(&saved(&base, &opened(&base)), "word/document.xml"));
+        let doc = opened(&base);
+        if let Some(edit) = case.get("edit") {
+            edit_case(&doc, edit);
+        }
+        let written = run_properties(&part(&saved(&base, &doc), "word/document.xml"));
         assert_eq!(
             serde_json::to_value(&written).unwrap(),
             case["runs"],

@@ -1414,7 +1414,8 @@ function asWritten(formatting: TextFormatting): TextFormatting {
 /**
  * A run of a source paragraph: the text attributes the seed resolves for it
  * under the paragraph's current style, those as formatting, its own rPr
- * (`source`) and, when it holds only text, that text.
+ * (`source`), whether that rPr is `faithful` to them (see {@link faithfulTo})
+ * and, when it holds only text, that text.
  */
 interface SourceRun {
   attrs: Attrs;
@@ -1422,7 +1423,42 @@ interface SourceRun {
   key: string;
   formatting: TextFormatting;
   source: TextFormatting | undefined;
+  faithful: boolean;
   text: string | undefined;
+}
+
+/**
+ * Whether a source run's rPr writes only what the seed resolved for it
+ * (`seeded`): every property but its run style, and every font name but one a
+ * theme slot resolved, with the seeded value. An rPr writing something the
+ * seed dropped or overrode (a pattern `w:shd`, `w:color auto` under a coloured
+ * style, a lone `w:cs`) is never copied onto other text. Keys holding null
+ * count as absent (the seed writes `themeColor: null`).
+ */
+function faithfulTo(source: TextFormatting | undefined, seeded: TextFormatting): boolean {
+  if (!source) return true;
+  const resolved = seeded as Attrs;
+  return Object.entries(source).every(([key, value]) => {
+    if (key === 'styleId') return true;
+    if (key !== 'fontFamily') return sameSet(resolved[key], value);
+    const fonts = asObject(resolved.fontFamily);
+    const family = asObject(value);
+    if (!family) return sameSet(resolved.fontFamily, value);
+    return Object.entries(family).every(
+      ([slot, name]) =>
+        slot.endsWith('Theme') || Boolean(family[`${slot}Theme`]) || sameSet(fonts?.[slot], name)
+    );
+  });
+}
+
+/** `sameJson` with object keys holding null or undefined counted as absent. */
+function sameSet(a: unknown, b: unknown): boolean {
+  const left = asObject(a);
+  const right = asObject(b);
+  if (!left || !right) return sameJson(a ?? undefined, b ?? undefined);
+  return [...Object.keys(left), ...Object.keys(right)].every((key) =>
+    sameSet(left[key], right[key])
+  );
 }
 
 /**
@@ -1496,10 +1532,11 @@ function sameSource(a: TextFormatting | undefined, b: TextFormatting | undefined
 
 /**
  * A run whose formatting is what the seed resolved for its source paragraph's
- * runs saves their own rPr when they all have the same one, so what it
- * inherited from styles keeps following them in Word (Epo 2026-10-21); a run
- * whose formatting changed, or that matches runs with different rPr, saves it
- * resolved.
+ * runs saves their own rPr when they all have the same one and it writes
+ * nothing the seed did not resolve ({@link faithfulTo}), so what it inherited
+ * from styles keeps following them in Word (Epo 2026-10-21); a run whose
+ * formatting changed, or that matches runs with different or unfaithful rPr,
+ * saves it resolved.
  */
 function withSourceRunFormatting(
   content: ParagraphContent[],
@@ -1509,7 +1546,9 @@ function withSourceRunFormatting(
   for (const run of nestedRuns(content)) {
     const live = run.formatting ?? {};
     const [first, ...others] = sourceRuns.filter((source) => sameJson(source.formatting, live));
-    if (!first || !others.every((other) => sameJson(other.source, first.source))) continue;
+    if (!first?.faithful || !others.every((other) => sameSource(other.source, first.source))) {
+      continue;
+    }
     if (first.source && Object.keys(first.source).length > 0) run.formatting = asWritten(first.source);
     else delete run.formatting;
   }
@@ -2737,7 +2776,10 @@ class SaveContext {
   /** Each source table's seeded cell borders and margins, by table story. */
   private readonly cellFrames = new Map<string, ReturnType<typeof seededCellFrames>>();
   /** What the seed resolves for a run, by paragraph style and source formatting. */
-  private readonly seededRuns = new Map<string, Pick<SourceRun, 'attrs' | 'key' | 'formatting'>>();
+  private readonly seededRuns = new Map<
+    string,
+    Pick<SourceRun, 'attrs' | 'key' | 'formatting' | 'faithful'>
+  >();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
@@ -2803,10 +2845,12 @@ class SaveContext {
       let seeded = this.seededRuns.get(cacheKey);
       if (!seeded) {
         const attrs = seededRunAttrs(styleId, run, styles);
+        const formatting = attrsToTextFormatting(formattingAttrs(attrs));
         seeded = {
           attrs,
           key: stableStringify(attrs),
-          formatting: attrsToTextFormatting(formattingAttrs(attrs)),
+          formatting,
+          faithful: faithfulTo(run.formatting, formatting),
         };
         this.seededRuns.set(cacheKey, seeded);
       }

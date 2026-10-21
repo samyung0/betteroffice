@@ -20,8 +20,8 @@ use super::item::{
     is_kind, o, ordinary_content_for_item, stable_stringify, tracked_info, ty,
 };
 use super::paragraph::{
-    FlowToken, SlotBreak, SourceRun, TokenKind, comment_marker, flow_tokens, nested_runs,
-    page_break_paragraph, paragraph_from_story, place_trailing, restore_note_marks,
+    FlowToken, SlotBreak, SourceRun, TokenKind, comment_marker, faithful_to, flow_tokens,
+    nested_runs, page_break_paragraph, paragraph_from_story, place_trailing, restore_note_marks,
     slot_break_content, sort_boundaries, split_flow, split_slot_bookmarks, tracked_kind,
     without_breaks,
 };
@@ -230,7 +230,7 @@ pub(crate) struct SaveContext<'a> {
     resolution: docx_edit::SeedResolution,
     /// The text attributes (and those as a key) and formatting the seed
     /// resolves for a run, by paragraph style and source formatting.
-    seeded_runs: HashMap<String, (V, std::rc::Rc<str>, V)>,
+    seeded_runs: HashMap<String, (V, std::rc::Rc<str>, V, bool)>,
     /// Each source table's seeded cell borders and margins, by table story.
     cell_frames: HashMap<String, Vec<Vec<(V, V)>>>,
 }
@@ -327,14 +327,20 @@ impl<'a> SaveContext<'a> {
                     stringify(&formatting).unwrap_or_default()
                 );
                 let resolution = &self.resolution;
-                let (attrs, attrs_key, resolved) =
+                let (attrs, attrs_key, resolved, faithful) =
                     self.seeded_runs.entry(key).or_insert_with(|| {
                         let source = (!formatting.nullish())
                             .then(|| serde_json::to_value(&formatting).ok())
                             .flatten();
                         let attrs = V::from(&resolution.run_attrs(style, source.as_ref()));
                         let resolved = V::Obj(attrs_to_text_formatting(&formatting_attrs(&attrs)));
-                        (attrs.clone(), stable_stringify(&attrs).into(), resolved)
+                        let faithful = faithful_to(&formatting, &resolved);
+                        (
+                            attrs.clone(),
+                            stable_stringify(&attrs).into(),
+                            resolved,
+                            faithful,
+                        )
                     });
                 let content = run.get("content").items();
                 SourceRun {
@@ -342,6 +348,7 @@ impl<'a> SaveContext<'a> {
                     key: attrs_key.clone(),
                     formatting: resolved.clone(),
                     source: formatting,
+                    faithful: *faithful,
                     text: content.iter().all(|entry| is(entry, "text")).then(|| {
                         content
                             .iter()

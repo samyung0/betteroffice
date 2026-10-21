@@ -926,14 +926,57 @@ fn as_written(formatting: &V) -> V {
 
 /// A run of a source paragraph: the text attributes the seed resolves for it
 /// under the paragraph's current style (and those as `key`, compared with a
-/// live item's), those as formatting, its own rPr (`source`) and, when it
-/// holds only text, that text.
+/// live item's), those as formatting, its own rPr (`source`), whether that
+/// rPr is `faithful` to them (see `faithful_to`) and, when it holds only
+/// text, that text.
 pub(crate) struct SourceRun {
     pub attrs: V,
     pub key: std::rc::Rc<str>,
     pub formatting: V,
     pub source: V,
+    pub faithful: bool,
     pub text: Option<String>,
+}
+
+/// Whether a source run's rPr writes only what the seed resolved for it
+/// (`seeded`): every property but its run style, and every font name but one
+/// a theme slot resolved, with the seeded value. An rPr writing something the
+/// seed dropped or overrode (a pattern `w:shd`, `w:color auto` under a
+/// coloured style, a lone `w:cs`) is never copied onto other text. Keys
+/// holding null count as absent (the seed writes `themeColor: null`).
+pub(crate) fn faithful_to(source: &V, seeded: &V) -> bool {
+    let Some(source) = o(source) else {
+        return true;
+    };
+    source.entries().iter().all(|(key, value)| match &**key {
+        "styleId" => true,
+        "fontFamily" => {
+            let fonts = seeded.get("fontFamily");
+            o(value).map_or_else(
+                || same_set(&fonts, value),
+                |family| {
+                    family.entries().iter().all(|(slot, name)| {
+                        slot.ends_with("Theme")
+                            || family.get(&format!("{slot}Theme")).truthy()
+                            || same_set(&fonts.get(slot), name)
+                    })
+                },
+            )
+        }
+        _ => same_set(&seeded.get(key), value),
+    })
+}
+
+/// `same_json` with object keys holding null or undefined counted as absent.
+fn same_set(a: &V, b: &V) -> bool {
+    match (o(a), o(b)) {
+        (Some(left), Some(right)) => left
+            .keys()
+            .iter()
+            .chain(right.keys().iter())
+            .all(|key| same_set(&left.get(key), &right.get(key))),
+        _ => (a.nullish() && b.nullish()) || same_json(a, b),
+    }
 }
 
 /// A paragraph whose text and runs are as its source had them, each run with
@@ -1038,10 +1081,11 @@ fn same_source(a: &V, b: &V) -> bool {
 }
 
 /// A run whose formatting is what the seed resolved for its source
-/// paragraph's runs saves their own rPr when they all have the same one, so
-/// what it inherited from styles keeps following them in Word (Epo
-/// 2026-10-21); a run whose formatting changed, or that matches runs with
-/// different rPr, saves it resolved.
+/// paragraph's runs saves their own rPr when they all have the same one and
+/// it writes nothing the seed did not resolve (`faithful_to`), so what it
+/// inherited from styles keeps following them in Word (Epo 2026-10-21); a
+/// run whose formatting changed, or that matches runs with different or
+/// unfaithful rPr, saves it resolved.
 fn with_source_run_formatting(content: Vec<V>, source_runs: &[SourceRun]) -> Vec<V> {
     if source_runs.is_empty() {
         return content;
@@ -1057,7 +1101,7 @@ fn with_source_run_formatting(content: Vec<V>, source_runs: &[SourceRun]) -> Vec
         let Some(first) = matching.next() else {
             continue;
         };
-        if !matching.all(|other| same_json(&other.source, &first.source)) {
+        if !first.faithful || !matching.all(|other| same_source(&other.source, &first.source)) {
             continue;
         }
         if o(&first.source).is_some_and(|source| !source.is_empty()) {
