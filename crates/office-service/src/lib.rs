@@ -16,6 +16,7 @@ mod error;
 mod formula;
 pub mod js;
 pub mod jsv;
+mod limits;
 mod pptx;
 mod rebase;
 mod replicas;
@@ -33,7 +34,7 @@ pub use replicas::{HEAP_PER_UNZIPPED_BYTE, REPLICA_IDLE, ReplicaStats, XlsxRepli
 pub use session::{compare_baselines, unshifted_effects};
 pub use types::*;
 
-use common::{assert_checkpoint, check_inserts, removed_notice, storable_command};
+use common::{assert_checkpoint, removed_notice, storable_command};
 use docx::DocxSession;
 use pptx::PptxSession;
 use session::{Applied, Item};
@@ -131,6 +132,15 @@ impl Session {
             Session::Docx(session) => session.apply(command),
             Session::Xlsx(session) => session.apply(command),
             Session::Pptx(session) => session.apply(command),
+        }
+    }
+
+    /// [`CommandResult::touched`] for `command`, read before it applies.
+    fn touched(&mut self, command: &Command) -> u64 {
+        match self {
+            Session::Docx(session) => session.touched(command),
+            Session::Pptx(session) => session.touched(command),
+            Session::Xlsx(_) => 0,
         }
     }
 
@@ -347,25 +357,17 @@ pub fn starter(format: Format) -> Result<&'static [u8]> {
     }
 }
 
-/// Commands one call holds (Epo 2026-10-21). The pipeline sends a call's
-/// commands only up to this and DOCX's inserted-paragraph limit, so these
-/// refusals guard other callers.
-const MAX_CALL_COMMANDS: usize = 50;
-
-fn check_call(commands: &[Command]) -> Result<()> {
-    if commands.len() > MAX_CALL_COMMANDS {
-        return Err(Error::edit(
-            EditCode::InvalidInput,
-            format!(
-                "the call holds {} commands; a call holds at most {MAX_CALL_COMMANDS}",
-                commands.len()
-            ),
-        ));
+/// The removed-characters notice and the limits' unapplied commands, as one.
+fn notices(removed: Option<String>, unapplied: Option<String>) -> Option<String> {
+    match (removed, unapplied) {
+        (Some(removed), Some(unapplied)) => Some(format!("{removed} {unapplied}")),
+        (removed, unapplied) => removed.or(unapplied),
     }
-    check_inserts(commands)
 }
 
 /// A new file: `starter` seeded, `commands` applied in one session, exported.
+/// The commands follow the agent's create command, which counts toward the
+/// call's limits; those past a limit are named in the notice, unapplied.
 pub fn create(
     format: Format,
     starter: &[u8],
@@ -375,7 +377,8 @@ pub fn create(
     guard(|| {
         check_determinism(determinism)?;
         assert_checkpoint(format, starter, None)?;
-        check_call(commands)?;
+        let (fit, unapplied) = limits::fitting(format, commands, 1)?;
+        let commands = &commands[..fit];
         let state = match format {
             Format::Docx => docx::seed(starter),
             Format::Xlsx => xlsx::seed(starter),
@@ -396,7 +399,7 @@ pub fn create(
         session.finish(commands)?;
         Ok(Created {
             bytes: session.export(determinism)?,
-            notice: removed_notice(&removed),
+            notice: notices(removed_notice(&removed), unapplied),
         })
     })
 }
@@ -414,14 +417,18 @@ pub fn apply_commands(
         if commands.is_empty() {
             return Err(Error::edit(EditCode::InvalidInput, "no commands"));
         }
-        check_call(commands)?;
+        let (fit, unapplied) = limits::fitting(checkpoint.format, commands, 0)?;
+        let commands = &commands[..fit];
         let mut session = Session::open(checkpoint.format, base, Some(checkpoint))?;
         let mut inverse = Some(Vec::with_capacity(commands.len()));
         let mut ids: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         let mut removed = Vec::new();
+        let mut touched = Vec::with_capacity(commands.len());
         for command in commands {
-            let applied = session.apply(&storable_command(command, &mut removed))?;
+            let command = storable_command(command, &mut removed);
+            touched.push(session.touched(&command));
+            let applied = session.apply(&command)?;
             inverse = inverse.zip(applied.inverse).map(|(mut list, command)| {
                 list.insert(0, command);
                 list
@@ -439,7 +446,8 @@ pub fn apply_commands(
             state,
             inverse,
             targets,
-            notice: removed_notice(&removed),
+            notice: notices(removed_notice(&removed), unapplied),
+            touched,
         })
     })
 }

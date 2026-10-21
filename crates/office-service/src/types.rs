@@ -339,6 +339,12 @@ pub struct CommandResult {
     /// For the edit's tool result: the characters an Office file cannot store
     /// that the agent's text lost before the edit applied (Epo 2026-10-15).
     pub notice: Option<String>,
+    /// For each command, the formatting its range held before it applied,
+    /// which its Undo or Redo writes back: each text run's attributes as
+    /// JSON plus a run's own bytes, a deleted paragraph's or table's marks
+    /// and table too; 0 where that does not grow with the runs. Capy sizes
+    /// an edit's Undo with it (`sources::undo_cost`, Epo 2026-10-21).
+    pub touched: Vec<u64>,
 }
 
 /// A file [`crate::create`] built from a starter.

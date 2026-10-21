@@ -181,27 +181,9 @@ pub(crate) fn check_replacement(
     Ok((span, after))
 }
 
-/// Paragraphs one call inserts and characters a new paragraph holds (the
-/// engine survey's bounds for DOCX, Epo 2026-10-21; PPTX takes the same).
-const MAX_INSERTED_PARAGRAPHS: usize = 20;
+/// Characters a new paragraph holds (the engine survey's bound for DOCX,
+/// Epo 2026-10-21; PPTX takes the same).
 const MAX_PARAGRAPH_CHARS: usize = 5_000;
-
-/// A call inserts at most [`MAX_INSERTED_PARAGRAPHS`] paragraphs.
-pub(crate) fn check_inserts(commands: &[Command]) -> Result<()> {
-    let inserts = commands
-        .iter()
-        .filter(|command| matches!(command, Command::InsertParagraph { .. }))
-        .count();
-    if inserts > MAX_INSERTED_PARAGRAPHS {
-        return Err(Error::edit(
-            EditCode::InvalidInput,
-            format!(
-                "the call inserts {inserts} paragraphs; insert at most {MAX_INSERTED_PARAGRAPHS} a call"
-            ),
-        ));
-    }
-    Ok(())
-}
 
 /// A new paragraph's text: one paragraph of at most [`MAX_PARAGRAPH_CHARS`]
 /// characters.

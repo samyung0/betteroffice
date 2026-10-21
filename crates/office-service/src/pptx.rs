@@ -11,7 +11,7 @@ use crate::common::{
 };
 use crate::env;
 use crate::error::{EditCode, Error, Result};
-use crate::js::{J, Obj, utf16_len};
+use crate::js::{J, Obj, stringify, utf16_len};
 use crate::session::{Applied, Item};
 use crate::types::{Asset, Command, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target};
 
@@ -272,6 +272,45 @@ impl PptxSession {
             .map(|(_, paragraph)| paragraph)
             .ok_or_else(missing)?;
         Ok((story_id, paragraph))
+    }
+
+    /// [`crate::CommandResult::touched`]: the runs a `replace_text`
+    /// expected text covers, or a deleted paragraph's runs, as their styles'
+    /// JSON plus 32 bytes each; 0 for the rest and where the paragraph is not
+    /// found.
+    pub fn touched(&mut self, command: &Command) -> u64 {
+        let (id, expected) = match command {
+            Command::ReplaceText {
+                target_id,
+                expected_text,
+                ..
+            } => (target_id, Some(expected_text)),
+            Command::DeleteParagraph { target_id, .. } => (target_id, None),
+            _ => return 0,
+        };
+        let Ok((_, paragraph)) = self.paragraph(id) else {
+            return 0;
+        };
+        let (start, end) = match expected {
+            Some(expected) => {
+                let at = paragraph
+                    .text
+                    .find(expected.as_str())
+                    .map_or(0, |at| utf16_len(&paragraph.text[..at]));
+                (at, at + utf16_len(expected).max(1))
+            }
+            None => (0, usize::MAX),
+        };
+        let mut at = 0;
+        let mut bytes = 0;
+        for run in &paragraph.runs {
+            let len = utf16_len(run.get("text").and_then(J::as_str).unwrap_or_default());
+            if at < end && at + len > start {
+                bytes += run.get("style").map_or(0, |style| stringify(style).len()) as u64 + 32;
+            }
+            at += len;
+        }
+        bytes
     }
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {

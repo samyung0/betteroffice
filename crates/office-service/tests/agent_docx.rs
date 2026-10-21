@@ -178,7 +178,7 @@ fn table(after_id: Option<&str>, rows: &[&[&str]]) -> Command {
     }
 }
 
-const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note";
+const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, content control, header, footer or note";
 
 fn refused(code: EditCode, message: &str) -> Error {
     Error::Edit {
@@ -427,7 +427,7 @@ fn insert_table_refuses_a_too_large_ragged_or_nested_table() {
     assert_eq!(
         doc.apply(&[table(Some(&cell), &[&["x"]])]).unwrap_err(),
         invalid(
-            "a new table goes in the document body: after_id names a body paragraph, not one of a table, header, footer or note"
+            "a new table goes in the document body: after_id names a body paragraph, not one of a table, content control, header, footer or note"
         )
     );
 }
@@ -649,6 +649,135 @@ fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
             "the paragraph follows a content control; it cannot be deleted"
         )
     );
+    // A tracked paragraph's list and alignment stay as they are (Epo
+    // 2026-09-25): Word's Reject All would undo them unseen.
+    let tracked = refused(
+        EditCode::UnavailableTarget,
+        "the paragraph holds tracked changes; it cannot be changed",
+    );
+    let kept = doc.id("Kept ");
+    assert_eq!(
+        doc.apply(&[Command::SetList {
+            ids: vec![kept.clone()],
+            list: ListKind::Bullet,
+        }])
+        .unwrap_err(),
+        tracked
+    );
+    assert_eq!(
+        doc.apply(&[Command::SetAlignment {
+            target_id: kept,
+            alignment: Alignment::Center,
+        }])
+        .unwrap_err(),
+        tracked
+    );
+}
+
+/// Review H2: a table whose cells hold a table or content control is
+/// refused, since `expected` names only its cells' text.
+#[test]
+fn delete_table_refuses_a_table_holding_a_table_or_content_control() {
+    let cell = |inner: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{inner}<w:p/></w:tc></w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let mut doc = Doc::new(with_body(&format!(
+        "{}{}",
+        cell(concat!(
+            r#"<w:p><w:r><w:t>Outer</w:t></w:r></w:p>"#,
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        )),
+        cell(
+            r#"<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Field</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        ),
+    )));
+    let refusal = refused(
+        EditCode::UnavailableTarget,
+        "a cell of the table holds a table or content control; the table cannot be deleted",
+    );
+    for text in ["Outer", "Field"] {
+        let first = doc.paragraph(text);
+        let id = first["table"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            doc.apply(&[Command::DeleteTable {
+                id,
+                expected: grid(&[&[&format!("{text}\n")]]),
+            }])
+            .unwrap_err(),
+            refusal,
+            "{text}"
+        );
+    }
+}
+
+/// A filled paragraph (a document's only one, empty) keeps its own tracked
+/// change records (review L6).
+#[test]
+fn an_insert_into_the_only_empty_paragraph_keeps_its_tracked_change() {
+    let mut doc = Doc::new(with_body(concat!(
+        r#"<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="3" w:author="A" w:date="2026-01-01T00:00:00Z">"#,
+        r#"<w:pPr><w:jc w:val="left"/></w:pPr></w:pPrChange></w:pPr></w:p>"#,
+    )));
+    doc.apply(&[insert(None, "Filled", None)]).unwrap();
+    let xml = doc.xml();
+    assert!(
+        xml.contains(">Filled<") && xml.contains("<w:pPrChange"),
+        "{xml}"
+    );
+}
+
+/// `touched` grows with the runs a command covers and the format it writes
+/// to each; Capy sizes the edit's Undo with it (review H1).
+#[test]
+fn touched_counts_the_runs_a_command_covers() {
+    let run =
+        |props: &str, text: &str| format!("<w:r><w:rPr>{props}</w:rPr><w:t>{text}</w:t></w:r>");
+    let many: String = (0..12)
+        .map(|n| {
+            run(
+                ["<w:b/>", "<w:i/>", "<w:u w:val=\"single\"/>"][n % 3],
+                "abcd",
+            )
+        })
+        .collect();
+    let mut doc = Doc::new(with_body(&format!(
+        "<w:p>{many}</w:p><w:p>{}</w:p><w:p><w:r><w:t>End</w:t></w:r></w:p>",
+        run("", &"abcd".repeat(12)),
+    )));
+    let format = |id: String| Command::FormatText {
+        target_id: id,
+        expected_text: "abcd".repeat(12),
+        format: TextFormat {
+            color: Some("#1F4E79".into()),
+            ..TextFormat::default()
+        },
+    };
+    let touched = |doc: &mut Doc, commands: &[Command]| {
+        let state = doc.state.clone();
+        let result = doc.apply(commands).unwrap();
+        doc.state = state;
+        result.touched
+    };
+    let ids: Vec<String> = doc.read(None, 10).unwrap()["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|paragraph| paragraph["id"].as_str().unwrap().to_owned())
+        .collect();
+    let (many, one) = (ids[0].clone(), ids[1].clone());
+    let formatted = touched(&mut doc, &[format(many.clone()), format(one.clone())]);
+    assert!(formatted[0] > 6 * formatted[1], "{formatted:?}");
+    let deleted = touched(
+        &mut doc,
+        &[Command::DeleteParagraph {
+            target_id: many,
+            expected_text: "abcd".repeat(12),
+        }],
+    );
+    assert!(deleted[0] > formatted[1], "{deleted:?}");
+    assert_eq!(touched(&mut doc, &[insert(None, "x", None)]), [0]);
 }
 
 /// Header, footer and note paragraphs read after the body, each marked with
@@ -708,22 +837,73 @@ fn headers_footers_and_notes_read_after_the_body_and_take_replace_text_only() {
     assert_eq!(doc.paragraph("Lab 3")["part"], "header (default)");
 }
 
-/// A call holds at most 50 commands; the pipeline sends no more, so this
-/// refusal guards other callers.
+/// The engine counts a call's limits (Epo 2026-10-22): it applies the
+/// commands up to the first that would pass one, 50 commands or a DOCX count
+/// (30 formatted spans, 400 table cells, 20 inserted paragraphs), and names
+/// the rest in the notice, unapplied; after a create the indexes start at 1.
 #[test]
-fn a_call_holds_at_most_50_commands() {
+fn a_call_applies_up_to_its_first_command_past_a_limit() {
+    let notice = |from: usize, to: usize, limit: &str| {
+        let which = if from == to {
+            format!("the command at index {from}")
+        } else {
+            format!("the commands at indexes {from} to {to}")
+        };
+        Some(format!(
+            "Not applied: {which} (counting from 0), past the limit of {limit} a call; send them in another call."
+        ))
+    };
     let mut doc = report();
-    let alignments: Vec<Command> = (0..51)
+    let timed = doc.id("We timed the pendulum.");
+    let bold: Vec<Command> = (0..31)
+        .map(|_| Command::FormatText {
+            target_id: timed.clone(),
+            expected_text: "pendulum".into(),
+            format: TextFormat {
+                bold: Some(true),
+                ..TextFormat::default()
+            },
+        })
+        .collect();
+    assert_eq!(
+        doc.apply(&bold).unwrap().notice,
+        notice(30, 30, "30 formatted spans")
+    );
+    assert!(doc.xml().contains("<w:b/>"));
+    let align: Vec<Command> = (0..52)
         .map(|_| Command::SetAlignment {
-            target_id: doc.id("Done."),
+            target_id: timed.clone(),
             alignment: Alignment::Left,
         })
         .collect();
     assert_eq!(
-        doc.apply(&alignments).unwrap_err(),
-        invalid("the call holds 51 commands; a call holds at most 50")
+        doc.apply(&align).unwrap().notice,
+        notice(50, 51, "50 commands")
     );
-    doc.apply(&alignments[..50]).unwrap();
+    let wide: Vec<&[&str]> = vec![&["x"; 10]; 20];
+    let tables = [
+        table(None, &wide),
+        table(None, &wide),
+        table(None, &[&["x"]]),
+    ];
+    assert_eq!(
+        doc.apply(&tables).unwrap().notice,
+        notice(2, 2, "400 table cells inserted or deleted")
+    );
+    assert_eq!(doc.xml().matches("<w:tbl>").count(), 3);
+    let paragraphs: Vec<Command> = (0..21)
+        .map(|n| insert(None, &format!("P{n}"), None))
+        .collect();
+    let created = create(
+        Format::Docx,
+        starter(Format::Docx).unwrap(),
+        &paragraphs,
+        DETERMINISM,
+    )
+    .unwrap();
+    assert_eq!(created.notice, notice(21, 21, "20 inserted paragraphs"));
+    let reopened = Doc::new(created.bytes);
+    assert_eq!(reopened.lines().len(), 20);
 }
 
 /// A list a paragraph style gives reads as a list, and `set_list` `none`

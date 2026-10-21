@@ -61,8 +61,11 @@ const HIGHLIGHTS: [&str; 16] = [
     "black",
     "white",
 ];
-const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note";
-const TABLE_ANCHOR: &str = "a new table goes in the document body: after_id names a body paragraph, not one of a table, header, footer or note";
+const PARAGRAPH_ANCHOR: &str = "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, content control, header, footer or note";
+const TABLE_ANCHOR: &str = "a new table goes in the document body: after_id names a body paragraph, not one of a table, content control, header, footer or note";
+/// Bytes a text run or paragraph mark costs beyond its attributes' JSON: its
+/// Yjs items' ids and keys ([`DocxSession::touched`]).
+const RUN_BYTES: u64 = 32;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::edit(EditCode::InvalidInput, message)
@@ -78,6 +81,15 @@ fn op(error: OpError) -> Error {
         OpError::TextContainsBreak | OpError::InvalidFormatValue(_) => invalid(error.to_string()),
         error => Error::engine(error),
     }
+}
+
+/// set_list's and set_alignment's refusal: Word's Reject All would undo
+/// the change unseen (Epo 2026-09-25).
+fn tracked_refusal() -> Error {
+    Error::edit(
+        EditCode::UnavailableTarget,
+        "the paragraph holds tracked changes; it cannot be changed",
+    )
 }
 
 fn gone() -> Error {
@@ -202,6 +214,9 @@ struct Para {
     /// Why the text commands refuse it: an object or a tracked change in it
     /// or on its mark.
     locked: Option<String>,
+    /// A tracked change in it or on its mark, which set_list and
+    /// set_alignment refuse too (Epo 2026-09-25).
+    tracked: bool,
     /// The tables and content controls its slot opens with, in order.
     blocks: Vec<(String, BTreeMap<String, Any>)>,
     properties: BTreeMap<String, Any>,
@@ -209,13 +224,15 @@ struct Para {
 
 impl Para {
     /// Why `replace_text` and `format_text` refuse it: [`Self::locked`],
-    /// else the table or content control before it.
+    /// else the content control or table before it (a content control first,
+    /// as delete_paragraph refuses only that).
     fn refused(&self) -> Option<String> {
         self.locked.clone().or_else(|| {
-            self.blocks.last().map(|(kind, _)| match kind.as_str() {
-                "table" => "follows a table".to_owned(),
-                _ => "follows a content control".to_owned(),
-            })
+            if self.follows_control() {
+                Some("follows a content control".to_owned())
+            } else {
+                (!self.blocks.is_empty()).then(|| "follows a table".to_owned())
+            }
         })
     }
 
@@ -246,6 +263,7 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
     let (mut at, mut start) = (0, 0);
     let mut text = String::new();
     let mut locked: Option<String> = None;
+    let mut tracked = false;
     let mut blocks = Vec::new();
     for segment in segments {
         match segment.content {
@@ -253,6 +271,7 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 let deleted = truthy(segment.attributes.get("del"));
                 if deleted || truthy(segment.attributes.get("ins")) {
                     locked.get_or_insert_with(|| "holds tracked changes".into());
+                    tracked = true;
                 }
                 at += len16(&part);
                 if !deleted {
@@ -260,13 +279,13 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 }
             }
             SegmentContent::Pilcrow(properties) => {
-                let tracked = ["ins", "del"]
+                let mark_tracked = ["ins", "del"]
                     .iter()
                     .any(|key| truthy(segment.attributes.get(*key)))
                     || TRACKED_KEYS
                         .iter()
                         .any(|key| properties.values.contains_key(*key));
-                if tracked {
+                if mark_tracked {
                     locked.get_or_insert_with(|| "holds tracked changes".into());
                 }
                 paras.push(Para {
@@ -275,6 +294,7 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                     mark: at,
                     text: std::mem::take(&mut text),
                     locked: locked.take(),
+                    tracked: std::mem::take(&mut tracked) || mark_tracked,
                     blocks: std::mem::take(&mut blocks),
                     properties: properties.values,
                 });
@@ -297,6 +317,56 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
         }
     }
     Ok(paras)
+}
+
+/// The JSON length of a run's or mark's attributes.
+fn attrs_len(attributes: &BTreeMap<String, Any>) -> u64 {
+    let mut json = String::new();
+    attributes
+        .iter()
+        .map(|(key, value)| {
+            json.clear();
+            value.to_json(&mut json);
+            (key.len() + json.len() + 4) as u64
+        })
+        .sum()
+}
+
+/// The text runs of `story` overlapping `[start, end)` (UTF-16): how many,
+/// and their attributes' JSON plus [`RUN_BYTES`] each.
+fn runs(doc: &EditingDoc, story: &str, start: u32, end: u32) -> Result<(u64, u64)> {
+    let segments = doc
+        .story_segments(story)
+        .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
+    let (mut at, mut count, mut bytes) = (0, 0, 0);
+    for segment in segments {
+        if at >= end {
+            break;
+        }
+        let len = match &segment.content {
+            SegmentContent::Text(text) => len16(text),
+            _ => 1,
+        };
+        if at + len > start && matches!(segment.content, SegmentContent::Text(_)) {
+            count += 1;
+            bytes += attrs_len(&segment.attributes) + RUN_BYTES;
+        }
+        at += len;
+    }
+    Ok((count, bytes))
+}
+
+/// Whether `story` holds a table or a content control (H2: delete_table's
+/// expected cells cannot name their text).
+fn holds_blocks(doc: &EditingDoc, story: &str) -> Result<bool> {
+    Ok(doc
+        .story_segments(story)
+        .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?
+        .iter()
+        .any(|segment| {
+            matches!(&segment.content, SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "table" | "blockSdt" | "inlineSdt" | "sdt"))
+        }))
 }
 
 /// The header, footer and note stories after the body, labelled for the
@@ -401,6 +471,10 @@ struct Placement {
     after: Option<String>,
 }
 
+/// A table found by a cell paragraph: its story, its ordinal among that
+/// story's tables, its cell stories row by row and its payload.
+type Table = (String, u32, Vec<Vec<String>>, BTreeMap<String, Any>);
+
 /// One cell's mark on the paragraphs a read lists.
 #[derive(Clone)]
 struct CellMark {
@@ -493,6 +567,66 @@ impl Walk<'_> {
 }
 
 impl DocxSession {
+    /// [`crate::CommandResult::touched`], read before `command` applies: the
+    /// runs a `replace_text` or `format_text` expected text covers (with the
+    /// format written to each), a deleted paragraph's runs and mark, a
+    /// deleted table's cells and table; 0 for the rest, and where the target
+    /// is not found (the command's own refusal says why).
+    pub(crate) fn touched(&self, command: &Command) -> u64 {
+        let doc = self.engine.doc();
+        let in_text = |id: &str, expected: &str| -> Result<(u64, u64)> {
+            let (story, para_id) = split_id(id)?;
+            let para = paras(doc, story)?
+                .into_iter()
+                .find(|para| para.para_id == para_id)
+                .ok_or_else(gone)?;
+            let at = para
+                .text
+                .find(expected)
+                .map_or(0, |at| len16(&para.text[..at]));
+            let start = para.start + at;
+            runs(doc, story, start, start + len16(expected).max(1))
+        };
+        let touched = || -> Result<u64> {
+            Ok(match command {
+                Command::ReplaceText {
+                    target_id,
+                    expected_text,
+                    ..
+                } => in_text(target_id, expected_text)?.1,
+                Command::FormatText {
+                    target_id,
+                    expected_text,
+                    format,
+                } => {
+                    let (count, bytes) = in_text(target_id, expected_text)?;
+                    let format = serde_json::to_string(format).map_err(Error::engine)?;
+                    bytes + count * format.len() as u64
+                }
+                Command::DeleteParagraph { target_id, .. } => {
+                    let (story, index, paras) = self.find(target_id)?;
+                    let para = &paras[index];
+                    runs(doc, &story, para.start, para.mark)?.1
+                        + attrs_len(&para.properties)
+                        + RUN_BYTES
+                }
+                Command::DeleteTable { id, .. } => {
+                    let (_, _, cells, payload) = self.table(id)?;
+                    let mut bytes = attrs_len(&payload);
+                    for cell in cells.iter().flatten() {
+                        bytes += runs(doc, cell, 0, u32::MAX)?.1;
+                        for para in paras(doc, cell)? {
+                            bytes += attrs_len(&para.properties) + RUN_BYTES;
+                        }
+                    }
+                    bytes
+                }
+                _ => 0,
+            })
+        };
+        touched().unwrap_or(0)
+    }
+
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {
         // Tracking keeps deleted items from garbage collection, as for
         // replace_text.
@@ -681,8 +815,7 @@ impl DocxSession {
     /// The style Enter at the end of a paragraph styled `style` (none: the
     /// default) gives the next one: the style's next style when the file has
     /// it, else the style itself; none for the default style.
-    fn next_style(&self, style: Option<&str>) -> Option<String> {
-        let styles = self.paragraph_styles();
+    fn next_style(styles: &[ParagraphStyle], style: Option<&str>) -> Option<String> {
         let default = styles
             .iter()
             .find(|known| known.default)
@@ -882,11 +1015,9 @@ impl DocxSession {
         list: Option<ListKind>,
     ) -> Result<Applied> {
         check_paragraph_text(text)?;
+        let styles = self.paragraph_styles();
         if let Some(style) = style
-            && !self
-                .paragraph_styles()
-                .iter()
-                .any(|known| known.id == style)
+            && !styles.iter().any(|known| known.id == style)
         {
             return Err(invalid(format!(
                 "the document has no paragraph style {style:?}; use a style id inspect_office_document lists"
@@ -895,16 +1026,17 @@ impl DocxSession {
         let body = paras(self.engine.doc(), BODY)?;
         let placement = self.place(&body, after_id, before_id, PARAGRAPH_ANCHOR)?;
         let continued = &body[placement.continued];
-        // Source and save bookkeeping (`_` keys) and tracked changes are not
-        // kept; the style is set below.
+        let fill = matches!(placement.place, Place::Fill);
+        // A new paragraph keeps no source and save bookkeeping (`_` keys) or
+        // tracked change of the one it continues; a filled one keeps its own.
+        // The style is set below.
         let mut kept: BTreeMap<String, Any> = continued
             .properties
             .iter()
             .filter(|(key, _)| {
                 !KEPT_KEYS.contains(&key.as_str())
-                    && !TRACKED_KEYS.contains(&key.as_str())
-                    && !key.starts_with('_')
                     && *key != "pStyle"
+                    && (fill || (!TRACKED_KEYS.contains(&key.as_str()) && !key.starts_with('_')))
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
@@ -912,7 +1044,7 @@ impl DocxSession {
             (Some(style), _) => Some(style.to_owned()),
             // A new file's empty paragraph keeps its own style.
             (None, Place::Fill) => continued.style().map(str::to_owned),
-            (None, _) => self.next_style(continued.style()),
+            (None, _) => Self::next_style(&styles, continued.style()),
         };
         if let Some(style) = style {
             kept.insert("pStyle".to_owned(), Any::from(style));
@@ -1013,6 +1145,9 @@ impl DocxSession {
                 .iter()
                 .find(|para| para.para_id == para_id)
                 .ok_or_else(gone)?;
+            if para.tracked {
+                return Err(tracked_refusal());
+            }
             let ilvl = match para.properties.get("numPr") {
                 Some(Any::Map(num_pr)) => match num_pr.get("ilvl") {
                     Some(Any::Number(ilvl)) => *ilvl,
@@ -1082,33 +1217,50 @@ impl DocxSession {
         Ok(())
     }
 
-    /// The table holding paragraph `id`, refused unless its cells read
-    /// `expected`.
-    fn delete_table(&mut self, id: &str, expected: &[Vec<String>]) -> Result<()> {
+    /// The [`Table`] holding cell paragraph `id`.
+    fn table(&self, id: &str) -> Result<Table> {
         let (cell, _, _) = self.find(id)?;
         let story = table_story(&cell).ok_or_else(|| {
             invalid("id must be a paragraph of a table cell, as inspect_office_document marks it")
         })?;
-        let doc = self.engine.doc();
-        let segments = doc
+        let segments = self
+            .engine
+            .doc()
             .story_segments(story)
             .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
-        let (ordinal, cells) = segments
-            .iter()
-            .filter_map(|segment| match &segment.content {
+        let (ordinal, (cells, payload)) = segments
+            .into_iter()
+            .filter_map(|segment| match segment.content {
                 SegmentContent::OtherEmbed { kind, payload } if kind == "table" => {
-                    Some(table_cells(payload))
+                    Some((table_cells(&payload), payload))
                 }
                 _ => None,
             })
             .enumerate()
-            .find(|(_, cells)| cells.iter().flatten().any(|story| *story == cell))
+            .find(|(_, (cells, _))| cells.iter().flatten().any(|story| *story == cell))
             .ok_or_else(|| {
                 Error::edit(
                     EditCode::UnavailableTarget,
                     "the table is no longer in the document",
                 )
             })?;
+        Ok((story.to_owned(), ordinal as u32, cells, payload))
+    }
+
+    /// The table holding paragraph `id`, refused unless its cells read
+    /// `expected` and hold no table or content control, whose text expected
+    /// cannot name.
+    fn delete_table(&mut self, id: &str, expected: &[Vec<String>]) -> Result<()> {
+        let (story, ordinal, cells, _) = self.table(id)?;
+        let doc = self.engine.doc();
+        for cell in cells.iter().flatten() {
+            if holds_blocks(doc, cell)? {
+                return Err(Error::edit(
+                    EditCode::UnavailableTarget,
+                    "a cell of the table holds a table or content control; the table cannot be deleted",
+                ));
+            }
+        }
         let grid = cells
             .iter()
             .map(|row| {
@@ -1137,7 +1289,7 @@ impl DocxSession {
                 })),
             });
         }
-        doc.delete_table(&ctx(), &TableLocator::new(story, ordinal as u32))
+        doc.delete_table(&ctx(), &TableLocator::new(story.as_str(), ordinal))
             .map_err(op)?;
         Ok(())
     }
@@ -1196,6 +1348,9 @@ impl DocxSession {
 
     fn set_alignment(&mut self, id: &str, alignment: Alignment) -> Result<()> {
         let (story, index, paras) = self.find(id)?;
+        if paras[index].tracked {
+            return Err(tracked_refusal());
+        }
         let mark = paras[index].mark;
         let value = match alignment {
             Alignment::Left => "left",
