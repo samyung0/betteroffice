@@ -32,7 +32,10 @@ SOFTWARE.
 (https://github.com/python-openxml/python-docx,
 `src/docx/templates/default.docx`), with its core properties
 (`docProps/core.xml`: python-docx as creator and description, a revision
-and 2013 dates) emptied (Epo 2026-10-21); everything else is unchanged.
+and 2013 dates) emptied (Epo 2026-10-21), and its blank-page thumbnail
+(`docProps/thumbnail.jpeg`, with its relationship and content type) and
+`docProps/app.xml`'s Template, Application and AppVersion removed (review
+r2 L7); everything else is unchanged.
 
 python-docx is MIT licensed:
 

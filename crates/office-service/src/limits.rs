@@ -198,6 +198,7 @@ mod tests {
                             "insert_columns",
                             "delete_rows",
                             "delete_columns",
+                            "replace_text",
                             "insert_paragraph",
                             "delete_paragraph",
                             "set_list",
@@ -274,5 +275,23 @@ mod tests {
             )
         );
         assert_eq!(fitting(Format::Xlsx, &[rows(1_000)], 0).unwrap(), (1, None));
+        // replace_text has its own count (review r2 L3).
+        let replace = Command::ReplaceText {
+            target_id: "body:paragraph:1".into(),
+            expected_text: "x".into(),
+            text: "y".into(),
+        };
+        for format in [Format::Docx, Format::Pptx] {
+            assert_eq!(
+                fitting(format, &vec![replace.clone(); 21], 0).unwrap(),
+                (
+                    20,
+                    Some(
+                        "Not applied: the command at index 20 (counting from 0), past the limit of 20 text replacements a call; send them in another call."
+                            .into()
+                    )
+                )
+            );
+        }
     }
 }

@@ -186,7 +186,7 @@ fn locked_by(kind: &str) -> String {
         "blockSdt" | "inlineSdt" | "sdt" => "holds a content control".into(),
         "image" => "holds a picture".into(),
         "shape" => "holds a drawing".into(),
-        "mathEquation" => "holds an equation".into(),
+        "mathEquation" | "math" => "holds an equation".into(),
         "footnoteRef" | "endnoteRef" => "holds a note reference".into(),
         kind => format!("holds a {kind}"),
     }
@@ -366,17 +366,20 @@ fn story_tree(doc: &EditingDoc, story: &str) -> Result<Touched> {
     Ok(sum)
 }
 
-/// Whether `story` holds a table or a content control (H2: delete_table's
-/// expected cells cannot name their text).
-fn holds_blocks(doc: &EditingDoc, story: &str) -> Result<bool> {
-    Ok(doc
-        .story_segments(story)
-        .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?
-        .iter()
-        .any(|segment| {
-            matches!(&segment.content, SegmentContent::OtherEmbed { kind, .. }
-                if matches!(kind.as_str(), "table" | "blockSdt" | "inlineSdt" | "sdt"))
-        }))
+/// Why a cell story keeps its table from a delete, as delete_paragraph
+/// refuses a paragraph: a table or content control (review H2: expected
+/// names only the cells' text), a picture, equation, field or note
+/// reference, a tracked change (review r2 L2).
+fn cell_refusal(doc: &EditingDoc, story: &str) -> Result<Option<String>> {
+    for para in paras(doc, story)? {
+        if !para.blocks.is_empty() {
+            return Ok(Some("holds a table or content control".into()));
+        }
+        if para.locked.is_some() {
+            return Ok(para.locked);
+        }
+    }
+    Ok(None)
 }
 
 /// The header, footer and note stories after the body, labelled for the
@@ -592,15 +595,13 @@ impl DocxSession {
         let measured = || -> Result<Touched> {
             Ok(match command {
                 Command::ReplaceText { target_id, .. } => {
-                    let (story, index, paras) = self.find(target_id)?;
-                    let para = &paras[index];
-                    let (span, _) = check_replacement(&para.text, command, "DOCX")?;
-                    range(
-                        &story,
-                        para.start + span.start as u32,
-                        para.start + span.end as u32,
-                        Kept::Content,
-                    )
+                    // The lookup apply uses: a header's, footer's or note's
+                    // paragraph too (review r2 H1).
+                    let (story, paragraph) = self.paragraph(target_id)?;
+                    let (span, _) = check_replacement(&paragraph.text, command, "DOCX")?;
+                    let start = (paragraph.start + span.start) as u32;
+                    let end = (paragraph.start + span.end) as u32;
+                    range(&story, start, end, Kept::Content)
                 }
                 Command::FormatText {
                     target_id,
@@ -1286,16 +1287,16 @@ impl DocxSession {
     }
 
     /// The table holding paragraph `id`, refused unless its cells read
-    /// `expected` and hold no table or content control, whose text expected
-    /// cannot name.
+    /// `expected` and hold nothing delete_paragraph refuses
+    /// ([`cell_refusal`]).
     fn delete_table(&mut self, id: &str, expected: &[Vec<String>]) -> Result<()> {
         let (story, ordinal, cells, _) = self.table(id)?;
         let doc = self.engine.doc();
         for cell in cells.iter().flatten() {
-            if holds_blocks(doc, cell)? {
+            if let Some(reason) = cell_refusal(doc, cell)? {
                 return Err(Error::edit(
                     EditCode::UnavailableTarget,
-                    "a cell of the table holds a table or content control; the table cannot be deleted",
+                    format!("a cell of the table {reason}; the table cannot be deleted"),
                 ));
             }
         }
