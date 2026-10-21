@@ -210,7 +210,7 @@ fn report() -> Doc {
 /// from its first paragraph on; reopened, the read shows the styles, the
 /// list and the table's cells before the paragraph that follows it, with no
 /// blank paragraph between (Epo 2026-10-21), and the file carries no
-/// python-docx core properties.
+/// python-docx core properties, thumbnail or application identity.
 #[test]
 fn create_builds_a_document_from_the_starter_and_it_reopens() {
     let doc = report();
@@ -234,15 +234,27 @@ fn create_builds_a_document_from_the_starter_and_it_reopens() {
         doc.read(None, 200).unwrap()["paragraphs"][9]["locked"],
         "follows a table"
     );
-    let core = part(
-        &export(&doc.base, doc.checkpoint(), DETERMINISM).unwrap(),
-        "docProps/core.xml",
-    );
+    let exported = export(&doc.base, doc.checkpoint(), DETERMINISM).unwrap();
+    let core = part(&exported, "docProps/core.xml");
     assert!(
         core.contains("<cp:coreProperties")
             && !core.contains("python-docx")
             && !core.contains("2013"),
         "{core}"
+    );
+    let app = part(&exported, "docProps/app.xml");
+    assert!(
+        !app.contains("Microsoft") && !app.contains("Normal.dotm"),
+        "{app}"
+    );
+    let names: Vec<String> = ooxml_opc::unzip_parts(&exported)
+        .unwrap()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        !names.iter().any(|name| name.contains("thumbnail")),
+        "{names:?}"
     );
     let xml = doc.xml();
     assert!(xml.contains(r#"<w:pStyle w:val="Title"/>"#), "{xml}");
@@ -674,40 +686,79 @@ fn the_read_leaves_out_deleted_text_and_marks_what_cannot_be_edited() {
     );
 }
 
-/// Review H2: a table whose cells hold a table or content control is
-/// refused, since `expected` names only its cells' text.
+/// Review H2 and r2 L2: a table whose cell holds what delete_paragraph
+/// refuses is refused, a table or content control (`expected` names only
+/// the cells' text), an equation, a field or a tracked change.
 #[test]
-fn delete_table_refuses_a_table_holding_a_table_or_content_control() {
+fn delete_table_refuses_cells_holding_what_delete_paragraph_refuses() {
     let cell = |inner: &str| {
         format!(
             r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{inner}<w:p/></w:tc></w:tr></w:tbl><w:p/>"#
         )
     };
-    let mut doc = Doc::new(with_body(&format!(
-        "{}{}",
-        cell(concat!(
-            r#"<w:p><w:r><w:t>Outer</w:t></w:r></w:p>"#,
-            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
-        )),
-        cell(
-            r#"<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Field</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+    let cases = [
+        (
+            "Outer",
+            concat!(
+                r#"<w:p><w:r><w:t>Outer</w:t></w:r></w:p>"#,
+                r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            ),
+            "holds a table or content control",
         ),
-    )));
-    let refusal = refused(
-        EditCode::UnavailableTarget,
-        "a cell of the table holds a table or content control; the table cannot be deleted",
-    );
-    for text in ["Outer", "Field"] {
-        let first = doc.paragraph(text);
+        (
+            "Field",
+            r#"<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Field</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+            "holds a table or content control",
+        ),
+        (
+            "Sum",
+            r#"<w:p><w:r><w:t>Sum</w:t></w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x+1</m:t></m:r></m:oMath></w:p>"#,
+            "holds an equation",
+        ),
+        (
+            "Page",
+            r#"<w:p><w:r><w:t>Page</w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#,
+            "",
+        ),
+        (
+            "Added",
+            r#"<w:p><w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Added</w:t></w:r></w:ins></w:p>"#,
+            "holds tracked changes",
+        ),
+    ];
+    let mut doc = Doc::new(with_body(
+        &cases
+            .iter()
+            .map(|(_, inner, _)| cell(inner))
+            .collect::<String>(),
+    ));
+    for (text, _, reason) in cases {
+        let first = doc.read(None, 200).unwrap()["paragraphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["text"].as_str().unwrap().starts_with(text))
+            .unwrap_or_else(|| panic!("no paragraph reads {text}"))
+            .clone();
         let id = first["table"]["id"].as_str().unwrap().to_owned();
-        assert_eq!(
-            doc.apply(&[Command::DeleteTable {
+        let error = doc
+            .apply(&[Command::DeleteTable {
                 id,
-                expected: grid(&[&[&format!("{text}\n")]]),
+                expected: grid(&[&[&format!(
+                    "{text}
+"
+                )]]),
             }])
-            .unwrap_err(),
-            refusal,
-            "{text}"
+            .unwrap_err();
+        let Error::Edit { code, message, .. } = &error else {
+            panic!("{text}: {error:?}");
+        };
+        assert_eq!(*code, EditCode::UnavailableTarget, "{text}: {message}");
+        assert!(
+            message.starts_with("a cell of the table ")
+                && message.contains(reason)
+                && message.ends_with("; the table cannot be deleted"),
+            "{text}: {message}"
         );
     }
 }
@@ -792,6 +843,84 @@ fn touched_counts_what_the_undo_re_creates() {
         touched(&mut doc, &[insert(None, "x", None)]),
         [Touched::default()]
     );
+}
+
+/// Review r2 H1: `touched` measures a `replace_text` in a header or a note
+/// as apply finds it, so the text it takes out is priced.
+#[test]
+fn touched_measures_a_header_and_a_note_replacement() {
+    let mut doc = Doc::new(include_bytes!("fixtures/stories.docx").to_vec());
+    for text in ["Header", "A note"] {
+        let state = doc.state.clone();
+        let result = doc
+            .apply(&[Command::ReplaceText {
+                target_id: doc.id(text),
+                expected_text: text.into(),
+                text: "x".into(),
+            }])
+            .unwrap();
+        doc.state = state;
+        assert!(
+            result.touched[0].items >= 1 && result.touched[0].content >= text.len() as u64 - 1,
+            "{text}: {:?}",
+            result.touched
+        );
+    }
+}
+
+/// Review r2 L1: a field's projected children (a TOC's links) sit in the
+/// field's own paragraph, which holds the field, so delete_paragraph,
+/// replace_text and format_text refuse it and no agent command makes
+/// docx-edit rewrite what the field shows outside the edited range, which
+/// `touched` would not count. The entries the result continues into hold no
+/// children.
+#[test]
+fn a_fields_own_paragraph_takes_no_text_command() {
+    let mut doc = Doc::new(with_body(concat!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Intro</w:t></w:r></w:hyperlink></w:p>"#,
+        r#"<w:p><w:hyperlink w:anchor="_Toc2"><w:r><w:t>Method</w:t></w:r></w:hyperlink></w:p>"#,
+        r#"<w:p><w:hyperlink w:anchor="_Toc3"><w:r><w:t>Results</w:t></w:r></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t>End</w:t></w:r></w:p>"#,
+    )));
+    assert_eq!(doc.paragraph("Intro")["locked"], "holds a field");
+    let intro = doc.id("Intro");
+    for command in [
+        Command::DeleteParagraph {
+            target_id: intro.clone(),
+            expected_text: "Intro".into(),
+        },
+        Command::ReplaceText {
+            target_id: intro.clone(),
+            expected_text: "Intro".into(),
+            text: "Overview".into(),
+        },
+        Command::FormatText {
+            target_id: intro.clone(),
+            expected_text: "Intro".into(),
+            format: TextFormat {
+                bold: Some(true),
+                ..TextFormat::default()
+            },
+        },
+    ] {
+        let error = doc.apply(std::slice::from_ref(&command)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::Edit {
+                    code: EditCode::UnavailableTarget,
+                    ..
+                }
+            ),
+            "{command:?}: {error:?}"
+        );
+    }
+    doc.apply(&[Command::DeleteParagraph {
+        target_id: doc.id("Method"),
+        expected_text: "Method".into(),
+    }])
+    .unwrap();
 }
 
 /// Header, footer and note paragraphs read after the body, each marked with

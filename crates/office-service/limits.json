@@ -19,6 +19,7 @@
       }
     ],
     "docx": [
+      { "count": "text replacements", "limit": 20, "commands": ["replace_text"] },
       { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
       { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
       {
@@ -34,6 +35,7 @@
       }
     ],
     "pptx": [
+      { "count": "text replacements", "limit": 20, "commands": ["replace_text"] },
       { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
       { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] }
     ]
