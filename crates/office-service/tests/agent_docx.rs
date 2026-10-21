@@ -923,6 +923,69 @@ fn a_fields_own_paragraph_takes_no_text_command() {
     .unwrap();
 }
 
+/// Review r2 L9: a call reads each story once and its index follows the
+/// call's own replacements, so later commands find their paragraphs where
+/// they now are, and the targets it reports are where a fresh read finds
+/// them.
+#[test]
+fn a_calls_paragraph_index_follows_its_replacements() {
+    let mut doc = Doc::new(with_body(concat!(
+        "<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>Beta</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>Gamma</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>Delta</w:t></w:r></w:p>",
+        "<w:p><w:r><w:t>End</w:t></w:r></w:p>",
+    )));
+    let replace = |id: String, expected: &str, text: &str| Command::ReplaceText {
+        target_id: id,
+        expected_text: expected.into(),
+        text: text.into(),
+    };
+    let (a, b, c, d) = (
+        doc.id("Alpha"),
+        doc.id("Beta"),
+        doc.id("Gamma"),
+        doc.id("Delta"),
+    );
+    let result = doc
+        .apply(&[
+            replace(a, "Alpha", "Alpha, much longer now"),
+            replace(c.clone(), "Gamma", "G"),
+            Command::FormatText {
+                target_id: c.clone(),
+                expected_text: "G".into(),
+                format: TextFormat {
+                    bold: Some(true),
+                    ..TextFormat::default()
+                },
+            },
+            replace(d, "Delta", "Delta and more"),
+            insert(Some(&b), "New", None),
+            replace(b, "Beta", "Beta!"),
+            replace(c, "G", "Gg"),
+        ])
+        .unwrap();
+    assert_eq!(
+        doc.lines(),
+        [
+            "Alpha, much longer now||",
+            "Beta!||",
+            "New||",
+            "Gg||",
+            "Delta and more||",
+            "End||",
+        ]
+    );
+    assert!(doc.xml().contains("<w:b/>"), "{}", doc.xml());
+    let ids: Vec<String> = result
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect();
+    let fresh = office_service::locate_targets(&doc.base, doc.checkpoint(), &ids).unwrap();
+    assert_eq!(result.targets, fresh);
+}
+
 /// Header, footer and note paragraphs read after the body, each marked with
 /// its part, and take `replace_text` only (Epo 2026-10-21).
 #[test]

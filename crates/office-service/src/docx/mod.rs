@@ -13,6 +13,7 @@ pub(crate) mod read;
 mod sdt;
 mod styles;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use docx_edit::{EditCtx, EngineSession, OpError, StoryRange, UndoSession};
@@ -43,6 +44,9 @@ pub(crate) struct DocxSession {
     /// For each paragraph an insert went after, the paraId of the last
     /// paragraph this session put there, so the next lands after it.
     after: HashMap<String, String>,
+    /// The call's paragraphs by story, shared by touched, apply and locate
+    /// (review r2 L9).
+    index: RefCell<agent::ParaIndex>,
 }
 
 struct Projected {
@@ -247,6 +251,7 @@ impl DocxSession {
             base: base.to_vec(),
             projected: None,
             after: HashMap::new(),
+            index: RefCell::default(),
         })
     }
 
@@ -526,16 +531,8 @@ impl DocxSession {
             })?;
         let story = &id[..marker];
         let para_id = &id[marker + ":paragraph:".len()..];
-        let paragraph = self
-            .paragraphs(story)?
-            .into_iter()
-            .find(|paragraph| paragraph.para_id == para_id)
-            .ok_or_else(|| {
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    "the paragraph is no longer in the document",
-                )
-            })?;
+        // The call's index: no story read again per lookup (review r2 L9).
+        let paragraph = self.indexed_paragraph(story, para_id)?;
         Ok((story.to_owned(), paragraph))
     }
 
@@ -575,6 +572,7 @@ impl DocxSession {
         let (span, text) = check_replacement(&paragraph.text, command, "DOCX")?;
         self.undo.track(self.engine.doc());
         self.undo.select_story(&story);
+        let before = self.index_mark();
         if span.start < span.end || !span.text.is_empty() {
             let range = StoryRange::new(
                 story.as_str(),
@@ -596,6 +594,9 @@ impl DocxSession {
                     error => Error::engine(error),
                 })?;
         }
+        self.keep_index(before, |stories| {
+            agent::replaced_in_index(stories, &story, &paragraph.para_id, text.clone());
+        });
         self.projected = None;
         Ok(Applied {
             ids: vec![target_id.clone()],

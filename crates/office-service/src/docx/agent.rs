@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use docx_edit::{
     ColorPatch, EditCtx, EditingDoc, FontFamilyPatch, FormatPolicy, InlineFormatDelta, OpError,
@@ -19,8 +20,8 @@ use docx_parse::numbering::list_button_num_ids;
 use serde_json::{Value, json};
 use yrs::Any;
 
-use super::DocxSession;
 use super::styles::{Numbering, StyleResolver, map_entries};
+use super::{DocxSession, Paragraph};
 use crate::common::{check_expected_paragraph, check_paragraph_text, check_replacement, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
@@ -202,11 +203,18 @@ fn truthy(value: Option<&Any>) -> bool {
 
 /// A paragraph as the agent's commands and read see it (`docxParagraphs`,
 /// with the tables and content controls its slot opens with set apart).
-struct Para {
+#[derive(Clone)]
+pub(super) struct Para {
     para_id: String,
     /// Where its own content starts: after the page and column breaks,
     /// tables and content controls its slot opens with.
     start: u32,
+    /// Where replace_text's paragraph starts (mod.rs `Paragraph`): after
+    /// the page and column breaks it opens with only.
+    node_start: u32,
+    /// No tracked change in its text and no object but those breaks:
+    /// replace_text edits it.
+    plain: bool,
     /// Its mark's index.
     mark: u32,
     /// Its text, without tracked deletions.
@@ -260,7 +268,8 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
         .story_segments(story)
         .map_err(|_| Error::edit(EditCode::UnavailableTarget, "unknown DOCX story"))?;
     let mut paras = Vec::new();
-    let (mut at, mut start) = (0, 0);
+    let (mut at, mut start, mut node_start) = (0, 0, 0);
+    let mut plain = true;
     let mut text = String::new();
     let mut locked: Option<String> = None;
     let mut tracked = false;
@@ -272,6 +281,7 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 if deleted || truthy(segment.attributes.get("ins")) {
                     locked.get_or_insert_with(|| "holds tracked changes".into());
                     tracked = true;
+                    plain = false;
                 }
                 at += len16(&part);
                 if !deleted {
@@ -291,6 +301,8 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 paras.push(Para {
                     para_id: properties.para_id,
                     start,
+                    node_start,
+                    plain: std::mem::replace(&mut plain, true),
                     mark: at,
                     text: std::mem::take(&mut text),
                     locked: locked.take(),
@@ -300,10 +312,18 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 });
                 at += 1;
                 start = at;
+                node_start = at;
             }
             SegmentContent::OtherEmbed { kind, payload } => {
                 let leading = at == start;
+                let breaks =
+                    at == node_start && matches!(kind.as_str(), "pageBreak" | "columnBreak");
                 at += 1;
+                if breaks {
+                    node_start = at;
+                } else {
+                    plain = false;
+                }
                 let block = matches!(kind.as_str(), "table" | "blockSdt");
                 if leading && (block || matches!(kind.as_str(), "pageBreak" | "columnBreak")) {
                     start = at;
@@ -364,6 +384,50 @@ fn story_tree(doc: &EditingDoc, story: &str) -> Result<Touched> {
         }
     }
     Ok(sum)
+}
+
+/// One call's paragraphs by story (review r2 L9): a story is read once and
+/// kept in step with this session's text edits (a replacement shifts the
+/// paragraphs after it, a format moves none); any other change to the
+/// document (a structural command, a list or alignment, an Undo) is a Yjs
+/// commit that inserts or deletes, counted in `changes`, and drops the
+/// index, so the next lookup reads the story again.
+#[derive(Default)]
+pub(super) struct ParaIndex {
+    stories: HashMap<String, Arc<Vec<Para>>>,
+    /// `changes` when `stories` was last in step with the document.
+    at: u64,
+    changes: Arc<AtomicU64>,
+    watch: Option<yrs::Subscription>,
+}
+
+/// The index after a replacement in paragraph `para_id` of `story` left it
+/// reading `text`: its mark and every later paragraph move by the change in
+/// length.
+pub(super) fn replaced_in_index(
+    stories: &mut HashMap<String, Arc<Vec<Para>>>,
+    story: &str,
+    para_id: &str,
+    text: String,
+) {
+    let Some(paras) = stories.get_mut(story) else {
+        return;
+    };
+    let paras = Arc::make_mut(paras);
+    let Some(index) = paras.iter().position(|para| para.para_id == para_id) else {
+        // Not where the index has it: read the story again.
+        stories.remove(story);
+        return;
+    };
+    let delta = i64::from(len16(&text)) - i64::from(len16(&paras[index].text));
+    let moved = |at: u32| (i64::from(at) + delta) as u32;
+    paras[index].text = text;
+    paras[index].mark = moved(paras[index].mark);
+    for para in &mut paras[index + 1..] {
+        para.start = moved(para.start);
+        para.node_start = moved(para.node_start);
+        para.mark = moved(para.mark);
+    }
 }
 
 /// Why a cell story keeps its table from a delete, as delete_paragraph
@@ -631,12 +695,12 @@ impl DocxSession {
                 }
                 Command::SetList { ids, .. } => {
                     // Each story read once: a list may name 200 paragraphs.
-                    let mut read: HashMap<&str, Vec<Para>> = HashMap::new();
+                    let mut read: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
                     let mut sum = Touched::default();
                     for id in ids {
                         let (story, para_id) = split_id(id)?;
                         if !read.contains_key(story) {
-                            read.insert(story, paras(doc, story)?);
+                            read.insert(story, self.story_paras(story)?);
                         }
                         let para = read[story]
                             .iter()
@@ -903,12 +967,77 @@ impl DocxSession {
             .map_or(12, |mode| mode.trunc().clamp(0.0, 255.0) as u8)
     }
 
+    /// `story`'s paragraphs from the call's index ([`ParaIndex`]).
+    pub(super) fn story_paras(&self, story: &str) -> Result<Arc<Vec<Para>>> {
+        let doc = self.engine.doc();
+        let mut index = self.index.borrow_mut();
+        if index.watch.is_none() {
+            let changes = Arc::clone(&index.changes);
+            let watch = doc
+                .yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    if !txn.delete_set().is_empty() || !txn.insert_set().is_empty() {
+                        changes.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .map_err(Error::engine)?;
+            index.watch = Some(watch);
+        }
+        let now = index.changes.load(Ordering::Relaxed);
+        if index.at != now {
+            index.stories.clear();
+            index.at = now;
+        }
+        if let Some(paras) = index.stories.get(story) {
+            return Ok(Arc::clone(paras));
+        }
+        let read = Arc::new(paras(doc, story)?);
+        index.stories.insert(story.to_owned(), Arc::clone(&read));
+        Ok(read)
+    }
+
+    /// The index's change count before an edit ([`Self::keep_index`]).
+    pub(super) fn index_mark(&self) -> u64 {
+        self.index.borrow().changes.load(Ordering::Relaxed)
+    }
+
+    /// After a text edit the index can follow: `update` brings its stories
+    /// in step, when they were in step before the edit (`before`).
+    pub(super) fn keep_index(
+        &self,
+        before: u64,
+        update: impl FnOnce(&mut HashMap<String, Arc<Vec<Para>>>),
+    ) {
+        let mut index = self.index.borrow_mut();
+        if index.watch.is_some() && index.at == before {
+            update(&mut index.stories);
+            index.at = index.changes.load(Ordering::Relaxed);
+        }
+    }
+
+    /// `replace_text`'s paragraph (mod.rs `paragraph`) from the index, in
+    /// any story.
+    pub(super) fn indexed_paragraph(&self, story: &str, para_id: &str) -> Result<Paragraph> {
+        let paras = self.story_paras(story)?;
+        let para = paras
+            .iter()
+            .find(|para| para.para_id == para_id)
+            .ok_or_else(gone)?;
+        Ok(Paragraph {
+            para_id: para.para_id.clone(),
+            start: para.node_start as usize,
+            length: (para.mark - para.node_start) as usize,
+            text: para.text.clone(),
+            plain: para.plain,
+        })
+    }
+
     /// The paragraph `id` names, its story and its story's paragraphs (body
     /// stories only, as every command but `replace_text` edits).
-    fn find(&self, id: &str) -> Result<(String, usize, Vec<Para>)> {
+    fn find(&self, id: &str) -> Result<(String, usize, Arc<Vec<Para>>)> {
         let (story, para_id) = split_id(id)?;
         in_body(story)?;
-        let paras = paras(self.engine.doc(), story)?;
+        let paras = self.story_paras(story)?;
         let index = paras
             .iter()
             .position(|para| para.para_id == para_id)
@@ -1062,7 +1191,7 @@ impl DocxSession {
                 "the document has no paragraph style {style:?}; use a style id inspect_office_document lists"
             )));
         }
-        let body = paras(self.engine.doc(), BODY)?;
+        let body = self.story_paras(BODY)?;
         let placement = self.place(&body, after_id, before_id, PARAGRAPH_ANCHOR)?;
         let continued = &body[placement.continued];
         let fill = matches!(placement.place, Place::Fill);
@@ -1172,13 +1301,13 @@ impl DocxSession {
             )));
         }
         let num_id = self.list_num_id(list)?;
-        let mut stories: HashMap<&str, Vec<Para>> = HashMap::new();
+        let mut stories: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
         let mut targets = Vec::with_capacity(ids.len());
         for id in ids {
             let (story, para_id) = split_id(id)?;
             in_body(story)?;
             if !stories.contains_key(story) {
-                stories.insert(story, paras(self.engine.doc(), story)?);
+                stories.insert(story, self.story_paras(story)?);
             }
             let para = stories[story]
                 .iter()
@@ -1229,7 +1358,7 @@ impl DocxSession {
         for cell in rows.iter().flatten() {
             check_cell(cell)?;
         }
-        let body = paras(self.engine.doc(), BODY)?;
+        let body = self.story_paras(BODY)?;
         let placement = self.place(&body, after_id, None, TABLE_ANCHOR)?;
         let (_, at, _) = self.new_paragraph(&body, placement, BTreeMap::new())?;
         let doc = self.engine.doc();
@@ -1374,14 +1503,17 @@ impl DocxSession {
             }
         };
         let start = para.start + len16(&para.text[..at]);
+        let before = self.index_mark();
         self.engine
             .doc()
             .format_range(
                 &ctx(),
-                StoryRange::new(story, start, start + len16(expected_text)),
+                StoryRange::new(&story, start, start + len16(expected_text)),
                 &delta,
             )
             .map_err(op)?;
+        // A format moves no text: the index stays in step.
+        self.keep_index(before, |_| {});
         Ok(())
     }
 
