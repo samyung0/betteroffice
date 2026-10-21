@@ -15,7 +15,11 @@ use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
 use crate::session::{Applied, Item};
+use crate::touched::{self, Touched};
 use crate::types::{Asset, Command, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target};
+
+/// The root map of PPTX stories (`crate::document_roots`).
+const STORIES: &str = "pptx:stories";
 
 pub(crate) struct PptxSession {
     deck: DeckSession,
@@ -274,6 +278,27 @@ impl PptxSession {
             .map(|(_, paragraph)| paragraph)
             .ok_or_else(missing)?;
         Ok((story_id, paragraph))
+    }
+
+    /// [`crate::CommandResult::touched`]: the paragraph a `replace_text` or
+    /// `delete_paragraph` names, its mark included; nothing for the rest,
+    /// nor where the paragraph is not found.
+    pub fn touched(&mut self, command: &Command) -> Touched {
+        let (Command::ReplaceText { target_id, .. } | Command::DeleteParagraph { target_id, .. }) =
+            command
+        else {
+            return Touched::default();
+        };
+        let Ok((story, paragraph)) = self.paragraph(target_id) else {
+            return Touched::default();
+        };
+        touched::story_range(
+            self.deck.yrs_doc(),
+            STORIES,
+            &story,
+            paragraph.start,
+            paragraph.start + paragraph.length,
+        )
     }
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {

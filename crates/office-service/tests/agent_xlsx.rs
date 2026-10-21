@@ -235,7 +235,9 @@ fn set_range_refuses_a_wrong_shape_or_too_many_cells() {
     assert_eq!(
         book.apply(&[set_range("Sheet1", "A1:B5001", &[], &[])])
             .unwrap_err(),
-        invalid("A1:B5001 has 10002 cells; set at most 10000 cells per command")
+        invalid(
+            "the command at index 0 alone passes the limit of 10,000 cells written a call; split it"
+        )
     );
     let Error::Edit { code, details, .. } = book
         .apply(&[set_range("Nope", "A1", &[&[""]], &[&["1"]])])
@@ -317,7 +319,9 @@ fn format_cells_patches_the_style_and_number_format_without_an_inverse() {
             },
         })
         .unwrap_err(),
-        invalid("A1:B5001 has 10002 cells; format at most 10000 cells per command")
+        invalid(
+            "the command at index 0 alone passes the limit of 10,000 cells written a call; split it"
+        )
     );
 }
 
@@ -562,19 +566,20 @@ fn a_stale_band_carries_its_grid_cut_at_two_thousand_cells() {
     assert_eq!(block["gridCut"], json!(true));
 }
 
-/// One call writes at most 10,000 cells across its commands: ranges by area,
-/// deletes by their stored cells, inserts and sheet changes none (Epo
-/// 2026-10-20, review finding 3).
+/// One call's commands name at most 10,000 cells across them: ranges by
+/// area, deletes by their expected cells, inserts and sheet changes none
+/// (Epo 2026-10-20, review finding 3); the engine applies the commands before
+/// the first past the limit and names the rest unapplied (Epo 2026-10-22).
 #[test]
 fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
-    let call_cap = |total: u64| {
-        invalid(&format!(
-            "this call's commands write at least {total} cells; a call writes at most 10000 cells across its commands, so split the edit into several calls"
+    let notice = |index: usize| {
+        Some(format!(
+            "Not applied: the command at index {index} (counting from 0), past the limit of 10,000 cells written a call; send them in another call."
         ))
     };
     let mut book = Book::created(&[column_of(9_000, "A")]);
-    assert_eq!(
-        book.apply(&[
+    let result = book
+        .apply(&[
             column_of(6_000, "B"),
             Command::FormatCells {
                 sheet: "Sheet1".into(),
@@ -588,13 +593,12 @@ fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
                 },
             },
         ])
-        .unwrap_err(),
-        call_cap(11_000)
-    );
+        .unwrap();
+    assert_eq!(result.notice, notice(1));
     let column: Vec<Vec<String>> = (1..=9_000).map(|row| vec![row.to_string()]).collect();
     assert_eq!(
         book.apply(&[
-            column_of(1_001, "B"),
+            column_of(1_001, "D"),
             Command::DeleteColumns {
                 sheet: "Sheet1".into(),
                 at: "A".into(),
@@ -602,11 +606,12 @@ fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
                 expected: column,
             },
         ])
-        .unwrap_err(),
-        call_cap(10_001)
+        .unwrap()
+        .notice,
+        notice(1)
     );
     book.apply(&[
-        column_of(10_000, "B"),
+        column_of(10_000, "E"),
         Command::InsertRows {
             sheet: "Sheet1".into(),
             at: 1,
@@ -618,18 +623,61 @@ fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
         },
     ])
     .unwrap();
-    let Error::Edit { code, message, .. } = create(
+    // After a create command the indexes start at 1.
+    let created = create(
         Format::Xlsx,
         starter(Format::Xlsx).unwrap(),
         &[column_of(6_000, "A"), column_of(6_000, "B")],
         DETERMINISM,
     )
-    .unwrap_err() else {
-        panic!("an edit refusal");
+    .unwrap();
+    assert_eq!(created.notice, notice(2));
+}
+
+/// A call inserts at most 1,000 rows and columns and adds, renames or
+/// deletes at most 20 sheets (Epo 2026-10-22); one insert past the limit on
+/// its own is refused.
+#[test]
+fn a_call_inserts_at_most_1000_rows_and_columns_and_changes_20_sheets() {
+    let mut book = Book::created(&[]);
+    let rows = |count: u32| Command::InsertRows {
+        sheet: "Sheet1".into(),
+        at: 1,
+        count,
     };
     assert_eq!(
-        (code, message.contains("at least 12000 cells")),
-        (EditCode::InvalidInput, true)
+        book.apply(&[
+            rows(600),
+            Command::InsertColumns {
+                sheet: "Sheet1".into(),
+                at: "A".into(),
+                count: 401,
+            },
+        ])
+        .unwrap()
+        .notice
+        .as_deref(),
+        Some(
+            "Not applied: the command at index 1 (counting from 0), past the limit of 1,000 inserted rows and columns a call; send them in another call."
+        )
+    );
+    assert_eq!(
+        book.apply(&[rows(1_001)]).unwrap_err(),
+        invalid(
+            "the command at index 0 alone passes the limit of 1,000 inserted rows and columns a call; split it"
+        )
+    );
+    let sheets: Vec<Command> = (0..21)
+        .map(|n| Command::AddSheet {
+            name: format!("S{n}"),
+            after: None,
+        })
+        .collect();
+    assert_eq!(
+        book.apply(&sheets).unwrap().notice.as_deref(),
+        Some(
+            "Not applied: the command at index 20 (counting from 0), past the limit of 20 sheets added, renamed or deleted a call; send them in another call."
+        )
     );
 }
 

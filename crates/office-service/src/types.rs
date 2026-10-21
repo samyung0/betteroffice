@@ -393,6 +393,10 @@ pub struct CommandResult {
     /// For the edit's tool result: the characters an Office file cannot store
     /// that the agent's text lost before the edit applied (Epo 2026-10-15).
     pub notice: Option<String>,
+    /// For each applied command, what its Undo re-creates: its target's
+    /// Yjs items before it applied ([`crate::Touched`]). Capy sizes an
+    /// edit's Undo with it (`sources::undo_cost::office`).
+    pub touched: Vec<crate::Touched>,
 }
 
 /// A file [`crate::create`] built from a starter.

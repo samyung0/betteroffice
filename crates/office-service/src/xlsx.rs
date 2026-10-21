@@ -15,6 +15,7 @@ use crate::error::{EditCode, Error, Result};
 use crate::formula::Formulas;
 use crate::js::{J, canonical};
 use crate::session::{Applied, Item};
+use crate::touched::Touched;
 use crate::types::{
     Asset, CellStyle, Checkpoint, Command, EffectKind, Entry, Format, InspectQuery, NetEffect,
     ObjectKind, ObjectRef, Target,
@@ -24,8 +25,7 @@ use crate::types::{
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
 /// Cells one `set_range` sets or `format_cells` formats, or one row or column
-/// delete removes; also the cells one call's commands name across them (a
-/// range's area, a delete's expected cells; Epo 2026-10-20, review finding 3).
+/// delete removes (a call's cells are `limits.json`'s).
 const MAX_EDIT_CELLS: u64 = 10_000;
 /// Cells one scoped read covers.
 const MAX_READ_CELLS: u64 = 2_000;
@@ -44,8 +44,6 @@ pub(crate) fn now_options() -> CalculationOptions {
 /// One call's workbook: `apply_commands` and `create` open one per call.
 pub(crate) struct XlsxSession {
     workbook: Workbook,
-    /// Cells the call's commands wrote so far, toward [`MAX_EDIT_CELLS`].
-    written: u64,
 }
 
 impl XlsxSession {
@@ -59,29 +57,28 @@ impl XlsxSession {
                 .map_err(Error::engine)?;
             workbook.sheet_info().map_err(Error::engine)?;
         }
-        Ok(Self {
-            workbook,
-            written: 0,
-        })
+        Ok(Self { workbook })
     }
 
     pub fn state(&self) -> Vec<u8> {
         self.workbook.encode_state_as_update_v1()
     }
 
-    /// Counts a command's `cells` toward its call, refused once the call
-    /// passes [`MAX_EDIT_CELLS`]: a range's area, a delete's expected cells.
-    /// The pipeline sends a call's commands only up to the limit, so the
-    /// refusal guards other callers.
-    fn write(&mut self, cells: u64) -> Result<()> {
-        self.written += cells;
-        if self.written > MAX_EDIT_CELLS {
-            return Err(invalid(format!(
-                "this call's commands write at least {} cells; a call writes at most {MAX_EDIT_CELLS} cells across its commands, so split the edit into several calls",
-                self.written
-            )));
+    /// [`crate::CommandResult::touched`]: a deleted sheet's key in the sheet
+    /// order, all `delete_sheet` removes (the sheet's map and cells stay in
+    /// Yjs, as a row or column delete only adds an axis change); nothing for
+    /// the rest.
+    pub fn touched(&self, command: &Command) -> Touched {
+        match command {
+            Command::DeleteSheet { sheet, .. } => self.sheet_ref(sheet).map_or_else(
+                |_| Touched::default(),
+                |sheet| Touched {
+                    content: sheet.id.len() as u64 + 2,
+                    items: 1,
+                },
+            ),
+            _ => Touched::default(),
         }
-        Ok(())
     }
 
     /// `checkpointProjectionJson` (`full`) or `checkpointCellsJson` without
@@ -342,7 +339,6 @@ impl XlsxSession {
         expected_value: &str,
         value: &str,
     ) -> Result<Applied> {
-        self.write(1)?;
         let cells = self.projection(false)?;
         let (index, found) = find_sheet(&cells, sheet)?;
         let sheet_id = text(found.get("id"));
@@ -435,7 +431,6 @@ impl XlsxSession {
                 )));
             }
         }
-        self.write(rows * columns)?;
         let formulas = self.formulas();
         for (at, value) in cells(area).zip(values.iter().flatten()) {
             formulas.check(&at.to_a1(), value)?;
@@ -519,7 +514,6 @@ impl XlsxSession {
                 rows * columns
             )));
         }
-        self.write(rows * columns)?;
         let patch = &style.patch;
         if let Some(font) = &patch.font_family
             && !(1..=31).contains(&font.chars().count())
@@ -680,7 +674,6 @@ impl XlsxSession {
         }
         // The call's count takes the cells the delete names, as the pipeline
         // counts them before it sends a call (Epo 2026-10-21).
-        self.write(expected.iter().map(|row| row.len() as u64).sum())?;
         let mut current: BTreeMap<(u32, u32), (String, String)> = BTreeMap::new();
         for at in stored {
             let cell = self.read(sheet.index, at)?;
@@ -1130,6 +1123,15 @@ fn cell_range(range: &str) -> Result<CellRange> {
         CellRef::new(parsed.start.row, parsed.start.col),
         CellRef::new(parsed.end.row, parsed.end.col),
     ))
+}
+
+/// The cells of `range` (`A1` or `A1:C3`), 0 when it is not one; the call
+/// limits count `set_range` and `format_cells` by it.
+pub(crate) fn range_cells(range: &str) -> u64 {
+    cell_range(range).map_or(0, |range| {
+        let (rows, columns) = shape(range);
+        rows * columns
+    })
 }
 
 /// Rows and columns.

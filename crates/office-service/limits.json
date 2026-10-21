@@ -1,0 +1,41 @@
+{
+  "commands": 50,
+  "formats": {
+    "xlsx": [
+      {
+        "count": "cells written",
+        "limit": 10000,
+        "commands": ["set_cell", "set_range", "format_cells", "delete_rows", "delete_columns"]
+      },
+      {
+        "count": "inserted rows and columns",
+        "limit": 1000,
+        "commands": ["insert_rows", "insert_columns"]
+      },
+      {
+        "count": "sheets added, renamed or deleted",
+        "limit": 20,
+        "commands": ["add_sheet", "rename_sheet", "delete_sheet"]
+      }
+    ],
+    "docx": [
+      { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
+      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
+      {
+        "count": "table cells inserted or deleted",
+        "limit": 400,
+        "commands": ["insert_table", "delete_table"]
+      },
+      { "count": "formatted spans", "limit": 30, "commands": ["format_text"] },
+      {
+        "count": "paragraphs given a list or an alignment",
+        "limit": 200,
+        "commands": ["set_list", "set_alignment"]
+      }
+    ],
+    "pptx": [
+      { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
+      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] }
+    ]
+  }
+}

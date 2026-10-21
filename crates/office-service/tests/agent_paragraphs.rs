@@ -296,6 +296,25 @@ fn the_docx_read_pages_the_paragraphs_and_lists_the_paragraph_styles_first() {
     let rest = read(&doc, Some(2), Some(200)).unwrap();
     let paragraphs = rest["paragraphs"].as_array().unwrap();
     assert_eq!(first["total"], paragraphs.len() + 2);
+    // The pages hold every paragraph inspect lists as editable, and the rest
+    // marked locked.
+    let mut unlocked: Vec<(String, String)> = first["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(paragraphs)
+        .filter(|paragraph| paragraph.get("locked").is_none())
+        .map(|paragraph| {
+            (
+                paragraph["id"].as_str().unwrap().to_owned(),
+                paragraph["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let mut editable = doc.paragraphs();
+    unlocked.sort();
+    editable.sort();
+    assert_eq!(unlocked, editable);
     let style = |text: &str| {
         paragraphs
             .iter()
@@ -507,10 +526,6 @@ fn docx_insert_refuses_unknown_styles_line_breaks_and_over_limit_input() {
             invalid("text holds 5001 characters; a paragraph holds at most 5000"),
         ),
         (
-            (0..21).map(|_| after(&timed, "x")).collect(),
-            invalid("the call inserts 21 paragraphs; insert at most 20 a call"),
-        ),
-        (
             vec![Command::InsertParagraph {
                 after_id: Some(timed.clone()),
                 before_id: Some(timed.clone()),
@@ -523,7 +538,7 @@ fn docx_insert_refuses_unknown_styles_line_breaks_and_over_limit_input() {
         (
             vec![after(&doc.id("Cell"), "x")],
             invalid(
-                "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, header, footer or note",
+                "a new paragraph goes in the document body: after_id and before_id name a body paragraph, not one of a table, content control, header, footer or note",
             ),
         ),
         (
@@ -539,10 +554,17 @@ fn docx_insert_refuses_unknown_styles_line_breaks_and_over_limit_input() {
         assert_eq!(doc.apply(&commands).unwrap_err(), error);
         assert_eq!(doc.state, before);
     }
-    // Exactly at the bounds it lands.
+    // Exactly at the bounds it lands; a 21st insert comes back unapplied.
     let mut bounded: Vec<Command> = (0..19).map(|_| after(&timed, "x")).collect();
     bounded.push(after(&timed, &"y".repeat(5_000)));
-    doc.apply(&bounded).unwrap();
+    bounded.push(after(&timed, "z"));
+    assert_eq!(
+        doc.apply(&bounded).unwrap().notice.as_deref(),
+        Some(
+            "Not applied: the command at index 20 (counting from 0), past the limit of 20 inserted paragraphs a call; send them in another call."
+        )
+    );
+    assert!(!doc.texts().iter().any(|text| text == "z"));
 }
 
 /// A delete names the paragraph's whole text; the paragraphs around a
