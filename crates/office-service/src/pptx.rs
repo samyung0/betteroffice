@@ -1,6 +1,8 @@
 //! PPTX sessions over `pptx_edit::DeckSession`, as office-checkpoint.ts
 //! drives `PptxDocument`.
 
+mod agent;
+
 use std::collections::HashMap;
 
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
@@ -297,12 +299,7 @@ impl PptxSession {
                 target_id,
                 expected_text,
             } => return self.delete_paragraph(target_id, expected_text),
-            _ => {
-                return Err(Error::edit(
-                    EditCode::UnsupportedOperation,
-                    "PPTX files take replace_text, insert_paragraph and delete_paragraph",
-                ));
-            }
+            _ => return self.apply_agent(command),
         };
         let (story_id, paragraph) = self.paragraph(target_id)?;
         let (span, text) = check_replacement(&paragraph.text, command, "PPTX")?;
@@ -460,11 +457,12 @@ fn text_style(style: Option<J>) -> Result<TextStyle> {
     }
 }
 
-/// The deck's refusal to edit an equation's text is an edit refusal with its
-/// sentence; any other failure stays the engine's.
+/// The deck's refusal to edit an equation's text, or to place a layout
+/// placeholder without a size, is an edit refusal with its sentence; any
+/// other failure stays the engine's.
 fn refused(error: pptx_edit::EditError) -> Error {
     match error {
-        pptx_edit::EditError::EquationText(_) => {
+        pptx_edit::EditError::EquationText(_) | pptx_edit::EditError::InvalidGeometry(_) => {
             Error::edit(EditCode::InvalidInput, error.to_string())
         }
         error => Error::engine(error),

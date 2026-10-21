@@ -170,6 +170,7 @@ dependencies = [
  "betteroffice-docx-parse",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
  "betteroffice-xlsx",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-ops",

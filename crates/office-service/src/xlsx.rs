@@ -311,17 +311,26 @@ impl XlsxSession {
                 EditCode::UnsupportedOperation,
                 "XLSX sources support set_cell only",
             )),
-            Command::InsertParagraph { .. } | Command::DeleteParagraph { .. } => Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "this command edits DOCX and PPTX files",
-            )),
-            Command::SetList { .. }
-            | Command::InsertTable { .. }
-            | Command::DeleteTable { .. }
+            Command::InsertParagraph { .. }
+            | Command::DeleteParagraph { .. }
             | Command::FormatText { .. }
             | Command::SetAlignment { .. } => Err(Error::edit(
                 EditCode::UnsupportedOperation,
-                "this command edits DOCX files",
+                "this command edits DOCX and PPTX files",
+            )),
+            Command::SetList { .. } | Command::InsertTable { .. } | Command::DeleteTable { .. } => {
+                Err(Error::edit(
+                    EditCode::UnsupportedOperation,
+                    "this command edits DOCX files",
+                ))
+            }
+            Command::SetShapeText { .. }
+            | Command::AddSlide { .. }
+            | Command::DeleteSlide { .. }
+            | Command::MoveSlide { .. }
+            | Command::AddTextBox { .. } => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "this command edits PPTX files",
             )),
         }
     }

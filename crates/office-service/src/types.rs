@@ -236,7 +236,8 @@ pub enum Command {
         id: String,
         expected: Vec<Vec<String>>,
     },
-    /// DOCX: formats the one occurrence of `expected_text` in a paragraph.
+    /// DOCX, PPTX: formats the one occurrence of `expected_text` in a
+    /// paragraph (`highlight` DOCX only).
     #[serde(rename_all = "camelCase")]
     FormatText {
         target_id: String,
@@ -248,6 +249,55 @@ pub enum Command {
     SetAlignment {
         target_id: String,
         alignment: Alignment,
+    },
+    /// PPTX: a shape's whole text, now `expected_text` (its paragraphs
+    /// joined by line breaks), becomes `paragraphs`.
+    #[serde(rename_all = "camelCase")]
+    SetShapeText {
+        shape_id: String,
+        expected_text: String,
+        paragraphs: Vec<String>,
+    },
+    /// PPTX: a slide right after `after_slide` or right before
+    /// `before_slide` (at most one; neither: last) with `layout`'s text
+    /// placeholders, `layout` defaulting to the slide it follows (else the
+    /// one it precedes).
+    #[serde(rename_all = "camelCase")]
+    AddSlide {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<String>,
+    },
+    /// PPTX: removes a slide whose text is `expected_text` (its shapes'
+    /// paragraphs, one a line, as the slide read shows them).
+    #[serde(rename_all = "camelCase")]
+    DeleteSlide {
+        slide_id: String,
+        expected_text: String,
+    },
+    /// PPTX: moves a slide right after `after_slide` or right before
+    /// `before_slide` (exactly one).
+    #[serde(rename_all = "camelCase")]
+    MoveSlide {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_slide: Option<String>,
+    },
+    /// PPTX: a text box of `paragraphs` on a slide, its box in points from
+    /// the slide's top left corner.
+    #[serde(rename_all = "camelCase")]
+    AddTextBox {
+        slide_id: String,
+        paragraphs: Vec<String>,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
     },
 }
 
@@ -305,7 +355,9 @@ pub struct CellStyle {
 
 /// A scoped read. XLSX: no `range` lists the sheets; `sheet` and `range`
 /// read that range's cells. DOCX: `count` (1 to 200) paragraphs from
-/// `start`.
+/// `start`. PPTX: no `slide` lists `count` slides from `start`; `slide`
+/// (its number, from 1) reads that slide's shapes and `count` of its
+/// paragraphs from `start`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectQuery {
@@ -317,6 +369,8 @@ pub struct InspectQuery {
     pub start: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide: Option<u32>,
 }
 
 /// Yrs location of an edited target: root map name, nested keys, and the

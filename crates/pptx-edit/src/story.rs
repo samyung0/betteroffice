@@ -290,6 +290,11 @@ fn append_pilcrow(
 }
 
 impl DeckSession {
+    /// Whether a story is an equation's text, which edits refuse.
+    pub fn is_equation_story(&self, story_id: &str) -> bool {
+        crate::deck::is_equation_story(self.package(), story_id)
+    }
+
     pub fn story(&self, story_id: &str) -> EditResult<StorySnapshot> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;

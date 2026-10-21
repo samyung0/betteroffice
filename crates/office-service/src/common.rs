@@ -290,6 +290,10 @@ pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Co
         Command::SetRange { values, .. } | Command::InsertTable { rows: values, .. } => {
             values.iter_mut().flatten().for_each(keep)
         }
+        Command::SetShapeText { paragraphs, .. } | Command::AddTextBox { paragraphs, .. } => {
+            paragraphs.iter_mut().for_each(keep)
+        }
+        Command::AddSlide { .. } | Command::DeleteSlide { .. } | Command::MoveSlide { .. } => {}
         Command::DeleteParagraph { .. }
         | Command::SetList { .. }
         | Command::DeleteTable { .. }

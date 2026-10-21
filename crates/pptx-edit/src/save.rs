@@ -678,6 +678,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         paragraphs,
         text_anchor: shape.text_anchor.clone(),
         picture: None,
+        placeholder: shape.placeholder.clone(),
     })
 }
 
@@ -705,5 +706,6 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
             media_bytes,
             content_type: pending.content_type.clone(),
         }),
+        placeholder: None,
     })
 }

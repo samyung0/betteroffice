@@ -155,10 +155,7 @@ impl Session {
         match self {
             Session::Xlsx(session) => session.inspect_scoped(query),
             Session::Docx(session) => session.inspect_scoped(query),
-            Session::Pptx(_) => Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "scoped reads cover XLSX and DOCX files for now",
-            )),
+            Session::Pptx(session) => session.inspect_scoped(query),
         }
     }
 
@@ -325,7 +322,9 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 /// What the agent reads of an Office file without projecting all of it
 /// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a page of its
 /// paragraphs, the body's then the headers', footers' and notes', the first
-/// with the file's paragraph styles).
+/// with the file's paragraph styles; PPTX: a page of its slides with their
+/// shapes, the first with the deck's layouts, or one slide's shapes and a
+/// page of its paragraphs).
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
