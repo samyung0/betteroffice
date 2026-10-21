@@ -35,6 +35,14 @@
       ]
     },
     {
+      "name": "runs Word split by rsid alone save as one run",
+      "body": "<w:p><w:r w:rsidR=\"00A1\"><w:t xml:space=\"preserve\">Split </w:t></w:r><w:r w:rsidR=\"00B2\"><w:t xml:space=\"preserve\">by </w:t></w:r><w:r w:rsidR=\"00C3\"><w:rPr><w:cs/></w:rPr><w:t>rsids</w:t></w:r></w:p>",
+      "runs": [
+        "",
+        "<w:rPr><w:cs/></w:rPr>"
+      ]
+    },
+    {
       "name": "runs the seed resolves alike, kept apart by a bookmark, save resolved",
       "body": "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:rPr><w:color w:val=\"auto\"/></w:rPr><w:t>Auto</w:t></w:r><w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:bookmarkEnd w:id=\"1\"/><w:r><w:t xml:space=\"preserve\"> styled red</w:t></w:r></w:p>",
       "runs": [
@@ -52,7 +60,7 @@
     {
       "name": "exchange-plan",
       "path": "poc/fixtures/exchange-plan.docx",
-      "runs": "55f243ebae310509c45b1b8096a41324635bd14c942692c7e3a9f6ee0b55bc91"
+      "runs": "cf8cbb7c7d6494765a8e7d33c8368037a0786ccb37d49e9d0f3c3ff0575ac685"
     },
     {
       "name": "feature-rich",

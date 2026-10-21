@@ -40,7 +40,7 @@ fn a_seeded_document_saves_the_same_bytes() {
         (
             "exchange-plan",
             include_bytes!("../../../poc/fixtures/exchange-plan.docx"),
-            "f505712544291df06f137be598227b3b47dcdd555dd822878cf6d9e48d3bbcaa",
+            "f14019ebb6d2259efcfa086e3cb0a04a42ca9c7626a04aeaa18bf3d8540f57b4",
         ),
         (
             "feature-rich",

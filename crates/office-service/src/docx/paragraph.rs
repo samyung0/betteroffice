@@ -940,7 +940,8 @@ pub(crate) struct SourceRun {
 /// the attributes the seed resolved for it, saves its source runs, each with
 /// its own rPr: runs the seed resolved alike (an explicit `w:color auto` under
 /// a red heading, character shading, `w:cs`) are neither merged nor given each
-/// other's properties. Returns whether it did.
+/// other's properties. Adjacent runs with the same rPr (Word's rsid splits)
+/// save as one. Returns whether it did.
 fn restore_source_runs(
     content: Vec<V>,
     items: &[V],
@@ -1005,13 +1006,20 @@ fn restore_source_runs(
             }
         }
     }
-    let runs = source_runs
-        .iter()
-        .map(|run| {
+    let mut merged: Vec<(&SourceRun, String)> = Vec::new();
+    for run in source_runs {
+        let text = run.text.as_deref().unwrap_or_default();
+        match merged.last_mut() {
+            Some((last, joined)) if same_source(&last.source, &run.source) => joined.push_str(text),
+            _ => merged.push((run, text.to_owned())),
+        }
+    }
+    let runs = merged
+        .into_iter()
+        .map(|(run, text)| {
             let resolved = attrs_to_text_formatting(&run.attrs);
-            let text = run.text.as_deref().unwrap_or_default();
             let saved =
-                obj! { "type": "run", "content": V::array(run_content_for_text(text, &resolved)) };
+                obj! { "type": "run", "content": V::array(run_content_for_text(&text, &resolved)) };
             if let Some(object) = saved.obj()
                 && o(&run.source).is_some_and(|source| !source.is_empty())
             {
@@ -1021,6 +1029,12 @@ fn restore_source_runs(
         })
         .collect();
     (runs, true)
+}
+
+/// Whether two source runs carry the same rPr (none and an empty one alike).
+fn same_source(a: &V, b: &V) -> bool {
+    let empty = |value: &V| o(value).is_none_or(|object| object.is_empty());
+    (empty(a) && empty(b)) || same_json(a, b)
 }
 
 /// A run whose formatting is what the seed resolved for its source

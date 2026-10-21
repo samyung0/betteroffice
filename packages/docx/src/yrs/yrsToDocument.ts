@@ -1430,7 +1430,8 @@ interface SourceRun {
  * the attributes the seed resolved for it, saves its source runs, each with
  * its own rPr: runs the seed resolved alike (an explicit `w:color auto` under
  * a red heading, character shading, `w:cs`) are neither merged nor given each
- * other's properties. Undefined when it does not apply.
+ * other's properties. Adjacent runs with the same rPr (Word's rsid splits)
+ * save as one. Undefined when it does not apply.
  */
 function restoreSourceRuns(
   content: ParagraphContent[],
@@ -1471,14 +1472,26 @@ function restoreSourceRuns(
       }
     }
   }
-  return sourceRuns.map((run) => {
+  const merged: Array<{ run: SourceRun; text: string }> = [];
+  for (const run of sourceRuns) {
+    const last = merged[merged.length - 1];
+    if (last && sameSource(last.run.source, run.source)) last.text += run.text!;
+    else merged.push({ run, text: run.text! });
+  }
+  return merged.map(({ run, text }) => {
     const saved: Run = {
       type: 'run',
-      content: runContentForText(run.text!, attrsToTextFormatting(run.attrs)),
+      content: runContentForText(text, attrsToTextFormatting(run.attrs)),
     };
     if (run.source && Object.keys(run.source).length > 0) saved.formatting = asWritten(run.source);
     return saved;
   });
+}
+
+/** Whether two source runs carry the same rPr (none and an empty one alike). */
+function sameSource(a: TextFormatting | undefined, b: TextFormatting | undefined): boolean {
+  const empty = (value: TextFormatting | undefined) => !value || Object.keys(value).length === 0;
+  return (empty(a) && empty(b)) || sameJson(a, b);
 }
 
 /**
