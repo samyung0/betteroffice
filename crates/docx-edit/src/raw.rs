@@ -1242,6 +1242,37 @@ mod tests {
         assert_stories_equivalent(&legacy, &batched, "body");
     }
 
+    /// Consecutive bookmark boundaries go in one batch, which still refuses a
+    /// boundary past the story's end as the per-op path did, leaving the
+    /// boundaries before it set.
+    #[test]
+    fn a_boundary_past_the_end_is_refused_after_the_ones_before_it() {
+        let boundary = |index, id: f64, kind: &str| RawOp::SetBookmark {
+            index,
+            data: Any::Map(Arc::new(
+                [
+                    ("id".to_owned(), Any::Number(id)),
+                    ("kind".to_owned(), Any::from(kind)),
+                ]
+                .into(),
+            )),
+        };
+        let (_, _, result) = assert_raw_ops_equivalent(
+            "AB",
+            vec![
+                boundary(0, 5.0, "start"),
+                boundary(1, 5.0, "end"),
+                boundary(4, 6.0, "end"),
+                RawOp::Insert {
+                    index: 0,
+                    text: "unreachable".into(),
+                    attrs: Attrs::new(),
+                },
+            ],
+        );
+        assert_eq!(result, Err(OpError::OutOfBounds { index: 4, len: 3 }));
+    }
+
     #[test]
     fn every_fallback_error_keeps_the_legacy_prefix() {
         let failures = vec![
