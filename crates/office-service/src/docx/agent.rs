@@ -1134,12 +1134,9 @@ fn inline_delta(format: &TextFormat) -> Result<InlineFormatDelta> {
         }
         delta.color = Patch::Set(ColorPatch::Rgb(hex.to_ascii_uppercase()));
     }
-    // Highlight is written as the seed stores it, the colour's name, which
-    // the save reads; the delta's own `highlight` field writes `{color}`,
-    // which the save projection drops.
     if let Some(highlight) = &format.highlight {
-        let value = if highlight.eq_ignore_ascii_case("none") {
-            None
+        delta.highlight = if highlight.eq_ignore_ascii_case("none") {
+            Patch::Clear
         } else {
             let name = HIGHLIGHTS
                 .iter()
@@ -1150,9 +1147,8 @@ fn inline_delta(format: &TextFormat) -> Result<InlineFormatDelta> {
                         HIGHLIGHTS.join(", ")
                     ))
                 })?;
-            Some(Any::from(*name))
+            Patch::Set((*name).to_owned())
         };
-        delta.other.insert("highlight".to_owned(), value);
     }
     if let Some(size) = format.font_size {
         if !(1.0..=1638.0).contains(&size) {
