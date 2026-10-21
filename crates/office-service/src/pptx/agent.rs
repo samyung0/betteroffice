@@ -19,7 +19,7 @@ use super::{PptxSession, STORIES, refused};
 use crate::common::{check_paragraph_text, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::session::Applied;
-use crate::touched::{self, Touched};
+use crate::touched::{self, Kept, Touched};
 use crate::types::{Alignment, Command, InspectQuery, TextFormat};
 
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -193,14 +193,24 @@ fn cell_of(story_id: &str) -> Option<(u32, u32)> {
 
 impl PptxSession {
     /// [`crate::CommandResult::touched`] of the agent's shape and slide
-    /// commands: a `set_shape_text` shape's story, a `delete_slide` slide
-    /// whole (its entry, its shapes', their stories' and its comments');
-    /// nothing for the rest, which add what they write.
+    /// commands: the text and marks of a `set_shape_text` shape's story
+    /// (what it can take out), a `delete_slide` slide whole (its entry, its
+    /// shapes', their stories' and its comments'); nothing for the rest,
+    /// which add what they write.
     pub(super) fn touched_agent(&self, command: &Command) -> Touched {
         let doc = self.deck.yrs_doc();
         match command {
             Command::SetShapeText { shape_id, .. } => {
-                touched::story(doc, STORIES, &format!("story:{shape_id}:0"))
+                let story = format!("story:{shape_id}:0");
+                let Ok(snapshot) = self.deck.story(&story) else {
+                    return Touched::default();
+                };
+                let end: u32 = snapshot
+                    .paragraphs
+                    .iter()
+                    .map(|paragraph| len16(&paragraph_text(paragraph)) + 1)
+                    .sum();
+                touched::story_range(doc, STORIES, &story, 0, end, Kept::Content)
             }
             Command::DeleteSlide { slide_id, .. } => {
                 let mut touched = touched::story(doc, "pptx:slides", slide_id);

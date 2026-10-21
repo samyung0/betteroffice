@@ -635,10 +635,10 @@ fn a_call_writes_at_most_ten_thousand_cells_across_its_commands() {
 }
 
 /// A call inserts at most 1,000 rows and columns and adds, renames or
-/// deletes at most 20 sheets (Epo 2026-10-22); one insert past the limit on
+/// deletes at most 5 sheets (Epo 2026-10-22); one insert past the limit on
 /// its own is refused.
 #[test]
-fn a_call_inserts_at_most_1000_rows_and_columns_and_changes_20_sheets() {
+fn a_call_inserts_at_most_1000_rows_and_columns_and_changes_5_sheets() {
     let mut book = Book::created(&[]);
     let rows = |count: u32| Command::InsertRows {
         sheet: "Sheet1".into(),
@@ -667,7 +667,7 @@ fn a_call_inserts_at_most_1000_rows_and_columns_and_changes_20_sheets() {
             "the command at index 0 alone passes the limit of 1,000 inserted rows and columns a call; split it"
         )
     );
-    let sheets: Vec<Command> = (0..21)
+    let sheets: Vec<Command> = (0..6)
         .map(|n| Command::AddSheet {
             name: format!("S{n}"),
             after: None,
@@ -676,7 +676,7 @@ fn a_call_inserts_at_most_1000_rows_and_columns_and_changes_20_sheets() {
     assert_eq!(
         book.apply(&sheets).unwrap().notice.as_deref(),
         Some(
-            "Not applied: the command at index 20 (counting from 0), past the limit of 20 sheets added, renamed or deleted a call; send them in another call."
+            "Not applied: the command at index 5 (counting from 0), past the limit of 5 sheets added, renamed or deleted a call; send them in another call."
         )
     );
 }

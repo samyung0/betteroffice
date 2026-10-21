@@ -21,11 +21,11 @@ use yrs::Any;
 
 use super::DocxSession;
 use super::styles::{Numbering, StyleResolver, map_entries};
-use crate::common::{check_expected_paragraph, check_paragraph_text, len16};
+use crate::common::{check_expected_paragraph, check_paragraph_text, check_replacement, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
 use crate::session::Applied;
-use crate::touched::{self, Touched};
+use crate::touched::{self, Kept, Touched};
 use crate::types::{Alignment, Command, InspectQuery, ListKind, TextFormat};
 
 const BODY: &str = "body";
@@ -330,7 +330,14 @@ fn table_embed(doc: &EditingDoc, story: &str, ordinal: u32) -> Result<Touched> {
             SegmentContent::Text(text) => at += len16(&text),
             SegmentContent::OtherEmbed { kind, .. } if kind == "table" => {
                 if seen == ordinal {
-                    return Ok(touched::story_range(doc.yrs_doc(), STORIES, story, at, at));
+                    return Ok(touched::story_range(
+                        doc.yrs_doc(),
+                        STORIES,
+                        story,
+                        at,
+                        at + 1,
+                        Kept::Content,
+                    ));
                 }
                 seen += 1;
                 at += 1;
@@ -570,30 +577,57 @@ impl Walk<'_> {
 }
 
 impl DocxSession {
-    /// [`crate::CommandResult::touched`], read before `command` applies: the
-    /// paragraph a `replace_text`, `format_text`, `delete_paragraph` or
-    /// `set_alignment` names, each paragraph of a `set_list`, a deleted
-    /// table's embed and cells; nothing for the rest, nor where the target is
-    /// not found (the command's own refusal says why).
+    /// [`crate::CommandResult::touched`], read before `command` applies:
+    /// what its Undo re-creates (the Editor's rule, 2026-10-22). The text a
+    /// `replace_text` takes out, the text and format markers a `format_text`
+    /// span covers, the mark entries a `set_alignment` or `set_list` writes,
+    /// a deleted paragraph's text and mark, a deleted table's embed and
+    /// cells; nothing for the rest, nor where the target is not found (the
+    /// command's own refusal says why).
     pub(crate) fn touched(&self, command: &Command) -> Touched {
         let doc = self.engine.doc();
-        let paragraph = |id: &str| -> Result<Touched> {
-            let (story, index, paras) = self.find(id)?;
-            let para = &paras[index];
-            Ok(touched::story_range(
-                doc.yrs_doc(),
-                STORIES,
-                &story,
-                para.start,
-                para.mark,
-            ))
+        let range = |story: &str, start: u32, end: u32, kept| {
+            touched::story_range(doc.yrs_doc(), STORIES, story, start, end, kept)
         };
         let measured = || -> Result<Touched> {
             Ok(match command {
-                Command::ReplaceText { target_id, .. }
-                | Command::FormatText { target_id, .. }
-                | Command::DeleteParagraph { target_id, .. }
-                | Command::SetAlignment { target_id, .. } => paragraph(target_id)?,
+                Command::ReplaceText { target_id, .. } => {
+                    let (story, index, paras) = self.find(target_id)?;
+                    let para = &paras[index];
+                    let (span, _) = check_replacement(&para.text, command, "DOCX")?;
+                    range(
+                        &story,
+                        para.start + span.start as u32,
+                        para.start + span.end as u32,
+                        Kept::Content,
+                    )
+                }
+                Command::FormatText {
+                    target_id,
+                    expected_text,
+                    ..
+                } => {
+                    let (story, index, paras) = self.find(target_id)?;
+                    let para = &paras[index];
+                    let at = para.text.find(expected_text.as_str()).ok_or_else(gone)?;
+                    let start = para.start + len16(&para.text[..at]);
+                    range(
+                        &story,
+                        start,
+                        start + len16(expected_text),
+                        Kept::Formatting,
+                    )
+                }
+                Command::DeleteParagraph { target_id, .. } => {
+                    let (story, index, paras) = self.find(target_id)?;
+                    let para = &paras[index];
+                    range(&story, para.start, para.mark + 1, Kept::Content)
+                }
+                Command::SetAlignment { target_id, .. } => {
+                    let (story, index, paras) = self.find(target_id)?;
+                    let mark = paras[index].mark;
+                    touched::mark_entries(doc.yrs_doc(), STORIES, &story, mark, &["alignment"])
+                }
                 Command::SetList { ids, .. } => {
                     // Each story read once: a list may name 200 paragraphs.
                     let mut read: HashMap<&str, Vec<Para>> = HashMap::new();
@@ -607,12 +641,12 @@ impl DocxSession {
                             .iter()
                             .find(|para| para.para_id == para_id)
                             .ok_or_else(gone)?;
-                        sum += touched::story_range(
+                        sum += touched::mark_entries(
                             doc.yrs_doc(),
                             STORIES,
                             story,
-                            para.start,
                             para.mark,
+                            &LIST_KEYS,
                         );
                     }
                     sum
@@ -1376,6 +1410,9 @@ impl DocxSession {
         Ok(())
     }
 }
+
+/// The mark keys [`list_attrs`] writes.
+const LIST_KEYS: [&str; 4] = ["numPr", "listIsBullet", "listNumFmt", "listMarker"];
 
 /// The paragraph properties a list writes, as the toolbar's buttons write
 /// them: `num_id` (0 for `none`, which also ends a list the paragraph's

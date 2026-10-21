@@ -728,12 +728,12 @@ fn an_insert_into_the_only_empty_paragraph_keeps_its_tracked_change() {
     );
 }
 
-/// `touched` is the target paragraph's Yjs items before the command (a
-/// text item a run, their format markers, the mark and its keys) and their
-/// bytes; Capy sizes the edit's Undo with it (the Editor's design,
-/// 2026-10-22).
+/// `touched` is what the command's Undo re-creates, read before it applies
+/// (the Editor's rule, 2026-10-22): a format the span's text items and
+/// their format markers, a delete the paragraph's text items and its mark
+/// but not the markers, which stay; Capy sizes the edit's Undo with it.
 #[test]
-fn touched_counts_the_items_of_the_target_paragraph() {
+fn touched_counts_what_the_undo_re_creates() {
     let run =
         |props: &str, text: &str| format!("<w:r><w:rPr>{props}</w:rPr><w:t>{text}</w:t></w:r>");
     let many: String = (0..12)
@@ -775,7 +775,7 @@ fn touched_counts_the_items_of_the_target_paragraph() {
         formatted[0].items >= formatted[1].items + 2 * 11,
         "{formatted:?}"
     );
-    assert!(formatted[1].content > 48, "{formatted:?}");
+    assert!(formatted[1].content >= 48, "{formatted:?}");
     let deleted = touched(
         &mut doc,
         &[Command::DeleteParagraph {
@@ -783,7 +783,11 @@ fn touched_counts_the_items_of_the_target_paragraph() {
             expected_text: "abcd".repeat(12),
         }],
     );
-    assert_eq!(deleted[0], formatted[0]);
+    // Twelve text items and the mark, without the markers.
+    assert!(
+        deleted[0].items > 12 && deleted[0].items < formatted[0].items,
+        "{deleted:?} {formatted:?}"
+    );
     assert_eq!(
         touched(&mut doc, &[insert(None, "x", None)]),
         [Touched::default()]

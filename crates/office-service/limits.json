@@ -14,7 +14,7 @@
       },
       {
         "count": "sheets added, renamed or deleted",
-        "limit": 20,
+        "limit": 5,
         "commands": ["add_sheet", "rename_sheet", "delete_sheet"]
       }
     ],

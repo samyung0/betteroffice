@@ -15,7 +15,7 @@ use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
 use crate::session::{Applied, Item};
-use crate::touched::{self, Touched};
+use crate::touched::{self, Kept, Touched};
 use crate::types::{Asset, Command, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target};
 
 /// The root map of PPTX stories (`crate::document_roots`).
@@ -280,11 +280,12 @@ impl PptxSession {
         Ok((story_id, paragraph))
     }
 
-    /// [`crate::CommandResult::touched`]: the paragraph a `replace_text`,
-    /// `delete_paragraph`, `format_text` or `set_alignment` names, its mark
-    /// included; a `set_shape_text` shape's story and a `delete_slide`
-    /// slide whole ([`Self::touched_agent`]); nothing for the rest, nor
-    /// where the target is not found.
+    /// [`crate::CommandResult::touched`]: what the command's Undo
+    /// re-creates (the Editor's rule, 2026-10-22): the text a `replace_text`
+    /// takes out, a deleted paragraph's text and mark, the text and format
+    /// markers a `format_text` span covers, the alignment a `set_alignment`
+    /// writes over; for the slide commands [`Self::touched_agent`]; nothing
+    /// for the rest, nor where the target is not found.
     pub fn touched(&mut self, command: &Command) -> Touched {
         let (Command::ReplaceText { target_id, .. }
         | Command::DeleteParagraph { target_id, .. }
@@ -296,12 +297,39 @@ impl PptxSession {
         let Ok((story, paragraph)) = self.paragraph(target_id) else {
             return Touched::default();
         };
+        let doc = self.deck.yrs_doc();
+        let (start, end, kept) = match command {
+            Command::ReplaceText { .. } => {
+                match check_replacement(&paragraph.text, command, "PPTX") {
+                    Ok((span, _)) => (span.start as u32, span.end as u32, Kept::Content),
+                    Err(_) => return Touched::default(),
+                }
+            }
+            Command::FormatText { expected_text, .. } => {
+                let Some(at) = paragraph.text.find(expected_text.as_str()) else {
+                    return Touched::default();
+                };
+                let at = len16(&paragraph.text[..at]);
+                (at, at + len16(expected_text), Kept::Formatting)
+            }
+            Command::SetAlignment { .. } => {
+                return touched::mark_entries(
+                    doc,
+                    STORIES,
+                    &story,
+                    paragraph.start + paragraph.length,
+                    &["alignment"],
+                );
+            }
+            _ => (0, paragraph.length + 1, Kept::Content),
+        };
         touched::story_range(
-            self.deck.yrs_doc(),
+            doc,
             STORIES,
             &story,
-            paragraph.start,
-            paragraph.start + paragraph.length,
+            paragraph.start + start,
+            paragraph.start + end,
+            kept,
         )
     }
 

@@ -84,33 +84,87 @@ pub(crate) fn story(doc: &Doc, root: &str, story: &str) -> Touched {
     touched
 }
 
-/// The items of story `story` from UTF-16 offset `start` through `end`
-/// included (a paragraph, its mark at `end`), and the format markers there.
-pub(crate) fn story_range(doc: &Doc, root: &str, story: &str, start: u32, end: u32) -> Touched {
-    let txn = doc.transact();
+/// Which items of a story range an Undo re-creates.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kept {
+    /// Text, embeds and nested types (whole): what a delete takes out, the
+    /// format markers staying where they are.
+    Content,
+    /// Those and the format markers too: what a format rewrites.
+    Formatting,
+}
+
+/// The items of story `story` in UTF-16 offsets `[start, end)` that `kept`
+/// names (a paragraph is `[start, mark + 1)`, its mark included).
+pub(crate) fn story_range(
+    doc: &Doc,
+    root: &str,
+    story: &str,
+    start: u32,
+    end: u32,
+    kept: Kept,
+) -> Touched {
     let mut touched = Touched::default();
+    walk(doc, root, story, |at, len, item| {
+        if at > end {
+            return false;
+        }
+        let inside = if len == 0 {
+            kept == Kept::Formatting && at >= start
+        } else {
+            at < end && at + len > start
+        };
+        if inside {
+            touched.item(item);
+        }
+        true
+    });
+    touched
+}
+
+/// The entries `keys` of the map embedded at UTF-16 offset `at` of story
+/// `story` (a paragraph's mark): the values a property write replaces.
+pub(crate) fn mark_entries(doc: &Doc, root: &str, story: &str, at: u32, keys: &[&str]) -> Touched {
+    let mut touched = Touched::default();
+    walk(doc, root, story, |offset, len, item| {
+        if offset < at || len == 0 {
+            return offset <= at;
+        }
+        if let ItemContent::Type(mark) = item.content() {
+            for key in keys {
+                if let Some(entry) = mark.entry_item(key) {
+                    touched.item(&entry);
+                }
+            }
+        }
+        false
+    });
+    touched
+}
+
+/// Each item of story `story` in order with its UTF-16 offset and live
+/// length (0 for a format marker or a deleted item), until `visit` says
+/// stop.
+fn walk(doc: &Doc, root: &str, story: &str, mut visit: impl FnMut(u32, u32, &Item) -> bool) {
+    let txn = doc.transact();
     let Some(holder) = story_item(&txn, root, story) else {
-        return touched;
+        return;
     };
     let ItemContent::Type(text) = holder.content() else {
-        return touched;
+        return;
     };
     let mut at = 0;
     let mut next = text.start();
     while let Some(item) = next {
-        if at > end {
-            break;
-        }
         let len = if item.is_countable() && !item.is_deleted() {
             item.len()
         } else {
             0
         };
-        if at + len > start || (len == 0 && at >= start) {
-            touched.item(&item);
+        if !visit(at, len, &item) {
+            return;
         }
         at += len;
         next = item.right();
     }
-    touched
 }
