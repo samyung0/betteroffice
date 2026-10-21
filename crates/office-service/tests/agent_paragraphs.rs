@@ -497,6 +497,46 @@ fn pptx_inserts_and_deletes_paragraphs_in_a_shapes_text() {
     assert_eq!(doc.id(DECK_STORY[1]), second);
 }
 
+/// An equation's text box (PowerPoint's spelling: the math in an `a14`
+/// choice, a text box picturing it as the fallback) takes no new paragraph.
+#[test]
+fn pptx_insert_into_an_equation_is_refused_as_invalid_input() {
+    let equation = concat!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#,
+        r#"<mc:Choice xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" Requires="a14">"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="90" name="Equation"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="457200" y="4114800"/><a:ext cx="1625600" cy="369332"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a14:m><m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara></a14:m></a:p></p:txBody></p:sp>"#,
+        r#"</mc:Choice><mc:Fallback>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="90" name="Equation"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="457200" y="4114800"/><a:ext cx="1625600" cy="369332"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>x squared</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        r#"</mc:Fallback></mc:AlternateContent>"#,
+    );
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(DECK)
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| match name.as_str() {
+            "ppt/slides/slide1.xml" => {
+                let xml = String::from_utf8(bytes).unwrap();
+                let xml = xml.replacen("</p:spTree>", &format!("{equation}</p:spTree>"), 1);
+                (name, xml.into_bytes())
+            }
+            _ => (name, bytes),
+        })
+        .collect();
+    let mut doc = Doc::new(Format::Pptx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let id = doc.id("x squared");
+    for command in [after(&id, "y"), before(&id, "y")] {
+        let error = doc.apply(&[command]).unwrap_err();
+        assert!(
+            matches!(&error, Error::Edit { code: EditCode::InvalidInput, message, details: None }
+                if message.ends_with("is an equation: its math can only be changed in PowerPoint")),
+            "{error:?}"
+        );
+    }
+}
+
 #[test]
 fn pptx_insert_takes_no_style() {
     let mut doc = Doc::new(Format::Pptx, DECK.to_vec());
