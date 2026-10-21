@@ -13,7 +13,7 @@ pub(crate) mod read;
 mod sdt;
 mod styles;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use docx_edit::{EditCtx, EngineSession, OpError, StoryRange, UndoSession};
 
@@ -40,8 +40,9 @@ pub(crate) struct DocxSession {
     /// The materialized source package (`materializeDocx`), read on first use.
     document: Option<V>,
     projected: Option<Projected>,
-    /// The paraIds of the paragraphs this session's commands inserted.
-    inserted: HashSet<String>,
+    /// For each paragraph an insert went after, the paraId of the last
+    /// paragraph this session put there, so the next lands after it.
+    after: HashMap<String, String>,
 }
 
 struct Projected {
@@ -245,7 +246,7 @@ impl DocxSession {
             undo: UndoSession::new(),
             base: base.to_vec(),
             projected: None,
-            inserted: HashSet::new(),
+            after: HashMap::new(),
         })
     }
 

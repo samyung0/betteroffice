@@ -844,31 +844,48 @@ impl DeckSession {
         })
     }
 
-    /// Inserts an empty paragraph at the start of the story with a new id,
-    /// taking the first paragraph's properties and file markup as a split
-    /// does; the first paragraph keeps its id. Returns the new paragraph's id.
-    pub fn insert_paragraph_at_start(
+    /// Inserts an empty paragraph right before `paragraph_id` with a new id,
+    /// taking that paragraph's properties and file markup as a split gives
+    /// them; the paragraph keeps its id. Returns the new paragraph's id.
+    pub fn insert_paragraph_before(
         &self,
         context: &crate::EditCtx,
         story_id: &str,
+        paragraph_id: &str,
     ) -> EditResult<String> {
         let mut txn = self.transact_typing_for(context, story_id);
         let story = self.editable_story(&txn, story_id)?;
         final_pilcrow_index(&story, &txn)?;
-        let (_, first) = pilcrow_from(&story, &txn, 0)
-            .ok_or_else(|| EditError::InvalidState(format!("story {story_id} has no paragraph")))?;
-        let first_id = map_string(&first, &txn, PARA_ID).unwrap_or_default();
-        let properties = pilcrow_properties(&first, &txn);
-        let id = self.next_id("para");
-        let pilcrow =
-            story.insert_embed_with_attributes(&mut txn, 0, MapPrelim::default(), Attrs::default());
-        pilcrow.insert(&mut txn, KIND, PILCROW_KIND);
-        for (key, value) in properties {
-            pilcrow.insert(&mut txn, key, value);
+        let mut offset = 0;
+        let mut start = 0;
+        let mut found = None;
+        for diff in story.diff(&txn, YChange::identity) {
+            if let Out::YMap(map) = &diff.insert {
+                if map_string(map, &txn, PARA_ID).as_deref() == Some(paragraph_id) {
+                    found = Some((start, map.clone()));
+                    break;
+                }
+                start = offset + 1;
+            }
+            offset += out_len(&diff.insert);
         }
-        pilcrow.insert(&mut txn, PARA_ID, id.as_str());
-        if source_paragraph_index(&first_id, story_id).is_some() {
-            pilcrow.insert(&mut txn, PROPERTIES_FROM, first_id);
+        let (start, pilcrow) =
+            found.ok_or_else(|| EditError::ParagraphNotFound(paragraph_id.to_owned()))?;
+        let properties = pilcrow_properties(&pilcrow, &txn);
+        let id = self.next_id("para");
+        let new = story.insert_embed_with_attributes(
+            &mut txn,
+            start,
+            MapPrelim::default(),
+            Attrs::default(),
+        );
+        new.insert(&mut txn, KIND, PILCROW_KIND);
+        for (key, value) in properties {
+            new.insert(&mut txn, key, value);
+        }
+        new.insert(&mut txn, PARA_ID, id.as_str());
+        if source_paragraph_index(paragraph_id, story_id).is_some() {
+            new.insert(&mut txn, PROPERTIES_FROM, paragraph_id);
         }
         Ok(id)
     }

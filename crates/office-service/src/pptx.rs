@@ -1,7 +1,7 @@
 //! PPTX sessions over `pptx_edit::DeckSession`, as office-checkpoint.ts
 //! drives `PptxDocument`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
 
@@ -21,8 +21,9 @@ pub(crate) struct PptxSession {
     /// never moves a paragraph to another story, and a paragraph insert or
     /// delete clears it.
     stories: Option<HashMap<String, String>>,
-    /// The ids of the paragraphs this session's commands inserted.
-    inserted: HashSet<String>,
+    /// For each paragraph an insert went after, the id of the last paragraph
+    /// this session put there, so the next lands after it.
+    after: HashMap<String, String>,
 }
 
 struct Paragraph {
@@ -44,7 +45,7 @@ impl PptxSession {
         Ok(Self {
             deck,
             stories: None,
-            inserted: HashSet::new(),
+            after: HashMap::new(),
         })
     }
 
@@ -329,11 +330,12 @@ impl PptxSession {
         })
     }
 
-    /// A paragraph right after or before `anchor` in its text, taking its
-    /// neighbour's paragraph properties as a split does and, for its text,
-    /// the style of the neighbour's character next to it. Several inserts
-    /// after one paragraph land in call order. The inverse deletes it, unless
-    /// it is its story's last paragraph, which delete_paragraph refuses.
+    /// A paragraph right after or before `anchor` in its text, taking that
+    /// paragraph's properties (level, bullet, alignment) as a split does and,
+    /// for its text, the style of its character next to the new one. Several
+    /// inserts after one paragraph land in call order. The inverse deletes
+    /// it, unless it is its story's last paragraph, which delete_paragraph
+    /// refuses.
     fn insert_paragraph(
         &mut self,
         anchor: &str,
@@ -350,27 +352,16 @@ impl PptxSession {
         check_paragraph_text(text)?;
         let (story_id, _) = self.paragraph(anchor)?;
         let paragraphs = self.story_paragraphs(&story_id)?;
-        let mut index = paragraphs
-            .iter()
-            .position(|(id, _)| id == anchor)
-            .ok_or_else(missing_paragraph)?;
-        if after {
-            while paragraphs
-                .get(index + 1)
-                .is_some_and(|(id, _)| self.inserted.contains(id))
-            {
-                index += 1;
-            }
-        }
+        let position = |id: &str| paragraphs.iter().position(|(other, _)| other == id);
         let ctx = EditCtx::local("wasm");
-        let (new_id, start, style, last) = if !after && index == 0 {
-            let id = self
-                .deck
-                .insert_paragraph_at_start(&ctx, &story_id)
-                .map_err(refused)?;
-            (id, 0, style_at(&paragraphs[0].1.runs, 0), false)
-        } else {
-            let index = if after { index } else { index - 1 };
+        // After a paragraph a new one is split off its end, after the
+        // paragraph this call last put there; before one it copies that
+        // paragraph's mark, which keeps its id.
+        let (new_id, start, style, undoable) = if after {
+            let index = match self.after.get(anchor).and_then(|id| position(id)) {
+                Some(index) => index,
+                None => position(anchor).ok_or_else(missing_paragraph)?,
+            };
             let neighbour = &paragraphs[index].1;
             let end = neighbour.start + neighbour.length;
             self.deck
@@ -382,7 +373,14 @@ impl PptxSession {
                 .nth(index + 1)
                 .ok_or_else(|| Error::engine("the split paragraph is missing"))?;
             let style = style_at(&neighbour.runs, neighbour.length as usize);
-            (id, end + 1, style, index + 1 == paragraphs.len())
+            (id, end + 1, style, index + 1 < paragraphs.len())
+        } else {
+            let paragraph = &paragraphs[position(anchor).ok_or_else(missing_paragraph)?].1;
+            let id = self
+                .deck
+                .insert_paragraph_before(&ctx, &story_id, anchor)
+                .map_err(refused)?;
+            (id, paragraph.start, style_at(&paragraph.runs, 0), true)
         };
         if !text.is_empty() {
             self.deck
@@ -390,10 +388,12 @@ impl PptxSession {
                 .map_err(refused)?;
         }
         self.stories = None;
-        self.inserted.insert(new_id.clone());
+        if after {
+            self.after.insert(anchor.to_owned(), new_id.clone());
+        }
         Ok(Applied {
             ids: vec![new_id.clone()],
-            inverse: (!last).then(|| Command::DeleteParagraph {
+            inverse: undoable.then(|| Command::DeleteParagraph {
                 target_id: new_id,
                 expected_text: text.to_owned(),
             }),

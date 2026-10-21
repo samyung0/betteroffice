@@ -1,6 +1,6 @@
 //! A paragraph removed whole leaves its neighbours' ids and properties, and
-//! one inserted at a story's start takes a fresh id: the agent's commands
-//! name paragraphs by id within one call.
+//! one inserted before another takes a fresh id: the agent's commands name
+//! paragraphs by id within one call.
 
 use docx_edit::*;
 use yrs::Any;
@@ -70,24 +70,58 @@ fn the_final_paragraph_and_an_unknown_one_are_refused() {
     assert_eq!(body(&doc), before);
 }
 
+/// Before the first paragraph and before a later one, a new paragraph takes
+/// a fresh id and the properties of the paragraph it precedes, which keeps
+/// its own id; the paragraph before it is untouched.
 #[test]
-fn a_paragraph_inserted_at_the_start_takes_a_fresh_id_and_the_first_ones_properties() {
+fn a_paragraph_inserted_before_another_takes_a_fresh_id_and_its_properties() {
     let doc = three();
-    let gamma = body(&doc)[2].0.clone();
-    doc.remove_paragraph(&ctx(), "body", &body(&doc)[0].0)
-        .unwrap();
-    doc.remove_paragraph(&ctx(), "body", &body(&doc)[0].0)
-        .unwrap();
-    // Gamma, centred, is the only paragraph left.
-    let receipt = doc.insert_paragraph_at_start(&ctx(), "body").unwrap();
+    let before = body(&doc);
+    let (alpha, gamma) = (before[0].0.clone(), before[2].0.clone());
+    let first = doc.insert_paragraph_before(&ctx(), "body", &alpha).unwrap();
+    let second = doc.insert_paragraph_before(&ctx(), "body", &gamma).unwrap();
     let center = Some(Any::from("center"));
+    let alignment = before[0].2.clone();
     assert_eq!(
         body(&doc),
         [
-            (receipt.first_para_id.clone(), String::new(), center.clone()),
-            (gamma.clone(), "Gamma".into(), center),
+            (first.first_para_id.clone(), String::new(), alignment),
+            before[0].clone(),
+            before[1].clone(),
+            (second.first_para_id.clone(), String::new(), center),
+            before[2].clone(),
         ]
     );
-    assert_eq!(receipt.second_para_id, gamma);
-    assert_ne!(receipt.first_para_id, gamma);
+    assert_eq!(
+        (first.second_para_id, second.second_para_id),
+        (alpha, gamma)
+    );
+    assert_eq!(
+        doc.insert_paragraph_before(&ctx(), "body", "nope"),
+        Err(OpError::UnknownPara("nope".into()))
+    );
+}
+
+/// A page break opening a paragraph's slot stays when that paragraph goes,
+/// opening the next one's.
+#[test]
+fn a_removed_paragraph_leaves_the_page_break_it_opened_with() {
+    let doc = three();
+    let before = body(&doc);
+    // "Alpha" ends at 5 and its mark is 5; "Beta" starts at 6.
+    doc.insert_embed(&ctx(), Position::new("body", 6), "pageBreak", vec![])
+        .unwrap();
+    doc.remove_paragraph(&ctx(), "body", &before[1].0).unwrap();
+    assert_eq!(body(&doc), [before[0].clone(), before[2].clone()]);
+    let kinds: Vec<String> = doc
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .map(|segment| match segment.content {
+            SegmentContent::Text(text) => text,
+            SegmentContent::Pilcrow(_) => "¶".into(),
+            SegmentContent::OtherEmbed { kind, .. } => kind,
+        })
+        .collect();
+    assert_eq!(kinds, ["Alpha", "¶", "pageBreak", "Gamma", "¶"]);
 }

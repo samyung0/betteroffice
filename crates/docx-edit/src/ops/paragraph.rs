@@ -373,12 +373,22 @@ impl EditingDoc {
         self.split_at(ctx, at, false)
     }
 
-    /// An empty paragraph at the start of `story`, as the split puts one
-    /// before a slot that opens with a block: the new mark takes a fresh
-    /// paraId and the first paragraph's properties, and the first paragraph
-    /// keeps its own. Its receipt's `first_para_id` is the new paragraph's.
-    pub fn insert_paragraph_at_start(&self, ctx: &EditCtx, story: &str) -> OpResult<SplitReceipt> {
-        self.split_at(ctx, Position::new(story, 0), true)
+    /// An empty paragraph right before `para_id` of `story`, as the split
+    /// puts one before a slot that opens with a block: the new mark takes a
+    /// fresh paraId and that paragraph's properties but its section, and the
+    /// paragraph keeps its own. Its receipt's `first_para_id` is the new
+    /// paragraph's. Errors when the story has no such paragraph.
+    pub fn insert_paragraph_before(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+    ) -> OpResult<SplitReceipt> {
+        let (start, _) = self
+            .segment_index(story)?
+            .para_span(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        self.split_at(ctx, Position::new(story, start), true)
     }
 
     fn split_at(&self, ctx: &EditCtx, mut at: Position, before: bool) -> OpResult<SplitReceipt> {
@@ -393,6 +403,7 @@ impl EditingDoc {
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         if let Some((text_start, end)) = slot
+            && !before
             && at.index > 0
             && text_start < end
         {

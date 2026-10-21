@@ -1,8 +1,8 @@
 //! The chat agent's paragraph commands (Epo 2026-10-21): `insert_paragraph`
 //! after or before a paragraph (a DOCX one in the body, with a paragraph
 //! style of the file) and `delete_paragraph` of a paragraph reading its
-//! expected text, never its story's last; the DOCX read lists the file's
-//! paragraph styles.
+//! expected text, never its story's last; the DOCX read names each
+//! paragraph's style and lists the file's shown paragraph styles.
 
 use office_service::{
     Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format, InspectQuery,
@@ -78,6 +78,11 @@ impl Doc {
 
     /// `word/document.xml` of the exported file.
     fn xml(&self) -> String {
+        self.part("word/document.xml")
+    }
+
+    /// A part of the exported file.
+    fn part(&self, name: &str) -> String {
         let saved = export(
             &self.base,
             self.checkpoint(),
@@ -90,33 +95,43 @@ impl Doc {
         ooxml_opc::unzip_parts(&saved)
             .unwrap()
             .into_iter()
-            .find(|(path, _)| path == "word/document.xml")
+            .find(|(path, _)| path == name)
             .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
             .unwrap()
     }
 
     /// The paragraph of the exported document whose text is `text`, as XML.
     fn paragraph_xml(&self, text: &str) -> String {
-        let xml = self.xml();
-        let chunk = xml
-            .split("</w:p>")
-            .find(|chunk| chunk.contains(&format!(">{text}</w:t>")))
-            .unwrap_or_else(|| panic!("no exported paragraph reads {text:?}: {xml}"));
-        let start = chunk
-            .rfind("<w:p ")
-            .into_iter()
-            .chain(chunk.rfind("<w:p>"))
-            .max()
-            .unwrap();
-        chunk[start..].to_owned()
+        paragraph_in(&self.xml(), "w", text)
     }
 }
 
-/// A DOCX with paragraph styles Normal, Heading1 and Title (and a character
-/// style), and a body of: a title, a centred paragraph, a paragraph with a
-/// tracked insertion, one ending a section, a table, the paragraph after it
-/// and a last paragraph.
+/// The paragraph (`<{ns}:p>`) of `xml` whose text is `text`.
+fn paragraph_in(xml: &str, ns: &str, text: &str) -> String {
+    let chunk = xml
+        .split(&format!("</{ns}:p>"))
+        .find(|chunk| chunk.contains(&format!(">{text}</{ns}:t>")))
+        .unwrap_or_else(|| panic!("no exported paragraph reads {text:?}: {xml}"));
+    let start = chunk
+        .rfind(&format!("<{ns}:p "))
+        .into_iter()
+        .chain(chunk.rfind(&format!("<{ns}:p>")))
+        .max()
+        .unwrap();
+    chunk[start..].to_owned()
+}
+
+/// A DOCX with shown paragraph styles Normal, Heading1 and Title, a hidden
+/// and a semi-hidden one and a character style, and a body of: a title, a
+/// centred paragraph, a paragraph with a tracked insertion, one ending a
+/// section, the next one, a table, the paragraph after it, Word's
+/// page-break paragraph, a heading and a last paragraph styled Normal.
 fn docx() -> Vec<u8> {
+    docx_with_styles("")
+}
+
+/// [`docx`] with `extra` style elements.
+fn docx_with_styles(extra: &str) -> Vec<u8> {
     let p = |id: &str, ppr: &str, text: &str| {
         format!(
             r#"<w:p w14:paraId="{id}"><w:pPr>{ppr}</w:pPr><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
@@ -126,10 +141,17 @@ fn docx() -> Vec<u8> {
         p("0000000A", r#"<w:pStyle w:val="Title"/>"#, "Lab report"),
         p("0000000B", r#"<w:jc w:val="center"/>"#, "We timed it."),
         r#"<w:p w14:paraId="0000000C"><w:r><w:t xml:space="preserve">Kept </w:t></w:r><w:ins w:id="1" w:author="Ada"><w:r><w:t>added</w:t></w:r></w:ins></w:p>"#.to_owned(),
-        p("0000000D", "<w:sectPr/>", "Section end"),
+        p(
+            "0000000D",
+            r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>"#,
+            "Section end",
+        ),
+        p("00000013", "", "Next section"),
         r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0000000E"><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#.to_owned(),
         p("0000000F", "", "After the table"),
-        p("00000010", "", "Last"),
+        r#"<w:p w14:paraId="00000011"><w:r><w:br w:type="page"/></w:r></w:p>"#.to_owned(),
+        p("00000012", r#"<w:pStyle w:val="Heading1"/>"#, "Chapter"),
+        p("00000010", r#"<w:pStyle w:val="Normal"/>"#, "Last"),
     ]
     .concat();
     let files = [
@@ -148,7 +170,7 @@ fn docx() -> Vec<u8> {
         (
             "word/styles.xml",
             format!(
-                r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style></w:styles>"#
+                r#"<w:styles xmlns:w="{W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr></w:style><w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style><w:style w:type="paragraph" w:styleId="Hidden"><w:name w:val="Hidden"/><w:hidden/></w:style><w:style w:type="paragraph" w:styleId="Quiet"><w:name w:val="Quiet"/><w:semiHidden/></w:style>{extra}</w:styles>"#
             ),
         ),
         (
@@ -232,12 +254,29 @@ fn read(doc: &Doc, start: Option<u32>, count: Option<u32>) -> Result<Value, Erro
     )
 }
 
+/// Each entry as inspect lists it, its label naming its paragraph style
+/// unless that is the default.
+fn styled_entries(doc: &Doc) -> Vec<Value> {
+    let mut entries = json!(inspect(&doc.base, doc.checkpoint()).unwrap());
+    for entry in entries.as_array_mut().unwrap() {
+        let style = match entry["value"].as_str().unwrap() {
+            "Lab report" => "Title",
+            "Chapter" => "Heading1",
+            _ => continue,
+        };
+        let label = format!("{} ({style})", entry["label"].as_str().unwrap());
+        entry["label"] = json!(label);
+    }
+    entries.as_array().unwrap().clone()
+}
+
 #[test]
 fn the_docx_read_pages_the_paragraphs_and_lists_the_paragraph_styles_first() {
     let doc = Doc::new(Format::Docx, docx());
     let first = read(&doc, None, Some(2)).unwrap();
-    let entries = inspect(&doc.base, doc.checkpoint()).unwrap();
-    assert_eq!(first["entries"], json!(&entries[..2]));
+    let entries = styled_entries(&doc);
+    assert_eq!(first["entries"], json!(entries[..2]));
+    assert_eq!(first["entries"][0]["label"], "body, paragraph 1 (Title)");
     assert_eq!(first["total"], entries.len());
     assert_eq!(first["nextStart"], 2);
     assert_eq!(
@@ -248,8 +287,9 @@ fn the_docx_read_pages_the_paragraphs_and_lists_the_paragraph_styles_first() {
             { "id": "Title", "name": "Title" },
         ])
     );
+    assert!(first.get("stylesMore").is_none());
     let rest = read(&doc, Some(2), Some(200)).unwrap();
-    assert_eq!(rest["entries"], json!(&entries[2..]));
+    assert_eq!(rest["entries"], json!(entries[2..]));
     assert_eq!(rest["nextStart"], Value::Null);
     assert!(rest.get("styles").is_none());
     assert_eq!(
@@ -258,8 +298,27 @@ fn the_docx_read_pages_the_paragraphs_and_lists_the_paragraph_styles_first() {
     );
 }
 
-/// Inserts after one paragraph, and before one, land in call order; a new
-/// paragraph takes the style named and nothing of its neighbour's
+/// The first page lists at most 50 shown styles and counts the rest.
+#[test]
+fn the_docx_read_caps_its_style_list() {
+    let extra: String = (0..60)
+        .map(|n| {
+            format!(
+                r#"<w:style w:type="paragraph" w:styleId="Body{n}"><w:name w:val="Body {n}"/></w:style>"#
+            )
+        })
+        .collect();
+    let doc = Doc::new(Format::Docx, docx_with_styles(&extra));
+    let first = read(&doc, None, Some(1)).unwrap();
+    let styles = first["styles"].as_array().unwrap();
+    assert_eq!(styles.len(), 50);
+    assert_eq!(styles[49], json!({ "id": "Body46", "name": "Body 46" }));
+    assert_eq!(first["stylesMore"], 13);
+}
+
+/// Inserts after one paragraph, and before one, land in call order, one
+/// after a paragraph right after it even past one inserted before the next;
+/// a new paragraph takes the style named and nothing of its neighbour's
 /// formatting, and the paragraphs around it keep their ids. The inverse
 /// deletes them.
 #[test]
@@ -269,19 +328,21 @@ fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
     let (title, timed) = (doc.id("Lab report"), doc.id("We timed it."));
     let edit = doc
         .apply(&[
+            before(&timed, "Aim"),
+            after(&title, "Sub"),
             after(&timed, "First."),
             styled(after(&timed, "Method"), "Heading1"),
             before(&title, "Draft"),
             before(&title, "v2"),
-            before(&timed, "Aim"),
         ])
         .unwrap();
     assert_eq!(
-        doc.texts()[..8],
+        doc.texts()[..9],
         [
             "Draft",
             "v2",
             "Lab report",
+            "Sub",
             "Aim",
             "We timed it.",
             "First.",
@@ -298,7 +359,7 @@ fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
         method.contains(r#"<w:pStyle w:val="Heading1"/>"#),
         "{method}"
     );
-    for text in ["First.", "Draft", "Aim"] {
+    for text in ["First.", "Draft", "Aim", "Sub"] {
         let xml = doc.paragraph_xml(text);
         assert!(
             !xml.contains("<w:pStyle") && !xml.contains("<w:jc"),
@@ -309,7 +370,7 @@ fn docx_inserts_land_after_and_before_in_call_order_and_undo() {
         doc.paragraph_xml("We timed it.")
             .contains(r#"<w:jc w:val="center"/>"#)
     );
-    assert_eq!(edit.targets.len(), 5);
+    assert_eq!(edit.targets.len(), 6);
 
     doc.apply(edit.inverse.as_deref().unwrap()).unwrap();
     assert_eq!(doc.paragraphs(), original);
@@ -324,6 +385,41 @@ fn an_insert_after_the_last_paragraph_has_no_inverse() {
     let edit = doc.apply(&[after(&last, "Done.")]).unwrap();
     assert_eq!(doc.texts().last().unwrap(), "Done.");
     assert_eq!(edit.inverse, None);
+}
+
+/// A split at a section's end leaves the section mark on the new paragraph,
+/// as Enter does, and delete_paragraph refuses a section's end: an insert
+/// after the section's last paragraph has no inverse. One before the next
+/// section's first paragraph leaves the section mark where it was and
+/// undoes.
+#[test]
+fn an_insert_next_to_a_section_end_keeps_the_section_and_undoes_where_it_can() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let original = doc.paragraphs();
+    let end = doc.id("Section end");
+    let edit = doc.apply(&[after(&end, "Coda")]).unwrap();
+    assert_eq!(edit.inverse, None);
+    assert!(doc.paragraph_xml("Coda").contains("<w:sectPr"));
+
+    let mut doc = Doc::new(Format::Docx, docx());
+    let next = doc.id("Next section");
+    let edit = doc.apply(&[before(&next, "Opening")]).unwrap();
+    assert!(doc.paragraph_xml("Section end").contains("<w:sectPr"));
+    assert!(!doc.paragraph_xml("Opening").contains("<w:sectPr"));
+    doc.apply(edit.inverse.as_deref().unwrap()).unwrap();
+    assert_eq!(doc.paragraphs(), original);
+}
+
+/// Word's page-break paragraph seeds as an empty paragraph and a break
+/// opening the next one; deleting that next paragraph keeps the break.
+#[test]
+fn docx_delete_after_a_page_break_keeps_the_break() {
+    let mut doc = Doc::new(Format::Docx, docx());
+    let chapter = doc.id("Chapter");
+    doc.apply(&[delete(&chapter, "Chapter")]).unwrap();
+    assert!(!doc.texts().iter().any(|text| text == "Chapter"));
+    let xml = doc.xml();
+    assert!(xml.contains(r#"w:type="page""#), "{xml}");
 }
 
 #[test]
@@ -456,10 +552,10 @@ fn pptx_inserts_and_deletes_paragraphs_in_a_shapes_text() {
     let (first, second) = (doc.id(DECK_STORY[0]), doc.id(DECK_STORY[1]));
     let edit = doc
         .apply(&[
+            before(&second, "C"),
             after(&first, "A"),
             after(&first, "B"),
             before(&first, "Top"),
-            before(&second, "C"),
         ])
         .unwrap();
     let story: Vec<String> = doc
@@ -495,6 +591,45 @@ fn pptx_inserts_and_deletes_paragraphs_in_a_shapes_text() {
     assert_eq!(edit.inverse, None);
     assert!(!doc.texts().iter().any(|text| text == DECK_STORY[0]));
     assert_eq!(doc.id(DECK_STORY[1]), second);
+}
+
+/// A new PPTX paragraph takes the level, bullet and alignment of the
+/// paragraph it goes after or before.
+#[test]
+fn a_pptx_insert_takes_the_level_and_bullet_of_its_anchor() {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(DECK)
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| match name.as_str() {
+            "ppt/slides/slide1.xml" => {
+                let xml = String::from_utf8(bytes).unwrap();
+                let plain = r#"<a:pPr algn="l" lvl="0"></a:pPr>"#;
+                let at = xml[..xml.find(DECK_STORY[1]).unwrap()]
+                    .rfind(plain)
+                    .unwrap();
+                let xml = format!(
+                    r#"{}<a:pPr marL="457200" lvl="1" algn="ctr"><a:buChar char="-"/></a:pPr>{}"#,
+                    &xml[..at],
+                    &xml[at + plain.len()..]
+                );
+                (name, xml.into_bytes())
+            }
+            _ => (name, bytes),
+        })
+        .collect();
+    let mut doc = Doc::new(Format::Pptx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let (first, second) = (doc.id(DECK_STORY[0]), doc.id(DECK_STORY[1]));
+    doc.apply(&[after(&first, "After"), before(&second, "Before")])
+        .unwrap();
+    let slide = doc.part("ppt/slides/slide1.xml");
+    let level = |text: &str| {
+        let xml = paragraph_in(&slide, "a", text);
+        (xml.contains(r#"lvl="1""#), xml.contains("<a:buChar"))
+    };
+    assert_eq!(level(DECK_STORY[0]), (false, false));
+    assert_eq!(level("After"), (false, false));
+    assert_eq!(level("Before"), (true, true));
+    assert_eq!(level(DECK_STORY[1]), (true, true));
 }
 
 /// An equation's text box (PowerPoint's spelling: the math in an `a14`

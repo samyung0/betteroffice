@@ -1,6 +1,6 @@
 //! A paragraph removed whole leaves its neighbours' ids and properties, and
-//! one inserted at a story's start takes a fresh id: the agent's commands
-//! name paragraphs by id within one call.
+//! one inserted before another takes a fresh id: the agent's commands name
+//! paragraphs by id within one call.
 
 use pptx_edit::{DeckSession, EditCtx, EditError, ParagraphSnapshot};
 
@@ -62,27 +62,46 @@ fn the_last_paragraph_and_an_unknown_one_are_refused() {
     assert_eq!(paragraphs(&session), before);
 }
 
+/// Before the first paragraph and before the second, a new paragraph takes
+/// a fresh id and the level and alignment of the paragraph it precedes,
+/// which keeps its id; it reopens saved.
 #[test]
-fn a_paragraph_inserted_at_the_start_takes_a_fresh_id_and_the_first_ones_properties() {
+fn a_paragraph_inserted_before_another_takes_a_fresh_id_and_its_properties() {
     let session = open();
-    let before = paragraphs(&session);
+    let second = "Office files,".encode_utf16().count() as u32 + 1;
     session
-        .remove_paragraph(&context(), STORY, &before[0].id)
+        .change_paragraph_level(&context(), STORY, second, second, 1, None)
         .unwrap();
-    // The centred paragraph is first now.
-    let id = session
-        .insert_paragraph_at_start(&context(), STORY)
+    let before = paragraphs(&session);
+    assert_eq!((before[0].level, before[1].level), (0, 1));
+    let first = session
+        .insert_paragraph_before(&context(), STORY, &before[0].id)
+        .unwrap();
+    let middle = session
+        .insert_paragraph_before(&context(), STORY, &before[1].id)
         .unwrap();
     let after = paragraphs(&session);
-    assert_eq!(after.len(), 2);
-    assert_ne!(id, before[1].id);
-    assert_eq!(after[0].id, id);
-    assert_eq!(after[0].alignment.as_deref(), Some("ctr"));
-    assert!(after[0].runs.iter().all(|run| run.text.is_empty()));
-    assert_eq!(after[1], before[1]);
+    assert_eq!(after.len(), 4);
+    assert_eq!(
+        (after[0].id.as_str(), after[2].id.as_str()),
+        (first.as_str(), middle.as_str())
+    );
+    assert_eq!(
+        (after[1].clone(), after[3].clone()),
+        (before[0].clone(), before[1].clone())
+    );
+    for (new, old) in [(&after[0], &before[0]), (&after[2], &before[1])] {
+        assert_ne!(new.id, old.id);
+        assert_eq!((new.level, &new.alignment), (old.level, &old.alignment));
+        assert!(new.runs.iter().all(|run| run.text.is_empty()));
+    }
     let reopened = DeckSession::open(&session.save().unwrap(), 8).unwrap();
     assert_eq!(
         reopened.story(STORY).unwrap().plain_text(),
-        "\nwithout the office."
+        "\nOffice files,\n\nwithout the office."
     );
+    assert!(matches!(
+        session.insert_paragraph_before(&context(), STORY, "nope"),
+        Err(EditError::ParagraphNotFound(id)) if id == "nope"
+    ));
 }
