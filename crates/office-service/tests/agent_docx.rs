@@ -1118,9 +1118,10 @@ fn docx_commands_parse_from_their_wire_json() {
     );
 }
 
-/// An XLSX command on a DOCX file is refused as unsupported.
+/// An XLSX or PPTX command on a DOCX file is refused as unsupported,
+/// naming the format it edits.
 #[test]
-fn xlsx_commands_are_refused_on_a_docx() {
+fn xlsx_and_pptx_commands_are_refused_on_a_docx() {
     let mut doc = report();
     assert_eq!(
         doc.apply(&[Command::AddSheet {
@@ -1131,6 +1132,18 @@ fn xlsx_commands_are_refused_on_a_docx() {
         refused(
             EditCode::UnsupportedOperation,
             "this command edits XLSX files"
+        )
+    );
+    assert_eq!(
+        doc.apply(&[Command::AddSlide {
+            after_slide: None,
+            before_slide: None,
+            layout: None,
+        }])
+        .unwrap_err(),
+        refused(
+            EditCode::UnsupportedOperation,
+            "this command edits PPTX files"
         )
     );
 }

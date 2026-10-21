@@ -706,6 +706,14 @@ impl DocxSession {
                 target_id,
                 alignment,
             } => self.set_alignment(target_id, *alignment).map(none),
+            Command::SetShapeText { .. }
+            | Command::AddSlide { .. }
+            | Command::DeleteSlide { .. }
+            | Command::MoveSlide { .. }
+            | Command::AddTextBox { .. } => Err(Error::edit(
+                EditCode::UnsupportedOperation,
+                "this command edits PPTX files",
+            )),
             _ => Err(Error::edit(
                 EditCode::UnsupportedOperation,
                 "this command edits XLSX files",
