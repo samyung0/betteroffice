@@ -13,6 +13,7 @@ use super::item::{
     formatting_attrs, is, is_kind, is_unit_break, o, run_content_for_text, st, stable_stringify,
     tracked_content_for_item, tracked_info, ty,
 };
+use super::styles::same_json;
 
 fn marks_key_to_yrs_attrs(marks_key: &V) -> Option<V> {
     let Some(key) = marks_key.as_str().filter(|key| !key.is_empty()) else {
@@ -892,12 +893,56 @@ pub(crate) fn items_with_markers(properties: &V, items: Vec<V>) -> Vec<V> {
     insert_bookmark_items(items, markers)
 }
 
+/// Every run among `nodes`, those inside links, tracked changes, fields and
+/// content controls included.
+pub(crate) fn nested_runs(nodes: &[V], runs: &mut Vec<V>) {
+    for node in nodes {
+        if is(node, "run") {
+            runs.push(node.clone());
+            continue;
+        }
+        for key in ["children", "content"] {
+            if node.get(key).arr().is_some() {
+                nested_runs(&node.get(key).items(), runs);
+            }
+        }
+    }
+}
+
+/// A run whose formatting is what the seed resolved for one of its source
+/// paragraph's runs saves that run's own formatting, so what it inherited
+/// from styles keeps following them in Word (Epo 2026-10-21); a run whose
+/// formatting changed saves it resolved.
+fn with_source_run_formatting(content: Vec<V>, source_runs: &[(V, V)]) -> Vec<V> {
+    if source_runs.is_empty() {
+        return content;
+    }
+    let mut runs = Vec::new();
+    nested_runs(&content, &mut runs);
+    for run in runs {
+        let Some(object) = run.obj() else { continue };
+        let live = run.get("formatting").or_else(|| V::Obj(Obj::new()));
+        if let Some((_, source)) = source_runs
+            .iter()
+            .find(|(seeded, _)| same_json(seeded, &live))
+        {
+            if o(source).is_some_and(|source| !source.is_empty()) {
+                object.set("formatting", source.deep_copy());
+            } else {
+                object.delete("formatting");
+            }
+        }
+    }
+    content
+}
+
 pub(crate) fn paragraph_from_story(
     para_id: &str,
     properties: &V,
     items: Vec<V>,
     comment_boundaries: &[V],
     base_paragraph: Option<&V>,
+    source_runs: &[(V, V)],
     seeded: &mut dyn FnMut(&V) -> Result<V>,
 ) -> Result<V> {
     let attrs = paragraph_attrs(properties);
@@ -911,6 +956,7 @@ pub(crate) fn paragraph_from_story(
             .map(|runs| runs.items()),
     );
     content = restore_raw_inlines(content, base_paragraph);
+    content = with_source_run_formatting(content, source_runs);
     content = insert_boundaries(
         content,
         comment_boundaries,

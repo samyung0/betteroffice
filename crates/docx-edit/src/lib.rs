@@ -105,8 +105,8 @@ pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::{
-    MEDIA_REF_PREFIX, SEED_CLIENT_ID, package_media, parse_docx_for_edit, seed_from_docx,
-    seed_parsed_docx, seed_parsed_docx_in_place,
+    MEDIA_REF_PREFIX, SEED_CLIENT_ID, SeedResolution, package_media, parse_docx_for_edit,
+    seed_from_docx, seed_parsed_docx, seed_parsed_docx_in_place,
 };
 use segments::SegmentIndex;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};

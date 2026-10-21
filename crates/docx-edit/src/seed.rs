@@ -4250,6 +4250,53 @@ impl PackageContext {
     }
 }
 
+/// What the seed resolves for a source run and a source table's cells, so a
+/// save writes back only what an edit changed: a run the seed's formatting
+/// still describes keeps its source formatting, and a cell saves only the
+/// borders and margins that differ from these (Epo 2026-10-21).
+pub struct SeedResolution {
+    styles: StyleResolver,
+}
+
+impl SeedResolution {
+    /// From a parsed document's `package.styles`.
+    pub fn new(styles: Option<&Value>) -> Self {
+        Self {
+            styles: StyleResolver::new(styles),
+        }
+    }
+
+    /// The text attributes the seed gives a run with `formatting` (its source
+    /// rPr) in a paragraph of style `paragraph_style`.
+    pub fn run_attrs(&self, paragraph_style: Option<&str>, formatting: Option<&Value>) -> Value {
+        let paragraph = json!({ "formatting": { "styleId": paragraph_style } });
+        let run = match formatting {
+            Some(formatting) => json!({ "formatting": formatting }),
+            None => json!({}),
+        };
+        let style = paragraph_style_formatting(&paragraph, &self.styles, None);
+        let marks = run_format_marks(&run, style.as_ref(), &self.styles);
+        Value::Object(marks_to_attrs(&marks).into_iter().collect())
+    }
+
+    /// The borders and margins the seed gives each cell of a source table,
+    /// by row and then by the cell's place among that row's seeded cells
+    /// (the `r{row}c{cell}` of its story id).
+    pub fn cell_frames(&self, table: &Value) -> Vec<Vec<(Value, Value)>> {
+        let frame = |attrs: &JsonObject, key: &str| attrs.get(key).cloned().unwrap_or(Value::Null);
+        project_table(table, &self.styles, None, 15)
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| (frame(&cell.attrs, "borders"), frame(&cell.attrs, "margins")))
+                    .collect()
+            })
+            .collect()
+    }
+}
+
 /// Every seed is written under this client, so a package seeds to the same
 /// bytes and object ids on every engine instance (and costs one byte per id).
 pub const SEED_CLIENT_ID: u64 = 0;

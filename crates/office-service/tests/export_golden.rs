@@ -1,6 +1,9 @@
 //! Pins the bytes a DOCX seed and save produce. The memory round's export fixes
 //! (working copies dropped, forms dropped, batched bookmark positions, story
 //! segments) kept these bytes; a change here is a change to what Word gets.
+//! Saving runs with their source formatting and cells with only the borders
+//! and margins an edit changed (Epo 2026-10-21) changed the three fixtures
+//! with styles; the others have none to resolve.
 //! The fixtures cover headers and footers, footnotes, fields and a TOC, tables,
 //! comments, and bookmarks in the body, a header and a footnote.
 
@@ -32,17 +35,17 @@ fn a_seeded_document_saves_the_same_bytes() {
         (
             "wordprocessingml-comprehensive",
             include_bytes!("../../../poc/fixtures/wordprocessingml-comprehensive.docx"),
-            "e14a1c63f619b775d41b8fba08d54027d81c7000d641feb909031346804d3a21",
+            "738686f6b8d95ac9f1bdf3a566e92709fbf05ec49660132c88981f289e9d29c7",
         ),
         (
             "exchange-plan",
             include_bytes!("../../../poc/fixtures/exchange-plan.docx"),
-            "650cf18ca39464d9570b4477c735395856164dae0cd7a136a9084ee22e8d1d78",
+            "f14019ebb6d2259efcfa086e3cb0a04a42ca9c7626a04aeaa18bf3d8540f57b4",
         ),
         (
             "feature-rich",
             include_bytes!("../../../poc/fixtures/feature-rich.docx"),
-            "bf8fee4c2f9f37c31c41e18781e7eae942f838760e3a147278a3a5e76e608d9a",
+            "3ddeff1960b564bd34a6d28618d205c17dfde500d286a34a8fcf1d9d2a57107f",
         ),
         (
             "stories",

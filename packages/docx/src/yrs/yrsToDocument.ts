@@ -63,6 +63,7 @@ import {
   type SourceStories,
 } from './tableParagraphFormatting';
 import { createStyleResolver, type StyleResolver } from '../styles';
+import { seededCellFrames, seededRunAttrs } from './documentToYrs';
 
 type Attrs = Record<string, unknown>;
 
@@ -1379,6 +1380,47 @@ function restoreOriginalRuns(
   });
 }
 
+/** Every run among `nodes`, those inside links, tracked changes, fields and content controls included. */
+function nestedRuns(nodes: readonly unknown[], runs: Run[] = []): Run[] {
+  for (const node of nodes) {
+    const object = asObject(node);
+    if (!object) continue;
+    if (object.type === 'run') {
+      runs.push(node as Run);
+      continue;
+    }
+    for (const key of ['children', 'content']) {
+      if (Array.isArray(object[key])) nestedRuns(object[key] as unknown[], runs);
+    }
+  }
+  return runs;
+}
+
+/** A source run as the formatting the seed resolved for it, with its own formatting. */
+type SourceRun = readonly [seeded: TextFormatting, source: TextFormatting | undefined];
+
+/**
+ * A run whose formatting is what the seed resolved for one of its source
+ * paragraph's runs saves that run's own formatting, so what it inherited from
+ * styles keeps following them in Word (Epo 2026-10-21); a run whose formatting
+ * changed saves it resolved.
+ */
+function withSourceRunFormatting(
+  content: ParagraphContent[],
+  sourceRuns: readonly SourceRun[]
+): ParagraphContent[] {
+  if (sourceRuns.length === 0) return content;
+  for (const run of nestedRuns(content)) {
+    const live = run.formatting ?? {};
+    const match = sourceRuns.find(([seeded]) => sameJson(seeded, live));
+    if (!match) continue;
+    const [, source] = match;
+    if (source && Object.keys(source).length > 0) run.formatting = { ...source };
+    else delete run.formatting;
+  }
+  return content;
+}
+
 function runTextLength(run: Run): number {
   return run.content.reduce((length, content) => {
     if (content.type === 'text' || content.type === 'instrText')
@@ -1757,6 +1799,7 @@ function paragraphFromStory(
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
   baseParagraph: Paragraph | undefined,
+  sourceRuns: readonly SourceRun[],
   seeded: (attrs: ParagraphSaveAttrs) => Attrs
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
@@ -1779,6 +1822,7 @@ function paragraphFromStory(
       : undefined
   );
   content = restoreRawInlines(content, baseParagraph);
+  content = withSourceRunFormatting(content, sourceRuns);
   content = insertBoundaries(content, commentBoundaries, storyUnits);
 
   const paragraph: Paragraph = {
@@ -1897,7 +1941,10 @@ function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): 
       : [];
   const cell: TableCell = {
     type: 'tableCell',
-    formatting: tableCellAttrsToFormatting(attrs),
+    formatting: tableCellAttrsToFormatting(
+      attrs,
+      payload.story ? context.seededCellFrame(payload.story) : undefined
+    ),
     content,
   };
   const marker = attrs.cellMarker;
@@ -2590,6 +2637,8 @@ class SaveContext {
   /** What each cell story's paragraphs save against, from {@link cellContext}. */
   private readonly cellContexts = new Map<string, ParagraphFormatting | undefined>();
   private readonly stylePprs = new Map<string, ParagraphFormatting | undefined>();
+  /** Each source table's seeded cell borders and margins, by table story. */
+  private readonly cellFrames = new Map<string, ReturnType<typeof seededCellFrames>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
   private readonly storyOwners = new WeakMap<object, string>();
   private readonly projectedStories = new Set<string>();
@@ -2640,6 +2689,29 @@ class SaveContext {
     while (this.paraIds.has(value)) value = (value % (PARA_ID_LIMIT - 1)) + 1;
     this.paraIds.add(value);
     return value.toString(16).toUpperCase().padStart(8, '0');
+  }
+
+  /** Each run of a source paragraph (see {@link nestedRuns}) as the formatting the seed resolved for it, with its own. */
+  private sourceRuns(paragraph: Paragraph): SourceRun[] {
+    const { styles } = this.seedSources;
+    return nestedRuns(paragraph.content).map((run) => [
+      attrsToTextFormatting(formattingAttrs(seededRunAttrs(paragraph.formatting?.styleId, run, styles))),
+      run.formatting,
+    ]);
+  }
+
+  /** The borders and margins the seed resolved for source cell `story`. */
+  seededCellFrame(story: string): { borders: unknown; margins: unknown } | undefined {
+    const source = this.source.cells.get(story);
+    const place = /^(.*):r(\d+)c(\d+)$/.exec(story);
+    if (!source || !place) return undefined;
+    const [, table, row, cell] = place;
+    let frames = this.cellFrames.get(table!);
+    if (!frames) {
+      frames = seededCellFrames(source.table, this.seedSources.styles);
+      this.cellFrames.set(table!, frames);
+    }
+    return frames[Number(row)]?.[Number(cell)];
   }
 
   /** The paragraph properties the seed gave a paragraph with the editor's style and list. */
@@ -3117,6 +3189,7 @@ class SaveContext {
             items,
             boundaries,
             baseParagraph,
+            baseParagraph ? this.sourceRuns(baseParagraph) : [],
             (attrs) => this.seededProperties(storyId, attrs)
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });

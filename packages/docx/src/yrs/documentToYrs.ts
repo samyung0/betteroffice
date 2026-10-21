@@ -1673,6 +1673,40 @@ function projectTable(
   };
 }
 
+/**
+ * The text attributes the seed gives a run of a paragraph with style
+ * `paragraphStyleId`, so a save can tell a run whose formatting no edit
+ * changed (seed.rs `SeedResolution::run_attrs`; Epo 2026-10-21).
+ */
+export function seededRunAttrs(
+  paragraphStyleId: string | undefined,
+  run: Run,
+  styleResolver: StyleResolver | null
+): Attrs {
+  const paragraph: Paragraph = {
+    type: 'paragraph',
+    formatting: { styleId: paragraphStyleId },
+    content: [],
+  };
+  return marksToYrsAttrs(
+    runFormatMarks(run, paragraphStyleFormatting(paragraph, styleResolver), styleResolver)
+  );
+}
+
+/**
+ * The borders and margins the seed gives each cell of a source table, by row
+ * and then by the cell's place among that row's seeded cells (seed.rs
+ * `SeedResolution::cell_frames`).
+ */
+export function seededCellFrames(
+  table: Table,
+  styleResolver: StyleResolver | null
+): Array<Array<{ borders: unknown; margins: unknown }>> {
+  return projectTable(table, styleResolver, null, 15).rows.map((row) =>
+    row.cells.map((cell) => ({ borders: cell.attrs.borders, margins: cell.attrs.margins }))
+  );
+}
+
 function blockSdtAttrs(properties: SdtProperties): Attrs {
   return blockSdtAttrsToPayload(sdtPropsToAttrs(properties));
 }
