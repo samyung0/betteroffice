@@ -280,6 +280,65 @@ impl StickyIndex {
             .collect()
     }
 
+    /// Patched for BetterOffice: [StickyIndex::at] of every `(index, assoc)`
+    /// in `requests` (answered in their order) from one forward walk of the
+    /// branch instead of a walk from its start per index, so placing all of a
+    /// long text's anchors stays linear.
+    pub fn at_many<T: ReadTxn>(
+        txn: &T,
+        branch: BranchPtr,
+        requests: &[(u32, Assoc)],
+    ) -> Vec<Option<Self>> {
+        // The unit `at` walks to; none for an index 0 that faces before.
+        let target = |(index, assoc): (u32, Assoc)| match assoc {
+            Assoc::Before => index.checked_sub(1),
+            Assoc::After => Some(index),
+        };
+        let mut order: Vec<usize> = (0..requests.len()).collect();
+        order.sort_by_key(|&at| target(requests[at]));
+        let mut out: Vec<Option<Self>> = vec![None; requests.len()];
+        // The walk and the unit it stands at; gone once a walk fails.
+        let mut walk = Some((BlockIter::new(branch), 0u32));
+        for at in order {
+            let (index, assoc) = requests[at];
+            let Some(goal) = target(requests[at]) else {
+                out[at] = Some(StickyIndex::new(IndexScope::from_branch(branch), assoc));
+                continue;
+            };
+            let Some((walker, walked)) = walk.as_mut() else {
+                out[at] = Self::at(txn, branch, index, assoc);
+                continue;
+            };
+            if !walker.try_forward(txn, goal - *walked) {
+                walk = None;
+                out[at] = Self::at(txn, branch, index, assoc);
+                continue;
+            }
+            *walked = goal;
+            // What `at` answers once its walker reached `goal`.
+            out[at] = if walker.finished() {
+                (assoc == Assoc::Before).then(|| {
+                    let context = match walker.next_item() {
+                        Some(ptr) => IndexScope::Relative(ptr.last_id()),
+                        None => IndexScope::from_branch(branch),
+                    };
+                    Self::new(context, assoc)
+                })
+            } else {
+                let context = match walker.next_item() {
+                    Some(ptr) => {
+                        let mut id = ptr.id().clone();
+                        id.clock += walker.rel();
+                        IndexScope::Relative(id)
+                    }
+                    None => IndexScope::from_branch(branch),
+                };
+                Some(Self::new(context, assoc))
+            };
+        }
+        out
+    }
+
     pub fn at<T: ReadTxn>(
         txn: &T,
         branch: BranchPtr,

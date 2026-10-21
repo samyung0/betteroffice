@@ -312,9 +312,49 @@ export interface TableCellSaveAttrs extends Record<string, unknown> {
   tcPrChange?: TableCellPropertyChange[] | null;
 }
 
+/**
+ * The sides of a cell's resolved borders or margins it saves: for a source
+ * cell only those that differ from what the seed resolved (`seeded`), the
+ * cell's own tcPr keeping the rest, so a table style or table-wide margins keep
+ * applying in Word (Epo 2026-10-21); all of them for any other cell.
+ */
+function changedSides<T extends object>(live: T | undefined, seeded: unknown): T | undefined {
+  if (seeded === undefined) return live;
+  const changed: Record<string, unknown> = {};
+  for (const [side, value] of Object.entries(live ?? {})) {
+    if (!sameCanonical(value, asRecord(seeded)?.[side])) changed[side] = value;
+  }
+  return Object.keys(changed).length > 0 ? (changed as T) : undefined;
+}
+
+/** `canonical(a) === canonical(b)` without building the strings (a cell compares about eight sides). */
+function sameCanonical(a: unknown, b: unknown): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((entry, index) => sameCanonical(entry, b[index]))
+    );
+  }
+  if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const left = Object.entries(a).filter(([, entry]) => entry != null);
+  return (
+    left.length === Object.values(b).filter((entry) => entry != null).length &&
+    left.every(([key, entry]) => sameCanonical(entry, (b as Record<string, unknown>)[key]))
+  );
+}
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+
 export function tableCellAttrsToFormatting(
-  attrs: TableCellSaveAttrs
+  attrs: TableCellSaveAttrs,
+  seeded?: { borders: unknown; margins: unknown }
 ): TableCellFormatting | undefined {
+  const borders = changedSides(attrs.borders ?? undefined, seeded && (seeded.borders ?? null));
+  const margins = changedSides(attrs.margins ?? undefined, seeded && (seeded.margins ?? null));
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
@@ -336,8 +376,10 @@ export function tableCellAttrsToFormatting(
     } else if (orig.shading) {
       result.shading = undefined;
     }
-    if (attrs.borders) result.borders = attrs.borders;
-    if (attrs.margins) result.margins = cellMargins(attrs.margins);
+    if (borders) result.borders = seeded ? { ...orig.borders, ...borders } : borders;
+    if (margins) {
+      result.margins = seeded ? { ...orig.margins, ...cellMargins(margins) } : cellMargins(margins);
+    }
     if (attrs.textDirection !== (orig.textDirection || undefined)) {
       result.textDirection = attrs.textDirection || undefined;
     }
@@ -351,8 +393,8 @@ export function tableCellAttrsToFormatting(
     attrs.width != null ||
     attrs.verticalAlign ||
     attrs.backgroundColor ||
-    attrs.borders ||
-    attrs.margins ||
+    borders ||
+    margins ||
     attrs.textDirection ||
     attrs.noWrap;
   if (!hasFormatting) return undefined;
@@ -368,8 +410,8 @@ export function tableCellAttrsToFormatting(
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: attrs.textDirection || undefined,
     shading: attrs.backgroundColor ? { fill: { rgb: attrs.backgroundColor } } : undefined,
-    borders: attrs.borders,
-    margins: attrs.margins ? cellMargins(attrs.margins) : undefined,
+    borders,
+    margins: margins ? cellMargins(margins) : undefined,
     noWrap: attrs.noWrap || undefined,
   };
 }

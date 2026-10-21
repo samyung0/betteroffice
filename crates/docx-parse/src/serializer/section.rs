@@ -399,7 +399,9 @@ fn write_document_grid(writer: &mut XmlWriter, grid: Option<&DocumentGrid>) {
 mod tests {
     use crate::borders::BorderSpec;
     use crate::notes::NoteProperties;
-    use crate::section::{Column, DocumentGrid, LineNumbering, PageBorders, StoryReference};
+    use crate::section::{
+        Column, DocumentGrid, LineNumbering, PageBorders, SectionPropertiesFields, StoryReference,
+    };
 
     use super::*;
 
@@ -410,19 +412,19 @@ mod tests {
             serialize_section_properties(Some(&SectionProperties::default())),
             ""
         );
-        let properties = SectionProperties {
+        let properties = SectionProperties::from(SectionPropertiesFields {
             columns: Some(Vec::new()),
             line_numbers: Some(LineNumbering::default()),
             doc_grid: Some(DocumentGrid::default()),
             page_borders: Some(PageBorders::default()),
-            ..SectionProperties::default()
-        };
+            ..SectionPropertiesFields::default()
+        });
         assert_eq!(serialize_section_properties(Some(&properties)), "");
     }
 
     #[test]
     fn preserves_schema_order_integer_rules_and_empty_column_spelling() {
-        let properties = SectionProperties {
+        let properties = SectionProperties::from(SectionPropertiesFields {
             header_references: Some(vec![StoryReference {
                 reference_type: "default".to_owned(),
                 relationship_id: "rId1".to_owned(),
@@ -455,18 +457,18 @@ mod tests {
                 char_space: None,
             }),
             even_and_odd_headers: Some(true),
-            ..SectionProperties::default()
-        };
+            ..SectionPropertiesFields::default()
+        });
         assert_eq!(
             serialize_section_properties(Some(&properties)),
             "<w:sectPr><w:headerReference w:type=\"default\" r:id=\"rId1\"/><w:footnotePr><w:pos w:val=\"pageBottom\"/><w:numStart w:val=\"1.25\"/></w:footnotePr><w:type w:val=\"nextPage\"/><w:pgSz w:w=\"1008\" w:h=\"2001\" w:orient=\"landscape\"/><w:pgMar w:top=\"-1\"/><w:paperSrc w:first=\"2.5\"/><w:lnNumType w:countBy=\"5\"/><w:cols w:num=\"2\" w:space=\"720\"><w:col /></w:cols><w15:footnoteColumns w:val=\"3\"/><w:vAlign w:val=\"center\"/><w:titlePg/><w:bidi/><w:docGrid w:type=\"lines\" w:linePitch=\"360.25\"/><w:evenAndOddHeaders/></w:sectPr>"
         );
         assert_eq!(
-            serialize_section_properties(Some(&SectionProperties {
+            serialize_section_properties(Some(&SectionProperties::from(SectionPropertiesFields {
                 column_count: Some(2.0),
                 column_space: Some(720.0),
-                ..SectionProperties::default()
-            })),
+                ..SectionPropertiesFields::default()
+            }))),
             "<w:sectPr><w:cols w:num=\"2\" w:space=\"720\"></w:cols></w:sectPr>"
         );
     }
@@ -474,7 +476,7 @@ mod tests {
     #[test]
     fn escapes_every_attacker_derived_section_string() {
         let attack = "\"/><evil attr='&".to_owned();
-        let properties = SectionProperties {
+        let properties = SectionProperties::from(SectionPropertiesFields {
             header_references: Some(vec![StoryReference {
                 reference_type: attack.clone(),
                 relationship_id: attack.clone(),
@@ -509,8 +511,8 @@ mod tests {
                 grid_type: Some(attack),
                 ..DocumentGrid::default()
             }),
-            ..SectionProperties::default()
-        };
+            ..SectionPropertiesFields::default()
+        });
         let xml = serialize_section_properties(Some(&properties));
         assert!(!xml.contains("<evil"));
         assert!(!xml.contains("attr='"));

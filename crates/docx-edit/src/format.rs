@@ -191,13 +191,8 @@ impl InlineFormatDelta {
         match &self.highlight {
             Patch::Keep => {}
             Patch::Clear => put("highlight", Any::Null),
-            Patch::Set(color) => put(
-                "highlight",
-                Any::Map(Arc::new(HashMap::from([(
-                    "color".into(),
-                    Any::from(highlight_color_name(color)),
-                )]))),
-            ),
+            // A plain colour name, as the seed stores it and the save reads it.
+            Patch::Set(color) => put("highlight", Any::from(highlight_color_name(color))),
         }
         match &self.font_size {
             Patch::Keep => {}

@@ -1673,6 +1673,43 @@ function projectTable(
   };
 }
 
+/**
+ * The text attributes the seed gives a run of a paragraph with style
+ * `paragraphStyleId`, so a save can tell a run whose formatting no edit
+ * changed (seed.rs `SeedResolution::run_attrs`; Epo 2026-10-21).
+ */
+export function seededRunAttrs(
+  paragraphStyleId: string | undefined,
+  run: Run,
+  styleResolver: StyleResolver | null
+): Attrs {
+  const paragraph: Paragraph = {
+    type: 'paragraph',
+    formatting: { styleId: paragraphStyleId },
+    content: [],
+  };
+  return marksToYrsAttrs(
+    runFormatMarks(run, paragraphStyleFormatting(paragraph, styleResolver), styleResolver)
+  );
+}
+
+/**
+ * The borders and margins the seed gives each cell of a source table, by row
+ * and then by the cell's place among that row's seeded cells (seed.rs
+ * `SeedResolution::cell_frames`).
+ */
+export function seededCellFrames(
+  table: Table,
+  styleResolver: StyleResolver | null
+): Array<Array<{ borders: unknown; margins: unknown }>> {
+  // No theme and compatibility mode 15: in projectTable they feed only a cell's
+  // shading and the table's compatibilityMode, never borders or margins. Pass
+  // the seed's own if that changes.
+  return projectTable(table, styleResolver, null, 15).rows.map((row) =>
+    row.cells.map((cell) => ({ borders: cell.attrs.borders, margins: cell.attrs.margins }))
+  );
+}
+
 function blockSdtAttrs(properties: SdtProperties): Attrs {
   return blockSdtAttrsToPayload(sdtPropsToAttrs(properties));
 }
@@ -1894,7 +1931,7 @@ function visitStory(
 }
 
 function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
-  const ops: YrsRawOp[] = [{ op: 'delete', index: 0, len: 1 }];
+  const ops: YrsRawOp[] = [];
   let index = 0;
   let text = '';
   let attrs: YrsAttrs = {};
@@ -2060,7 +2097,14 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     });
   }
 
-  for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
+  // Every story first, empty (an empty seed batch creates it), as seed.rs does;
+  // a story the document names twice (two notes with one id) fails the seed.
+  const storyIds = new Set<string>();
+  for (const plan of context.plans) {
+    if (storyIds.has(plan.storyId)) throw new Error(`story "${plan.storyId}" already exists`);
+    storyIds.add(plan.storyId);
+  }
+  for (const plan of context.plans) session.applySeedRawOps(plan.storyId, []);
   for (const plan of context.plans) seedPlan(session, plan);
   session.applySeedRawOps(
     'body',

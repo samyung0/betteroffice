@@ -105,8 +105,8 @@ pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::{
-    MEDIA_REF_PREFIX, SEED_CLIENT_ID, package_media, parse_docx_for_edit, seed_from_docx,
-    seed_parsed_docx, seed_parsed_docx_in_place,
+    MEDIA_REF_PREFIX, SEED_CLIENT_ID, SeedResolution, package_media, parse_docx_for_edit,
+    seed_from_docx, seed_parsed_docx, seed_parsed_docx_in_place,
 };
 use segments::SegmentIndex;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
@@ -228,6 +228,11 @@ pub struct StorySegment {
     pub content: SegmentContent,
     pub attributes: BTreeMap<String, Any>,
 }
+
+/// Every story's bookmark and field-boundary positions from one scan of the
+/// bookmarks map, for [`EditingDoc::story_segments_with`] while the document
+/// does not change.
+pub struct BookmarkPositions(HashMap<String, Vec<(u32, Any)>>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphSnapshot {
@@ -481,28 +486,6 @@ impl EditingDoc {
         self.create_story_with_paragraph_id(story_id, para_id, initial_text, p_style, alignment)
     }
 
-    pub(crate) fn create_empty_stories(&self, story_ids: &[String]) -> EditResult<()> {
-        let mut txn = self.doc.transact_mut_with(self.client_id);
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        for story_id in story_ids {
-            let para_id = self.next_id();
-            if stories.contains_key(&txn, story_id) {
-                return Err(EditError::StoryExists(story_id.clone()));
-            }
-            let story = stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
-            let pilcrow = story.insert_embed_with_attributes(
-                &mut txn,
-                0,
-                MapPrelim::default(),
-                insertion_attrs(None, None),
-            );
-            write_pilcrow_properties(&pilcrow, &mut txn, &para_id, "Normal", Some("left"));
-        }
-        Ok(())
-    }
-
     /// Adds a one-paragraph story with a caller-supplied paragraph ID.
     pub fn create_story_with_paragraph_id(
         &self,
@@ -731,6 +714,25 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
+        Ok(segments_of(&txn, &story, &bookmarks))
+    }
+
+    /// [`Self::story_segments`] for a reader of many stories: one story's read
+    /// scans every bookmark of the document, this scan serves them all.
+    pub fn bookmark_positions(&self) -> BookmarkPositions {
+        BookmarkPositions(bookmarks::positions_by_story(&self.doc.transact()))
+    }
+
+    /// [`Self::story_segments`] with `positions` read since the last change.
+    pub fn story_segments_with(
+        &self,
+        story_id: &str,
+        positions: &BookmarkPositions,
+    ) -> EditResult<Vec<StorySegment>> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let markers = positions.0.get(story_id).map_or(&[][..], Vec::as_slice);
+        let bookmarks = bookmarks::paragraph_properties_at(&txn, &story, markers);
         Ok(segments_of(&txn, &story, &bookmarks))
     }
 

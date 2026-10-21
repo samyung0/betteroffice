@@ -123,6 +123,12 @@ Transactions and updates:
   transactions count it as made before them, so changes to it raise events
   (upstream counted it as new and raised none). Tests are in
   `crates/docx-edit/tests/yrs_transaction_work.rs`, which pins the skip case;
+- a commit merges the blocks around each deleted range as upstream does, then
+  removes every merged block from a client's list in one pass
+  (`ClientBlockList::squash_deleted_ranges` in `src/block_store.rs`, called
+  by `try_squash_with` in `src/id_set.rs`); upstream moved the list's tail
+  once per range, quadratic in a commit that deletes in many places (tested
+  in `crates/docx-edit/tests/yrs_squash_once.rs`);
 - a pending update waits on each client's held state (`BlockStore::get_state`
   in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
   instead of its clock past skips, and on every client its stacked structs
@@ -214,7 +220,11 @@ Read-only accessors, for structure walks and guards that compute no index:
   item right of a deleted one, so the DOCX editor finds the field an edit
   ends at) (`src/store.rs`, with unit tests and tests in `crates/docx-edit`);
 - `StickyIndex::get_offsets` (`src/sticky_index.rs`), which resolves many
-  indexes in one walk as `get_offset` resolves each, with unit tests.
+  indexes in one walk as `get_offset` resolves each, with unit tests;
+- `StickyIndex::at_many` (`src/sticky_index.rs`), which places many indexes in
+  one walk as `at` places each, so a DOCX seed anchors all of a story's
+  bookmarks and field boundaries in linear time (tested in
+  `crates/docx-edit/tests/yrs_sticky_batch.rs`).
 
 Its `Cargo.toml` also has a `[lints]` block that allows its upstream warnings.
 

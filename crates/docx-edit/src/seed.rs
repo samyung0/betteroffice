@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -3953,7 +3953,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
 ) -> Result<Vec<RawOp>, String> {
-    let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
+    let mut ops = Vec::new();
     let mut index = 0u32;
     let mut text = String::new();
     let mut attrs = JsonObject::new();
@@ -4250,6 +4250,56 @@ impl PackageContext {
     }
 }
 
+/// What the seed resolves for a source run and a source table's cells, so a
+/// save writes back only what an edit changed: a run the seed's formatting
+/// still describes keeps its source formatting, and a cell saves only the
+/// borders and margins that differ from these (Epo 2026-10-21).
+pub struct SeedResolution {
+    styles: StyleResolver,
+}
+
+impl SeedResolution {
+    /// From a parsed document's `package.styles`.
+    pub fn new(styles: Option<&Value>) -> Self {
+        Self {
+            styles: StyleResolver::new(styles),
+        }
+    }
+
+    /// The text attributes the seed gives a run with `formatting` (its source
+    /// rPr) in a paragraph of style `paragraph_style`.
+    pub fn run_attrs(&self, paragraph_style: Option<&str>, formatting: Option<&Value>) -> Value {
+        let paragraph = json!({ "formatting": { "styleId": paragraph_style } });
+        let run = match formatting {
+            Some(formatting) => json!({ "formatting": formatting }),
+            None => json!({}),
+        };
+        let style = paragraph_style_formatting(&paragraph, &self.styles, None);
+        let marks = run_format_marks(&run, style.as_ref(), &self.styles);
+        Value::Object(marks_to_attrs(&marks).into_iter().collect())
+    }
+
+    /// The borders and margins the seed gives each cell of a source table,
+    /// by row and then by the cell's place among that row's seeded cells
+    /// (the `r{row}c{cell}` of its story id).
+    pub fn cell_frames(&self, table: &Value) -> Vec<Vec<(Value, Value)>> {
+        let frame = |attrs: &JsonObject, key: &str| attrs.get(key).cloned().unwrap_or(Value::Null);
+        // No theme and compatibility mode 15: in `project_table` they feed only
+        // a cell's shading and the table's `compatibilityMode`, never borders
+        // or margins. Pass the seed's own if that changes.
+        project_table(table, &self.styles, None, 15)
+            .rows
+            .into_iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|cell| (frame(&cell.attrs, "borders"), frame(&cell.attrs, "margins")))
+                    .collect()
+            })
+            .collect()
+    }
+}
+
 /// Every seed is written under this client, so a package seeds to the same
 /// bytes and object ids on every engine instance (and costs one byte per id).
 pub const SEED_CLIENT_ID: u64 = 0;
@@ -4392,13 +4442,23 @@ pub fn seed_parsed_docx_in_place(
         })
         .collect::<Result<Vec<_>, String>>()?;
     drop(parsed);
+    let ctx = EditCtx::local(String::new(), String::new());
+    // Every story first, empty, then their content (documentToYrs does the
+    // same). A story the package names twice (two notes with one id) fails.
+    let mut story_ids = HashSet::new();
+    for plan in &context.plans {
+        if !story_ids.insert(plan.story_id.as_str()) {
+            return Err(crate::EditError::StoryExists(plan.story_id.clone()).to_string());
+        }
+    }
     document
-        .create_empty_stories(
-            &context
+        .apply_raw_story_batches(
+            context
                 .plans
                 .iter()
-                .map(|plan| plan.story_id.clone())
-                .collect::<Vec<_>>(),
+                .map(|plan| (plan.story_id.clone(), Vec::new()))
+                .collect(),
+            &ctx,
         )
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
@@ -4409,15 +4469,14 @@ pub fn seed_parsed_docx_in_place(
     }
     batches.push(("body".to_owned(), comment_ops));
     document
-        .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+        .apply_raw_story_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
     Ok(referenced_fonts.into_iter().collect())
 }
 
 /// The raw ops that seed `blocks` (paragraphs the editor wrote) into an empty
 /// story with `package`'s styles, as the seed of a file holding them would:
-/// their units, then their bookmarks and field boundaries. The delete of the
-/// empty story's own pilcrow is left out.
+/// their units, then their bookmarks and field boundaries.
 pub(crate) fn fragment_ops(
     blocks: &[docx_parse::BlockContent],
     package: Option<&PackageContext>,
@@ -4445,8 +4504,7 @@ pub(crate) fn fragment_ops(
         },
     );
     let plan = context.plans.swap_remove(0);
-    let (_, mut ops, _) = seed_plan(plan, &HashMap::new())?;
-    ops.remove(0);
+    let (_, ops, _) = seed_plan(plan, &HashMap::new())?;
     Ok(ops)
 }
 
@@ -4491,13 +4549,15 @@ mod tests {
             },
         );
         let document = EditingDoc::new(74101);
+        let ctx = EditCtx::local(String::new(), String::new());
         document
-            .create_empty_stories(
-                &context
+            .apply_raw_story_batches(
+                context
                     .plans
                     .iter()
-                    .map(|plan| plan.story_id.clone())
-                    .collect::<Vec<_>>(),
+                    .map(|plan| (plan.story_id.clone(), Vec::new()))
+                    .collect(),
+                &ctx,
             )
             .unwrap();
         let batches = context

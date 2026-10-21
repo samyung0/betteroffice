@@ -60,7 +60,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   counts as older in later events, where upstream's state-vector diff left
 #   it out; a work counter and budget (`TransactionMut::limit_work`,
 #   `UpdateError::WorkBudgetExceeded`) stops integration past a budget; the
-#   commit is skipped while a panic unwinds through a transaction;
+#   commit is skipped while a panic unwinds through a transaction; a commit
+#   removes the blocks it merged around its deleted ranges in one pass per
+#   client, not one per range;
 # - Undo and Redo: `follow_redone` (src/store.rs) keeps the offset into a
 #   redone item as Yjs does, so a position inside text Undo and Redo restored
 #   stays on its unit and Undo after a delete, Undo and Redo removes only its
@@ -89,12 +91,14 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   store (`get_item`, `get_block_range`, `blocks_in`) and update
 #   (`Update::blocks`) accessors, `Store::next_live_item` (the first live item
 #   right of a deleted one, for the DOCX field re-read), `Item::redone` (the
-#   local link to the copy Undo made, for the DOCX marker re-anchor) and
-#   `StickyIndex::get_offsets`.
+#   local link to the copy Undo made, for the DOCX marker re-anchor),
+#   `StickyIndex::get_offsets` and `StickyIndex::at_many` (many indexes placed
+#   in one walk, for the DOCX seed's bookmarks).
 # CI runs their tests in pptx-edit's yrs_memory, yrs_undo, yrs_undo_order,
 # yrs_hostile, yrs_decode_alloc, yrs_placement and convergence, docx-edit's
-# yrs_memory, yrs_pending, yrs_format_order, yrs_transaction_work and
-# concurrent_undo, and betteroffice-xlsx's stable_collaboration. Carry the
+# yrs_memory, yrs_pending, yrs_format_order, yrs_transaction_work,
+# yrs_sticky_batch, yrs_squash_once and concurrent_undo, and
+# betteroffice-xlsx's stable_collaboration. Carry the
 # patches until upstream has the fixes and equivalent lookups, or the re-read
 # no longer needs it; re-apply them on each yrs upgrade.
 [patch.crates-io]

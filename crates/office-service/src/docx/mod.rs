@@ -74,16 +74,22 @@ fn open_engine(
     Ok((engine, Some(envelope)))
 }
 
-/// `seedOffice` for DOCX.
+/// `seedOffice` for DOCX: seeded straight into one document under the seed
+/// client, the bytes `seed_parsed_docx` gives an engine session.
 pub(crate) fn seed(base: &[u8]) -> Result<Vec<u8>> {
-    let (engine, _) = open_engine(base, true)?;
-    Ok(engine.doc().encode_state_as_update_v1())
+    let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
+    let doc = docx_edit::EditingDoc::new(docx_edit::SEED_CLIENT_ID);
+    docx_edit::seed_parsed_docx_in_place(&doc, envelope).map_err(Error::Engine)?;
+    Ok(doc.encode_state_as_update_v1())
 }
 
 /// The materialized source as decodeS9Envelope gives the TS its `Document`.
-fn decode_document(envelope: &docx_parse::S9WireEnvelope) -> Result<V> {
-    let json = serde_json::to_string(envelope).map_err(Error::engine)?;
+/// Each form is freed once the next exists.
+fn decode_document(envelope: docx_parse::S9WireEnvelope) -> Result<V> {
+    let json = serde_json::to_string(&envelope).map_err(Error::engine)?;
+    drop(envelope);
     let wire = V::parse(&json).map_err(Error::Engine)?;
+    drop(json);
     let document = wire.get("document");
     let package = document.get("package");
     let body = package.get("document");
@@ -232,7 +238,7 @@ impl DocxSession {
             None => docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?,
         };
         Ok(Self {
-            document: Some(decode_document(&envelope)?),
+            document: Some(decode_document(envelope)?),
             engine,
             undo: UndoSession::new(),
             base: base.to_vec(),
@@ -609,9 +615,14 @@ impl DocxSession {
         })
     }
 
-    pub fn export(&mut self, determinism: Determinism) -> Result<Vec<u8>> {
-        let document = self.project()?.document.clone();
-        save(&document, &self.base, determinism)
+    /// Ends the session: the save reads only the projection, so the engine
+    /// and the source tree are freed before the save request is built.
+    pub fn export(mut self, determinism: Determinism) -> Result<Vec<u8>> {
+        self.project()?;
+        let projected = self.projected.take().expect("projected above");
+        let base = std::mem::take(&mut self.base);
+        drop(self);
+        save(projected.document, &base, determinism)
     }
 
     /// The projected document with `onParagraph` (office-checkpoint.ts `docxRawInlines`).
@@ -682,8 +693,10 @@ fn docx_image_asset(src: &V, media: &HashMap<String, String>) -> Result<Option<A
 }
 
 /// rustSaveFacade.ts `writeDocumentWithRust` with `updateModifiedDate: false`.
-fn save(document: &V, original: &[u8], determinism: Determinism) -> Result<Vec<u8>> {
+/// Each form of the request is freed once the next exists.
+fn save(document: V, original: &[u8], determinism: Determinism) -> Result<Vec<u8>> {
     let package = document.get("package");
+    drop(document);
     let entries = |key: &str| package.get(key).or_else(|| V::array(Vec::new()));
     let request = obj! {
         "determinism": obj! { "seed": determinism.seed, "now": determinism.now },
@@ -703,7 +716,28 @@ fn save(document: &V, original: &[u8], determinism: Determinism) -> Result<Vec<u
         object.set("options", obj! { "updateModifiedDate": false });
     }
     let json = serde_json::to_string(&request).map_err(Error::engine)?;
+    drop((request, package));
     let request: docx_parse::serializer::S13SaveRequest =
         serde_json::from_str(&json).map_err(Error::engine)?;
+    drop(json);
     docx_parse::serializer::write_docx_s13(request, original).map_err(Error::engine)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `seed` writes straight into one document under the seed client: the
+    /// bytes an engine session's seed (a second document and a copy) gives.
+    #[test]
+    fn seed_has_the_bytes_of_an_engine_session_seed() {
+        for base in [
+            &include_bytes!("../../tests/fixtures/stories.docx")[..],
+            include_bytes!(
+                "../../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+            ),
+            include_bytes!("../../../docx-edit/tests/fixtures/footnote-anchor.docx"),
+        ] {
+            let (engine, _) = super::open_engine(base, true).unwrap();
+            assert!(super::seed(base).unwrap() == engine.doc().encode_state_as_update_v1());
+        }
+    }
 }

@@ -22,65 +22,115 @@ pub(crate) fn set(
     index: u32,
     data: Any,
 ) -> OpResult<()> {
-    let Any::Map(metadata) = &data else {
-        return Err(OpError::InvalidUpdate(
-            "bookmark metadata must be an object".into(),
-        ));
-    };
-    let id = match metadata.get("id") {
-        Some(Any::Number(id)) => id.to_string(),
-        Some(Any::String(id)) => id.to_string(),
-        _ => return Err(OpError::InvalidUpdate("inline boundary needs an id".into())),
-    };
-    let Some(Any::String(kind)) = metadata.get("kind") else {
-        return Err(OpError::InvalidUpdate(
-            "bookmark needs a boundary kind".into(),
-        ));
-    };
-    let mut assoc = match kind.as_ref() {
-        "start" => Assoc::After,
-        "end" | "fieldend" | "fieldseparate" => Assoc::Before,
-        _ => {
-            return Err(OpError::InvalidUpdate(
-                "invalid bookmark boundary kind".into(),
-            ));
-        }
-    };
+    set_batch(txn, story, story_id, vec![(index, data)])
+}
+
+/// [`set`] for boundaries applied one after another with no text change
+/// between them (a seed's): every anchor comes from one walk of the story
+/// ([`StickyIndex::at_many`]) rather than a walk per boundary, and a boundary
+/// collapses onto an opposite one this batch set by comparing their indexes.
+/// A boundary past the story's end is refused, and a refused boundary leaves
+/// the ones before it set, as one call each would.
+pub(crate) fn set_batch(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    story_id: &str,
+    boundaries: Vec<(u32, Any)>,
+) -> OpResult<()> {
+    struct Planned {
+        data: Any,
+        key: String,
+        other_key: String,
+        collapsed: bool,
+    }
     let root = txn.get_map(ROOT).expect("bookmarks root is declared");
-    let opposite = if kind.as_ref() == "start" {
-        "end"
-    } else {
-        "start"
-    };
-    let other = match root.get(txn, &format!("{story_id}:{id}:{opposite}")) {
-        Some(Out::YMap(entry)) => Some(entry),
-        _ => None,
-    };
-    let collapsed = other.as_ref().is_some_and(|entry| {
-        let Some(Out::Any(Any::Array(anchors))) = entry.get(txn, "anchors") else {
-            return false;
-        };
-        anchors
-            .first()
-            .and_then(|value| decode_anchor(value).ok())
-            .and_then(|anchor| anchor.start.get_offset(txn))
-            .is_some_and(|offset| offset.index == index)
-    });
-    if collapsed {
-        assoc = Assoc::Before;
+    let story_len = yrs::Text::len(story, txn);
+    let mut set_at: HashMap<String, u32> = HashMap::new();
+    let mut planned = Vec::with_capacity(boundaries.len());
+    let mut requests = Vec::with_capacity(boundaries.len());
+    let refused = (|| -> OpResult<()> {
+        for (index, data) in boundaries {
+            if index > story_len {
+                return Err(OpError::OutOfBounds {
+                    index,
+                    len: story_len,
+                });
+            }
+            let Any::Map(metadata) = &data else {
+                return Err(OpError::InvalidUpdate(
+                    "bookmark metadata must be an object".into(),
+                ));
+            };
+            let id = match metadata.get("id") {
+                Some(Any::Number(id)) => id.to_string(),
+                Some(Any::String(id)) => id.to_string(),
+                _ => return Err(OpError::InvalidUpdate("inline boundary needs an id".into())),
+            };
+            let Some(Any::String(kind)) = metadata.get("kind") else {
+                return Err(OpError::InvalidUpdate(
+                    "bookmark needs a boundary kind".into(),
+                ));
+            };
+            let mut assoc = match kind.as_ref() {
+                "start" => Assoc::After,
+                "end" | "fieldend" | "fieldseparate" => Assoc::Before,
+                _ => {
+                    return Err(OpError::InvalidUpdate(
+                        "invalid bookmark boundary kind".into(),
+                    ));
+                }
+            };
+            let opposite = if kind.as_ref() == "start" {
+                "end"
+            } else {
+                "start"
+            };
+            let other_key = format!("{story_id}:{id}:{opposite}");
+            let collapsed = match set_at.get(&other_key) {
+                Some(at) => *at == index,
+                None => match root.get(txn, &other_key) {
+                    Some(Out::YMap(entry)) => match entry.get(txn, "anchors") {
+                        Some(Out::Any(Any::Array(anchors))) => anchors
+                            .first()
+                            .and_then(|value| decode_anchor(value).ok())
+                            .and_then(|anchor| anchor.start.get_offset(txn))
+                            .is_some_and(|offset| offset.index == index),
+                        _ => false,
+                    },
+                    _ => false,
+                },
+            };
+            if collapsed {
+                assoc = Assoc::Before;
+            }
+            let key = format!("{story_id}:{id}:{kind}");
+            set_at.insert(key.clone(), index);
+            requests.push((index, assoc));
+            planned.push(Planned {
+                data,
+                key,
+                other_key,
+                collapsed,
+            });
+        }
+        Ok(())
+    })();
+    let branch = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(story));
+    let anchors = StickyIndex::at_many(txn, branch, &requests);
+    for (plan, anchor) in planned.into_iter().zip(anchors) {
+        let anchor = anchor
+            .ok_or_else(|| OpError::InvalidUpdate("bookmark position does not resolve".into()))?;
+        let anchors = Any::Array(Arc::from([anchor_value(story_id, &anchor, &anchor)]));
+        if plan.collapsed
+            && let Some(Out::YMap(other)) = root.get(txn, &plan.other_key)
+        {
+            other.insert(txn, "anchors", anchors.clone());
+        }
+        let entry = root.insert(txn, plan.key, MapPrelim::default());
+        entry.insert(txn, "data", plan.data);
+        entry.insert(txn, "anchors", anchors);
     }
-    let anchor = story
-        .sticky_index(txn, index, assoc)
-        .ok_or_else(|| OpError::InvalidUpdate("bookmark position does not resolve".into()))?;
-    let anchors = Any::Array(Arc::from([anchor_value(story_id, &anchor, &anchor)]));
-    if collapsed && let Some(other) = other {
-        other.insert(txn, "anchors", anchors.clone());
-    }
-    let key = format!("{story_id}:{id}:{kind}");
-    let entry = root.insert(txn, key, MapPrelim::default());
-    entry.insert(txn, "data", data);
-    entry.insert(txn, "anchors", anchors);
-    Ok(())
+    refused
 }
 
 /// Re-anchors the bookmarks and comment ranges whose own text this replica's
@@ -554,6 +604,65 @@ mod tests {
             &EditCtx::local("", ""),
         )
         .unwrap();
+    }
+
+    /// A seed's boundaries set as one batch write exactly what setting each
+    /// on its own writes: the batch places every anchor in one walk and
+    /// collapses a boundary onto an opposite one it set by comparing indexes,
+    /// where a single call reads the stored opposite's offset. Covers every
+    /// kind, collapsed pairs in both orders, an opposite set in an earlier
+    /// transaction, and the story's first and last index.
+    #[test]
+    fn a_boundary_batch_writes_what_one_call_each_writes() {
+        let boundary = |id: f64, kind: &str| {
+            Any::Map(Arc::new(
+                [
+                    ("id".to_owned(), Any::Number(id)),
+                    ("kind".to_owned(), Any::from(kind)),
+                ]
+                .into(),
+            ))
+        };
+        let earlier = [(4, boundary(9.0, "end")), (2, boundary(8.0, "start"))];
+        let batch = |len: u32| {
+            vec![
+                (0, boundary(1.0, "start")),
+                (0, boundary(1.0, "end")),
+                (3, boundary(2.0, "end")),
+                (3, boundary(2.0, "start")),
+                (1, boundary(3.0, "start")),
+                (len, boundary(3.0, "end")),
+                (2, boundary(4.0, "fieldseparate")),
+                (len, boundary(4.0, "fieldend")),
+                (4, boundary(9.0, "start")),
+                (2, boundary(8.0, "end")),
+                (0, boundary(5.0, "end")),
+            ]
+        };
+        let seeded = |batched: bool| {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "Hello world", "Normal", "left")
+                .unwrap();
+            let story_len = doc.story_len("body").unwrap();
+            let write = |boundaries: Vec<(u32, Any)>, batched: bool| {
+                let mut txn = doc.transact_for(&EditCtx::local("", ""));
+                let story = crate::story_ref(&txn, "body").unwrap();
+                if batched {
+                    set_batch(&mut txn, &story, "body", boundaries).unwrap();
+                } else {
+                    for (index, data) in boundaries {
+                        set(&mut txn, &story, "body", index, data).unwrap();
+                    }
+                }
+            };
+            write(earlier.to_vec(), false);
+            write(batch(story_len), batched);
+            doc
+        };
+        let (one_by_one, batched) = (seeded(false), seeded(true));
+        assert!(one_by_one.encode_state_as_update_v1() == batched.encode_state_as_update_v1());
+        let txn = batched.yrs_doc().transact();
+        assert_eq!(positions(&txn, "body").len(), 13);
     }
 
     /// The batch resolution answers exactly what resolving each anchor on

@@ -16,13 +16,14 @@ use super::format::{
     table_attrs_to_formatting, table_cell_attrs_to_formatting, table_row_attrs_to_formatting,
 };
 use super::item::{
-    build_paragraph_content, content_control_value, is, is_kind, o, ordinary_content_for_item,
-    tracked_info, ty,
+    attrs_to_text_formatting, build_paragraph_content, content_control_value, formatting_attrs, is,
+    is_kind, o, ordinary_content_for_item, stable_stringify, tracked_info, ty,
 };
 use super::paragraph::{
-    FlowToken, SlotBreak, TokenKind, comment_marker, flow_tokens, page_break_paragraph,
-    paragraph_from_story, place_trailing, restore_note_marks, slot_break_content, sort_boundaries,
-    split_flow, split_slot_bookmarks, tracked_kind, without_breaks,
+    FlowToken, SlotBreak, SourceRun, TokenKind, comment_marker, faithful_to, flow_tokens,
+    nested_runs, page_break_paragraph, paragraph_from_story, place_trailing, restore_note_marks,
+    slot_break_content, sort_boundaries, split_flow, split_slot_bookmarks, tracked_kind,
+    without_breaks,
 };
 use super::read;
 use super::sdt::{apply_content_control_value, sdt_attrs_to_props};
@@ -223,6 +224,15 @@ pub(crate) struct SaveContext<'a> {
     projected_stories: HashSet<String>,
     referenced_comments: Option<HashSet<u64>>,
     hooks: Hooks,
+    /// Every story's bookmarks, read once rather than once per story.
+    bookmarks: docx_edit::BookmarkPositions,
+    /// What the seed resolved for source runs and cells.
+    resolution: docx_edit::SeedResolution,
+    /// The text attributes (and those as a key) and formatting the seed
+    /// resolves for a run, by paragraph style and source formatting.
+    seeded_runs: HashMap<String, (V, std::rc::Rc<str>, V, bool)>,
+    /// Each source table's seeded cell borders and margins, by table story.
+    cell_frames: HashMap<String, Vec<Vec<(V, V)>>>,
 }
 
 /// One story's projection state (`storyToBlocks` locals).
@@ -260,6 +270,12 @@ impl<'a> SaveContext<'a> {
             }
         }
         let styles = package.get("styles");
+        let resolution = docx_edit::SeedResolution::new(
+            serde_json::to_value(&styles)
+                .ok()
+                .filter(|_| !styles.nullish())
+                .as_ref(),
+        );
         let seed_sources = SeedSources {
             styles: styles.truthy().then(|| StyleResolver::new(&styles)),
             numbering: Numbering::new(&package.get("numbering")),
@@ -288,7 +304,83 @@ impl<'a> SaveContext<'a> {
             projected_stories: HashSet::new(),
             referenced_comments: None,
             hooks,
+            bookmarks: doc.bookmark_positions(),
+            resolution,
+            seeded_runs: HashMap::new(),
+            cell_frames: HashMap::new(),
         })
+    }
+
+    /// Each run of a source paragraph (see `nested_runs`) with what the seed
+    /// resolves for it under the paragraph's current style `style`: an
+    /// unchanged style gives what the seed stored, a changed one makes the
+    /// runs save as the editor shows them.
+    fn source_runs(&mut self, paragraph: &V, style: Option<&str>) -> Vec<SourceRun> {
+        let mut runs = Vec::new();
+        nested_runs(&paragraph.get("content").items(), &mut runs);
+        runs.iter()
+            .map(|run| {
+                let formatting = run.get("formatting");
+                let key = format!(
+                    "{}|{}",
+                    style.unwrap_or_default(),
+                    stringify(&formatting).unwrap_or_default()
+                );
+                let resolution = &self.resolution;
+                let (attrs, attrs_key, resolved, faithful) =
+                    self.seeded_runs.entry(key).or_insert_with(|| {
+                        let source = (!formatting.nullish())
+                            .then(|| serde_json::to_value(&formatting).ok())
+                            .flatten();
+                        let attrs = V::from(&resolution.run_attrs(style, source.as_ref()));
+                        let resolved = V::Obj(attrs_to_text_formatting(&formatting_attrs(&attrs)));
+                        let faithful = faithful_to(&formatting, &resolved);
+                        (
+                            attrs.clone(),
+                            stable_stringify(&attrs).into(),
+                            resolved,
+                            faithful,
+                        )
+                    });
+                let content = run.get("content").items();
+                SourceRun {
+                    attrs: attrs.clone(),
+                    key: attrs_key.clone(),
+                    formatting: resolved.clone(),
+                    source: formatting,
+                    faithful: *faithful,
+                    text: content.iter().all(|entry| is(entry, "text")).then(|| {
+                        content
+                            .iter()
+                            .map(|entry| entry.get("text").to_js_string())
+                            .collect()
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// The borders and margins the seed resolved for source cell `story`.
+    fn seeded_cell_frame(&mut self, story: &str) -> Option<(V, V)> {
+        let source = self.source.cells.get(story)?;
+        let (table, place) = story.rsplit_once(":r")?;
+        let (row, cell) = place.split_once('c')?;
+        let (row, cell): (usize, usize) = (row.parse().ok()?, cell.parse().ok()?);
+        if !self.cell_frames.contains_key(table) {
+            let json = serde_json::to_value(&source.table).ok()?;
+            let frames = self
+                .resolution
+                .cell_frames(&json)
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|(borders, margins)| (V::from(borders), V::from(margins)))
+                        .collect()
+                })
+                .collect();
+            self.cell_frames.insert(table.to_owned(), frames);
+        }
+        self.cell_frames[table].get(row)?.get(cell).cloned()
     }
 
     pub fn into_hooks(self) -> Hooks {
@@ -519,7 +611,9 @@ impl<'a> SaveContext<'a> {
             let mut stories: Vec<&String> = self.story_ids.iter().collect();
             stories.sort();
             for story in stories {
-                for segment in read::story_segments(self.doc, story).unwrap_or_default() {
+                for segment in
+                    read::story_segments_with(self.doc, story, &self.bookmarks).unwrap_or_default()
+                {
                     if segment.get("kind").as_str().as_deref() == Some("embed")
                         && segment.get("payload").get("modelKind").as_str().as_deref()
                             == Some("commentReference")
@@ -560,7 +654,7 @@ impl<'a> SaveContext<'a> {
                 .cloned()
                 .collect()
         });
-        let segments = read::story_segments(self.doc, story_id)?;
+        let segments = read::story_segments_with(self.doc, story_id, &self.bookmarks)?;
         let mut state = StoryState {
             blocks: Vec::new(),
             slot_breaks: Vec::new(),
@@ -631,12 +725,18 @@ impl<'a> SaveContext<'a> {
                 let (properties, slot_bookmarks) =
                     split_slot_bookmarks(&segment.get("properties"), !state.slot_breaks.is_empty());
                 let story = story_id.to_owned();
+                let style = properties.get("pStyle").as_str();
+                let source_runs = base_paragraph
+                    .as_ref()
+                    .map(|base| self.source_runs(base, style.as_deref()))
+                    .unwrap_or_default();
                 let paragraph = paragraph_from_story(
                     &saved,
                     &properties,
                     std::mem::take(&mut items),
                     &boundaries,
                     base_paragraph.as_ref(),
+                    &source_runs,
                     &mut |attrs| self.seeded_properties(&story, attrs),
                 )?;
                 let paragraph = self
@@ -1106,7 +1206,13 @@ impl<'a> SaveContext<'a> {
         };
         let cell = Obj::new();
         cell.set("type", V::str("tableCell"));
-        cell.set("formatting", table_cell_attrs_to_formatting(&attrs));
+        let seeded = story
+            .as_str()
+            .and_then(|story| self.seeded_cell_frame(&story));
+        cell.set(
+            "formatting",
+            table_cell_attrs_to_formatting(&attrs, seeded.as_ref()),
+        );
         cell.set("content", V::array(content));
         let marker = attrs.get("cellMarker");
         if marker.truthy() {
