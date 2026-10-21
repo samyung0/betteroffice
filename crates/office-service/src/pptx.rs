@@ -13,7 +13,7 @@ use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
 use crate::session::{Applied, Item};
-use crate::touched::{self, Touched};
+use crate::touched::{self, Kept, Touched};
 use crate::types::{Asset, Command, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target};
 
 /// The root map of PPTX stories (`crate::document_roots`).
@@ -278,9 +278,10 @@ impl PptxSession {
         Ok((story_id, paragraph))
     }
 
-    /// [`crate::CommandResult::touched`]: the paragraph a `replace_text` or
-    /// `delete_paragraph` names, its mark included; nothing for the rest,
-    /// nor where the paragraph is not found.
+    /// [`crate::CommandResult::touched`]: what the command's Undo
+    /// re-creates, the text a `replace_text` takes out or a deleted
+    /// paragraph's text and mark; nothing for the rest, nor where the
+    /// paragraph is not found.
     pub fn touched(&mut self, command: &Command) -> Touched {
         let (Command::ReplaceText { target_id, .. } | Command::DeleteParagraph { target_id, .. }) =
             command
@@ -290,12 +291,22 @@ impl PptxSession {
         let Ok((story, paragraph)) = self.paragraph(target_id) else {
             return Touched::default();
         };
+        let (start, end) = match command {
+            Command::ReplaceText { .. } => {
+                match check_replacement(&paragraph.text, command, "PPTX") {
+                    Ok((span, _)) => (span.start as u32, span.end as u32),
+                    Err(_) => return Touched::default(),
+                }
+            }
+            _ => (0, paragraph.length + 1),
+        };
         touched::story_range(
             self.deck.yrs_doc(),
             STORIES,
             &story,
-            paragraph.start,
-            paragraph.start + paragraph.length,
+            paragraph.start + start,
+            paragraph.start + end,
+            Kept::Content,
         )
     }
 
