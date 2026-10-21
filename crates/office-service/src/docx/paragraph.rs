@@ -909,6 +909,21 @@ pub(crate) fn nested_runs(nodes: &[V], runs: &mut Vec<V>) {
     }
 }
 
+/// A source run's formatting as its file wrote it: a font slot with a theme
+/// font keeps no name, which parsing resolves from the theme (as
+/// `attrs_to_text_formatting` writes it).
+fn as_written(formatting: &V) -> V {
+    let copy = formatting.deep_copy();
+    if let Some(family) = o(&copy.get("fontFamily")) {
+        for slot in ["ascii", "hAnsi", "eastAsia", "cs"] {
+            if family.get(&format!("{slot}Theme")).truthy() {
+                family.delete(slot);
+            }
+        }
+    }
+    copy
+}
+
 /// A run whose formatting is what the seed resolved for one of its source
 /// paragraph's runs saves that run's own formatting, so what it inherited
 /// from styles keeps following them in Word (Epo 2026-10-21); a run whose
@@ -927,7 +942,7 @@ fn with_source_run_formatting(content: Vec<V>, source_runs: &[(V, V)]) -> Vec<V>
             .find(|(seeded, _)| same_json(seeded, &live))
         {
             if o(source).is_some_and(|source| !source.is_empty()) {
-                object.set("formatting", source.deep_copy());
+                object.set("formatting", as_written(source));
             } else {
                 object.delete("formatting");
             }

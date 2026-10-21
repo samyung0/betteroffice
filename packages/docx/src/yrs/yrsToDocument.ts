@@ -1396,6 +1396,21 @@ function nestedRuns(nodes: readonly unknown[], runs: Run[] = []): Run[] {
   return runs;
 }
 
+/**
+ * A source run's formatting as its file wrote it: a font slot with a theme font
+ * keeps no name, which parsing resolves from the theme (as attrsToTextFormatting
+ * writes it).
+ */
+function asWritten(formatting: TextFormatting): TextFormatting {
+  const family = formatting.fontFamily;
+  if (!family) return { ...formatting };
+  const written = { ...family };
+  for (const slot of ['ascii', 'hAnsi', 'eastAsia', 'cs'] as const) {
+    if (written[`${slot}Theme`]) delete written[slot];
+  }
+  return { ...formatting, fontFamily: written };
+}
+
 /** A source run as the formatting the seed resolved for it, with its own formatting. */
 type SourceRun = readonly [seeded: TextFormatting, source: TextFormatting | undefined];
 
@@ -1415,7 +1430,7 @@ function withSourceRunFormatting(
     const match = sourceRuns.find(([seeded]) => sameJson(seeded, live));
     if (!match) continue;
     const [, source] = match;
-    if (source && Object.keys(source).length > 0) run.formatting = { ...source };
+    if (source && Object.keys(source).length > 0) run.formatting = asWritten(source);
     else delete run.formatting;
   }
   return content;
