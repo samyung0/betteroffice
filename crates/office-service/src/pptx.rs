@@ -280,14 +280,18 @@ impl PptxSession {
         Ok((story_id, paragraph))
     }
 
-    /// [`crate::CommandResult::touched`]: the paragraph a `replace_text` or
-    /// `delete_paragraph` names, its mark included; nothing for the rest,
-    /// nor where the paragraph is not found.
+    /// [`crate::CommandResult::touched`]: the paragraph a `replace_text`,
+    /// `delete_paragraph`, `format_text` or `set_alignment` names, its mark
+    /// included; a `set_shape_text` shape's story and a `delete_slide`
+    /// slide whole ([`Self::touched_agent`]); nothing for the rest, nor
+    /// where the target is not found.
     pub fn touched(&mut self, command: &Command) -> Touched {
-        let (Command::ReplaceText { target_id, .. } | Command::DeleteParagraph { target_id, .. }) =
-            command
+        let (Command::ReplaceText { target_id, .. }
+        | Command::DeleteParagraph { target_id, .. }
+        | Command::FormatText { target_id, .. }
+        | Command::SetAlignment { target_id, .. }) = command
         else {
-            return Touched::default();
+            return self.touched_agent(command);
         };
         let Ok((story, paragraph)) = self.paragraph(target_id) else {
             return Touched::default();

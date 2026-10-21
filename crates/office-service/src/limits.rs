@@ -27,6 +27,34 @@ struct Limit {
     count: String,
     limit: u64,
     commands: Vec<String>,
+    /// Counts the text a command writes instead of [`counted`]'s amount.
+    #[serde(default)]
+    text: Option<Text>,
+}
+
+/// What a count takes of the text a PPTX shape or text box gets.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Text {
+    Paragraphs,
+    Characters,
+}
+
+/// The paragraphs or characters of text `command` writes into a shape.
+fn written(command: &Command, text: Text) -> u64 {
+    let paragraphs = match command {
+        Command::SetShapeText { paragraphs, .. } | Command::AddTextBox { paragraphs, .. } => {
+            paragraphs.as_slice()
+        }
+        _ => &[],
+    };
+    match text {
+        Text::Paragraphs => paragraphs.len() as u64,
+        Text::Characters => paragraphs
+            .iter()
+            .map(|paragraph| paragraph.chars().count() as u64)
+            .sum(),
+    }
 }
 
 fn table() -> Result<&'static Table> {
@@ -63,6 +91,11 @@ fn counted(command: &Command) -> (&'static str, u64) {
         Command::DeleteTable { expected, .. } => ("delete_table", cells(expected)),
         Command::FormatText { .. } => ("format_text", 1),
         Command::SetAlignment { .. } => ("set_alignment", 1),
+        Command::SetShapeText { .. } => ("set_shape_text", 1),
+        Command::AddSlide { .. } => ("add_slide", 1),
+        Command::DeleteSlide { .. } => ("delete_slide", 1),
+        Command::MoveSlide { .. } => ("move_slide", 1),
+        Command::AddTextBox { .. } => ("add_text_box", 1),
     }
 }
 
@@ -100,7 +133,7 @@ pub(crate) fn fitting(
         let (name, amount) = counted(command);
         for (limit, count) in limits.iter().zip(counts.iter_mut()) {
             if limit.commands.iter().any(|command| command == name) {
-                *count += amount;
+                *count += limit.text.map_or(amount, |text| written(command, text));
                 if *count > limit.limit && passed.is_none() {
                     passed = Some(format!("{} {}", number(limit.limit), limit.count));
                 }
@@ -172,6 +205,11 @@ mod tests {
                             "delete_table",
                             "format_text",
                             "set_alignment",
+                            "set_shape_text",
+                            "add_slide",
+                            "delete_slide",
+                            "move_slide",
+                            "add_text_box",
                         ]
                         .contains(&name.as_str()),
                         "{name}"
@@ -197,10 +235,17 @@ mod tests {
                 )
             )
         );
-        // PPTX has no formatted-span count; the 50 commands stop it.
-        let many = vec![format_text(); 51];
+        // After a create command the 50 commands stop a call one earlier.
+        let many = vec![
+            Command::AddSlide {
+                after_slide: None,
+                before_slide: None,
+                layout: None,
+            };
+            51
+        ];
         assert_eq!(
-            fitting(Format::Pptx, &many, 1).unwrap(),
+            fitting(Format::Xlsx, &many, 1).unwrap(),
             (
                 49,
                 Some(

@@ -35,7 +35,25 @@
     ],
     "pptx": [
       { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
-      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] }
+      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
+      { "count": "formatted spans", "limit": 30, "commands": ["format_text"] },
+      { "count": "paragraphs given an alignment", "limit": 200, "commands": ["set_alignment"] },
+      {
+        "count": "paragraphs of shape and text box text",
+        "limit": 500,
+        "commands": ["set_shape_text", "add_text_box"],
+        "text": "paragraphs"
+      },
+      {
+        "count": "characters of shape and text box text",
+        "limit": 50000,
+        "commands": ["set_shape_text", "add_text_box"],
+        "text": "characters"
+      },
+      { "count": "slides added", "limit": 20, "commands": ["add_slide"] },
+      { "count": "slides deleted", "limit": 20, "commands": ["delete_slide"] },
+      { "count": "slides moved", "limit": 50, "commands": ["move_slide"] },
+      { "count": "text boxes added", "limit": 20, "commands": ["add_text_box"] }
     ]
   }
 }

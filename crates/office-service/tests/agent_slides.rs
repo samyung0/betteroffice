@@ -497,3 +497,95 @@ fn the_slide_commands_parse_from_their_wire_json() {
         ]
     );
 }
+
+/// Each PPTX command has its own per-call count (Epo 2026-10-22): the
+/// commands before the first past one apply and the notice names the rest;
+/// shape and text box text share one budget of paragraphs and characters.
+#[test]
+fn a_call_stops_at_its_first_command_past_a_pptx_limit() {
+    let mut deck = Deck::new();
+    let adds: Vec<Command> = (0..21).map(|_| add_slide(None, None, None)).collect();
+    let result = deck.apply(&adds).unwrap();
+    assert_eq!(
+        result.notice.as_deref(),
+        Some(
+            "Not applied: the command at index 20 (counting from 0), past the limit of 20 slides added a call; send them in another call."
+        )
+    );
+    assert_eq!(deck.read(None)["total"], 70);
+
+    let mut commands: Vec<Command> = (1..=10)
+        .map(|number| {
+            let read = deck.read(Some(number));
+            let body = read["shapes"][1]["id"].as_str().unwrap().to_owned();
+            let expected: Vec<&str> = read["paragraphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|paragraph| paragraph["shape"] == body.as_str())
+                .map(|paragraph| paragraph["text"].as_str().unwrap())
+                .collect();
+            Command::SetShapeText {
+                shape_id: body.clone(),
+                expected_text: expected.join("\n"),
+                paragraphs: vec!["x".repeat(100); 50],
+            }
+        })
+        .collect();
+    commands.push(Command::AddTextBox {
+        slide_id: deck.slides()[0].clone(),
+        paragraphs: vec!["y".into()],
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 50.0,
+    });
+    let result = deck.apply(&commands).unwrap();
+    assert_eq!(
+        result.notice.as_deref(),
+        Some(
+            "Not applied: the command at index 10 (counting from 0), past the limit of 500 paragraphs of shape and text box text a call; send them in another call."
+        )
+    );
+    assert_eq!(result.touched.len(), 10);
+}
+
+/// What a delete_slide's or set_shape_text's Undo re-creates is measured
+/// before it applies: the slide whole, the shape's story.
+#[test]
+fn a_slide_delete_and_a_shape_write_measure_what_their_undo_recreates() {
+    let mut deck = Deck::new();
+    let ids = deck.slides();
+    let text = deck.slide_text(1);
+    let title = deck.read(Some(2))["shapes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let result = deck
+        .apply(&[
+            Command::DeleteSlide {
+                slide_id: ids[0].clone(),
+                expected_text: text.clone(),
+            },
+            Command::SetShapeText {
+                shape_id: title,
+                expected_text: "2. Less with behind problem areas".into(),
+                paragraphs: vec!["New".into()],
+            },
+            Command::MoveSlide {
+                slide_id: ids[2].clone(),
+                after_slide: Some(ids[3].clone()),
+                before_slide: None,
+            },
+        ])
+        .unwrap();
+    let [slide, story, moved] = result.touched[..] else {
+        panic!("{:?}", result.touched);
+    };
+    assert!(
+        slide.items > 30 && slide.content > text.len() as u64,
+        "{slide:?}"
+    );
+    assert!(story.items > 1 && story.content >= 33, "{story:?}");
+    assert_eq!((moved.items, moved.content), (0, 0));
+}

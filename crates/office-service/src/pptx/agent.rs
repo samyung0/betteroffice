@@ -15,10 +15,11 @@ use pptx_parse::{
 };
 use serde_json::{Value, json};
 
-use super::{PptxSession, refused};
+use super::{PptxSession, STORIES, refused};
 use crate::common::{check_paragraph_text, len16};
 use crate::error::{EditCode, Error, Result};
 use crate::session::Applied;
+use crate::touched::{self, Touched};
 use crate::types::{Alignment, Command, InspectQuery, TextFormat};
 
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -191,6 +192,42 @@ fn cell_of(story_id: &str) -> Option<(u32, u32)> {
 }
 
 impl PptxSession {
+    /// [`crate::CommandResult::touched`] of the agent's shape and slide
+    /// commands: a `set_shape_text` shape's story, a `delete_slide` slide
+    /// whole (its entry, its shapes', their stories' and its comments');
+    /// nothing for the rest, which add what they write.
+    pub(super) fn touched_agent(&self, command: &Command) -> Touched {
+        let doc = self.deck.yrs_doc();
+        match command {
+            Command::SetShapeText { shape_id, .. } => {
+                touched::story(doc, STORIES, &format!("story:{shape_id}:0"))
+            }
+            Command::DeleteSlide { slide_id, .. } => {
+                let mut touched = touched::story(doc, "pptx:slides", slide_id);
+                let Ok(deck) = self.deck.snapshot() else {
+                    return touched;
+                };
+                if let Some(slide) = deck.slides.iter().find(|slide| slide.id == *slide_id) {
+                    walk(&slide.shapes, &mut |shape| {
+                        touched += touched::story(doc, "pptx:shapes", &shape.id);
+                        for story in &shape.text_stories {
+                            touched += touched::story(doc, STORIES, &story.id);
+                        }
+                    });
+                }
+                for comment in deck
+                    .comments
+                    .iter()
+                    .filter(|comment| comment.slide_id == *slide_id)
+                {
+                    touched += touched::story(doc, "pptx:comments", &comment.id);
+                }
+                touched
+            }
+            _ => Touched::default(),
+        }
+    }
+
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {
         match command {
             Command::SetShapeText {
