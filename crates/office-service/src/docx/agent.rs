@@ -326,9 +326,9 @@ impl DocxSession {
             let continued = &marks[previous.unwrap_or(index)];
             (receipt.first_para_id, at, &marks[index], continued, true)
         };
-        // The new mark copies `neighbour`'s: every key but its identity and
-        // section goes, then the properties it keeps come back. Source and
-        // save bookkeeping (`_` keys) and tracked changes are not kept.
+        // The new mark copies `neighbour`'s; it keeps that identity and
+        // section and `kept` for the rest. Source and save bookkeeping (`_`
+        // keys) and tracked changes are not kept.
         let kept: BTreeMap<String, Any> = match style {
             Some(style) => BTreeMap::from([("pStyle".to_owned(), Any::from(style))]),
             None => {
@@ -352,22 +352,29 @@ impl DocxSession {
                 kept
             }
         };
-        let other: BTreeMap<String, Option<Any>> = neighbour
-            .properties
-            .keys()
-            .filter(|key| !KEPT_KEYS.contains(&key.as_str()))
-            .map(|key| (key.clone(), None))
-            .chain(kept.into_iter().map(|(key, value)| (key, Some(value))))
-            .collect();
-        doc.set_paragraph_attrs(
-            &ctx(),
-            &ParaSelector::One(new_id.clone()),
-            &ParaAttrDelta {
-                other,
-                ..ParaAttrDelta::default()
-            },
-        )
-        .map_err(op)?;
+        // Only what differs from the copy is written.
+        let mut other: BTreeMap<String, Option<Any>> = BTreeMap::new();
+        for (key, value) in &neighbour.properties {
+            if !KEPT_KEYS.contains(&key.as_str()) && kept.get(key) != Some(value) {
+                other.insert(key.clone(), kept.get(key).cloned());
+            }
+        }
+        for (key, value) in kept {
+            if !neighbour.properties.contains_key(&key) {
+                other.insert(key, Some(value));
+            }
+        }
+        if !other.is_empty() {
+            doc.set_paragraph_attrs(
+                &ctx(),
+                &ParaSelector::One(new_id.clone()),
+                &ParaAttrDelta {
+                    other,
+                    ..ParaAttrDelta::default()
+                },
+            )
+            .map_err(op)?;
+        }
         if !text.is_empty() {
             doc.insert_text(&ctx(), Position::new(BODY, at), text, FormatPolicy::Plain)
                 .map_err(op)?;
