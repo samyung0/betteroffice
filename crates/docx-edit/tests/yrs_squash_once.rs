@@ -33,7 +33,7 @@ fn a_commit_deleting_in_many_places_merges_in_one_pass() {
         txn.work()
     };
     // A few steps per place; removing merged blocks range by range moved the
-    // list's tail each time (about 1,500,000 steps here).
+    // list's tail each time (816,256 steps here before the patch).
     assert!(work < 10 * places as u64, "{work} steps");
 
     let kept: String = source
