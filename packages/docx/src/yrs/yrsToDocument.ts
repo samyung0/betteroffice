@@ -1433,14 +1433,18 @@ interface SourceRun {
  * theme slot resolved, with the seeded value. An rPr writing something the
  * seed dropped or overrode (a pattern `w:shd`, `w:color auto` under a coloured
  * style, a lone `w:cs`) is never copied onto other text. Keys holding null
- * count as absent (the seed writes `themeColor: null`).
+ * count as absent (the seed writes `themeColor: null`), and an explicit off of
+ * a toggle the seed models matches no seeded value (the seeded formatting
+ * holds only what is on).
  */
 function faithfulTo(source: TextFormatting | undefined, seeded: TextFormatting): boolean {
   if (!source) return true;
   const resolved = seeded as Attrs;
   return Object.entries(source).every(([key, value]) => {
     if (key === 'styleId') return true;
-    if (key !== 'fontFamily') return sameSet(resolved[key], value);
+    if (key !== 'fontFamily') {
+      return sameSet(resolved[key], value) || (resolved[key] == null && modelledOff(key, value));
+    }
     const fonts = asObject(resolved.fontFamily);
     const family = asObject(value);
     if (!family) return sameSet(resolved.fontFamily, value);
@@ -1449,6 +1453,38 @@ function faithfulTo(source: TextFormatting | undefined, seeded: TextFormatting):
         slot.endsWith('Theme') || Boolean(family[`${slot}Theme`]) || sameSet(fonts?.[slot], name)
     );
   });
+}
+
+/**
+ * An explicit off (`w:b w:val="0"`, `w:u w:val="none"`, ...) of a toggle the
+ * seed models, where no seeded value means off. Not `snapToGrid` or `cs`, which
+ * the seed does not model.
+ */
+function modelledOff(key: string, value: unknown): boolean {
+  switch (key) {
+    case 'bold':
+    case 'boldCs':
+    case 'italic':
+    case 'italicCs':
+    case 'strike':
+    case 'doubleStrike':
+    case 'allCaps':
+    case 'smallCaps':
+    case 'hidden':
+    case 'emboss':
+    case 'imprint':
+    case 'outline':
+    case 'shadow':
+      return value === false;
+    case 'underline':
+      return asObject(value)?.style === 'none';
+    case 'highlight':
+      return value === 'none';
+    case 'vertAlign':
+      return value === 'baseline';
+    default:
+      return false;
+  }
 }
 
 /** `sameJson` with object keys holding null or undefined counted as absent. */

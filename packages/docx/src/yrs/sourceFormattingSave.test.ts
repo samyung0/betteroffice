@@ -131,7 +131,9 @@ interface CrossPortCases {
   cases: Array<{
     name: string;
     body: string;
-    edit?: { start: number; end: number; clear: 'bold' | 'italic' };
+    edit?:
+      | { insert: string; at: number }
+      | { start: number; end: number; clear: 'bold' | 'italic' };
     runs: string[];
   }>;
   fixtures: Array<{ name: string; path: string; runs: string }>;
@@ -145,9 +147,11 @@ test('both saves write these run properties', async () => {
   for (const [index, { name, body, edit, runs: expected }] of cases.cases.entries()) {
     const { session, base } = await opened(pack(cases.styles, body), 61100 + index);
     try {
-      if (edit) {
+      const paraId = session.paragraphs('body')[0]!.paraId;
+      if (edit && 'insert' in edit) {
+        session.insertText({ story: 'body', paraId, offset: edit.at }, edit.insert);
+      } else if (edit) {
         // As the toolbar's toggle clears bold or italic.
-        const { paraId } = session.paragraphs('body')[0]!;
         session.formatRange(
           { story: 'body', start: { paraId, offset: edit.start }, end: { paraId, offset: edit.end } },
           { [edit.clear]: false }

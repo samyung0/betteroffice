@@ -943,7 +943,9 @@ pub(crate) struct SourceRun {
 /// a theme slot resolved, with the seeded value. An rPr writing something the
 /// seed dropped or overrode (a pattern `w:shd`, `w:color auto` under a
 /// coloured style, a lone `w:cs`) is never copied onto other text. Keys
-/// holding null count as absent (the seed writes `themeColor: null`).
+/// holding null count as absent (the seed writes `themeColor: null`), and an
+/// explicit off of a toggle the seed models matches no seeded value (the
+/// seeded formatting holds only what is on).
 pub(crate) fn faithful_to(source: &V, seeded: &V) -> bool {
     let Some(source) = o(source) else {
         return true;
@@ -963,8 +965,27 @@ pub(crate) fn faithful_to(source: &V, seeded: &V) -> bool {
                 },
             )
         }
-        _ => same_set(&seeded.get(key), value),
+        _ => {
+            let resolved = seeded.get(key);
+            same_set(&resolved, value) || (resolved.nullish() && modelled_off(key, value))
+        }
     })
+}
+
+/// An explicit off (`w:b w:val="0"`, `w:u w:val="none"`, ...) of a toggle the
+/// seed models, where no seeded value means off. Not `snapToGrid` or `cs`,
+/// which the seed does not model.
+fn modelled_off(key: &str, value: &V) -> bool {
+    match key {
+        "bold" | "boldCs" | "italic" | "italicCs" | "strike" | "doubleStrike" | "allCaps"
+        | "smallCaps" | "hidden" | "emboss" | "imprint" | "outline" | "shadow" => {
+            value.as_bool() == Some(false)
+        }
+        "underline" => value.get("style").as_str().as_deref() == Some("none"),
+        "highlight" => value.as_str().as_deref() == Some("none"),
+        "vertAlign" => value.as_str().as_deref() == Some("baseline"),
+        _ => false,
+    }
 }
 
 /// `same_json` with object keys holding null or undefined counted as absent.

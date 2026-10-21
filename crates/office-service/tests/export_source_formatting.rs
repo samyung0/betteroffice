@@ -9,8 +9,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use docx_edit::{
-    CanonicalItem, CellLoc, EditCtx, EditingDoc, InlineFormatDelta, ParaSelector, Patch,
-    StoryRange, TableRange, project_story,
+    CanonicalItem, CellLoc, EditCtx, EditingDoc, FormatPolicy, InlineFormatDelta, ParaSelector,
+    Patch, Position, StoryRange, TableRange, project_story,
 };
 use office_service::{Checkpoint, Determinism, Format, export, seed, sha256_hex};
 use serde_json::Value;
@@ -193,9 +193,21 @@ fn cross_port_cases() -> Value {
     serde_json::from_str(include_str!("fixtures/source-formatting-cases.json")).unwrap()
 }
 
-/// A case's edit: clears `clear` (bold or italic) over `[start, end)` of the
-/// body, as the toolbar's toggle does.
+/// A case's edit: types `insert` at `at` of the body, or clears `clear`
+/// (bold or italic) over `[start, end)` of it, as the toolbar's toggle does.
 fn edit_case(doc: &EditingDoc, edit: &Value) {
+    let at = |key: &str| edit[key].as_u64().unwrap() as u32;
+    let ctx = EditCtx::local("", "");
+    if let Some(text) = edit["insert"].as_str() {
+        doc.insert_text(
+            &ctx,
+            Position::new("body", at("at")),
+            text,
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        return;
+    }
     let delta = match edit["clear"].as_str().unwrap() {
         "bold" => InlineFormatDelta {
             bold: Patch::Clear,
@@ -207,9 +219,8 @@ fn edit_case(doc: &EditingDoc, edit: &Value) {
         },
         other => panic!("no case clears {other}"),
     };
-    let at = |key: &str| edit[key].as_u64().unwrap() as u32;
     doc.format_range(
-        &EditCtx::local("", ""),
+        &ctx,
         StoryRange::new("body", at("start"), at("end")),
         &delta,
     )

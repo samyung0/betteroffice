@@ -1,5 +1,5 @@
 {
-  "about": "Both DOCX saves (office-service tests/export_source_formatting.rs and packages/docx/src/yrs/sourceFormattingSave.test.ts) seed each case, apply its edit if it has one (clear bold or italic over [start, end) of the body), save and must write these run properties: each case's w:rPr per run in document.xml order (\"\" for none), each fixture's as the SHA-256 of those joined by newlines.",
+  "about": "Both DOCX saves (office-service tests/export_source_formatting.rs and packages/docx/src/yrs/sourceFormattingSave.test.ts) seed each case, apply its edit if it has one (type `insert` at `at` of the body, or clear bold or italic over [start, end) of it), save and must write these run properties: each case's w:rPr per run in document.xml order (\"\" for none), each fixture's as the SHA-256 of those joined by newlines.",
   "styles": "<w:styles xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\"/><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/></w:style><w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:basedOn w:val=\"Normal\"/><w:rPr><w:b/><w:color w:val=\"FF0000\"/><w:sz w:val=\"32\"/></w:rPr></w:style></w:styles>",
   "cases": [
     {
@@ -72,6 +72,26 @@
       },
       "runs": [
         "<w:rPr><w:rFonts w:ascii=\"Calibri\" w:hAnsi=\"Calibri\"/><w:b/><w:bCs/><w:color w:val=\"FF0000\"/><w:sz w:val=\"32\"/><w:szCs w:val=\"32\"/></w:rPr>"
+      ]
+    },
+    {
+      "name": "an unedited Heading 1 with a bookmark keeps a run's w:b w:val=0",
+      "body": "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>Text</w:t></w:r><w:bookmarkEnd w:id=\"0\"/><w:r><w:t xml:space=\"preserve\"> plain</w:t></w:r></w:p>",
+      "runs": [
+        "<w:rPr><w:b w:val=\"0\"/></w:rPr>",
+        ""
+      ]
+    },
+    {
+      "name": "typing in a Heading 1 with a bookmark keeps a run's w:b w:val=0",
+      "body": "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:bookmarkStart w:id=\"0\" w:name=\"_Toc1\"/><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>Text</w:t></w:r><w:bookmarkEnd w:id=\"0\"/><w:r><w:t xml:space=\"preserve\"> plain</w:t></w:r></w:p>",
+      "edit": {
+        "insert": "!",
+        "at": 10
+      },
+      "runs": [
+        "<w:rPr><w:b w:val=\"0\"/></w:rPr>",
+        ""
       ]
     }
   ],
