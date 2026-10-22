@@ -10,7 +10,7 @@ use std::ops::AddAssign;
 
 use serde::{Deserialize, Serialize};
 use yrs::block::{Item, ItemContent, ItemPtr};
-use yrs::branch::Branch;
+use yrs::branch::{Branch, BranchPtr};
 use yrs::{Any, Doc, ID, OffsetKind, ReadTxn, Transact};
 
 /// The live items under a target and the bytes their content holds.
@@ -183,20 +183,21 @@ fn walk(
     mut visit: impl FnMut(u32, u32, &Item) -> bool,
 ) {
     let txn = doc.transact();
-    let (mut next, mut at) = match from {
-        Some((mark, at)) => match txn.store().get_item(&mark) {
-            Some(mark) => (mark.right(), at),
-            None => return,
-        },
-        None => {
-            let Some(holder) = story_item(&txn, root, story) else {
-                return;
-            };
-            let ItemContent::Type(text) = holder.content() else {
-                return;
-            };
-            (text.start(), 0)
-        }
+    let Some(holder) = story_item(&txn, root, story) else {
+        return;
+    };
+    let ItemContent::Type(text) = holder.content() else {
+        return;
+    };
+    // From the mark while it is a live item of the story; from the story's
+    // start once it went (review L4).
+    let (mut next, mut at) = match from
+        .and_then(|(mark, at)| Some((txn.store().get_item(&mark)?, at)))
+        .filter(|(mark, _)| {
+            !mark.is_deleted() && mark.parent_branch() == Some(BranchPtr::from(text))
+        }) {
+        Some((mark, at)) => (mark.right(), at),
+        None => (text.start(), 0),
     };
     while let Some(item) = next {
         let len = if item.is_countable() && !item.is_deleted() {
@@ -209,5 +210,37 @@ fn walk(
         }
         at += len;
         next = item.right();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position};
+
+    /// A walk from a paragraph mark that went starts at the story's start,
+    /// so it measures what that walk measures (review L4).
+    #[test]
+    fn a_walk_from_a_deleted_mark_reads_from_the_start() {
+        let doc = EditingDoc::new(7);
+        doc.create_story("body", "One", "Normal", "left").unwrap();
+        let ctx = EditCtx::local("", "");
+        doc.split_paragraph(&ctx, Position::new("body", 3)).unwrap();
+        doc.insert_text(&ctx, Position::new("body", 4), "Two", FormatPolicy::Plain)
+            .unwrap();
+        let mut mark = None;
+        walk(doc.yrs_doc(), "stories", "body", None, |at, len, item| {
+            if at == 3 && len == 1 {
+                mark = Some(*item.id());
+            }
+            mark.is_none()
+        });
+        let first = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.remove_paragraph(&ctx, "body", &first).unwrap();
+        let seek = mark.map(|mark| (mark, 4));
+        let range =
+            |from| story_range_from(doc.yrs_doc(), "stories", "body", from, 0, 4, Kept::Content);
+        assert_eq!(range(seek), range(None));
+        assert!(range(None).items > 0);
     }
 }

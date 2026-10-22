@@ -596,9 +596,10 @@ pub(crate) mod tests {
             let txn = doc.yrs_doc().transact();
             SegmentIndex::build(&crate::story_ref(&txn, story).unwrap(), &txn)
         };
+        let lossy = lossy_starts(&fresh);
         assert_eq!(
-            comparable(&index, true),
-            comparable(&fresh, true),
+            comparable(&index, &lossy),
+            comparable(&fresh, &lossy),
             "the followed index of {story}"
         );
         let len = doc.story_len(story).unwrap();
@@ -779,14 +780,36 @@ pub(crate) mod tests {
         ids
     }
 
-    /// One random edit of a random story of `doc`, as a person, a suggesting
-    /// person, an Undo or Redo, or a peer makes it; errors are the edit's.
+    /// One random step on `doc`: mostly its own edit ([`local_edit`]);
+    /// otherwise a peer's edits of any kind on a state that diverged from
+    /// this one, and maybe one of `doc`'s own meanwhile, exchanged both ways
+    /// so they integrate concurrently.
     pub(crate) fn random_edit(
         doc: &EditingDoc,
         peer: &EditingDoc,
         undo: &crate::UndoSession,
         draw: &mut Draw,
     ) {
+        if draw.below(8) != 0 {
+            local_edit(doc, undo, draw);
+            return;
+        }
+        let peer_undo = crate::UndoSession::new();
+        for _ in 0..1 + draw.below(3) {
+            local_edit(peer, &peer_undo, draw);
+        }
+        if draw.below(2) == 0 {
+            local_edit(doc, undo, draw);
+        }
+        let to_peer = doc.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap();
+        doc.apply_update_v1(&peer.encode_diff_v1(&doc.encode_state_vector_v1()).unwrap())
+            .unwrap();
+        peer.apply_update_v1(&to_peer).unwrap();
+    }
+
+    /// One random edit of a random story of `doc`, as a person, a suggesting
+    /// person, or an Undo or Redo makes it; errors are the edit's.
+    fn local_edit(doc: &EditingDoc, undo: &crate::UndoSession, draw: &mut Draw) {
         let ids = story_ids(doc);
         let story = ids[draw.below(ids.len() as u32) as usize].clone();
         let len = doc.story_len(&story).unwrap();
@@ -799,7 +822,7 @@ pub(crate) mod tests {
             EditCtx::local("Ada", "2026-10-22T00:00:00Z")
         };
         undo.track(doc);
-        let _ = match draw.below(16) {
+        let _ = match draw.below(14) {
             0..=2 => {
                 // The receipt, read from the slot before the insert, is
                 // where a read from the story's start puts the text.
@@ -896,7 +919,7 @@ pub(crate) mod tests {
                         .map(drop)
                 }
             }
-            13 => {
+            _ => {
                 if draw.below(2) == 0 {
                     undo.undo();
                 } else {
@@ -904,36 +927,24 @@ pub(crate) mod tests {
                 }
                 Ok(())
             }
-            _ => {
-                // A peer's edit arrives as an update.
-                peer.apply_update_v1(&doc.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap())
-                    .unwrap();
-                if let Ok(len) = peer.story_len(&story) {
-                    let at = draw.below(len + 1);
-                    let _ = peer.insert_text(
-                        &ctx,
-                        Position::new(&story, at),
-                        piece,
-                        FormatPolicy::Plain,
-                    );
-                }
-                doc.apply_update_v1(&peer.encode_diff_v1(&doc.encode_state_vector_v1()).unwrap())
-                    .map_err(crate::OpError::from)
-            }
         };
     }
 
     /// An index as comparable values. A text item an edit split inside a
-    /// surrogate pair reads U+FFFD for each half once read again (`lossy`),
-    /// where a followed index may still hold the pair: text then compares by
-    /// its UTF-16 length.
-    fn comparable(index: &SegmentIndex, lossy: bool) -> (u32, Vec<ParaEntry>, Vec<(u32, String)>) {
+    /// surrogate pair reads U+FFFD for each half once read again, where a
+    /// followed index may still hold the pair: a text segment starting at
+    /// one of `lossy` (where the fresh read holds U+FFFD) compares by its
+    /// UTF-16 length.
+    fn comparable(
+        index: &SegmentIndex,
+        lossy: &[u32],
+    ) -> (u32, Vec<ParaEntry>, Vec<(u32, String)>) {
         let segs = index
             .segs
             .iter()
             .map(|seg| {
                 let kind = match &seg.kind {
-                    SegKind::Text(text) if lossy => {
+                    SegKind::Text(text) if lossy.contains(&seg.start) => {
                         format!("text of {} units", text.encode_utf16().count())
                     }
                     kind => format!("{kind:?}"),
@@ -942,6 +953,16 @@ pub(crate) mod tests {
             })
             .collect();
         (index.len, index.paras.clone(), segs)
+    }
+
+    /// Where `fresh`'s text segments holding U+FFFD start ([`comparable`]).
+    fn lossy_starts(fresh: &SegmentIndex) -> Vec<u32> {
+        fresh
+            .segs
+            .iter()
+            .filter(|seg| matches!(&seg.kind, SegKind::Text(text) if text.contains('\u{FFFD}')))
+            .map(|seg| seg.start)
+            .collect()
     }
 
     /// Chunks as comparable values.
@@ -962,8 +983,9 @@ pub(crate) mod tests {
     }
 
     /// Every index a document keeps follows random edits (local, suggested,
-    /// Undo and Redo, a peer's) to equal the index read afresh; the reads
-    /// that start from it equal those from the story's start.
+    /// Undo and Redo, a peer's of every kind integrated concurrently) to
+    /// equal the index read afresh; the reads that start from it equal those
+    /// from the story's start.
     #[test]
     fn segment_indexes_follow_random_edits() {
         let (mut followed, mut read) = (0, 0);
@@ -1007,12 +1029,10 @@ pub(crate) mod tests {
                         let txn = doc.yrs_doc().transact();
                         SegmentIndex::build(&crate::story_ref(&txn, &story).unwrap(), &txn)
                     };
-                    let lossy = fresh.segs.iter().any(
-                        |seg| matches!(&seg.kind, SegKind::Text(text) if text.contains('\u{FFFD}')),
-                    );
+                    let lossy = lossy_starts(&fresh);
                     assert_eq!(
-                        comparable(&index, lossy),
-                        comparable(&fresh, lossy),
+                        comparable(&index, &lossy),
+                        comparable(&fresh, &lossy),
                         "seed {seed} step {step} story {story}"
                     );
                     let len = doc.story_len(&story).unwrap();

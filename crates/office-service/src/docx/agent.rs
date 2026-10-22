@@ -444,6 +444,21 @@ fn read_paras<T: ReadTxn>(
     paras
 }
 
+/// The item of the first live paragraph mark from `next` on.
+fn next_mark<T: ReadTxn>(txn: &T, mut next: Option<ItemPtr>) -> Option<ID> {
+    while let Some(item) = next {
+        next = item.right();
+        if !item.is_deleted()
+            && matches!(item.content(), ItemContent::Type(_))
+            && let Some(Out::YMap(map)) = item.content().get_first()
+            && entry_string(&map, txn, "_kind").as_deref() == Some("pilcrow")
+        {
+            return Some(*item.id());
+        }
+    }
+    None
+}
+
 /// `story`'s paragraphs in order.
 fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
     let txn = doc.yrs_doc().transact();
@@ -523,7 +538,9 @@ pub(super) fn replaced_in_index(
 /// before them, as far as `last`'s mark moved by the story's change in
 /// length, and the paragraphs after move by that change. The story drops
 /// out of the index, to be read whole again, where that read does not end
-/// at a mark there with the same tracked changes open after it.
+/// at a mark there with the same tracked changes open after it, or the
+/// next mark the story holds is not the one the index holds next (review
+/// L1).
 fn reread(
     doc: &EditingDoc,
     stories: &mut HashMap<String, Arc<Vec<Para>>>,
@@ -550,7 +567,11 @@ fn reread(
         };
         let read = read_paras(&txn, next, at, open, Some(end));
         let ends = read.last()?;
-        (ends.mark + 1 == end && ends.after == old[last].after).then_some((read, delta))
+        let after = next_mark(&txn, txn.store().get_item(&ends.mark_item)?.right());
+        (ends.mark + 1 == end
+            && ends.after == old[last].after
+            && after == old.get(last + 1).map(|para| para.mark_item))
+        .then_some((read, delta))
     };
     let Some((read, delta)) = read() else {
         stories.remove(story);
@@ -811,15 +832,10 @@ impl DocxSession {
         let doc = self.engine.doc();
         // Each read starts after the mark before the paragraph it measures.
         let range = |story: &str, paras: &[Para], index: usize, start: u32, end: u32, kept| {
-            touched::story_range_from(
-                doc.yrs_doc(),
-                STORIES,
-                story,
-                seek(paras, index),
-                start,
-                end,
-                kept,
-            )
+            let from = seek(paras, index);
+            #[cfg(test)]
+            let from = from.filter(|_| !tests::FROM_START.get());
+            touched::story_range_from(doc.yrs_doc(), STORIES, story, from, start, end, kept)
         };
         let measured = || -> Result<Touched> {
             Ok(match command {
@@ -2015,13 +2031,24 @@ mod tests {
                     list: [ListKind::Bullet, ListKind::Numbered, ListKind::None][draw.below(3)],
                 }
             }
-            12 => Command::InsertParagraph {
-                after_id: Some(id(BODY, draw.pick(body)?)),
-                before_id: None,
-                text: PIECES[draw.below(PIECES.len())].to_owned(),
-                style: None,
-                list: (draw.below(3) == 0).then_some(ListKind::Bullet),
-            },
+            12 => {
+                // After a paragraph, before one, or with neither: at the
+                // body's end, or into its only paragraph when that is empty.
+                let anchor = draw.below(3);
+                let mut named = || draw.pick(body).map(|para| id(BODY, para));
+                let (after_id, before_id) = match anchor {
+                    0 => (Some(named()?), None),
+                    1 => (None, Some(named()?)),
+                    _ => (None, None),
+                };
+                Command::InsertParagraph {
+                    after_id,
+                    before_id,
+                    text: PIECES[draw.below(PIECES.len())].to_owned(),
+                    style: None,
+                    list: (draw.below(3) == 0).then_some(ListKind::Bullet),
+                }
+            }
             13 => {
                 let (story, paras) = draw.pick(&body_stories)?;
                 let deletable: Vec<&Para> = paras
@@ -2103,9 +2130,13 @@ mod tests {
     /// so its items differ, and so does what its Undo re-creates.)
     #[test]
     fn the_index_reads_as_a_fresh_scan_after_each_command() {
-        let base = include_bytes!("../../tests/fixtures/stories.docx");
-        for seed in 1..=12_u64 {
+        let stories: &[u8] = include_bytes!("../../tests/fixtures/stories.docx");
+        // The starter's only paragraph is empty: an insert with no anchor
+        // fills it.
+        let starter = crate::starter(crate::Format::Docx).unwrap();
+        for seed in 1..=18_u64 {
             let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let base = if seed <= 12 { stories } else { starter };
             let mut session = DocxSession::open(base, None).unwrap();
             let mut commands = Vec::new();
             while commands.len() < 40 {
@@ -2117,6 +2148,12 @@ mod tests {
                 let scanned = session.touched(&command);
                 session.index.borrow_mut().stories = kept;
                 assert_eq!(indexed, scanned, "seed {seed}: {command:?}");
+                // A read from a paragraph mark measures what a walk from the
+                // story's start does (review L4).
+                FROM_START.set(true);
+                let walked = session.touched(&command);
+                FROM_START.set(false);
+                assert_eq!(indexed, walked, "seed {seed}: {command:?}");
                 session
                     .apply(&command)
                     .unwrap_or_else(|error| panic!("seed {seed}: {command:?}: {error:?}"));
@@ -2128,6 +2165,44 @@ mod tests {
             }
             session.finish_agent(&commands).unwrap();
             assert_in_step(&session, &format!("seed {seed} after the call"));
+        }
+    }
+
+    thread_local! {
+        /// `touched` walks each story from its start, not from a mark.
+        pub(super) static FROM_START: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// A reread whose slots read as before but past which a mark was
+    /// replaced (an edit outside the slots it names) drops the story rather
+    /// than keep the gone mark (review L1).
+    #[test]
+    fn a_reread_drops_a_story_whose_next_mark_changed() {
+        let mut session =
+            DocxSession::open(crate::starter(crate::Format::Docx).unwrap(), None).unwrap();
+        for text in ["One", "Two", "Three"] {
+            let command = Command::InsertParagraph {
+                after_id: None,
+                before_id: None,
+                text: text.to_owned(),
+                style: None,
+                list: None,
+            };
+            session.apply(&command).unwrap();
+        }
+        let body = session.story_paras(BODY).unwrap();
+        assert!(body.len() >= 3, "{body:?}");
+        let before = session.index_mark();
+        let doc = session.engine.doc();
+        // Paragraph 1's mark goes and a new one takes its place.
+        doc.merge_paragraphs(&ctx(), &body[1].para_id, docx_edit::MergeDirection::Forward)
+            .unwrap();
+        doc.split_paragraph(&ctx(), Position::new(BODY, body[1].mark))
+            .unwrap();
+        session.reread(before, BODY, 0, 0);
+        let index = session.index.borrow();
+        if let Some(cached) = index.stories.get(BODY) {
+            assert_eq!(**cached, paras(doc, BODY).unwrap());
         }
     }
 
