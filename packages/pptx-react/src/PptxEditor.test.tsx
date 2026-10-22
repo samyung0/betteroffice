@@ -1126,15 +1126,21 @@ describe('PptxEditor speaker notes', () => {
       { name: 'Speaker notes' },
       { timeout: 15_000 }
     )) as HTMLTextAreaElement;
-    const count = () => view.queryByTestId('pptx-notes-count')?.textContent ?? null;
+    // Its text, and whether it is at the cap (shown in the error colour).
+    const count = () => {
+      const counter = view.queryByTestId('pptx-notes-count');
+      return counter && [counter.textContent, counter.getAttribute('data-full')];
+    };
 
     fireEvent.change(input, { target: { value: 'n'.repeat(3599) } });
     expect(count()).toBeNull();
     // 3,600 code points, though 3,601 UTF-16 units.
     fireEvent.change(input, { target: { value: `😀${'n'.repeat(3599)}` } });
-    expect(count()).toBe('3600/4000');
+    expect(count()).toEqual(['3600/4000', null]);
+    fireEvent.change(input, { target: { value: 'n'.repeat(3999) } });
+    expect(count()).toEqual(['3999/4000', null]);
     fireEvent.change(input, { target: { value: 'n'.repeat(4000) } });
-    expect(count()).toBe('4000/4000');
+    expect(count()).toEqual(['4000/4000', 'true']);
   }, 60_000);
 
   // An uploaded deck's notes may already hold more, as the server allows.

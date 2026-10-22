@@ -3768,13 +3768,14 @@ function NotesPanel({
       <div style={styles.notesHeader}>
         <span style={styles.notesLabel}>{label}</span>
         {cut ? (
-          <span role="alert" data-testid="pptx-notes-limit" style={styles.notesLimit}>
+          <span role="alert" title={limitHint} data-testid="pptx-notes-limit" style={styles.notesLimit}>
             {limitHint}
           </span>
         ) : null}
         {count >= NOTES_COUNT_FROM ? (
           <span
             data-testid="pptx-notes-count"
+            data-full={count >= MAX_NOTES_CHARS || undefined}
             style={count >= MAX_NOTES_CHARS ? styles.notesCountFull : styles.notesCount}
           >
             {count}/{MAX_NOTES_CHARS}
@@ -4367,14 +4368,24 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--pptx-surface, #ffffff)',
     borderTop: '1px solid var(--pptx-divider, #e2e8f0)',
   },
-  notesHeader: { display: 'flex', alignItems: 'baseline', gap: 8 },
-  notesLabel: {
+  // One fixed line: the panel's height sets the slide's fit, so the limit line
+  // and the counter never resize the slide; the limit line ends in an ellipsis.
+  notesHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    height: 16,
     fontSize: 11,
+    lineHeight: '16px',
+    overflow: 'hidden',
+  },
+  notesLabel: {
     fontWeight: 650,
     color: 'var(--pptx-text-muted, #647087)',
     textTransform: 'uppercase',
     letterSpacing: '0.02em',
     whiteSpace: 'nowrap',
+    flexShrink: 0,
     marginRight: 'auto',
   },
   notesTextarea: {
@@ -4390,11 +4401,17 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     outline: 'none',
   },
-  // The XLSX editor's refusal line, on the label's row so the slide keeps its size.
-  notesLimit: { color: 'var(--pptx-error-text, #8b1e2d)', font: `12px ${toolbarFont}`, textAlign: 'right' },
+  // The XLSX editor's refusal line, in the error colour.
+  notesLimit: {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    color: 'var(--pptx-error-text, #8b1e2d)',
+  },
   // Capy's CharCount: muted, in the error colour at or over the cap.
-  notesCount: { color: 'var(--pptx-text-muted, #647087)', font: `12px ${toolbarFont}`, whiteSpace: 'nowrap' },
-  notesCountFull: { color: 'var(--pptx-error-text, #8b1e2d)', font: `12px ${toolbarFont}`, whiteSpace: 'nowrap' },
+  notesCount: { flexShrink: 0, whiteSpace: 'nowrap', color: 'var(--pptx-text-muted, #647087)' },
+  notesCountFull: { flexShrink: 0, whiteSpace: 'nowrap', color: 'var(--pptx-error-text, #8b1e2d)' },
   empty: { margin: 'auto', color: 'var(--pptx-text-muted, #6b7587)', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: 'var(--pptx-error-text, #8b1e2d)', background: 'var(--pptx-error-bg, #fff0f2)', border: '1px solid var(--pptx-error-border, #efb8c0)', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {
