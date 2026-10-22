@@ -1242,7 +1242,8 @@ impl DocxSession {
     /// `story` and paraId of a target id (`<story>:paragraph:<paraId>`). A
     /// file without `w14:paraId` seeds paraIds that name their story
     /// (`body:p9`, read as `body:paragraph:body:p9`), and the agent sent the
-    /// paraId alone (UAT 2026-10-22), so the refusal names the read's id.
+    /// paraId alone, or a table's or cell's story id (`body:t0`,
+    /// `body:t0:r0c0`; UAT 2026-10-22), so the refusal names the read's id.
     pub(super) fn split<'a>(&self, id: &'a str) -> Result<(&'a str, &'a str)> {
         id.rsplit_once(":paragraph:")
             .filter(|(story, _)| !story.is_empty())
@@ -1251,8 +1252,20 @@ impl DocxSession {
                 let known = self
                     .story_paras(story)
                     .is_ok_and(|paras| paras.iter().any(|para| para.para_id == id));
+                // A story's first paragraph as the read names it.
+                let first = |story: &str| {
+                    let paras = self.story_paras(story).ok()?;
+                    let para = paras.first()?;
+                    Some(format!("{story}:paragraph:{}", para.para_id))
+                };
                 let shown = if known {
                     format!("; the read shows it as \"{story}:paragraph:{id}\"")
+                } else if let Some(table) = first(&format!("{id}:r0c0")) {
+                    // A table's slot: the read names a table by its first
+                    // cell's first paragraph.
+                    format!("; the read shows that table as {table:?}")
+                } else if let Some(para) = first(id) {
+                    format!("; the read shows its first paragraph as {para:?}")
                 } else {
                     String::new()
                 };

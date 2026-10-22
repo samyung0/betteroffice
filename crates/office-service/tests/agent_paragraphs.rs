@@ -6,7 +6,7 @@
 
 use office_service::{
     Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format, InspectQuery,
-    apply_commands, export, inspect, inspect_scoped, seed, sha256_hex,
+    ListKind, TextFormat, apply_commands, export, inspect, inspect_scoped, seed, sha256_hex,
 };
 use serde_json::{Value, json};
 
@@ -640,19 +640,28 @@ fn docx_without_para_ids() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-/// The agent sent a seeded paraId alone (UAT 2026-10-22): every command, an
-/// insert's anchor and replace_text included, refuses it naming the id the
-/// read shows; an id naming nothing says to copy ids whole from a read.
+/// The agent sent a seeded paraId alone, or a table's or cell's story id
+/// (UAT 2026-10-22): every command, an insert's anchor and replace_text
+/// included, refuses it naming the id the read shows, a cell paragraph's
+/// and a table's too; an id naming nothing says to copy ids whole from a
+/// read. The read's full seeded ids work for each kind of command.
 #[test]
 fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
     let mut doc = Doc::new(Format::Docx, docx_without_para_ids());
     assert_eq!(doc.id("We timed it."), "body:paragraph:body:p1");
-    let copy = ": copy each id whole from inspect_office_document, reading the file first";
-    let shown = refused(
-        EditCode::UnavailableTarget,
-        &format!(
-            r#""body:p1" is not a DOCX paragraph id; the read shows it as "body:paragraph:body:p1"{copy}"#
-        ),
+    let cell = "body:t0:r0c0:paragraph:body:t0:r0c0:p0";
+    assert_eq!(doc.id("Cell"), cell);
+    let refusal = |sent: &str, shown: &str| {
+        refused(
+            EditCode::UnavailableTarget,
+            &format!(
+                "{sent:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
+            ),
+        )
+    };
+    let timed = refusal(
+        "body:p1",
+        r#"; the read shows it as "body:paragraph:body:p1""#,
     );
     let replace = Command::ReplaceText {
         target_id: "body:p1".into(),
@@ -664,15 +673,75 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
         after("body:p1", "x"),
         replace,
     ] {
-        assert_eq!(doc.apply(&[command]).unwrap_err(), shown);
+        assert_eq!(doc.apply(&[command]).unwrap_err(), timed);
     }
-    assert_eq!(
-        doc.apply(&[delete("body:t0", "Cell")]).unwrap_err(),
-        refused(
-            EditCode::UnavailableTarget,
-            &format!(r#""body:t0" is not a DOCX paragraph id{copy}"#),
-        )
+    let bold = TextFormat {
+        bold: Some(true),
+        ..TextFormat::default()
+    };
+    let table = |id: &str| Command::DeleteTable {
+        id: id.into(),
+        expected: vec![vec!["Cell".into()]],
+    };
+    let cases = [
+        (
+            Command::FormatText {
+                target_id: "body:t0:r0c0:p0".into(),
+                expected_text: "Cell".into(),
+                format: bold.clone(),
+            },
+            refusal(
+                "body:t0:r0c0:p0",
+                &format!("; the read shows it as {cell:?}"),
+            ),
+        ),
+        (
+            table("body:t0"),
+            refusal(
+                "body:t0",
+                &format!("; the read shows that table as {cell:?}"),
+            ),
+        ),
+        (
+            table("body:t0:r0c0"),
+            refusal(
+                "body:t0:r0c0",
+                &format!("; the read shows its first paragraph as {cell:?}"),
+            ),
+        ),
+        (delete("body:x9", "Cell"), refusal("body:x9", "")),
+    ];
+    for (command, error) in cases {
+        assert_eq!(doc.apply(&[command]).unwrap_err(), error);
+    }
+
+    let (title, timed, chapter) = (
+        doc.id("Lab report"),
+        doc.id("We timed it."),
+        doc.id("Chapter"),
     );
+    doc.apply(&[
+        after(&timed, "Added"),
+        Command::FormatText {
+            target_id: timed.clone(),
+            expected_text: "timed".into(),
+            format: bold,
+        },
+        Command::SetList {
+            ids: vec![title],
+            list: ListKind::Bullet,
+        },
+        delete(&chapter, "Chapter"),
+    ])
+    .unwrap();
+    let texts = doc.texts();
+    assert!(
+        texts.contains(&"Added".to_owned()) && !texts.contains(&"Chapter".to_owned()),
+        "{texts:?}"
+    );
+    // The bold run splits the paragraph's text: find it by that run.
+    assert!(doc.paragraph_xml("timed").contains("<w:b/>"));
+    assert!(doc.paragraph_xml("Lab report").contains("<w:numPr>"));
 }
 
 /// In a shape's text, inserts after and before a paragraph land in call
