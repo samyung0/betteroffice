@@ -923,10 +923,28 @@ fn a_fields_own_paragraph_takes_no_text_command() {
     .unwrap();
 }
 
+/// The text of each exported run carrying `property` (`<w:b/>`, `<w:i/>`).
+fn runs_with(xml: &str, property: &str) -> Vec<String> {
+    xml.split("<w:r>")
+        .skip(1)
+        .filter(|run| {
+            run.split_once("</w:rPr>")
+                .is_some_and(|(props, _)| props.contains(property))
+        })
+        .map(|run| {
+            let text = &run[run.find("<w:t").unwrap()..];
+            text[text.find('>').unwrap() + 1..text.find("</w:t>").unwrap()].to_owned()
+        })
+        .collect()
+}
+
 /// Review r2 L9: a call reads each story once and its index follows the
-/// call's own replacements, so later commands find their paragraphs where
-/// they now are, and the targets it reports are where a fresh read finds
-/// them.
+/// call's own edits, so later commands find their paragraphs where they now
+/// are, and the targets it reports are where a fresh read finds them. The
+/// formats land on their own text only where the paragraphs after a
+/// replacement moved (review M1: the shifted start), and a second
+/// replacement and a format in one paragraph match the text its first
+/// replacement wrote (the cached text).
 #[test]
 fn a_calls_paragraph_index_follows_its_replacements() {
     let mut doc = Doc::new(with_body(concat!(
@@ -941,28 +959,36 @@ fn a_calls_paragraph_index_follows_its_replacements() {
         expected_text: expected.into(),
         text: text.into(),
     };
+    let format = |id: String, expected: &str, format: TextFormat| Command::FormatText {
+        target_id: id,
+        expected_text: expected.into(),
+        format,
+    };
     let (a, b, c, d) = (
         doc.id("Alpha"),
         doc.id("Beta"),
         doc.id("Gamma"),
         doc.id("Delta"),
     );
+    let bold = TextFormat {
+        bold: Some(true),
+        ..TextFormat::default()
+    };
+    let italic = TextFormat {
+        italic: Some(true),
+        ..TextFormat::default()
+    };
     let result = doc
         .apply(&[
             replace(a, "Alpha", "Alpha, much longer now"),
-            replace(c.clone(), "Gamma", "G"),
-            Command::FormatText {
-                target_id: c.clone(),
-                expected_text: "G".into(),
-                format: TextFormat {
-                    bold: Some(true),
-                    ..TextFormat::default()
-                },
-            },
+            replace(c.clone(), "Gamma", "Gamut"),
+            replace(c.clone(), "Gamut", "Gamut and more"),
+            format(c.clone(), "and", bold),
+            format(d.clone(), "elt", italic),
             replace(d, "Delta", "Delta and more"),
             insert(Some(&b), "New", None),
             replace(b, "Beta", "Beta!"),
-            replace(c, "G", "Gg"),
+            replace(c, "Gamut and more", "Gamut, and more"),
         ])
         .unwrap();
     assert_eq!(
@@ -971,12 +997,14 @@ fn a_calls_paragraph_index_follows_its_replacements() {
             "Alpha, much longer now||",
             "Beta!||",
             "New||",
-            "Gg||",
+            "Gamut, and more||",
             "Delta and more||",
             "End||",
         ]
     );
-    assert!(doc.xml().contains("<w:b/>"), "{}", doc.xml());
+    let xml = doc.xml();
+    assert_eq!(runs_with(&xml, "<w:b/>"), ["and"], "{xml}");
+    assert_eq!(runs_with(&xml, "<w:i/>"), ["elt"], "{xml}");
     let ids: Vec<String> = result
         .targets
         .iter()

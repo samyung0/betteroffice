@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use docx_edit::{
     ColorPatch, EditCtx, EditingDoc, FontFamilyPatch, FormatPolicy, InlineFormatDelta, OpError,
@@ -203,7 +202,7 @@ fn truthy(value: Option<&Any>) -> bool {
 
 /// A paragraph as the agent's commands and read see it (`docxParagraphs`,
 /// with the tables and content controls its slot opens with set apart).
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Para {
     para_id: String,
     /// Where its own content starts: after the page and column breaks,
@@ -227,6 +226,7 @@ pub(super) struct Para {
     tracked: bool,
     /// The tables and content controls its slot opens with, in order.
     blocks: Vec<(String, BTreeMap<String, Any>)>,
+    /// Its mark's properties but its bookmarks.
     properties: BTreeMap<String, Any>,
 }
 
@@ -298,6 +298,11 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                 if mark_tracked {
                     locked.get_or_insert_with(|| "holds tracked changes".into());
                 }
+                // Its bookmarks stay where docx-edit puts them: a new
+                // paragraph copies none, and a replacement before one moves
+                // it, which the index would not follow (review L1).
+                let mut values = properties.values;
+                values.remove("bookmarks");
                 paras.push(Para {
                     para_id: properties.para_id,
                     start,
@@ -308,7 +313,7 @@ fn paras(doc: &EditingDoc, story: &str) -> Result<Vec<Para>> {
                     locked: locked.take(),
                     tracked: std::mem::take(&mut tracked) || mark_tracked,
                     blocks: std::mem::take(&mut blocks),
-                    properties: properties.values,
+                    properties: values,
                 });
                 at += 1;
                 start = at;
@@ -389,16 +394,14 @@ fn story_tree(doc: &EditingDoc, story: &str) -> Result<Touched> {
 /// One call's paragraphs by story (review r2 L9): a story is read once and
 /// kept in step with this session's text edits (a replacement shifts the
 /// paragraphs after it, a format moves none); any other change to the
-/// document (a structural command, a list or alignment, an Undo) is a Yjs
-/// commit that inserts or deletes, counted in `changes`, and drops the
-/// index, so the next lookup reads the story again.
+/// document (a structural command, a list or alignment, an Undo) is a commit
+/// that advances the engine's document epoch and drops the index, so the
+/// next lookup reads the story again.
 #[derive(Default)]
 pub(super) struct ParaIndex {
     stories: HashMap<String, Arc<Vec<Para>>>,
-    /// `changes` when `stories` was last in step with the document.
+    /// The document epoch `stories` was last in step with.
     at: u64,
-    changes: Arc<AtomicU64>,
-    watch: Option<yrs::Subscription>,
 }
 
 /// The index after a replacement in paragraph `para_id` of `story` left it
@@ -979,19 +982,7 @@ impl DocxSession {
     pub(super) fn story_paras(&self, story: &str) -> Result<Arc<Vec<Para>>> {
         let doc = self.engine.doc();
         let mut index = self.index.borrow_mut();
-        if index.watch.is_none() {
-            let changes = Arc::clone(&index.changes);
-            let watch = doc
-                .yrs_doc()
-                .observe_after_transaction(move |txn| {
-                    if !txn.delete_set().is_empty() || !txn.insert_set().is_empty() {
-                        changes.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-                .map_err(Error::engine)?;
-            index.watch = Some(watch);
-        }
-        let now = index.changes.load(Ordering::Relaxed);
+        let now = self.engine.doc_epoch();
         if index.at != now {
             index.stories.clear();
             index.at = now;
@@ -1004,9 +995,9 @@ impl DocxSession {
         Ok(read)
     }
 
-    /// The index's change count before an edit ([`Self::keep_index`]).
+    /// The document epoch before an edit ([`Self::keep_index`]).
     pub(super) fn index_mark(&self) -> u64 {
-        self.index.borrow().changes.load(Ordering::Relaxed)
+        self.engine.doc_epoch()
     }
 
     /// After a text edit the index can follow: `update` brings its stories
@@ -1017,9 +1008,9 @@ impl DocxSession {
         update: impl FnOnce(&mut HashMap<String, Arc<Vec<Para>>>),
     ) {
         let mut index = self.index.borrow_mut();
-        if index.watch.is_some() && index.at == before {
+        if index.at == before {
             update(&mut index.stories);
-            index.at = index.changes.load(Ordering::Relaxed);
+            index.at = self.engine.doc_epoch();
         }
     }
 
@@ -1667,5 +1658,248 @@ mod tests {
         assert_eq!(table_story("body"), None);
         assert_eq!(table_story("body:t0:rxc1"), None);
         assert_eq!(table_story("hf:rId1"), None);
+    }
+
+    /// xorshift64: the commands a seed draws.
+    struct Draw(u64);
+
+    impl Draw {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n.max(1) as u64) as usize
+        }
+
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
+            (!items.is_empty()).then(|| &items[self.below(items.len())])
+        }
+    }
+
+    /// What a replacement or a new paragraph writes: nothing, ASCII, CJK and
+    /// characters of two UTF-16 units.
+    const PIECES: [&str; 6] = ["", "x", "a longer piece", "漢字かな", "😀𝄞", "a😀b"];
+
+    /// Each story with its paragraphs as a fresh scan reads them: the body,
+    /// its tables' cells, the headers', footers' and notes'.
+    fn stories(session: &DocxSession) -> Vec<(String, Vec<Para>)> {
+        let doc = session.engine.doc();
+        let mut names: Vec<String> = parts(&session.package())
+            .into_iter()
+            .map(|(story, _)| story)
+            .filter(|story| doc.story_segments(story).is_ok())
+            .collect();
+        names.push(BODY.to_owned());
+        let mut read = Vec::new();
+        while let Some(story) = names.pop() {
+            let paras = paras(doc, &story).unwrap();
+            for (kind, payload) in paras.iter().flat_map(|para| &para.blocks) {
+                if kind == "table" {
+                    names.extend(table_cells(payload).into_iter().flatten());
+                }
+            }
+            read.push((story, paras));
+        }
+        read
+    }
+
+    /// `text` with a random span of its characters replaced by a piece.
+    fn edited(text: &str, draw: &mut Draw) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let (a, b) = (draw.below(chars.len() + 1), draw.below(chars.len() + 1));
+        let (from, to) = (a.min(b), a.max(b));
+        let mut edited: String = chars[..from].iter().collect();
+        edited.push_str(PIECES[draw.below(PIECES.len())]);
+        edited.extend(&chars[to..]);
+        edited
+    }
+
+    /// A command the session applies: mostly replacements and formats in
+    /// every story they edit, sometimes a structural one.
+    fn draw_command(session: &DocxSession, draw: &mut Draw) -> Option<Command> {
+        let stories = stories(session);
+        let id = |story: &str, para: &Para| format!("{story}:paragraph:{}", para.para_id);
+        let body_stories: Vec<&(String, Vec<Para>)> = stories
+            .iter()
+            .filter(|(story, _)| in_body(story).is_ok())
+            .collect();
+        let body = &stories.iter().find(|(story, _)| story == BODY)?.1;
+        Some(match draw.below(16) {
+            0..=5 => {
+                let (story, paras) = draw.pick(&stories)?;
+                let plain: Vec<&Para> = paras.iter().filter(|para| para.plain).collect();
+                let para = draw.pick(&plain)?;
+                Command::ReplaceText {
+                    target_id: id(story, para),
+                    expected_text: para.text.clone(),
+                    text: edited(&para.text, draw),
+                }
+            }
+            6..=9 => {
+                let (story, paras) = draw.pick(&body_stories)?;
+                let open: Vec<&Para> = paras
+                    .iter()
+                    .filter(|para| para.refused().is_none() && !para.text.is_empty())
+                    .collect();
+                let para = draw.pick(&open)?;
+                let chars: Vec<char> = para.text.chars().collect();
+                let from = draw.below(chars.len());
+                let to = from + 1 + draw.below(chars.len() - from);
+                let span: String = chars[from..to].iter().collect();
+                let unique = para.text.matches(span.as_str()).count() == 1;
+                Command::FormatText {
+                    target_id: id(story, para),
+                    expected_text: if unique { span } else { para.text.clone() },
+                    format: TextFormat {
+                        bold: Some(draw.below(2) == 0),
+                        italic: (draw.below(2) == 0).then_some(true),
+                        ..TextFormat::default()
+                    },
+                }
+            }
+            10 => {
+                let (story, paras) = draw.pick(&body_stories)?;
+                let open: Vec<&Para> = paras.iter().filter(|para| !para.tracked).collect();
+                Command::SetAlignment {
+                    target_id: id(story, draw.pick(&open)?),
+                    alignment: [Alignment::Center, Alignment::Right, Alignment::Left]
+                        [draw.below(3)],
+                }
+            }
+            11 => {
+                let (story, paras) = draw.pick(&body_stories)?;
+                let open: Vec<&Para> = paras.iter().filter(|para| !para.tracked).collect();
+                let mut ids: Vec<String> = (0..1 + draw.below(3))
+                    .filter_map(|_| draw.pick(&open).map(|para| id(story, para)))
+                    .collect();
+                ids.dedup();
+                Command::SetList {
+                    ids,
+                    list: [ListKind::Bullet, ListKind::Numbered, ListKind::None][draw.below(3)],
+                }
+            }
+            12 => Command::InsertParagraph {
+                after_id: Some(id(BODY, draw.pick(body)?)),
+                before_id: None,
+                text: PIECES[draw.below(PIECES.len())].to_owned(),
+                style: None,
+                list: (draw.below(3) == 0).then_some(ListKind::Bullet),
+            },
+            13 => {
+                let (story, paras) = draw.pick(&body_stories)?;
+                let deletable: Vec<&Para> = paras
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, para)| {
+                        para.locked.is_none()
+                            && !para.follows_control()
+                            && index + 1 < paras.len()
+                            && (para.blocks.is_empty() || paras[index + 1].blocks.is_empty())
+                            && !para.ends_section()
+                    })
+                    .map(|(_, para)| para)
+                    .collect();
+                let para = draw.pick(&deletable)?;
+                Command::DeleteParagraph {
+                    target_id: id(story, para),
+                    expected_text: para.text.clone(),
+                }
+            }
+            14 => {
+                if stories.len() > 30 {
+                    return None;
+                }
+                let columns = 1 + draw.below(2);
+                Command::InsertTable {
+                    after_id: Some(id(BODY, draw.pick(body)?)),
+                    rows: (0..1 + draw.below(2))
+                        .map(|_| {
+                            (0..columns)
+                                .map(|_| PIECES[draw.below(PIECES.len())].to_owned())
+                                .collect()
+                        })
+                        .collect(),
+                }
+            }
+            _ => {
+                let doc = session.engine.doc();
+                let tables: Vec<Vec<Vec<String>>> = body
+                    .iter()
+                    .flat_map(|para| &para.blocks)
+                    .filter(|(kind, _)| kind == "table")
+                    .map(|(_, payload)| table_cells(payload))
+                    .filter(|cells| {
+                        cells
+                            .iter()
+                            .flatten()
+                            .all(|cell| cell_refusal(doc, cell).unwrap().is_none())
+                    })
+                    .collect();
+                let cells = draw.pick(&tables)?;
+                let read = |cell: &String| paras(doc, cell).unwrap();
+                let first = &cells[0][0];
+                Command::DeleteTable {
+                    id: id(first, &read(first)[0]),
+                    expected: cells
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|cell| {
+                                    read(cell)
+                                        .into_iter()
+                                        .map(|para| para.text)
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                                .collect()
+                        })
+                        .collect(),
+                }
+            }
+        })
+    }
+
+    /// Review M2: after each command of seeded random calls, every story the
+    /// call's index holds reads as a fresh scan does, field by field, and
+    /// each command's `touched` is what a fresh scan of the same document
+    /// measures. (Not what a one-command call on the saved state measures:
+    /// loading merges a client's adjacent runs that the call's edits split,
+    /// so its items differ, and so does what its Undo re-creates.)
+    #[test]
+    fn the_index_reads_as_a_fresh_scan_after_each_command() {
+        let base = include_bytes!("../../tests/fixtures/stories.docx");
+        for seed in 1..=12_u64 {
+            let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut session = DocxSession::open(base, None).unwrap();
+            let mut commands = Vec::new();
+            while commands.len() < 40 {
+                let Some(command) = draw_command(&session, &mut draw) else {
+                    continue;
+                };
+                let indexed = session.touched(&command);
+                let kept = std::mem::take(&mut session.index.borrow_mut().stories);
+                let scanned = session.touched(&command);
+                session.index.borrow_mut().stories = kept;
+                assert_eq!(indexed, scanned, "seed {seed}: {command:?}");
+                session
+                    .apply(&command)
+                    .unwrap_or_else(|error| panic!("seed {seed}: {command:?}: {error:?}"));
+                commands.push(command);
+                // An index out of step is dropped at its next lookup.
+                let index = session.index.borrow();
+                if index.at != session.engine.doc_epoch() {
+                    continue;
+                }
+                for (story, cached) in &index.stories {
+                    let fresh = paras(session.engine.doc(), story);
+                    assert!(
+                        fresh.as_ref().is_ok_and(|fresh| **cached == *fresh),
+                        "seed {seed}, story {story} after {:?}:\n{cached:?}\n{fresh:?}",
+                        commands.last()
+                    );
+                }
+            }
+            session.finish_agent(&commands).unwrap();
+        }
     }
 }
