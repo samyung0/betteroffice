@@ -1,5 +1,7 @@
 {
   "commands": 50,
+  "shapeText": { "paragraphs": 50, "characters": 5000 },
+  "slideNotes": { "characters": 2000 },
   "formats": {
     "xlsx": [
       {
@@ -22,11 +24,8 @@
       { "count": "text replacements", "limit": 20, "commands": ["replace_text"] },
       { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
       { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
-      {
-        "count": "table cells inserted or deleted",
-        "limit": 400,
-        "commands": ["insert_table", "delete_table"]
-      },
+      { "count": "table cells inserted", "limit": 400, "commands": ["insert_table"] },
+      { "count": "tables deleted", "limit": 5, "commands": ["delete_table"] },
       { "count": "formatted spans", "limit": 30, "commands": ["format_text"] },
       {
         "count": "paragraphs given a list or an alignment",

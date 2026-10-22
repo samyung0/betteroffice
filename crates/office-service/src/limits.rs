@@ -3,7 +3,10 @@
 //! also writes into edit_office_document's description. A call applies its
 //! commands up to the first that would pass a limit and names the rest in
 //! its notice, unapplied; people's own edits are not counted. A format adds
-//! its counts to the table.
+//! its counts to the table. `shapeText` bounds the text one PPTX command
+//! writes into one shape (review L2: gen:openapi writes it into the tool's
+//! schema and the skill's generated limits), `slideNotes` the speaker notes
+//! a slide read shows.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -14,11 +17,38 @@ use crate::error::{EditCode, Error, Result};
 use crate::types::{Command, Format};
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Table {
     /// Commands a call holds, in every format.
     commands: u64,
+    /// The text one PPTX command writes into one shape or text box.
+    shape_text: ShapeText,
+    /// The speaker notes a PPTX slide read shows of one slide.
+    slide_notes: SlideNotes,
     /// Each format's counts.
     formats: BTreeMap<String, Vec<Limit>>,
+}
+
+/// The paragraphs and characters of one shape's text a command writes.
+#[derive(Clone, Copy, Deserialize)]
+pub(crate) struct ShapeText {
+    pub paragraphs: usize,
+    pub characters: usize,
+}
+
+/// [`ShapeText`] from the table.
+pub(crate) fn shape_text() -> Result<ShapeText> {
+    Ok(table()?.shape_text)
+}
+
+#[derive(Deserialize)]
+struct SlideNotes {
+    characters: usize,
+}
+
+/// The characters of a slide's notes the slide read shows (Epo 2026-10-22).
+pub(crate) fn slide_notes() -> Result<usize> {
+    Ok(table()?.slide_notes.characters)
 }
 
 /// One count: the commands that add to it and the most a call holds.
@@ -69,7 +99,8 @@ fn table() -> Result<&'static Table> {
 
 /// A command's tool name and what it adds to the counts naming it: cells by
 /// range area or grid, rows and columns by count, a list by its paragraphs,
-/// a table by its cells, 1 otherwise.
+/// an inserted table by its cells, 1 otherwise (a deleted table of any
+/// size, Epo 2026-10-22).
 fn counted(command: &Command) -> (&'static str, u64) {
     let cells = |grid: &[Vec<String>]| grid.iter().map(|row| row.len() as u64).sum();
     match command {
@@ -88,7 +119,7 @@ fn counted(command: &Command) -> (&'static str, u64) {
         Command::DeleteParagraph { .. } => ("delete_paragraph", 1),
         Command::SetList { ids, .. } => ("set_list", ids.len() as u64),
         Command::InsertTable { rows, .. } => ("insert_table", cells(rows)),
-        Command::DeleteTable { expected, .. } => ("delete_table", cells(expected)),
+        Command::DeleteTable { .. } => ("delete_table", 1),
         Command::FormatText { .. } => ("format_text", 1),
         Command::SetAlignment { .. } => ("set_alignment", 1),
         Command::SetShapeText { .. } => ("set_shape_text", 1),

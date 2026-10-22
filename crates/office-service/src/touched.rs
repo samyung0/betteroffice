@@ -1,7 +1,9 @@
 //! What an agent command's Undo re-creates ([`crate::CommandResult::touched`],
 //! the Editor's design 2026-10-22): its target's live Yjs items in the
 //! document before the command applies, nested types whole, and their
-//! content's bytes. Capy prices an edit's Undo from it
+//! content's bytes; a PPTX `add_slide` and `set_shape_text` add the slide
+//! and the story they wrote, read after they apply (their Redo re-creates
+//! them). Capy prices an edit's Undo from it
 //! (`sources::undo_cost::office`).
 
 use std::ops::AddAssign;

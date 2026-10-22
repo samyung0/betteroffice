@@ -146,6 +146,16 @@ impl Session {
         }
     }
 
+    /// What the command just applied wrote that its Redo re-creates, read
+    /// after it applied: a PPTX `add_slide`'s slide and `set_shape_text`'s
+    /// story; nothing for the rest.
+    fn created(&mut self) -> Touched {
+        match self {
+            Session::Pptx(session) => session.created(),
+            Session::Docx(_) | Session::Xlsx(_) => Touched::default(),
+        }
+    }
+
     /// After a call's commands (DOCX: the empty paragraphs its tables no
     /// longer need).
     fn finish(&mut self, commands: &[Command]) -> Result<()> {
@@ -428,8 +438,10 @@ pub fn apply_commands(
         let mut touched = Vec::with_capacity(commands.len());
         for command in commands {
             let command = storable_command(command, &mut removed);
-            touched.push(session.touched(&command));
+            let mut measured = session.touched(&command);
             let applied = session.apply(&command)?;
+            measured += session.created();
+            touched.push(measured);
             inverse = inverse.zip(applied.inverse).map(|(mut list, command)| {
                 list.insert(0, command);
                 list

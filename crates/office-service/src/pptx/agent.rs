@@ -23,11 +23,10 @@ use crate::touched::{self, Kept, Touched};
 use crate::types::{Alignment, Command, InspectQuery, TextFormat};
 
 const EMU_PER_POINT: f64 = 12_700.0;
-/// A shape's text one command writes (the engine survey's bounds).
-const MAX_SHAPE_PARAGRAPHS: usize = 50;
-const MAX_SHAPE_CHARS: usize = 5_000;
-/// Slides, or one slide's paragraphs, a read lists.
+/// Slides, or one slide's shapes and paragraphs, a read lists.
 const MAX_READ: u32 = 200;
+/// Shapes of a slide the slide list shows; its slide read pages the rest.
+const MAX_LISTED_SHAPES: usize = 20;
 /// Characters of a shape's first line the slide list shows.
 const FIRST_LINE_CHARS: usize = 80;
 
@@ -81,14 +80,31 @@ fn walk<'a>(shapes: &'a [ShapeSnapshot], visit: &mut impl FnMut(&'a ShapeSnapsho
 
 /// A slide's text as `delete_slide` compares it: its paragraphs' trimmed
 /// text, blank ones left out, one a line.
-fn slide_text(slide: &SlideSnapshot) -> String {
+/// What `delete_slide` compares: each paragraph a line in shape order, then
+/// the notes as the slide read shows them (Epo 2026-10-22).
+fn slide_text(slide: &SlideSnapshot) -> Result<String> {
     let mut lines = Vec::new();
     walk(&slide.shapes, &mut |shape| {
         for story in &shape.text_stories {
             lines.extend(story.paragraphs.iter().map(paragraph_text));
         }
     });
-    canonical_lines(&lines.join("\n"))
+    lines.push(shown_notes(&slide.notes)?);
+    Ok(canonical_lines(&lines.join("\n")))
+}
+
+/// A slide's speaker notes as its read shows them: whole up to limits.json's
+/// `slideNotes` characters, else cut there, a marker counting the rest.
+fn shown_notes(notes: &str) -> Result<String> {
+    let most = crate::limits::slide_notes()?;
+    Ok(match notes.char_indices().nth(most) {
+        Some((at, _)) => format!(
+            "{}… [notes cut: {} more characters]",
+            &notes[..at],
+            notes[at..].chars().count()
+        ),
+        None => notes.to_owned(),
+    })
 }
 
 fn canonical_lines(text: &str) -> String {
@@ -99,24 +115,27 @@ fn canonical_lines(text: &str) -> String {
         .join("\n")
 }
 
-/// A shape's new text: 1 to [`MAX_SHAPE_PARAGRAPHS`] paragraphs of at most
-/// [`MAX_SHAPE_CHARS`] characters together, none holding a line break.
+/// A shape's new text: at least one paragraph, none holding a line break,
+/// within limits.json's `shapeText` paragraphs and characters (review L2).
 fn check_shape_text(paragraphs: &[String]) -> Result<()> {
     if paragraphs.is_empty() {
         return Err(invalid(
             "paragraphs holds the shape's text, one string a paragraph; [\"\"] empties it",
         ));
     }
-    if paragraphs.len() > MAX_SHAPE_PARAGRAPHS {
+    let most = crate::limits::shape_text()?;
+    if paragraphs.len() > most.paragraphs {
         return Err(invalid(format!(
-            "paragraphs holds {} paragraphs; a shape takes at most {MAX_SHAPE_PARAGRAPHS} a command",
-            paragraphs.len()
+            "paragraphs holds {} paragraphs; a shape takes at most {} a command",
+            paragraphs.len(),
+            most.paragraphs
         )));
     }
     let chars: usize = paragraphs.iter().map(|text| text.chars().count()).sum();
-    if chars > MAX_SHAPE_CHARS {
+    if chars > most.characters {
         return Err(invalid(format!(
-            "paragraphs hold {chars} characters; a shape takes at most {MAX_SHAPE_CHARS} a command"
+            "paragraphs hold {chars} characters; a shape takes at most {} a command",
+            most.characters
         )));
     }
     paragraphs
@@ -196,7 +215,7 @@ impl PptxSession {
     /// commands: the text and marks of a `set_shape_text` shape's story
     /// (what it can take out), a `delete_slide` slide whole (its entry, its
     /// shapes', their stories' and its comments'); nothing for the rest,
-    /// which add what they write.
+    /// which add what they write (`add_slide`'s is [`Self::created`]).
     pub(super) fn touched_agent(&self, command: &Command) -> Touched {
         let doc = self.deck.yrs_doc();
         match command {
@@ -212,30 +231,44 @@ impl PptxSession {
                     .sum();
                 touched::story_range(doc, STORIES, &story, 0, end, Kept::Content)
             }
-            Command::DeleteSlide { slide_id, .. } => {
-                let mut touched = touched::story(doc, "pptx:slides", slide_id);
-                let Ok(deck) = self.deck.snapshot() else {
-                    return touched;
-                };
-                if let Some(slide) = deck.slides.iter().find(|slide| slide.id == *slide_id) {
-                    walk(&slide.shapes, &mut |shape| {
-                        touched += touched::story(doc, "pptx:shapes", &shape.id);
-                        for story in &shape.text_stories {
-                            touched += touched::story(doc, STORIES, &story.id);
-                        }
-                    });
-                }
-                for comment in deck
-                    .comments
-                    .iter()
-                    .filter(|comment| comment.slide_id == *slide_id)
-                {
-                    touched += touched::story(doc, "pptx:comments", &comment.id);
-                }
-                touched
-            }
+            Command::DeleteSlide { slide_id, .. } => self.slide_touched(slide_id),
             _ => Touched::default(),
         }
+    }
+
+    /// What the last command wrote that its Redo re-creates, read after it
+    /// applied, where the command alone cannot say how much (the Editor
+    /// 2026-10-22): an `add_slide`'s slide whole (its layout's
+    /// placeholders), a `set_shape_text`'s story whole (its paragraphs take
+    /// their runs' formatting, a start and an end marker a key; review M3).
+    pub(crate) fn created(&mut self) -> Touched {
+        self.created.take().unwrap_or_default()
+    }
+
+    /// A slide's entry, its shapes', their stories' and its comments', read
+    /// from the slide alone (review L5).
+    fn slide_touched(&self, slide_id: &str) -> Touched {
+        let doc = self.deck.yrs_doc();
+        let mut touched = touched::story(doc, "pptx:slides", slide_id);
+        let index = self
+            .deck
+            .slide_ids()
+            .ok()
+            .and_then(|ids| ids.iter().position(|id| id == slide_id));
+        if let Some(Ok(scope)) = index.map(|index| self.deck.slide_scope(index)) {
+            walk(&scope.slide.shapes, &mut |shape| {
+                touched += touched::story(doc, "pptx:shapes", &shape.id);
+                for story in &shape.text_stories {
+                    touched += touched::story(doc, STORIES, &story.id);
+                }
+            });
+        }
+        for comment in self.deck.comments().unwrap_or_default() {
+            if comment.slide_id == slide_id {
+                touched += touched::story(doc, "pptx:comments", &comment.id);
+            }
+        }
+        touched
     }
 
     pub(super) fn apply_agent(&mut self, command: &Command) -> Result<Applied> {
@@ -292,12 +325,6 @@ impl PptxSession {
                  format_text, set_alignment, add_slide, delete_slide, move_slide and add_text_box",
             )),
         }?;
-        if !matches!(
-            command,
-            Command::FormatText { .. } | Command::SetAlignment { .. }
-        ) {
-            self.stories = None;
-        }
         Ok(Applied {
             ids: Vec::new(),
             inverse: None,
@@ -305,11 +332,14 @@ impl PptxSession {
     }
 
     /// No slide: `count` slides from `start`, each with its layout and its
-    /// shapes (id, kind, placeholder type, first line of text), the first
-    /// page also listing the deck's layouts. A slide (its number): its
-    /// shapes (id, kind, name, placeholder type, box in points for a shape
-    /// not in a group) and `count` of its paragraphs from `start`, in shape
-    /// order.
+    /// first [`MAX_LISTED_SHAPES`] shapes (id, kind, placeholder type, first
+    /// line of text) and how many more it holds, the first page also
+    /// listing the deck's layouts. A slide (its number): `count` of its
+    /// shapes and paragraphs from `start`, in reading order, each shape
+    /// followed by its paragraphs (review M1: a slide of hundreds of shapes
+    /// pages like its text), a shape with its name, placeholder type and,
+    /// outside a group, its box in points; the first page also gives the
+    /// slide's speaker notes ([`shown_notes`]).
     pub(crate) fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<Value> {
         let count = query
             .count
@@ -317,23 +347,31 @@ impl PptxSession {
             .ok_or_else(|| invalid(format!("a PPTX read names a count of 1 to {MAX_READ}")))?
             as usize;
         let start = query.start.unwrap_or(0) as usize;
-        let deck = self.deck.snapshot().map_err(Error::engine)?;
+        let total = self.deck.slide_ids().map_err(Error::engine)?.len();
+        let scope = |index: usize| self.deck.slide_scope(index).map_err(Error::engine);
         let package = self.deck.package();
-        let total = deck.slides.len();
-        let mut answer = json!({
-            "width": points(deck.width_emu),
-            "height": points(deck.height_emu),
-        });
         let Some(number) = query.slide else {
             let end = (start + count).min(total);
-            let slides: Vec<Value> = deck.slides[start.min(end)..end]
-                .iter()
-                .enumerate()
-                .map(|(offset, slide)| self.listed_slide(package, slide, start + offset + 1))
-                .collect();
-            answer["slides"] = json!(slides);
-            answer["total"] = json!(total);
-            answer["nextStart"] = json!((end < total).then_some(end));
+            let scopes = (start.min(end)..end)
+                .map(scope)
+                .collect::<Result<Vec<_>>>()?;
+            let (width, height) = match scopes.first() {
+                Some(first) => (first.width_emu, first.height_emu),
+                None => {
+                    let deck = self.deck.snapshot().map_err(Error::engine)?;
+                    (deck.width_emu, deck.height_emu)
+                }
+            };
+            let mut answer = json!({
+                "width": points(width),
+                "height": points(height),
+                "slides": scopes
+                    .iter()
+                    .map(|scope| self.listed_slide(package, &scope.slide, scope.index + 1))
+                    .collect::<Vec<_>>(),
+                "total": total,
+                "nextStart": (end < total).then_some(end),
+            });
             if start == 0 {
                 answer["layouts"] = package
                     .layouts
@@ -343,18 +381,21 @@ impl PptxSession {
             }
             return Ok(answer);
         };
-        let slide = (number as usize)
+        let scope = (number as usize)
             .checked_sub(1)
-            .and_then(|index| deck.slides.get(index))
+            .filter(|index| *index < total)
+            .map(scope)
+            .transpose()?
             .ok_or_else(|| {
                 invalid(format!(
                     "slide {number} is not in the deck, which has {total} slides"
                 ))
             })?;
+        let slide = &scope.slide;
         let layout = slide_layout(package, slide);
         let master = master_for_layout(package, layout);
-        let mut shapes = Vec::new();
-        let mut paragraphs = Vec::new();
+        // Each shape, then its paragraphs: the units a page counts.
+        let mut items = Vec::new();
         for shape in &slide.shapes {
             // A group's children are placed in its own coordinates: only
             // top-level shapes show a box.
@@ -375,38 +416,53 @@ impl PptxSession {
                     transform = (found.x, found.y, found.width, found.height);
                 }
             }
-            let mut entry = self.read_shape(shape, &mut paragraphs);
-            entry["box"] = json!([
+            let at = self.read_shape(shape, &mut items);
+            items[at].1["box"] = json!([
                 points(transform.0),
                 points(transform.1),
                 points(transform.2),
                 points(transform.3)
             ]);
-            shapes.push(entry);
             walk(&shape.children, &mut |child| {
-                let mut entry = self.read_shape(child, &mut paragraphs);
-                entry["inGroup"] = json!(true);
-                shapes.push(entry);
+                let at = self.read_shape(child, &mut items);
+                items[at].1["inGroup"] = json!(true);
             });
         }
-        let end = (start + count).min(paragraphs.len());
-        answer["slide"] = json!({
-            "id": slide.id,
-            "number": number,
-            "layout": layout.map(|layout| json!({ "id": layout.part_path, "name": layout_name(layout) })),
+        let end = (start + count).min(items.len());
+        let (shapes, paragraphs): (Vec<_>, Vec<_>) = items[start.min(end)..end]
+            .iter()
+            .cloned()
+            .partition(|(shape, _)| *shape);
+        let mut answer = json!({
+            "width": points(scope.width_emu),
+            "height": points(scope.height_emu),
+            "slide": {
+                "id": slide.id,
+                "number": number,
+                "layout": layout.map(|layout| json!({ "id": layout.part_path, "name": layout_name(layout) })),
+            },
+            "slides": total,
+            "shapes": shapes.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
+            "paragraphs": paragraphs.into_iter().map(|(_, item)| item).collect::<Vec<_>>(),
+            "total": items.len(),
+            "nextStart": (end < items.len()).then_some(end),
         });
-        answer["slides"] = json!(total);
-        answer["shapes"] = json!(shapes);
-        answer["total"] = json!(paragraphs.len());
-        answer["nextStart"] = json!((end < paragraphs.len()).then_some(end));
-        answer["paragraphs"] = Value::from(paragraphs[start.min(end)..end].to_vec());
+        // The speaker notes, on the first page (Epo 2026-10-22).
+        if start == 0 && !slide.notes.is_empty() {
+            answer["slide"]["notes"] = json!(shown_notes(&slide.notes)?);
+        }
         Ok(answer)
     }
 
     /// A slide of the slide list.
     fn listed_slide(&self, package: &PptxPackage, slide: &SlideSnapshot, number: usize) -> Value {
         let mut shapes = Vec::new();
+        let mut more = 0;
         walk(&slide.shapes, &mut |shape| {
+            if shapes.len() == MAX_LISTED_SHAPES {
+                more += 1;
+                return;
+            }
             let mut entry = json!({ "id": shape.id, "kind": kind(shape) });
             self.mark(shape, &mut entry);
             let first = shape
@@ -424,18 +480,25 @@ impl PptxSession {
             }
             shapes.push(entry);
         });
-        json!({
+        let mut entry = json!({
             "id": slide.id,
             "number": number,
             "layout": slide_layout(package, slide).map(layout_name),
             "shapes": shapes,
-        })
+        });
+        if more > 0 {
+            entry["moreShapes"] = json!(more);
+        }
+        entry
     }
 
-    /// A shape of the slide read, its paragraphs added to `paragraphs`.
-    fn read_shape(&self, shape: &ShapeSnapshot, paragraphs: &mut Vec<Value>) -> Value {
+    /// A shape of the slide read and then its paragraphs, added to `items`
+    /// (`true` marks the shape); the shape's index there.
+    fn read_shape(&self, shape: &ShapeSnapshot, items: &mut Vec<(bool, Value)>) -> usize {
         let mut entry = json!({ "id": shape.id, "kind": kind(shape), "name": shape.name });
         self.mark(shape, &mut entry);
+        let at = items.len();
+        items.push((true, entry));
         for story in &shape.text_stories {
             let cell = cell_of(&story.id);
             for paragraph in &story.paragraphs {
@@ -451,10 +514,10 @@ impl PptxSession {
                     item["row"] = json!(row);
                     item["column"] = json!(column);
                 }
-                paragraphs.push(item);
+                items.push((false, item));
             }
         }
-        entry
+        at
     }
 
     /// A shape's placeholder type (`obj` when the file names none) and
@@ -576,6 +639,7 @@ impl PptxSession {
                     .map_err(refused)?;
             }
         }
+        self.created = Some(touched::story(self.deck.yrs_doc(), STORIES, &story.id));
         Ok(())
     }
 
@@ -625,11 +689,13 @@ impl PptxSession {
         self.deck
             .add_layout_placeholders(&ctx(), &receipt.slide_id)
             .map_err(refused)?;
+        self.created = Some(self.slide_touched(&receipt.slide_id));
         Ok(())
     }
 
-    /// Refused unless the slide's text reads `expected_text` (blank lines
-    /// and the spaces around a line aside), and for a deck's only slide.
+    /// Refused unless the slide's text and notes read `expected_text` as
+    /// [`slide_text`] gives them (blank lines and the spaces around a line
+    /// aside), and for a deck's only slide.
     fn delete_slide(&mut self, slide_id: &str, expected_text: &str) -> Result<()> {
         let ids = self.deck.slide_ids().map_err(Error::engine)?;
         let index = self.slide_index(&ids, slide_id)?;
@@ -637,10 +703,10 @@ impl PptxSession {
             return Err(invalid("a deck keeps at least one slide"));
         }
         let slide = self.deck.slide_scope(index).map_err(Error::engine)?.slide;
-        let current = slide_text(&slide);
+        let current = slide_text(&slide)?;
         if current != canonical_lines(expected_text) {
             return Err(stale(
-                "the slide's text differs from expected_text",
+                "the slide's text or notes differ from expected_text",
                 slide_id,
                 "slide",
                 current,
@@ -827,8 +893,9 @@ fn text_patch(format: &TextFormat) -> Result<TextStylePatch> {
     }
     if let Some(family) = &format.font_family {
         let family = family.trim();
-        if family.is_empty() || family.chars().count() > 31 || family.chars().any(char::is_control)
-        {
+        // Controls and the XML noncharacters a file cannot store (review L4).
+        let unstorable = |c: char| c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}');
+        if family.is_empty() || family.chars().count() > 31 || family.chars().any(unstorable) {
             return Err(invalid("font_family is a font name of 1 to 31 characters"));
         }
         patch.font_family = Some(family.to_owned());

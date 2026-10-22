@@ -1094,7 +1094,7 @@ fn a_call_applies_up_to_its_first_command_past_a_limit() {
     ];
     assert_eq!(
         doc.apply(&tables).unwrap().notice,
-        notice(2, 2, "400 table cells inserted or deleted")
+        notice(2, 2, "400 table cells inserted")
     );
     assert_eq!(doc.xml().matches("<w:tbl>").count(), 3);
     let paragraphs: Vec<Command> = (0..21)
@@ -1209,4 +1209,61 @@ fn xlsx_and_pptx_commands_are_refused_on_a_docx() {
             "this command edits PPTX files"
         )
     );
+}
+
+/// delete_table counts tables, at most 5 a call, so a table of any size
+/// goes in one command (Epo 2026-10-22): a 50x10 table is deleted with
+/// four others, and the call's sixth table comes back not applied.
+#[test]
+fn delete_table_counts_tables_not_cells() {
+    let cells = |t: usize, rows: usize, columns: usize| -> Vec<Vec<String>> {
+        (0..rows)
+            .map(|r| (0..columns).map(|c| format!("t{t} r{r}c{c}")).collect())
+            .collect()
+    };
+    let xml = |grid: &Vec<Vec<String>>| {
+        let rows: String = grid
+            .iter()
+            .map(|row| {
+                let cells: String = row
+                    .iter()
+                    .map(|cell| format!("<w:tc><w:p><w:r><w:t>{cell}</w:t></w:r></w:p></w:tc>"))
+                    .collect();
+                format!("<w:tr>{cells}</w:tr>")
+            })
+            .collect();
+        format!(
+            "<w:tbl><w:tblPr/><w:tblGrid>{}</w:tblGrid>{rows}</w:tbl><w:p/>",
+            "<w:gridCol/>".repeat(grid[0].len())
+        )
+    };
+    // Five small tables, then the 50x10 one.
+    let grids: Vec<Vec<Vec<String>>> = (0..6)
+        .map(|t| {
+            if t == 5 {
+                cells(t, 50, 10)
+            } else {
+                cells(t, 1, 2)
+            }
+        })
+        .collect();
+    let mut doc = Doc::new(with_body(&grids.iter().map(xml).collect::<String>()));
+    // Last to first, so no delete moves a table a later one names.
+    let deletes: Vec<Command> = (0..6)
+        .rev()
+        .map(|t| Command::DeleteTable {
+            id: doc.id(&format!("t{t} r0c0")),
+            expected: grids[t].clone(),
+        })
+        .collect();
+    let result = doc.apply(&deletes).unwrap();
+    assert_eq!(
+        result.notice.as_deref(),
+        Some(
+            "Not applied: the command at index 5 (counting from 0), past the limit of 5 tables deleted a call; send them in another call."
+        )
+    );
+    assert_eq!(doc.xml().matches("<w:tbl>").count(), 1);
+    assert!(doc.xml().contains(">t0 r0c0<"));
+    assert!(!doc.xml().contains(">t5 r49c9<"));
 }

@@ -394,8 +394,10 @@ pub struct CommandResult {
     /// that the agent's text lost before the edit applied (Epo 2026-10-15).
     pub notice: Option<String>,
     /// For each applied command, what its Undo re-creates: its target's
-    /// Yjs items before it applied ([`crate::Touched`]). Capy sizes an
-    /// edit's Undo with it (`sources::undo_cost::office`).
+    /// Yjs items before it applied ([`crate::Touched`]); a PPTX `add_slide`
+    /// adds the slide it wrote and a `set_shape_text` the story it wrote,
+    /// read after it applied, which their Redo re-creates. Capy
+    /// sizes an edit's Undo with it (`sources::undo_cost::office`).
     pub touched: Vec<crate::Touched>,
 }
 

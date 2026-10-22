@@ -21,10 +21,14 @@ struct Deck {
 
 impl Deck {
     fn new() -> Self {
-        let state = seed(Format::Pptx, DECK).unwrap();
+        Self::of(DECK.to_vec())
+    }
+
+    fn of(base: Vec<u8>) -> Self {
+        let state = seed(Format::Pptx, &base).unwrap();
         Self {
-            sha: sha256_hex(DECK),
-            base: DECK.to_vec(),
+            sha: sha256_hex(&base),
+            base,
             state,
         }
     }
@@ -68,15 +72,27 @@ impl Deck {
             .collect()
     }
 
-    /// A slide's text as `delete_slide` expects it.
+    /// A slide's text as `delete_slide` expects it: its paragraphs, then
+    /// its notes as the read shows them.
     fn slide_text(&self, number: u32) -> String {
-        self.read(Some(number))["paragraphs"]
+        let read = self.read(Some(number));
+        let mut lines: Vec<&str> = read["paragraphs"]
             .as_array()
             .unwrap()
             .iter()
             .map(|paragraph| paragraph["text"].as_str().unwrap())
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        lines.extend(read["slide"]["notes"].as_str());
+        lines.join("\n")
+    }
+
+    /// A person writes the slide's speaker notes in the editor.
+    fn set_notes(&mut self, slide_id: &str, notes: &str) {
+        let deck = pptx_edit::DeckSession::open_from_update_with_source(&self.state, &self.base, 9)
+            .unwrap();
+        deck.set_slide_notes(&pptx_edit::EditCtx::local("person"), slide_id, notes)
+            .unwrap();
+        self.state = deck.encode_state_as_update_v1();
     }
 
     /// The exported slide whose text holds `text`, as XML.
@@ -224,6 +240,44 @@ fn add_slide_refuses_an_unknown_layout_and_two_anchors() {
     );
 }
 
+/// A layout placeholder with no size of its own nor on the master refuses
+/// the slide as invalid input, adding nothing (review M2).
+#[test]
+fn add_slide_refuses_a_layout_placeholder_with_no_size() {
+    let strip = |xml: String| {
+        let mut out = String::new();
+        let mut rest = xml.as_str();
+        while let Some(at) = rest.find("<a:xfrm>") {
+            out.push_str(&rest[..at]);
+            let end = rest[at..].find("</a:xfrm>").unwrap() + at + "</a:xfrm>".len();
+            rest = &rest[end..];
+        }
+        out + rest
+    };
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(DECK)
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| {
+            if name != "ppt/slideMasters/slideMaster1.xml" {
+                return (name, bytes);
+            }
+            (name, strip(String::from_utf8(bytes).unwrap()).into_bytes())
+        })
+        .collect();
+    let mut deck = Deck::of(ooxml_opc::rezip_parts(&parts).unwrap());
+    let ids = deck.slides();
+    assert_eq!(
+        deck.apply(&[add_slide(
+            Some(&ids[0]),
+            None,
+            Some(&format!("{LAYOUT}2.xml"))
+        )])
+        .unwrap_err(),
+        invalid("invalid shape geometry: the layout's placeholder \"Title 1\" has no size")
+    );
+    assert_eq!(deck.slides(), ids);
+}
+
 /// A delete names the slide's text, compared without blank lines and the
 /// spaces around a line; a stale one carries the text as it reads now.
 #[test]
@@ -241,7 +295,7 @@ fn delete_slide_removes_a_slide_reading_its_expected_text() {
         stale,
         Error::Edit {
             code: EditCode::StaleTarget,
-            message: "the slide's text differs from expected_text".into(),
+            message: "the slide's text or notes differ from expected_text".into(),
             details: Some(json!({ "block": { "id": ids[1], "type": "slide", "text": text } })),
         }
     );
@@ -418,6 +472,19 @@ fn format_text_and_set_alignment_write_a_paragraphs_runs_and_alignment() {
     }
     assert!(xml.contains(r#"algn="ctr""#));
 
+    // A noncharacter a file cannot store (review L4).
+    assert_eq!(
+        deck.apply(&[Command::FormatText {
+            target_id: title.clone(),
+            expected_text: "Mendel".into(),
+            format: TextFormat {
+                font_family: Some("Ari\u{fffe}al".into()),
+                ..TextFormat::default()
+            },
+        }])
+        .unwrap_err(),
+        invalid("font_family is a font name of 1 to 31 characters")
+    );
     let highlight = TextFormat {
         highlight: Some("yellow".into()),
         ..TextFormat::default()
@@ -588,4 +655,87 @@ fn a_slide_delete_and_a_shape_write_measure_what_their_undo_recreates() {
     );
     assert!(story.items > 1 && story.content >= 33, "{story:?}");
     assert_eq!((moved.items, moved.content), (0, 0));
+}
+
+/// An add_slide measures the slide it wrote, after it applies: what a
+/// delete of that slide measures, since the add's Redo re-creates it whole.
+#[test]
+fn an_added_slide_measures_the_slide_it_wrote() {
+    let mut deck = Deck::new();
+    let first = deck.slides().remove(0);
+    let layout = format!("{LAYOUT}2.xml");
+    let added = deck
+        .apply(&[add_slide(Some(&first), None, Some(&layout))])
+        .unwrap()
+        .touched[0];
+    let deleted = deck
+        .apply(&[Command::DeleteSlide {
+            slide_id: deck.slides()[1].clone(),
+            expected_text: deck.slide_text(2),
+        }])
+        .unwrap()
+        .touched[0];
+    assert!(added.items > 10, "{added:?}");
+    assert_eq!(added, deleted);
+}
+
+/// A slide's speaker notes (Epo 2026-10-22): the slide read's first page
+/// shows them, past 2,000 characters cut with a marker
+/// counting the rest, the deck read none; delete_slide compares them as
+/// shown, so notes edited after the read make it stale and unchanged ones
+/// delete.
+#[test]
+fn delete_slide_names_the_notes_the_read_shows() {
+    let mut deck = Deck::new();
+    let ids = deck.slides();
+    deck.set_notes(&ids[1], "Greet the room.\nThen the demo.");
+    let read = deck.read(Some(2));
+    assert_eq!(read["slide"]["notes"], "Greet the room.\nThen the demo.");
+    let later = inspect_scoped(
+        &deck.base,
+        deck.checkpoint(),
+        &InspectQuery {
+            slide: Some(2),
+            start: Some(1),
+            count: Some(200),
+            ..InspectQuery::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(later["slide"].get("notes"), None);
+
+    let long: String = (0..2_500)
+        .map(|n| if n % 50 == 49 { '.' } else { 'x' })
+        .collect();
+    deck.set_notes(&ids[1], &long);
+    let shown = format!("{}… [notes cut: 500 more characters]", &long[..2_000]);
+    assert_eq!(deck.read(Some(2))["slide"]["notes"], shown);
+    assert_eq!(deck.read(None)["slides"][1].get("notes"), None);
+
+    // Edited after the read, in the part the read showed.
+    let text = deck.slide_text(2);
+    let edited = format!("y{}", &long[1..]);
+    deck.set_notes(&ids[1], &edited);
+    let stale = deck
+        .apply(&[Command::DeleteSlide {
+            slide_id: ids[1].clone(),
+            expected_text: text,
+        }])
+        .unwrap_err();
+    let Error::Edit { code, details, .. } = stale else {
+        panic!("{stale:?}");
+    };
+    assert_eq!(code, EditCode::StaleTarget);
+    let now = details.unwrap()["block"]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(now.ends_with("… [notes cut: 500 more characters]") && now.contains("\nyxx"));
+
+    deck.apply(&[Command::DeleteSlide {
+        slide_id: ids[1].clone(),
+        expected_text: deck.slide_text(2),
+    }])
+    .unwrap();
+    assert_eq!(deck.slides().len(), 49);
 }

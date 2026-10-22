@@ -157,12 +157,13 @@ fn the_deck_read_pages_slides_with_their_layouts_and_shapes() {
     );
 }
 
-/// A slide read lists its shapes, boxed in points (a placeholder that
-/// spells out no position at its layout's), and pages its paragraphs in
-/// shape order with their levels.
+/// A slide read pages its shapes, boxed in points (a placeholder that
+/// spells out no position at its layout's), each followed by its
+/// paragraphs with their levels.
 #[test]
-fn a_slide_read_lists_shapes_and_pages_their_paragraphs() {
+fn a_slide_read_pages_shapes_with_their_paragraphs() {
     let deck = Deck::new(DECK.to_vec());
+    // The title, its paragraph and the body.
     let read = deck.read(Some(2), 0, 3).unwrap();
     assert_eq!(read["slide"]["number"], 2);
     assert_eq!(
@@ -176,18 +177,24 @@ fn a_slide_read_lists_shapes_and_pages_their_paragraphs() {
     let boxed = shapes[0]["box"].as_array().unwrap();
     assert!(boxed.iter().all(|value| value.as_f64().unwrap() >= 0.0));
     assert!(boxed[2].as_f64().unwrap() > 0.0 && boxed[3].as_f64().unwrap() > 0.0);
-    let total = deck.paragraphs(2).len();
+    assert_eq!(shapes.len(), 2);
+    let total = deck.paragraphs(2).len() + 2;
     assert_eq!(read["total"], total);
     assert_eq!(read["nextStart"], 3);
     let paragraphs = read["paragraphs"].as_array().unwrap();
-    assert_eq!(paragraphs.len(), 3);
+    assert_eq!(paragraphs.len(), 1);
     assert_eq!(paragraphs[0]["shape"], shapes[0]["id"]);
     assert_eq!(paragraphs[0]["text"], "2. Less with behind problem areas");
-    assert_eq!(paragraphs[1]["shape"], shapes[1]["id"]);
 
     let rest = deck.read(Some(2), 3, 200).unwrap();
-    assert_eq!(rest["paragraphs"].as_array().unwrap().len(), total - 3);
+    assert_eq!(rest["shapes"], json!([]));
     assert_eq!(rest["nextStart"], Value::Null);
+    let rest = rest["paragraphs"].as_array().unwrap();
+    assert_eq!(rest.len(), total - 3);
+    assert!(
+        rest.iter()
+            .all(|paragraph| paragraph["shape"] == shapes[1]["id"])
+    );
     assert_eq!(
         deck.read(Some(51), 0, 60).unwrap_err(),
         invalid("slide 51 is not in the deck, which has 50 slides")
@@ -238,7 +245,22 @@ fn set_shape_text_replaces_a_shapes_paragraphs_keeping_their_levels() {
         [false, false, false, true, false, false, false, true, true]
     );
 
-    deck.apply(&[set_text(&body, &more.join("\n"), &["Only", ""])])
+    // Shrunk to four, the kept paragraphs keep their levels (review L7).
+    let four = ["A", "B", "C", "D"];
+    deck.apply(&[set_text(&body, &more.join("\n"), &four)])
+        .unwrap();
+    assert_eq!(deck.shape_text(1, &body), four);
+    let slide = deck.part("ppt/slides/slide1.xml");
+    let level_one = |text: &str| {
+        let chunk = slide
+            .split("</a:p>")
+            .find(|chunk| chunk.contains(&format!(">{text}</a:t>")))
+            .unwrap();
+        chunk[chunk.rfind("<a:p>").unwrap()..].contains("lvl=\"1\"")
+    };
+    assert_eq!(four.map(level_one), [false, false, false, true]);
+
+    deck.apply(&[set_text(&body, &four.join("\n"), &["Only", ""])])
         .unwrap();
     assert_eq!(deck.shape_text(1, &body), ["Only", ""]);
     let title = read["shapes"][0]["id"].as_str().unwrap();
@@ -379,4 +401,68 @@ fn set_shape_text_and_the_slide_read_parse_from_their_wire_json() {
     let query: InspectQuery =
         serde_json::from_value(json!({ "slide": 3, "start": 0, "count": 60 })).unwrap();
     assert_eq!(query.slide, Some(3));
+}
+
+/// deck-50 with `count` text boxes added to its first slide, each of one
+/// paragraph.
+fn with_boxes(count: usize) -> Vec<u8> {
+    let boxes: String = (0..count)
+        .map(|n| {
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="{}" name="Box {n}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>Box {n}</a:t></a:r></a:p></p:txBody></p:sp>"#,
+                1000 + n
+            )
+        })
+        .collect();
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(DECK)
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| {
+            if name != "ppt/slides/slide1.xml" {
+                return (name, bytes);
+            }
+            let xml = String::from_utf8(bytes).unwrap();
+            let xml = xml.replacen("</p:spTree>", &format!("{boxes}</p:spTree>"), 1);
+            (name, xml.into_bytes())
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A slide of 600 shapes (review M1): its read pages shapes with their
+/// paragraphs, no page past its count and every shape and paragraph read
+/// once; the deck read lists its first 20 shapes and counts the rest.
+#[test]
+fn a_slide_of_600_shapes_pages_its_shapes_with_their_paragraphs() {
+    let deck = Deck::new(with_boxes(600));
+    let mut seen = Vec::new();
+    let mut shapes = 0;
+    let mut start = Some(0);
+    let mut total = 0;
+    while let Some(at) = start {
+        let page = deck.read(Some(1), at, 200).unwrap();
+        let ids = |key: &str| -> Vec<String> {
+            page[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let (page_shapes, paragraphs) = (ids("shapes"), ids("paragraphs"));
+        assert!(page_shapes.len() + paragraphs.len() <= 200);
+        shapes += page_shapes.len();
+        seen.extend(page_shapes.into_iter().chain(paragraphs));
+        total = page["total"].as_u64().unwrap() as usize;
+        start = page["nextStart"].as_u64().map(|next| next as u32);
+    }
+    assert_eq!(shapes, 602);
+    assert_eq!(seen.len(), total);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), total);
+
+    let listed = &deck.read(None, 0, 1).unwrap()["slides"][0];
+    assert_eq!(listed["shapes"].as_array().unwrap().len(), 20);
+    assert_eq!(listed["moreShapes"], 582);
 }

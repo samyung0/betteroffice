@@ -30,6 +30,9 @@ pub(crate) struct PptxSession {
     /// For each paragraph an insert went after, the id of the last paragraph
     /// this session put there, so the next lands after it.
     after: HashMap<String, String>,
+    /// What the last command wrote that its Redo re-creates, read after it
+    /// applied, for [`Self::created`].
+    created: Option<Touched>,
 }
 
 struct Paragraph {
@@ -52,6 +55,7 @@ impl PptxSession {
             deck,
             stories: None,
             after: HashMap::new(),
+            created: None,
         })
     }
 
@@ -255,29 +259,41 @@ impl PptxSession {
             .collect())
     }
 
+    /// A paragraph id never changes story, so the cache only misses the
+    /// paragraphs a command added (or finds one gone): a miss reads the
+    /// deck again once (review L5).
     fn paragraph(&mut self, id: &str) -> Result<(String, Paragraph)> {
-        if self.stories.is_none() {
-            self.stories = Some(
-                self.text_entries()?
-                    .into_iter()
-                    .map(|(entry, story)| (entry.id, story))
-                    .collect(),
-            );
+        let mut fresh = false;
+        loop {
+            if self.stories.is_none() {
+                self.stories = Some(
+                    self.text_entries()?
+                        .into_iter()
+                        .map(|(entry, story)| (entry.id, story))
+                        .collect(),
+                );
+                fresh = true;
+            }
+            let found = self
+                .stories
+                .as_ref()
+                .and_then(|stories| stories.get(id))
+                .cloned()
+                .and_then(|story_id| {
+                    let paragraph = self
+                        .story_paragraphs(&story_id)
+                        .ok()?
+                        .into_iter()
+                        .find(|(paragraph_id, _)| paragraph_id == id)?
+                        .1;
+                    Some((story_id, paragraph))
+                });
+            match found {
+                Some(found) => return Ok(found),
+                None if fresh => return Err(missing_paragraph()),
+                None => self.stories = None,
+            }
         }
-        let missing = missing_paragraph;
-        let story_id = self
-            .stories
-            .as_ref()
-            .and_then(|stories| stories.get(id))
-            .cloned()
-            .ok_or_else(missing)?;
-        let paragraph = self
-            .story_paragraphs(&story_id)?
-            .into_iter()
-            .find(|(paragraph_id, _)| paragraph_id == id)
-            .map(|(_, paragraph)| paragraph)
-            .ok_or_else(missing)?;
-        Ok((story_id, paragraph))
     }
 
     /// [`crate::CommandResult::touched`]: what the command's Undo
