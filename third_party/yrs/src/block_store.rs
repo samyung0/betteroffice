@@ -77,15 +77,23 @@ impl ClientBlockList {
 
     /// Given a block's identifier clock value, return an offset under which this block could be
     /// found using binary search algorithm, or a index under which this block should be inserted.
+    ///
+    /// Patched for BetterOffice: `None` for a clock the list does not hold (an
+    /// empty list, a clock past its last block or before its first) instead
+    /// of a panic.
     pub(crate) fn find_index(&self, clock: u32) -> Option<usize> {
         let mut left = 0;
-        let mut right = self.inner.len() - 1;
+        let mut right = self.inner.len().checked_sub(1)?;
         let mut block = unsafe { &*self.inner[right].get() };
         let (mut start, mut end) = block.clock_range();
         if start == clock {
             // a common case is to just append a block at the end, so check first if we can do that
             Some(right)
+        } else if clock > end {
+            None
         } else {
+            // Here `clock <= end` and `clock != start`, so `end > 0` and the
+            // guess is the first block or the last.
             let mut mid = ((clock / end) * right as u32) as usize;
             while left <= right {
                 block = unsafe { &*self.inner[mid].get() };
@@ -96,7 +104,7 @@ impl ClientBlockList {
                     }
                     left = mid + 1;
                 } else {
-                    right = mid - 1;
+                    right = mid.checked_sub(1)?;
                 }
                 mid = (left + right) / 2;
             }
@@ -546,5 +554,46 @@ impl std::fmt::Display for BlockStore {
             s.field(&k.to_string(), v);
         }
         s.finish()
+    }
+}
+
+#[cfg(test)]
+mod find_index_test {
+    use super::ClientBlockList;
+    use crate::block::{Block, BlockRange, ClientID, ID};
+
+    /// Collected runs of these lengths from clock 0.
+    fn list(lens: &[u32]) -> ClientBlockList {
+        let mut list = ClientBlockList::default();
+        let mut clock = 0;
+        for &len in lens {
+            list.push(Block::GC(BlockRange::new(
+                ID::new(ClientID::new(1), clock),
+                len,
+            )));
+            clock += len;
+        }
+        list
+    }
+
+    // Patched for BetterOffice: a clock the list does not hold finds nothing.
+    #[test]
+    fn finds_held_clocks_only() {
+        assert_eq!(list(&[]).find_index(0), None);
+        let one = list(&[1]);
+        assert_eq!(one.find_index(0), Some(0));
+        assert_eq!(one.find_index(1), None);
+        assert_eq!(one.find_index(5), None);
+        let several = list(&[2, 1, 3, 1]);
+        for (clock, &owner) in [0, 0, 1, 2, 2, 2, 3].iter().enumerate() {
+            assert_eq!(several.find_index(clock as u32), Some(owner));
+        }
+        for clock in [7, 13, 1_000, u32::MAX] {
+            assert_eq!(several.find_index(clock), None);
+        }
+        let mut late = ClientBlockList::default();
+        late.push(Block::GC(BlockRange::new(ID::new(ClientID::new(1), 4), 2)));
+        assert_eq!(late.find_index(1), None);
+        assert_eq!(late.find_index(5), Some(0));
     }
 }

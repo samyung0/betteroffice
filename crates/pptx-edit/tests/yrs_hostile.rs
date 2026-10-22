@@ -2,9 +2,10 @@
 //! `third_party/yrs` sits outside the cargo workspace, so its own unit tests
 //! never run in CI; these do.
 
+use yrs::block::ClientID;
 use yrs::encoding::write::Write;
 use yrs::updates::decoder::Decode;
-use yrs::{Doc, GetString, ReadTxn, Text, Transact, Update};
+use yrs::{Doc, GetString, ID, ReadTxn, Text, Transact, Update};
 
 /// An update of one client with one item whose content is a single `Any`
 /// value starting with `value`, under the root text "t".
@@ -65,4 +66,54 @@ fn a_value_nested_past_128_levels_is_refused_at_decode() {
         .join()
         .unwrap();
     assert!(refused);
+}
+
+/// Security regression (yrs find-index, 2026-10-22): a lookup of a clock the
+/// store does not hold, such as an id an update names, finds nothing. Here
+/// the client holds one unit.
+#[test]
+fn a_lookup_past_a_single_unit_finds_nothing() {
+    let doc = Doc::with_client_id(1);
+    let text = doc.get_or_insert_text("t");
+    text.insert(&mut doc.transact_mut(), 0, "a");
+    let client = ClientID::new(1);
+    let txn = doc.transact();
+    let store = txn.store();
+    assert!(store.get_item(&ID::new(client, 0)).is_some());
+    for clock in [1, 5, 1_000] {
+        assert!(store.get_item(&ID::new(client, clock)).is_none());
+        assert!(store.get_block_range(&ID::new(client, clock)).is_none());
+        assert_eq!(store.blocks_in(&client, clock..clock + 1).count(), 0);
+    }
+}
+
+/// Security regression (yrs find-index, 2026-10-22): as above, for a client
+/// holding several blocks, while every held clock still finds the block
+/// holding it.
+#[test]
+fn a_lookup_past_several_blocks_finds_nothing() {
+    let doc = Doc::with_client_id(1);
+    let text = doc.get_or_insert_text("t");
+    // Typed at the start, so no block merges with the one before: clocks 0,
+    // 1-3 and 4.
+    for typed in ["a", "xyz", "b"] {
+        text.insert(&mut doc.transact_mut(), 0, typed);
+    }
+    let client = ClientID::new(1);
+    let txn = doc.transact();
+    let store = txn.store();
+    for (clock, start, len) in [(0, 0, 1), (1, 1, 3), (2, 1, 3), (3, 1, 3), (4, 4, 1)] {
+        let (range, _) = store.get_block_range(&ID::new(client, clock)).unwrap();
+        assert_eq!((range.clock, range.len), (start, len), "clock {clock}");
+    }
+    for clock in [5, 9, 1_000, u32::MAX] {
+        assert!(store.get_item(&ID::new(client, clock)).is_none());
+        assert!(store.get_block_range(&ID::new(client, clock)).is_none());
+        assert_eq!(
+            store
+                .blocks_in(&client, clock..clock.saturating_add(1))
+                .count(),
+            0
+        );
+    }
 }
