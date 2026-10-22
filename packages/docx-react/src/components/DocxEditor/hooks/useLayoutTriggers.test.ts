@@ -29,7 +29,7 @@ test('lays out a header/footer or render change as a local pass', () => {
     updateSelectionOverlay: () => {},
   });
   const { rerender } = renderHook((header: HeaderFooter | null) => useLayoutTriggers(options(header)), {
-    initialProps: null,
+    initialProps: null as HeaderFooter | null,
   });
   expect(calls).toEqual([]);
   rerender({ type: 'header' } as unknown as HeaderFooter);
