@@ -1248,11 +1248,14 @@ impl DocxSession {
             .filter(|(story, _)| !story.is_empty())
             .ok_or_else(|| {
                 let story = id.rsplit_once(':').map_or(BODY, |(story, _)| story);
-                let shown = self
+                let known = self
                     .story_paras(story)
-                    .is_ok_and(|paras| paras.iter().any(|para| para.para_id == id))
-                    .then(|| format!("; the read shows it as \"{story}:paragraph:{id}\""))
-                    .unwrap_or_default();
+                    .is_ok_and(|paras| paras.iter().any(|para| para.para_id == id));
+                let shown = if known {
+                    format!("; the read shows it as \"{story}:paragraph:{id}\"")
+                } else {
+                    String::new()
+                };
                 Error::edit(
                     EditCode::UnavailableTarget,
                     format!(
