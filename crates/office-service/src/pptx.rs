@@ -343,7 +343,6 @@ impl PptxSession {
             doc,
             STORIES,
             &story,
-            None,
             paragraph.start + start,
             paragraph.start + end,
             kept,

@@ -811,7 +811,7 @@ impl DocxSession {
         let doc = self.engine.doc();
         // Each read starts after the mark before the paragraph it measures.
         let range = |story: &str, paras: &[Para], index: usize, start: u32, end: u32, kept| {
-            touched::story_range(
+            touched::story_range_from(
                 doc.yrs_doc(),
                 STORIES,
                 story,
@@ -869,7 +869,11 @@ impl DocxSession {
                 }
                 Command::SetAlignment { target_id, .. } => {
                     let (_, index, paras) = self.find(target_id)?;
-                    touched::mark_entries(doc.yrs_doc(), &paras[index].mark_item, &["alignment"])
+                    touched::mark_item_entries(
+                        doc.yrs_doc(),
+                        &paras[index].mark_item,
+                        &["alignment"],
+                    )
                 }
                 Command::SetList { ids, .. } => {
                     // Each story read once: a list may name 200 paragraphs.
@@ -884,7 +888,8 @@ impl DocxSession {
                             .iter()
                             .find(|para| para.para_id == para_id)
                             .ok_or_else(gone)?;
-                        sum += touched::mark_entries(doc.yrs_doc(), &para.mark_item, &LIST_KEYS);
+                        sum +=
+                            touched::mark_item_entries(doc.yrs_doc(), &para.mark_item, &LIST_KEYS);
                     }
                     sum
                 }

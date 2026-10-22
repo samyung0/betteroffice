@@ -102,9 +102,20 @@ pub(crate) enum Kept {
 pub(crate) type Seek = Option<(ID, u32)>;
 
 /// The items of story `story` in UTF-16 offsets `[start, end)` that `kept`
-/// names (a paragraph is `[start, mark + 1)`, its mark included), walked
-/// from `from`.
+/// names (a paragraph is `[start, mark + 1)`, its mark included).
 pub(crate) fn story_range(
+    doc: &Doc,
+    root: &str,
+    story: &str,
+    start: u32,
+    end: u32,
+    kept: Kept,
+) -> Touched {
+    story_range_from(doc, root, story, None, start, end, kept)
+}
+
+/// [`story_range`] walked from `from`.
+pub(crate) fn story_range_from(
     doc: &Doc,
     root: &str,
     story: &str,
@@ -131,9 +142,22 @@ pub(crate) fn story_range(
     touched
 }
 
-/// The entries `keys` of the paragraph mark whose item is `mark` (a map
-/// embedded in a story): the values a property write replaces.
-pub(crate) fn mark_entries(doc: &Doc, mark: &ID, keys: &[&str]) -> Touched {
+/// The entries `keys` of the map embedded at UTF-16 offset `at` of story
+/// `story` (a paragraph's mark): the values a property write replaces.
+pub(crate) fn mark_entries(doc: &Doc, root: &str, story: &str, at: u32, keys: &[&str]) -> Touched {
+    let mut mark = None;
+    walk(doc, root, story, None, |offset, len, item| {
+        if offset < at || len == 0 {
+            return offset <= at;
+        }
+        mark = Some(*item.id());
+        false
+    });
+    mark.map_or_else(Touched::default, |mark| mark_item_entries(doc, &mark, keys))
+}
+
+/// [`mark_entries`] of the paragraph mark whose item is `mark`.
+pub(crate) fn mark_item_entries(doc: &Doc, mark: &ID, keys: &[&str]) -> Touched {
     let mut touched = Touched::default();
     if let Some(item) = doc.transact().store().get_item(mark)
         && !item.is_deleted()
