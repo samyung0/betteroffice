@@ -63,11 +63,31 @@ export function computeViewportAnchoredScrollTop(
   return Math.min(Math.max(0, requested), Math.max(0, maxScrollTop));
 }
 
+/**
+ * The origin of a layout pass: a scheduled one keeps its own, and one run
+ * without a schedule (a session's first layout, a read-only switch, fonts or
+ * measurement becoming ready, header, footer or render settings) is not the
+ * reader's edit, so it keeps the view as a peer's does.
+ */
+export function layoutPassOrigin(pending: LayoutUpdateOrigin | null): LayoutUpdateOrigin {
+  return pending ?? 'remote';
+}
+
+/** The caret's selection against the last caret pass; `first` is a session's
+ * first pass (a document opening, or shown read-only). */
+export type CaretSelectionChange = 'first' | 'same' | 'changed';
+
+/**
+ * Only the reader moves the view to the caret: a selection they changed, or
+ * a local edit. A document's first caret pass never does, so a reader placed
+ * elsewhere (a restored scroll offset) stays there.
+ */
 export function shouldScrollCaretIntoView(
   layoutUpdateOrigin: LayoutUpdateOrigin,
-  selectionChanged: boolean
+  selection: CaretSelectionChange
 ): boolean {
-  return layoutUpdateOrigin === 'local' || selectionChanged;
+  if (selection === 'first') return false;
+  return layoutUpdateOrigin === 'local' || selection === 'changed';
 }
 
 /**

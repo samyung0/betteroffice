@@ -49,6 +49,7 @@ import { InputOperationQueue } from './inputOperationQueue';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
   shouldScrollCaretIntoView,
+  type CaretSelectionChange,
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
 
@@ -273,10 +274,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
   const resolveDisplayListQueriesRef = useRef(resolveDisplayListQueries);
   // Sticky (not display-position) selection the caret-into-view step last acted
-  // on. `undefined` is the pre-mount sentinel; display positions shift under a
-  // remote insert above the caret while sticky locs do not, so comparing locs is
-  // what keeps a viewer's viewport still during someone else's edit.
-  const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  // on, with its session; none before a session's first pass. Display
+  // positions shift under a remote insert above the caret while sticky locs do
+  // not, so comparing locs is what keeps a viewer's viewport still during
+  // someone else's edit.
+  const lastCaretScrollRef = useRef<{
+    session: YrsSession | null;
+    selection: YrsSelection | null;
+  } | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -1417,14 +1422,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         : { left: nextLeft, top: nextTop, height: nextHeight }
     );
     const stickySelection = session?.selection() ?? null;
-    const previousStickySelection = lastCaretScrollSelectionRef.current;
-    lastCaretScrollSelectionRef.current = stickySelection;
-    const selectionChanged =
-      previousStickySelection === undefined ||
-      !sameYrsSelection(previousStickySelection, stickySelection);
+    const previous = lastCaretScrollRef.current;
+    lastCaretScrollRef.current = { session: session ?? null, selection: stickySelection };
+    const change: CaretSelectionChange =
+      !previous || previous.session !== (session ?? null)
+        ? 'first'
+        : sameYrsSelection(previous.selection, stickySelection)
+          ? 'same'
+          : 'changed';
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+      shouldScrollCaretIntoView(layoutUpdateOrigin, change)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const viewport = scroller.getBoundingClientRect();
