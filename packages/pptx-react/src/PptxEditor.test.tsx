@@ -1105,6 +1105,38 @@ describe('PptxEditor speaker notes', () => {
     expect([notes(), input.value, hint()]).toEqual([`${shorter}漢字漢`, `${shorter}漢字漢`, limit]);
   }, 60_000);
 
+  // As Capy's other capped inputs (Epo 2026-10-22).
+  it('shows an x/4,000 counter from 90% of the cap, in code points', async () => {
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        file={fixture}
+        fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        defaultSpeakerNotes
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await act(async () => {
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    });
+    const input = (await view.findByRole(
+      'textbox',
+      { name: 'Speaker notes' },
+      { timeout: 15_000 }
+    )) as HTMLTextAreaElement;
+    const count = () => view.queryByTestId('pptx-notes-count')?.textContent ?? null;
+
+    fireEvent.change(input, { target: { value: 'n'.repeat(3599) } });
+    expect(count()).toBeNull();
+    // 3,600 code points, though 3,601 UTF-16 units.
+    fireEvent.change(input, { target: { value: `😀${'n'.repeat(3599)}` } });
+    expect(count()).toBe('3600/4000');
+    fireEvent.change(input, { target: { value: 'n'.repeat(4000) } });
+    expect(count()).toBe('4000/4000');
+  }, 60_000);
+
   // An uploaded deck's notes may already hold more, as the server allows.
   it('lets notes over 4,000 code points shrink or keep their length, never grow', async () => {
     const deck = pptx.openPresentation(fixture);

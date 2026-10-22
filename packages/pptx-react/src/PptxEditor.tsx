@@ -3696,6 +3696,8 @@ function RemoteShapeOutline({
  * (Epo 2026-10-22).
  */
 const MAX_NOTES_CHARS = 4000;
+/** The x/4,000 counter shows from 90% of the cap, as Capy's capped inputs (`CharCount`). */
+const NOTES_COUNT_FROM = Math.ceil(MAX_NOTES_CHARS * 0.9);
 
 function codePoints(text: string): number {
   return Array.from(text).length;
@@ -3752,6 +3754,9 @@ function NotesPanel({
   useLayoutEffect(() => {
     if (cut) textareaRef.current?.setSelectionRange(cut.caret, cut.caret);
   }, [cut]);
+  const shown = draft ?? value;
+  // UTF-16 units bound code points, so most notes are never counted.
+  const count = shown.length < NOTES_COUNT_FROM ? 0 : codePoints(shown);
   const commit = (next: string) => {
     const fitted = fitNotes(value, next);
     setCut(fitted && { caret: fitted.caret });
@@ -3767,12 +3772,20 @@ function NotesPanel({
             {limitHint}
           </span>
         ) : null}
+        {count >= NOTES_COUNT_FROM ? (
+          <span
+            data-testid="pptx-notes-count"
+            style={count >= MAX_NOTES_CHARS ? styles.notesCountFull : styles.notesCount}
+          >
+            {count}/{MAX_NOTES_CHARS}
+          </span>
+        ) : null}
       </div>
       <textarea
         ref={textareaRef}
         aria-label={label}
         style={styles.notesTextarea}
-        value={draft ?? value}
+        value={shown}
         readOnly={readOnly}
         placeholder={placeholder}
         data-testid="pptx-notes-textarea"
@@ -4354,7 +4367,7 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--pptx-surface, #ffffff)',
     borderTop: '1px solid var(--pptx-divider, #e2e8f0)',
   },
-  notesHeader: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
+  notesHeader: { display: 'flex', alignItems: 'baseline', gap: 8 },
   notesLabel: {
     fontSize: 11,
     fontWeight: 650,
@@ -4362,6 +4375,7 @@ const styles: Record<string, CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: '0.02em',
     whiteSpace: 'nowrap',
+    marginRight: 'auto',
   },
   notesTextarea: {
     width: '100%',
@@ -4378,6 +4392,9 @@ const styles: Record<string, CSSProperties> = {
   },
   // The XLSX editor's refusal line, on the label's row so the slide keeps its size.
   notesLimit: { color: 'var(--pptx-error-text, #8b1e2d)', font: `12px ${toolbarFont}`, textAlign: 'right' },
+  // Capy's CharCount: muted, in the error colour at or over the cap.
+  notesCount: { color: 'var(--pptx-text-muted, #647087)', font: `12px ${toolbarFont}`, whiteSpace: 'nowrap' },
+  notesCountFull: { color: 'var(--pptx-error-text, #8b1e2d)', font: `12px ${toolbarFont}`, whiteSpace: 'nowrap' },
   empty: { margin: 'auto', color: 'var(--pptx-text-muted, #6b7587)', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: 'var(--pptx-error-text, #8b1e2d)', background: 'var(--pptx-error-bg, #fff0f2)', border: '1px solid var(--pptx-error-border, #efb8c0)', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {
