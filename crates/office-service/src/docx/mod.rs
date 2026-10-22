@@ -520,17 +520,7 @@ impl DocxSession {
     }
 
     fn paragraph(&self, id: &str) -> Result<(String, Paragraph)> {
-        let marker = id
-            .rfind(":paragraph:")
-            .filter(|marker| *marker > 0)
-            .ok_or_else(|| {
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    "target_id is not a DOCX paragraph",
-                )
-            })?;
-        let story = &id[..marker];
-        let para_id = &id[marker + ":paragraph:".len()..];
+        let (story, para_id) = self.split(id)?;
         // The call's index: no story read again per lookup (review r2 L9).
         let paragraph = self.indexed_paragraph(story, para_id)?;
         Ok((story.to_owned(), paragraph))

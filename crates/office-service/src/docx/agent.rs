@@ -124,18 +124,6 @@ fn check_cell(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// `story` and paraId of a target id (`<story>:paragraph:<paraId>`).
-fn split_id(id: &str) -> Result<(&str, &str)> {
-    id.rsplit_once(":paragraph:")
-        .filter(|(story, _)| !story.is_empty())
-        .ok_or_else(|| {
-            Error::edit(
-                EditCode::UnavailableTarget,
-                format!("{id:?} is not a DOCX paragraph id"),
-            )
-        })
-}
-
 /// Header, footer and note paragraphs take `replace_text` only (Epo
 /// 2026-10-21); the body's tables and content controls are the body's.
 fn in_body(story: &str) -> Result<()> {
@@ -896,7 +884,7 @@ impl DocxSession {
                     let mut read: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
                     let mut sum = Touched::default();
                     for id in ids {
-                        let (story, para_id) = split_id(id)?;
+                        let (story, para_id) = self.split(id)?;
                         if !read.contains_key(story) {
                             read.insert(story, self.story_paras(story)?);
                         }
@@ -1251,10 +1239,33 @@ impl DocxSession {
         })
     }
 
+    /// `story` and paraId of a target id (`<story>:paragraph:<paraId>`). A
+    /// file without `w14:paraId` seeds paraIds that name their story
+    /// (`body:p9`, read as `body:paragraph:body:p9`), and the agent sent the
+    /// paraId alone (UAT 2026-10-22), so the refusal names the read's id.
+    pub(super) fn split<'a>(&self, id: &'a str) -> Result<(&'a str, &'a str)> {
+        id.rsplit_once(":paragraph:")
+            .filter(|(story, _)| !story.is_empty())
+            .ok_or_else(|| {
+                let story = id.rsplit_once(':').map_or(BODY, |(story, _)| story);
+                let shown = self
+                    .story_paras(story)
+                    .is_ok_and(|paras| paras.iter().any(|para| para.para_id == id))
+                    .then(|| format!("; the read shows it as \"{story}:paragraph:{id}\""))
+                    .unwrap_or_default();
+                Error::edit(
+                    EditCode::UnavailableTarget,
+                    format!(
+                        "{id:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
+                    ),
+                )
+            })
+    }
+
     /// The paragraph `id` names, its story and its story's paragraphs (body
     /// stories only, as every command but `replace_text` edits).
     fn find(&self, id: &str) -> Result<(String, usize, Arc<Vec<Para>>)> {
-        let (story, para_id) = split_id(id)?;
+        let (story, para_id) = self.split(id)?;
         in_body(story)?;
         let paras = self.story_paras(story)?;
         let index = paras
@@ -1278,9 +1289,10 @@ impl DocxSession {
         refusal: &str,
     ) -> Result<Placement> {
         let index = |id: &str| -> Result<usize> {
-            let para_id = id
-                .strip_prefix("body:paragraph:")
-                .ok_or_else(|| invalid(refusal))?;
+            let (story, para_id) = self.split(id)?;
+            if story != BODY {
+                return Err(invalid(refusal));
+            }
             body.iter()
                 .position(|para| para.para_id == para_id)
                 .ok_or_else(gone)
@@ -1532,7 +1544,7 @@ impl DocxSession {
         let mut stories: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
         let mut targets = Vec::with_capacity(ids.len());
         for id in ids {
-            let (story, para_id) = split_id(id)?;
+            let (story, para_id) = self.split(id)?;
             in_body(story)?;
             if !stories.contains_key(story) {
                 stories.insert(story, self.story_paras(story)?);

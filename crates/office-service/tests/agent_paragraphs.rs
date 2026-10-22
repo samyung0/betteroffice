@@ -622,6 +622,59 @@ fn docx_delete_refuses_tracked_section_ending_and_last_paragraphs() {
     }
 }
 
+/// [`docx`] without `w14:paraId`, as UAT's file: the seed names each
+/// paragraph by its story and place, read as `body:paragraph:body:p1`.
+fn docx_without_para_ids() -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&docx())
+        .unwrap()
+        .into_iter()
+        .map(|(path, bytes)| {
+            let mut xml = String::from_utf8(bytes).unwrap();
+            // ` w14:paraId="0000000A"`: every paraId of `docx` has 8 digits.
+            while let Some(at) = xml.find(r#" w14:paraId=""#) {
+                xml.replace_range(at..at + 22, "");
+            }
+            (path, xml.into_bytes())
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// The agent sent a seeded paraId alone (UAT 2026-10-22): every command, an
+/// insert's anchor and replace_text included, refuses it naming the id the
+/// read shows; an id naming nothing says to copy ids whole from a read.
+#[test]
+fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
+    let mut doc = Doc::new(Format::Docx, docx_without_para_ids());
+    assert_eq!(doc.id("We timed it."), "body:paragraph:body:p1");
+    let copy = ": copy each id whole from inspect_office_document, reading the file first";
+    let shown = refused(
+        EditCode::UnavailableTarget,
+        &format!(
+            r#""body:p1" is not a DOCX paragraph id; the read shows it as "body:paragraph:body:p1"{copy}"#
+        ),
+    );
+    let replace = Command::ReplaceText {
+        target_id: "body:p1".into(),
+        expected_text: "We".into(),
+        text: "They".into(),
+    };
+    for command in [
+        delete("body:p1", "We timed it."),
+        after("body:p1", "x"),
+        replace,
+    ] {
+        assert_eq!(doc.apply(&[command]).unwrap_err(), shown);
+    }
+    assert_eq!(
+        doc.apply(&[delete("body:t0", "Cell")]).unwrap_err(),
+        refused(
+            EditCode::UnavailableTarget,
+            &format!(r#""body:t0" is not a DOCX paragraph id{copy}"#),
+        )
+    );
+}
+
 /// In a shape's text, inserts after and before a paragraph land in call
 /// order with its neighbours' ids kept; the inverse deletes them; a delete
 /// keeps the paragraph after it as it was.
