@@ -1085,9 +1085,13 @@ describe('PptxEditor speaker notes', () => {
     // Typing at the cap changes nothing and keeps the caret where it typed.
     fireEvent.change(input, { target: { value: `${full.slice(0, 100)}x${full.slice(100)}` } });
     expect([notes(), input.value, input.selectionStart, hint()]).toEqual([full, full, 100, limit]);
+    // A paste over two characters in the middle keeps what fits, the caret after it.
+    fireEvent.change(input, { target: { value: `${full.slice(0, 100)}PQRSTU${full.slice(102)}` } });
+    const middle = `${full.slice(0, 100)}PQ${full.slice(102)}`;
+    expect([notes(), input.value, input.selectionStart, hint()]).toEqual([middle, middle, 102, limit]);
     // A paste over the last ten characters keeps what fits.
-    fireEvent.change(input, { target: { value: `${full.slice(0, -10)}PASTED-TEXT-0123456789` } });
-    const pasted = `${full.slice(0, -10)}PASTED-TEX`;
+    fireEvent.change(input, { target: { value: `${middle.slice(0, -10)}PASTED-TEXT-0123456789` } });
+    const pasted = `${middle.slice(0, -10)}PASTED-TEX`;
     expect([notes(), input.value, input.selectionStart, hint()]).toEqual([pasted, pasted, pasted.length, limit]);
     // Deleting fits again.
     const shorter = pasted.slice(0, -3);
@@ -1099,6 +1103,49 @@ describe('PptxEditor speaker notes', () => {
     expect([notes(), input.value]).toEqual([shorter, `${shorter}漢字漢字`]);
     fireEvent.compositionEnd(input);
     expect([notes(), input.value, hint()]).toEqual([`${shorter}漢字漢`, `${shorter}漢字漢`, limit]);
+  }, 60_000);
+
+  // An uploaded deck's notes may already hold more, as the server allows.
+  it('lets notes over 4,000 code points shrink or keep their length, never grow', async () => {
+    const deck = pptx.openPresentation(fixture);
+    const over = 'o'.repeat(5000);
+    deck.setSlideNotes(deck.snapshot().slides[0].id, over);
+    const file = deck.save();
+    deck.dispose();
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        file={file}
+        fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        defaultSpeakerNotes
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await act(async () => {
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    });
+    const input = (await view.findByRole(
+      'textbox',
+      { name: 'Speaker notes' },
+      { timeout: 15_000 }
+    )) as HTMLTextAreaElement;
+    const notes = () => api!.handle.snapshot().slides[0].notes;
+    const hint = () => view.queryByTestId('pptx-notes-limit') !== null;
+    expect(notes()).toBe(over);
+
+    // Growing changes nothing.
+    fireEvent.change(input, { target: { value: `${over}x` } });
+    expect([notes(), input.value, hint()]).toEqual([over, over, true]);
+    // Shrinking is sent, though still past 4,000.
+    const shrunk = over.slice(0, -1);
+    fireEvent.change(input, { target: { value: shrunk } });
+    expect([notes(), hint()]).toEqual([shrunk, false]);
+    // A paste over ten characters keeps the length, cut to ten.
+    fireEvent.change(input, { target: { value: `${shrunk.slice(0, -10)}ABCDEFGHIJKL` } });
+    const kept = `${shrunk.slice(0, -10)}ABCDEFGHIJ`;
+    expect([notes(), input.value, hint()]).toEqual([kept, kept, true]);
   }, 60_000);
 
   it('keeps read-only notes focusable and selectable for copying, but not editable', async () => {
