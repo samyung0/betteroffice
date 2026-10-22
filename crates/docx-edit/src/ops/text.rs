@@ -7,11 +7,11 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, Text, TextRef, TransactionMut};
 
 use crate::format::{FIELD_RESULT, FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
-use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
+use crate::op::{OpError, OpResult, Receipt, loc_range_from, loc_range_in_txn};
 use crate::ops::field_changes::{child_owners, refresh_shown, release_children, removes_owner};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
+    capture_pilcrow, utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -104,12 +104,28 @@ pub(crate) struct DeleteOutcome {
     pub removed: u32,
 }
 
-/// Chunks covering the insertion/deletion boundary.
-fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec<Chunk> {
-    snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
+impl EditingDoc {
+    /// Chunks covering the insertion/deletion boundary.
+    fn boundary_chunks(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &TransactionMut<'_>,
+        index: u32,
+    ) -> Vec<Chunk> {
+        self.snapshot_range_in(
+            story_id,
+            story,
+            txn,
+            index.saturating_sub(1),
+            index.saturating_add(1),
+        )
+    }
 }
 
-/// Stamps retained content, removes owned insertions, and protects the final pilcrow.
+/// Stamps retained content, removes owned insertions, and protects the final
+/// pilcrow (`final_pilcrow`, its index).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn suggest_delete(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -118,8 +134,8 @@ pub(crate) fn suggest_delete(
     start: u32,
     end: u32,
     chunks: &[Chunk],
+    final_pilcrow: Option<u32>,
 ) -> DeleteOutcome {
-    let final_pilcrow = last_pilcrow(story, txn).map(|(index, _)| index);
     let mut removed = 0;
     for chunk in chunks.iter().rev() {
         let overlap_start = chunk.start.max(start);
@@ -169,14 +185,16 @@ pub(crate) fn suggest_delete(
 }
 
 /// Plain-mode delete with the R6 survival rule: when the range removes pilcrows, the surviving
-/// paragraph adopts the FIRST affected paragraph's pPr + paraId. The story's final pilcrow is
-/// never removed (Word keeps the last paragraph mark); content around it still is.
+/// paragraph adopts the FIRST affected paragraph's pPr + paraId. The story's final pilcrow
+/// (`final_pilcrow`) is never removed (Word keeps the last paragraph mark); content around it
+/// still is.
 pub(crate) fn plain_delete(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
     start: u32,
     end: u32,
     chunks: &[Chunk],
+    final_pilcrow: Option<(u32, yrs::MapRef)>,
 ) -> DeleteOutcome {
     release_children(txn, story, chunks, start, end);
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
@@ -188,7 +206,6 @@ pub(crate) fn plain_delete(
             _ => None,
         })
         .collect();
-    let final_pilcrow = last_pilcrow(story, txn);
     let donor = pilcrows_in_range
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
@@ -226,7 +243,9 @@ pub(crate) fn plain_delete(
 }
 
 /// Deletes `[start, end)` but for the paragraph mark at `kept`, plainly or as
-/// a suggestion under `revision`; returns the units physically removed.
+/// a suggestion under `revision`; returns the units physically removed. The
+/// story's final pilcrow is read before: the second piece, before `kept`,
+/// never reaches it.
 #[allow(clippy::too_many_arguments)]
 fn delete_keeping(
     txn: &mut TransactionMut<'_>,
@@ -237,6 +256,7 @@ fn delete_keeping(
     end: u32,
     kept: Option<u32>,
     chunks: &[Chunk],
+    final_pilcrow: Option<(u32, yrs::MapRef)>,
 ) -> u32 {
     let pieces = match kept {
         Some(mark) => vec![(mark + 1, end), (start, mark)],
@@ -246,8 +266,11 @@ fn delete_keeping(
         .into_iter()
         .filter(|(from, to)| from < to)
         .map(|(from, to)| match revision {
-            Some(revision) => suggest_delete(txn, story, ctx, revision, from, to, chunks).removed,
-            None => plain_delete(txn, story, from, to, chunks).removed,
+            Some(revision) => {
+                let last = final_pilcrow.as_ref().map(|(index, _)| *index);
+                suggest_delete(txn, story, ctx, revision, from, to, chunks, last).removed
+            }
+            None => plain_delete(txn, story, from, to, chunks, final_pilcrow.clone()).removed,
         })
         .sum()
 }
@@ -278,7 +301,8 @@ impl EditingDoc {
                 ..Receipt::default()
             });
         }
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        let chunks = self.boundary_chunks(&at.story, &story, &txn, at.index);
+        let from = self.slot_mark_in(&at.story, &story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
@@ -292,7 +316,7 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         story.insert_with_attributes(&mut txn, at.index, text, stamped_attrs(formatting, ins));
         let end = at.index + utf16_len(text);
-        let range = loc_range_in_txn(&at.story, &story, &txn, at.index, end)?;
+        let range = loc_range_from(&at.story, &story, &txn, from, at.index, end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -313,12 +337,25 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let chunks = snapshot_range(
+        let chunks = self.snapshot_range_in(
+            &range.story,
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let final_pilcrow = self.last_pilcrow_in(&range.story, &story, &txn);
+        let joins = chunks.iter().any(|chunk| {
+            matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                && chunk.start >= range.start
+                && chunk.start < range.end
+        });
+        // A delete inside one paragraph changes nothing before its slot.
+        let from = if joins {
+            None
+        } else {
+            self.slot_mark_in(&range.story, &story, &txn, range.start)
+        };
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
@@ -336,6 +373,7 @@ impl EditingDoc {
             range.end,
             kept,
             &chunks,
+            final_pilcrow,
         );
         let result_end = if revision.is_some() {
             range.end - removed
@@ -343,13 +381,7 @@ impl EditingDoc {
             range.start
         };
         // A join restores a field Enter split across the two paragraphs.
-        if revision.is_none()
-            && chunks.iter().any(|chunk| {
-                matches!(chunk.kind, ChunkKind::Pilcrow(_))
-                    && chunk.start >= range.start
-                    && chunk.start < range.end
-            })
-        {
+        if revision.is_none() && joins {
             crate::ops::field_changes::rejoin_fields(&mut txn, &story, &range.story, range.start)?;
         }
         if revision.is_none() {
@@ -359,7 +391,7 @@ impl EditingDoc {
                 &child_owners(&chunks, range.start, range.end),
             );
         }
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
+        let loc_range = loc_range_from(&range.story, &story, &txn, from, range.start, result_end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -386,9 +418,11 @@ impl EditingDoc {
             .para_at(pilcrow)
             .map_or(pilcrow, |para| para.node_start);
         let end = pilcrow + 1;
+        // The commit follows the index in place unless it is still held.
+        drop(index);
         let mut txn = self.transact_for(ctx);
         let text = story_ref(&txn, story)?;
-        let chunks = snapshot_range(&text, &txn, start, end);
+        let chunks = self.snapshot_range_in(story, &text, &txn, start, end);
         release_children(&mut txn, &text, &chunks, start, end);
         text.remove_range(&mut txn, start, end - start);
         refresh_shown(&mut txn, &text, &child_owners(&chunks, start, end));
@@ -412,12 +446,24 @@ impl EditingDoc {
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
 
-        let chunks = snapshot_range(
+        let chunks = self.snapshot_range_in(
+            &range.story,
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let final_pilcrow = self.last_pilcrow_in(&range.story, &story, &txn);
+        // A replacement inside one paragraph changes nothing before its slot.
+        let from = if chunks.iter().any(|chunk| {
+            matches!(chunk.kind, ChunkKind::Pilcrow(_))
+                && chunk.start >= range.start
+                && chunk.start < range.end
+        }) {
+            None
+        } else {
+            self.slot_mark_in(&range.story, &story, &txn, range.start)
+        };
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -480,6 +526,7 @@ impl EditingDoc {
             range.end,
             kept,
             &chunks,
+            final_pilcrow,
         );
         let plain = revision.is_none();
         if !text.is_empty() {
@@ -499,7 +546,7 @@ impl EditingDoc {
             );
         }
         let end = landing + utf16_len(text);
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, landing, end)?;
+        let loc_range = loc_range_from(&range.story, &story, &txn, from, landing, end)?;
         Ok(Receipt {
             new_para_ids: Vec::new(),
             revision_ids: revision_id.into_iter().collect(),
@@ -539,12 +586,14 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let chunks = snapshot_range(
+        let chunks = self.snapshot_range_in(
+            &range.story,
             &story,
             &txn,
             range.start.saturating_sub(1),
             range.end.saturating_add(1),
         );
+        let final_pilcrow = self.last_pilcrow_in(&range.story, &story, &txn);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -564,6 +613,7 @@ impl EditingDoc {
             range.end,
             kept,
             &chunks,
+            final_pilcrow,
         );
         let mut cursor = landing;
         for run in runs {
@@ -609,7 +659,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        let chunks = self.boundary_chunks(&at.story, &story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())
@@ -643,7 +693,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        let chunks = self.boundary_chunks(&at.story, &story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())

@@ -108,7 +108,12 @@ Text:
 - a split at a UTF-16 offset inside a surrogate pair, at a slice boundary or
   in an `ItemContent` split, gives two replacement characters as Yjs does,
   instead of panicking (`split_str_utf16_lossy` in `src/block.rs`, with a unit
-  test).
+  test);
+- `find_position` (`src/types/text.rs`) takes a live item's length, which is
+  its content's UTF-16 length, in a UTF-16 walk instead of counting each
+  string's characters again, so placing an edit costs one step per item
+  before it (positions across surrogate pairs are tested in
+  `crates/docx-edit/tests/raw_ops_surrogate_boundaries.rs`, which CI runs).
 
 Transactions and updates:
 

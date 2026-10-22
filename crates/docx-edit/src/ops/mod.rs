@@ -10,10 +10,12 @@ pub mod toc;
 
 use std::collections::BTreeMap;
 
+use yrs::block::{ItemContent, ItemPtr};
+use yrs::branch::Branch;
 use yrs::types::Attrs;
-use yrs::types::text::YChange;
-use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, TextRef, TransactionMut};
 
+use crate::segments::{SlotStart, apply_format};
 use crate::{KIND_KEY, PARA_ID, PPR_CHANGE, is_pilcrow, map_string, out_len};
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
@@ -141,72 +143,198 @@ pub(crate) fn revision_id_in_range(
         })
 }
 
-fn chunk_at<T: ReadTxn>(insert: &Out, attrs: Option<&Attrs>, offset: u32, txn: &T) -> Chunk {
+fn chunk_at<T: ReadTxn>(insert: &Out, attrs: &Attrs, offset: u32, txn: &T) -> Chunk {
     let kind = match insert {
         Out::Any(Any::String(value)) => ChunkKind::Text(value.to_string()),
         Out::YMap(map) if is_pilcrow(map, txn) => ChunkKind::Pilcrow(map.clone()),
         Out::YMap(map) => ChunkKind::Embed(Some(map.clone())),
         _ => ChunkKind::Embed(None),
     };
-    let attrs = attrs
-        .into_iter()
-        .flat_map(|attrs| attrs.iter())
-        .map(|(key, value)| (key.to_string(), value.clone()))
-        .collect();
     Chunk {
         start: offset,
         len: out_len(insert),
         kind,
-        attrs,
+        attrs: attrs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect(),
     }
 }
 
-pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
-    let mut offset = 0;
-    story
-        .diff(txn, YChange::identity)
-        .into_iter()
-        .map(|diff| {
-            let chunk = chunk_at(&diff.insert, diff.attributes.as_deref(), offset, txn);
-            offset += chunk.len;
-            chunk
-        })
+/// The chunks `TextRef::diff` reads a story as, from the first that ends
+/// after `lo`, read item by item and only as far as asked: from `next`, at
+/// story offset `at` with format attributes `attrs` open there (the story's
+/// start, or a paragraph slot's). A run of text items with no format marker
+/// or embed between them is one chunk.
+pub(crate) struct Chunks<'a, T: ReadTxn> {
+    txn: &'a T,
+    next: Option<ItemPtr>,
+    at: u32,
+    attrs: Attrs,
+    lo: u32,
+    /// The text items of the run being read, and where it starts.
+    run: Vec<ItemPtr>,
+    run_start: u32,
+    /// An embed's chunk read with the run before it, to give next.
+    held: Option<Chunk>,
+}
+
+impl<'a, T: ReadTxn> Chunks<'a, T> {
+    pub(crate) fn new(txn: &'a T, next: Option<ItemPtr>, at: u32, attrs: Attrs, lo: u32) -> Self {
+        Self {
+            txn,
+            next,
+            at,
+            attrs,
+            lo,
+            run: Vec::new(),
+            run_start: at,
+            held: None,
+        }
+    }
+
+    /// A story's chunks from `from`, a paragraph slot's start, else from
+    /// the story's start.
+    pub(crate) fn of(story: &TextRef, txn: &'a T, from: Option<&SlotStart>, lo: u32) -> Self {
+        match from {
+            Some((next, at, attrs)) => Self::new(txn, *next, *at, attrs.clone(), lo),
+            None => Self::new(
+                txn,
+                AsRef::<Branch>::as_ref(story).start(),
+                0,
+                Attrs::new(),
+                lo,
+            ),
+        }
+    }
+
+    /// The run read so far as a chunk, when it ends after `lo`.
+    fn flush(&mut self) -> Option<Chunk> {
+        if self.run.is_empty() {
+            return None;
+        }
+        let chunk = (self.at > self.lo).then(|| {
+            let mut text = String::new();
+            for item in &self.run {
+                if let ItemContent::String(part) = item.content() {
+                    text.push_str(part.as_str());
+                }
+            }
+            Chunk {
+                start: self.run_start,
+                len: self.at - self.run_start,
+                kind: ChunkKind::Text(text),
+                attrs: owned_attrs(&self.attrs),
+            }
+        });
+        self.run.clear();
+        chunk
+    }
+}
+
+impl<T: ReadTxn> Iterator for Chunks<'_, T> {
+    type Item = Chunk;
+
+    fn next(&mut self) -> Option<Chunk> {
+        if let Some(chunk) = self.held.take() {
+            return Some(chunk);
+        }
+        while let Some(item) = self.next {
+            self.next = item.right();
+            if item.is_deleted() {
+                continue;
+            }
+            match item.content() {
+                ItemContent::Format(key, value) => {
+                    let chunk = self.flush();
+                    apply_format(&mut self.attrs, key, value);
+                    if chunk.is_some() {
+                        return chunk;
+                    }
+                }
+                ItemContent::String(_) => {
+                    if self.run.is_empty() {
+                        self.run_start = self.at;
+                    }
+                    self.run.push(item);
+                    self.at += item.len();
+                }
+                ItemContent::Type(_) | ItemContent::Embed(_) => {
+                    let chunk = self.flush();
+                    if let Some(value) = item.content().get_first() {
+                        let len = out_len(&value);
+                        if self.at + len > self.lo {
+                            self.held = Some(chunk_at(&value, &self.attrs, self.at, self.txn));
+                        }
+                        self.at += len;
+                    }
+                    if chunk.is_some() {
+                        return chunk;
+                    }
+                    if let Some(held) = self.held.take() {
+                        return Some(held);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.flush()
+    }
+}
+
+/// Format attributes as a chunk holds them.
+fn owned_attrs(attrs: &Attrs) -> BTreeMap<String, Any> {
+    attrs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.clone()))
         .collect()
+}
+
+/// The chunks of [`Chunks`] that overlap `[lo, hi)`.
+pub(crate) fn chunks_from<T: ReadTxn>(
+    txn: &T,
+    next: Option<ItemPtr>,
+    at: u32,
+    attrs: Attrs,
+    lo: u32,
+    hi: u32,
+) -> Vec<Chunk> {
+    Chunks::new(txn, next, at, attrs, lo)
+        .take_while(|chunk| chunk.start < hi)
+        .collect()
+}
+
+pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
+    snapshot_range(story, txn, 0, u32::MAX)
 }
 
 /// `snapshot` over the chunks overlapping `[lo, hi)`.
 pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: u32) -> Vec<Chunk> {
-    let mut offset = 0;
-    let mut chunks = Vec::new();
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
-        if offset >= hi {
-            break;
-        }
-        if offset + len > lo {
-            chunks.push(chunk_at(
-                &diff.insert,
-                diff.attributes.as_deref(),
-                offset,
-                txn,
-            ));
-        }
-        offset += len;
-    }
-    chunks
+    chunks_from(
+        txn,
+        AsRef::<Branch>::as_ref(story).start(),
+        0,
+        Attrs::new(),
+        lo,
+        hi,
+    )
 }
 
 /// The story's last pilcrow as `(index, map)`.
 pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32, MapRef)> {
     let mut offset = 0;
     let mut last = None;
-    for diff in story.diff(txn, YChange::identity) {
-        if let Out::YMap(map) = &diff.insert
-            && is_pilcrow(map, txn)
+    let mut next = AsRef::<Branch>::as_ref(story).start();
+    while let Some(item) = next {
+        if !item.is_deleted()
+            && let ItemContent::Type(_) = item.content()
+            && let Some(Out::YMap(map)) = item.content().get_first()
+            && is_pilcrow(&map, txn)
         {
-            last = Some((offset, map.clone()));
+            last = Some((offset, map));
         }
-        offset += out_len(&diff.insert);
+        offset += crate::segments::units(&item);
+        next = item.right();
     }
     last
 }

@@ -313,10 +313,12 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
-    /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
-    /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
+    /// Bumped once per committed update (local ops, remote merges, undo/redo); chunk
+    /// snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
-    segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
+    /// Each commit's changes are followed into the segment indexes in step
+    /// with the epoch before it ([`segments::follow_commit`]).
+    segment_indexes: Arc<Mutex<segments::Indexes>>,
     chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
@@ -340,6 +342,8 @@ impl EditingDoc {
         doc.get_or_insert_map(bookmarks::ROOT);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
+        let segment_indexes = Arc::new(Mutex::new(segments::Indexes::new()));
+        let followed = Arc::clone(&segment_indexes);
         // after_transaction: bumps on any store-changing commit without encoding an update.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
@@ -347,7 +351,8 @@ impl EditingDoc {
                 // per transaction, and an override-layout session holds one
                 // client per copy writer.
                 if !txn.delete_set().is_empty() || !txn.insert_set().is_empty() {
-                    observed.fetch_add(1, Ordering::Relaxed);
+                    let before = observed.fetch_add(1, Ordering::Relaxed);
+                    segments::follow_commit(txn, &followed, before);
                 }
             })
             .expect("a fresh doc accepts an update observer");
@@ -356,7 +361,7 @@ impl EditingDoc {
             client_id,
             id_counter: AtomicU64::new(0),
             epoch,
-            segment_indexes: Mutex::new(HashMap::new()),
+            segment_indexes,
             chunk_snapshots: Mutex::new(HashMap::new()),
             package: Mutex::new(None),
             _update_sub: update_sub,
@@ -372,7 +377,8 @@ impl EditingDoc {
         self.package.lock().unwrap().clone()
     }
 
-    /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
+    /// Segment geometry for `story_id`, read once and kept in step with each
+    /// commit ([`segments::follow_commit`]).
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
         // Sampling before the read txn lets a racing commit tag the fresh index
         // stale rather than serve a pre-commit snapshot as current.
@@ -395,6 +401,98 @@ impl EditingDoc {
         drop(txn);
         cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
         Ok(index)
+    }
+
+    /// [`Self::segment_index`] inside the write transaction `txn`, read with
+    /// it when not in step: `None` once `txn` has changed the document, which
+    /// the index does not show until the commit.
+    pub(crate) fn segment_index_txn(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &yrs::TransactionMut,
+    ) -> Option<Arc<SegmentIndex>> {
+        if !txn.insert_set().is_empty() || !txn.delete_set().is_empty() {
+            return None;
+        }
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let mut cache = self.segment_indexes.lock().unwrap();
+        if let Some((cached_epoch, index)) = cache.get(story_id)
+            && *cached_epoch == epoch
+        {
+            return Some(Arc::clone(index));
+        }
+        let index = Arc::new(SegmentIndex::build(story, txn));
+        cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
+        Some(index)
+    }
+
+    /// `ops::snapshot_range` inside `txn`, read from the paragraph slot `lo`
+    /// is in where the segment index is in step.
+    pub(crate) fn snapshot_range_in(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &yrs::TransactionMut,
+        lo: u32,
+        hi: u32,
+    ) -> Vec<ops::Chunk> {
+        if let Some(index) = self.segment_index_txn(story_id, story, txn) {
+            let slot = index.slot_at(lo);
+            if slot < index.paras().len()
+                && let Some((next, at, attrs)) = index.slot_start(story.as_ref(), txn, slot)
+            {
+                return ops::chunks_from(txn, next, at, attrs, lo, hi);
+            }
+        }
+        ops::snapshot_range(story, txn, lo, hi)
+    }
+
+    /// The [`segments::SlotMark`] of the slot holding `at`, from the segment
+    /// index inside `txn` (before it changes anything).
+    pub(crate) fn slot_mark_in(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &yrs::TransactionMut,
+        at: u32,
+    ) -> segments::SlotMark {
+        self.segment_index_txn(story_id, story, txn)?.slot_mark(at)
+    }
+
+    /// `ops::last_pilcrow` inside `txn`, from the segment index where it is
+    /// in step.
+    pub(crate) fn last_pilcrow_in(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &yrs::TransactionMut,
+    ) -> Option<(u32, MapRef)> {
+        if let Some(index) = self.segment_index_txn(story_id, story, txn)
+            && let Some(para) = index.paras().last()
+            && let Some(map) = mark_map(txn, &para.mark)
+        {
+            return Some((para.pilcrow, map));
+        }
+        ops::last_pilcrow(story, txn)
+    }
+
+    /// `next_pilcrow` inside `txn`, from the segment index where it is in
+    /// step.
+    pub(crate) fn next_pilcrow_in(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &yrs::TransactionMut,
+        from: u32,
+    ) -> Option<(u32, MapRef)> {
+        if let Some(index) = self.segment_index_txn(story_id, story, txn) {
+            let para = index.para_at(from)?;
+            if let Some(map) = mark_map(txn, &para.mark) {
+                return Some((para.pilcrow, map));
+            }
+        }
+        next_pilcrow(story, txn, from)
     }
 
     /// Where inline content replacing `[start, end)` lands: after the tables,
@@ -1033,35 +1131,52 @@ fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
 }
 
 fn is_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> bool {
-    map_string(map, txn, KIND_KEY).as_deref() == Some(PILCROW_KIND)
+    matches!(map.get(txn, KIND_KEY), Some(Out::Any(Any::String(kind))) if &*kind == PILCROW_KIND)
 }
 
+/// The live pilcrow `item` is, as a map.
+fn pilcrow_map<T: ReadTxn>(item: &yrs::block::Item, txn: &T) -> Option<MapRef> {
+    if item.is_deleted() || !matches!(item.content(), yrs::block::ItemContent::Type(_)) {
+        return None;
+    }
+    match item.content().get_first() {
+        Some(Out::YMap(map)) if is_pilcrow(&map, txn) => Some(map),
+        _ => None,
+    }
+}
+
+/// The map of the live pilcrow whose item is `mark`.
+fn mark_map<T: ReadTxn>(txn: &T, mark: &yrs::ID) -> Option<MapRef> {
+    pilcrow_map(&*txn.store().get_item(mark)?, txn)
+}
+
+/// Each pilcrow of a story with its index, read item by item.
 fn pilcrows<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
     let mut offset = 0;
     let mut result = Vec::new();
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && is_pilcrow(&map, txn)
-        {
+    let mut next = AsRef::<yrs::branch::Branch>::as_ref(story).start();
+    while let Some(item) = next {
+        if let Some(map) = pilcrow_map(&item, txn) {
             result.push((offset, map));
         }
-        offset += len;
+        offset += segments::units(&item);
+        next = item.right();
     }
     result
 }
 
+/// The first pilcrow at or after index `from`, read item by item.
 fn next_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T, from: u32) -> Option<(u32, MapRef)> {
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
+    let mut next = AsRef::<yrs::branch::Branch>::as_ref(story).start();
+    while let Some(item) = next {
         if offset >= from
-            && let Out::YMap(map) = diff.insert
-            && is_pilcrow(&map, txn)
+            && let Some(map) = pilcrow_map(&item, txn)
         {
             return Some((offset, map));
         }
-        offset += len;
+        offset += segments::units(&item);
+        next = item.right();
     }
     None
 }

@@ -16,6 +16,7 @@ use crate::seed::{
     JsonObject, PackageContext, any_from_value, field_units, own_shown_runs, payload, run_units,
     shown_runs, yrs_attrs,
 };
+use crate::segments::SlotStart;
 use crate::{KIND_KEY, RawOp, map_string};
 
 /// Whether a field's data keeps a tracked change as markup where resolving
@@ -421,6 +422,8 @@ pub(crate) fn renumber_fields(
 /// begin stays after the children before `at`, those after it become plain
 /// content, and the field ends where its embed stood, across the paragraphs.
 /// A field holding a kept tracked insertion in its result stays as it is.
+/// The story is read from `read_from`, a paragraph slot's start before `at` that
+/// the split left in place, else from its start.
 pub(crate) fn split_field(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -428,20 +431,27 @@ pub(crate) fn split_field(
     at: u32,
     continuation: &str,
     package: Option<&PackageContext>,
+    read_from: Option<SlotStart>,
 ) -> OpResult<()> {
-    let chunks = snapshot(story, txn);
-    let Some(before) = chunks.iter().position(|chunk| chunk.end() == at) else {
+    // Read from the chunk that ends at the split, as far as the field's owner.
+    let mut chunks = crate::ops::Chunks::of(story, txn, read_from.as_ref(), at.saturating_sub(1));
+    let Some(before) = chunks.next().filter(|chunk| chunk.end() == at) else {
         return Ok(());
     };
-    let Some((id, split)) = field_result_attr(&chunks[before]).filter(|(_, index)| *index >= 0)
-    else {
+    let Some((id, split)) = field_result_attr(&before).filter(|(_, index)| *index >= 0) else {
         return Ok(());
     };
-    let owner = chunks
-        .get(before + 2..)
-        .unwrap_or_default()
-        .iter()
-        .find(|chunk| field_result_attr(chunk).is_none_or(|(child, _)| child != id));
+    chunks.next();
+    // The field's result runs after the split, then the chunk after them.
+    let mut children = Vec::new();
+    let mut owner = None;
+    for chunk in chunks {
+        if field_result_attr(&chunk).is_none_or(|(child, _)| child != id) {
+            owner = Some(chunk);
+            break;
+        }
+        children.push(chunk);
+    }
     let Some(owner) = owner.filter(|chunk| projection(txn, chunk).is_some_and(|(of, _)| of == id))
     else {
         return Ok(());
@@ -476,11 +486,6 @@ pub(crate) fn split_field(
     if holds_insertion(&data["structuredResult"]) {
         // Enter stays as it was; a field left with only result runs for
         // children shows them itself, as its seed would.
-        let children = &chunks[before + 2
-            ..chunks
-                .iter()
-                .position(|chunk| chunk.start == owner.start)
-                .expect("owner chunk")];
         if children.is_empty()
             || children.iter().any(|chunk| {
                 !matches!(chunk.kind, ChunkKind::Text(_)) || chunk.attr_active(HYPERLINK)
@@ -488,7 +493,7 @@ pub(crate) fn split_field(
         {
             return Ok(());
         }
-        let (_, recorded) = projection(txn, owner).expect("found as a projecting field");
+        let (_, recorded) = projection(txn, &owner).expect("found as a projecting field");
         let folded: Vec<i64> = children
             .iter()
             .filter_map(|chunk| field_result_attr(chunk).map(|(_, index)| index))
@@ -531,7 +536,7 @@ pub(crate) fn split_field(
     // The result after the split goes to the second paragraph: its children as
     // plain content there, its own runs as text among them. Other content the
     // field shows after the split keeps the field whole.
-    let (_, recorded) = projection(txn, owner).expect("found as a projecting field");
+    let (_, recorded) = projection(txn, &owner).expect("found as a projecting field");
     let inline = data["structuredResult"]["inline"]
         .as_array()
         .cloned()
@@ -640,10 +645,15 @@ pub(crate) fn split_field(
             Attrs::from([(Arc::from(FIELD_RESULT), Any::Null)]),
         );
     }
-    let style = paragraph_style(txn, &chunks, before);
-    let children: Vec<(u32, i64)> = chunks[before + 2..]
+    // The style of the paragraph mark after the split.
+    let style = crate::ops::Chunks::of(story, txn, read_from.as_ref(), before.start)
+        .find_map(|chunk| match &chunk.kind {
+            ChunkKind::Pilcrow(map) => Some(map_string(map, txn, "pStyle")),
+            _ => None,
+        })
+        .flatten();
+    let children: Vec<(u32, i64)> = children
         .iter()
-        .take_while(|chunk| chunk.start < owner.start)
         .filter_map(|chunk| field_result_attr(chunk).map(|(_, index)| (chunk.start, index)))
         .collect();
     story.remove_range(txn, to, 1);

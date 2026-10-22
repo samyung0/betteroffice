@@ -53,6 +53,9 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   `insert_attributes` and `insert_negated_attributes` write an edit's format
 #   items in key order, so one edit writes the same items in every run; a
 #   surrogate pair split inside gives two replacement characters as in Yjs;
+#   `find_position` takes a live item's length as its UTF-16 length instead
+#   of counting each string's characters again, so placing an edit costs one
+#   step per item before it;
 # - transactions: an update and its events read the transaction's insert set
 #   instead of whole state vectors, so their cost no longer grows with every
 #   client the document saw; a struct integrated behind a skip (it arrived

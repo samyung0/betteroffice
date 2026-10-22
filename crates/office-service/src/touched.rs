@@ -11,7 +11,7 @@ use std::ops::AddAssign;
 use serde::{Deserialize, Serialize};
 use yrs::block::{Item, ItemContent, ItemPtr};
 use yrs::branch::Branch;
-use yrs::{Any, Doc, OffsetKind, ReadTxn, Transact};
+use yrs::{Any, Doc, ID, OffsetKind, ReadTxn, Transact};
 
 /// The live items under a target and the bytes their content holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,18 +96,25 @@ pub(crate) enum Kept {
     Formatting,
 }
 
+/// Where a walk over a story starts: right after the item at a given
+/// UTF-16 offset of the story (a paragraph mark before the range), or at
+/// the story's start (`None`).
+pub(crate) type Seek = Option<(ID, u32)>;
+
 /// The items of story `story` in UTF-16 offsets `[start, end)` that `kept`
-/// names (a paragraph is `[start, mark + 1)`, its mark included).
+/// names (a paragraph is `[start, mark + 1)`, its mark included), walked
+/// from `from`.
 pub(crate) fn story_range(
     doc: &Doc,
     root: &str,
     story: &str,
+    from: Seek,
     start: u32,
     end: u32,
     kept: Kept,
 ) -> Touched {
     let mut touched = Touched::default();
-    walk(doc, root, story, |at, len, item| {
+    walk(doc, root, story, from, |at, len, item| {
         if at > end {
             return false;
         }
@@ -124,39 +131,49 @@ pub(crate) fn story_range(
     touched
 }
 
-/// The entries `keys` of the map embedded at UTF-16 offset `at` of story
-/// `story` (a paragraph's mark): the values a property write replaces.
-pub(crate) fn mark_entries(doc: &Doc, root: &str, story: &str, at: u32, keys: &[&str]) -> Touched {
+/// The entries `keys` of the paragraph mark whose item is `mark` (a map
+/// embedded in a story): the values a property write replaces.
+pub(crate) fn mark_entries(doc: &Doc, mark: &ID, keys: &[&str]) -> Touched {
     let mut touched = Touched::default();
-    walk(doc, root, story, |offset, len, item| {
-        if offset < at || len == 0 {
-            return offset <= at;
-        }
-        if let ItemContent::Type(mark) = item.content() {
-            for key in keys {
-                if let Some(entry) = mark.entry_item(key) {
-                    touched.item(&entry);
-                }
+    if let Some(item) = doc.transact().store().get_item(mark)
+        && !item.is_deleted()
+        && let ItemContent::Type(mark) = item.content()
+    {
+        for key in keys {
+            if let Some(entry) = mark.entry_item(key) {
+                touched.item(&entry);
             }
         }
-        false
-    });
+    }
     touched
 }
 
-/// Each item of story `story` in order with its UTF-16 offset and live
-/// length (0 for a format marker or a deleted item), until `visit` says
-/// stop.
-fn walk(doc: &Doc, root: &str, story: &str, mut visit: impl FnMut(u32, u32, &Item) -> bool) {
+/// Each item of story `story` in order from `from` with its UTF-16 offset
+/// and live length (0 for a format marker or a deleted item), until `visit`
+/// says stop.
+fn walk(
+    doc: &Doc,
+    root: &str,
+    story: &str,
+    from: Seek,
+    mut visit: impl FnMut(u32, u32, &Item) -> bool,
+) {
     let txn = doc.transact();
-    let Some(holder) = story_item(&txn, root, story) else {
-        return;
+    let (mut next, mut at) = match from {
+        Some((mark, at)) => match txn.store().get_item(&mark) {
+            Some(mark) => (mark.right(), at),
+            None => return,
+        },
+        None => {
+            let Some(holder) = story_item(&txn, root, story) else {
+                return;
+            };
+            let ItemContent::Type(text) = holder.content() else {
+                return;
+            };
+            (text.start(), 0)
+        }
     };
-    let ItemContent::Type(text) = holder.content() else {
-        return;
-    };
-    let mut at = 0;
-    let mut next = text.start();
     while let Some(item) = next {
         let len = if item.is_countable() && !item.is_deleted() {
             item.len()
