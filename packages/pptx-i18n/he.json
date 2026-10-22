@@ -164,7 +164,8 @@
     "panelLabel": "הערות דובר",
     "placeholder": "הוסף הערות דובר…",
     "toggle": "הערות",
-    "showSpeakerNotes": "הצג הערות דובר"
+    "showSpeakerNotes": "הצג הערות דובר",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

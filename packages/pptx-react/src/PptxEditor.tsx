@@ -37,6 +37,7 @@ import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, usePro
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -3592,6 +3593,7 @@ function PptxEditorContent({
           readOnly={!model || canvasReview.reviewing || readOnly}
           label={t('notes.panelLabel')}
           placeholder={t('notes.placeholder')}
+          limitHint={t('notes.tooLong')}
           onCommit={(text) => {
             const handle = handleRef.current;
             if (!handle || readOnly) return;
@@ -3688,11 +3690,47 @@ function RemoteShapeOutline({
   );
 }
 
+/**
+ * Speaker notes a person may write on a slide, in Unicode code points: Capy's
+ * collaboration server refuses an update that grows a slide's notes past it
+ * (Epo 2026-10-22).
+ */
+const MAX_NOTES_CHARS = 4000;
+
+function codePoints(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * `next`, an edit of `previous`, with the text it inserted cut so the notes
+ * hold at most `MAX_NOTES_CHARS` code points (or as many as `previous`, when it
+ * held more), and the caret after the kept part; null when it fits.
+ */
+function fitNotes(previous: string, next: string): { text: string; caret: number } | null {
+  // UTF-16 units bound code points.
+  if (next.length <= MAX_NOTES_CHARS) return null;
+  const over = codePoints(next) - Math.max(MAX_NOTES_CHARS, codePoints(previous));
+  if (over <= 0) return null;
+  // The inserted text lies between the common prefix and suffix, which never
+  // end inside a surrogate pair.
+  const shorter = Math.min(previous.length, next.length);
+  let start = 0;
+  while (start < shorter && previous[start] === next[start]) start += 1;
+  if (start > 0 && (next.charCodeAt(start - 1) & 0xfc00) === 0xd800) start -= 1;
+  let tail = 0;
+  while (tail < shorter - start && previous[previous.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1;
+  if (tail > 0 && (next.charCodeAt(next.length - tail) & 0xfc00) === 0xdc00) tail -= 1;
+  const inserted = Array.from(next.slice(start, next.length - tail));
+  const kept = inserted.slice(0, Math.max(0, inserted.length - over)).join('');
+  return { text: next.slice(0, start) + kept + next.slice(next.length - tail), caret: start + kept.length };
+}
+
 function NotesPanel({
   value,
   readOnly,
   label,
   placeholder,
+  limitHint,
   onCommit,
 }: {
   value: string;
@@ -3700,19 +3738,61 @@ function NotesPanel({
   readOnly: boolean;
   label: string;
   placeholder: string;
+  /** Shown while the last input was cut at `MAX_NOTES_CHARS`. */
+  limitHint: string;
   onCommit: (text: string) => void;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
+  // A composition past the cap stays here, uncommitted, until it ends: cutting
+  // it while the IME holds it would break the composition.
+  const [draft, setDraft] = useState<string | null>(null);
+  // The caret after the last cut input (the notes re-render without the cut part).
+  const [cut, setCut] = useState<{ caret: number } | null>(null);
+  useLayoutEffect(() => {
+    if (cut) textareaRef.current?.setSelectionRange(cut.caret, cut.caret);
+  }, [cut]);
+  const commit = (next: string) => {
+    const fitted = fitNotes(value, next);
+    setCut(fitted && { caret: fitted.caret });
+    const text = fitted?.text ?? next;
+    if (text !== value) onCommit(text);
+  };
   return (
     <div style={styles.notesPanel}>
-      <span style={styles.notesLabel}>{label}</span>
+      <div style={styles.notesHeader}>
+        <span style={styles.notesLabel}>{label}</span>
+        {cut ? (
+          <span role="alert" data-testid="pptx-notes-limit" style={styles.notesLimit}>
+            {limitHint}
+          </span>
+        ) : null}
+      </div>
       <textarea
+        ref={textareaRef}
         aria-label={label}
         style={styles.notesTextarea}
-        value={value}
+        value={draft ?? value}
         readOnly={readOnly}
         placeholder={placeholder}
         data-testid="pptx-notes-textarea"
-        onChange={(event) => onCommit(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (composingRef.current && fitNotes(value, next)) {
+            setDraft(next);
+            return;
+          }
+          setDraft(null);
+          commit(next);
+        }}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={(event) => {
+          composingRef.current = false;
+          setDraft(null);
+          commit(event.currentTarget.value);
+        }}
       />
     </div>
   );
@@ -4274,12 +4354,14 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--pptx-surface, #ffffff)',
     borderTop: '1px solid var(--pptx-divider, #e2e8f0)',
   },
+  notesHeader: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 },
   notesLabel: {
     fontSize: 11,
     fontWeight: 650,
     color: 'var(--pptx-text-muted, #647087)',
     textTransform: 'uppercase',
     letterSpacing: '0.02em',
+    whiteSpace: 'nowrap',
   },
   notesTextarea: {
     width: '100%',
@@ -4294,6 +4376,8 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     outline: 'none',
   },
+  // The XLSX editor's refusal line, on the label's row so the slide keeps its size.
+  notesLimit: { color: 'var(--pptx-error-text, #8b1e2d)', font: `12px ${toolbarFont}`, textAlign: 'right' },
   empty: { margin: 'auto', color: 'var(--pptx-text-muted, #6b7587)', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: 'var(--pptx-error-text, #8b1e2d)', background: 'var(--pptx-error-bg, #fff0f2)', border: '1px solid var(--pptx-error-border, #efb8c0)', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {

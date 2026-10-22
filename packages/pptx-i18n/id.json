@@ -164,7 +164,8 @@
     "panelLabel": "Catatan pembicara",
     "placeholder": "Tambahkan catatan pembicara…",
     "toggle": "Catatan",
-    "showSpeakerNotes": "Tampilkan catatan pembicara"
+    "showSpeakerNotes": "Tampilkan catatan pembicara",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null
