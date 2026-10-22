@@ -14,7 +14,9 @@
  *  2. Header / footer content or render-env changes — runLayoutPipeline does include
  *     these in its deps, but only re-runs when explicitly called. The
  *     first render already laid out when the Yrs session became ready, so this
- *     effect skips the initial render via a one-shot epoch counter.
+ *     effect skips the initial render via a one-shot epoch counter. A header
+ *     or footer save or the hidden-text toggle is the reader's action: it
+ *     lays out as a local pass and keeps the caret in view.
  */
 
 import { useEffect, useRef } from 'react';
@@ -66,7 +68,8 @@ export function useLayoutTriggers(opts: UseLayoutTriggersOptions): void {
   }, []);
 
   // Re-layout when H/F content or the render env changes (HF editor save,
-  // showHiddenText toggle, etc.).
+  // showHiddenText toggle, etc.). The reader's own action: a local pass, so
+  // the caret stays in view, as for any edit.
   const contentEpochRef = useRef(0);
   useEffect(() => {
     // Skip the initial render — session readiness already triggered the first layout.
@@ -74,6 +77,7 @@ export function useLayoutTriggers(opts: UseLayoutTriggersOptions): void {
       contentEpochRef.current = 1;
       return;
     }
+    scheduleLayoutRef.current('local');
     runLayoutPipelineRef.current();
   }, [
     headerContent,

@@ -278,6 +278,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // positions shift under a remote insert above the caret while sticky locs do
   // not, so comparing locs is what keeps a viewer's viewport still during
   // someone else's edit.
+  // A resident edit runs no layout pass: the caret pass for its frame counts
+  // it as local, so an edit that keeps the caret (forward Delete, a collapsed
+  // Ctrl+B) still brings an off-screen caret into view.
+  const residentEditRef = useRef(false);
   const lastCaretScrollRef = useRef<{
     session: YrsSession | null;
     selection: YrsSelection | null;
@@ -372,6 +376,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
+      residentEditRef.current = true;
       if (result.frameEpoch !== null) {
         pendingResidentFrameEpochRef.current = result.frameEpoch;
       }
@@ -1421,6 +1426,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : { left: nextLeft, top: nextTop, height: nextHeight }
     );
+    const origin = residentEditRef.current ? 'local' : layoutUpdateOrigin;
+    residentEditRef.current = false;
     const stickySelection = session?.selection() ?? null;
     const previous = lastCaretScrollRef.current;
     lastCaretScrollRef.current = { session: session ?? null, selection: stickySelection };
@@ -1432,7 +1439,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           : 'changed';
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, change)
+      shouldScrollCaretIntoView(origin, change)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const viewport = scroller.getBoundingClientRect();
