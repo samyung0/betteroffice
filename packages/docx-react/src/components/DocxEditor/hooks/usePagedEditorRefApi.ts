@@ -13,6 +13,7 @@ import {
 import type { YrsInputRef } from '../YrsInput';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { FormattingAction } from '../../Toolbar';
+import type { LayoutUpdateOrigin } from '../internals/viewportAnchoring';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import { performYrsHistoryAction, type YrsEditorCommand } from '../yrsCommands';
 
@@ -20,6 +21,7 @@ interface RefApiInputs {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: () => void;
+  scheduleLayout: (origin: LayoutUpdateOrigin) => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
@@ -58,6 +60,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    scheduleLayout,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -155,6 +158,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
     relayout: runLayoutPipeline,
+    scheduleLayout,
     scrollToPosition: scrollToPositionImpl,
     scrollToParaId: scrollToParaIdImpl,
     scrollToPage: scrollToPageImpl,
@@ -202,6 +206,7 @@ export interface UsePagedEditorRefApiOptions {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   layout: Layout | null;
   runLayoutPipeline: () => void;
+  scheduleLayout: (origin: LayoutUpdateOrigin) => void;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
   scrollToPageImpl: (pageNumber: number) => void;
@@ -224,6 +229,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    scheduleLayout,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -262,6 +268,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     yrsInputRef,
     layout,
     runLayoutPipeline,
+    scheduleLayout,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,
@@ -280,6 +287,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   useImperativeHandle(ref, () => buildRefApi(inputs), [
     layout,
     runLayoutPipeline,
+    scheduleLayout,
     scrollToPositionImpl,
     scrollToParaIdImpl,
     scrollToPageImpl,

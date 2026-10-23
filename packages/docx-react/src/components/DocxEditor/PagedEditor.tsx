@@ -400,6 +400,9 @@ export interface PagedEditorRef {
   getLayout(): Layout | null;
   /** Force re-layout. */
   relayout(): void;
+  /** Schedule a layout pass; a local one is the reader's action and keeps
+   * the caret in view. */
+  scheduleLayout(origin: LayoutUpdateOrigin): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
   /**
@@ -1826,6 +1829,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsInputRef,
       layout,
       runLayoutPipeline,
+      scheduleLayout,
       scrollToPositionImpl,
       scrollToParaIdImpl,
       scrollToPageImpl,
