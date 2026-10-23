@@ -206,6 +206,18 @@ pub(crate) fn check_paragraph_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The refusal of an id without the form of the `kind` ids a read lists,
+/// `shown` giving one as the read shows it; only an id of the right form
+/// that names nothing is no longer in the file (Epo 2026-10-24, Q223).
+pub(crate) fn malformed_id(id: &str, kind: &str, shown: &str) -> Error {
+    Error::edit(
+        EditCode::InvalidInput,
+        format!(
+            "{id:?} is a malformed {kind} id; {shown}: copy each id whole from inspect_office_document, reading the file first"
+        ),
+    )
+}
+
 /// `delete_paragraph`'s check: the paragraph reads `expected` whole, else a
 /// `stale_target` carrying it as it reads now.
 pub(crate) fn check_expected_paragraph(id: &str, current: &str, expected: &str) -> Result<()> {

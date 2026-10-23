@@ -240,6 +240,111 @@ fn add_slide_refuses_an_unknown_layout_and_two_anchors() {
     );
 }
 
+/// An id without the form of the ids the read lists (ids the MiniMax probe
+/// sent) is malformed, its refusal showing the read's; only an id of that
+/// form the deck does not hold is no longer in it (Epo 2026-10-24, Q223).
+#[test]
+fn a_malformed_slide_shape_or_paragraph_id_is_refused_showing_the_reads_form() {
+    let mut deck = Deck::new();
+    let ids = deck.slides();
+    let (first, second) = (deck.read(Some(1)), deck.read(Some(2)));
+    let id = |read: &Value, kind: &str| read[kind][0]["id"].as_str().unwrap().to_owned();
+    let malformed = |sent: &str, kind: &str, shown: &str| {
+        invalid(&format!(
+            "{sent:?} is a malformed {kind} id; {shown}: copy each id whole from inspect_office_document, reading the file first"
+        ))
+    };
+    let slide = format!("slide ids read like {:?}, slide 1's", ids[0]);
+    let shape = format!(
+        "shape ids read like {:?}, slide 1's first",
+        id(&first, "shapes")
+    );
+    let paragraph = format!(
+        "paragraph ids read like {:?}, slide 1's first",
+        id(&first, "paragraphs")
+    );
+    let set_text = |shape_id: &str| Command::SetShapeText {
+        shape_id: shape_id.into(),
+        expected_text: String::new(),
+        paragraphs: vec!["x".into()],
+    };
+    let align = |target_id: &str| Command::SetAlignment {
+        target_id: target_id.into(),
+        alignment: Alignment::Center,
+    };
+    let cases = [
+        (
+            add_slide(Some("259"), None, None),
+            malformed("259", "slide", &slide),
+        ),
+        (
+            Command::MoveSlide {
+                slide_id: ids[1].clone(),
+                after_slide: None,
+                before_slide: Some("slide 3".into()),
+            },
+            malformed("slide 3", "slide", &slide),
+        ),
+        (
+            set_text("14945076102458:1"),
+            malformed("14945076102458:1", "shape", &shape),
+        ),
+        // A seeded shape id names a slide of the file as uploaded.
+        (
+            set_text("slide:14945076102458:0:shape:1"),
+            malformed("slide:14945076102458:0:shape:1", "shape", &shape),
+        ),
+        (
+            set_text("Google Shape;71;p16"),
+            malformed("Google Shape;71;p16", "shape", &shape),
+        ),
+        (
+            align("14945076102458:2"),
+            malformed("14945076102458:2", "PPTX paragraph", &paragraph),
+        ),
+        (
+            align("slide:14945076102458:0:shape:1:0:0"),
+            malformed(
+                "slide:14945076102458:0:shape:1:0:0",
+                "PPTX paragraph",
+                &paragraph,
+            ),
+        ),
+    ];
+    for (command, error) in cases {
+        assert_eq!(deck.apply(&[command]).unwrap_err(), error);
+    }
+
+    let gone = |message: &str| Error::Edit {
+        code: EditCode::UnavailableTarget,
+        message: message.into(),
+        details: None,
+    };
+    let text = deck.slide_text(2);
+    deck.apply(&[Command::DeleteSlide {
+        slide_id: ids[1].clone(),
+        expected_text: text,
+    }])
+    .unwrap();
+    let cases = [
+        (
+            add_slide(Some(&ids[1]), None, None),
+            gone(&format!("slide {} is no longer in the deck", ids[1])),
+        ),
+        (
+            set_text(&id(&second, "shapes")),
+            gone("the shape is no longer in the deck"),
+        ),
+        (
+            align(&id(&second, "paragraphs")),
+            gone("the paragraph is no longer in the deck"),
+        ),
+    ];
+    for (command, error) in cases {
+        assert_eq!(deck.apply(&[command]).unwrap_err(), error);
+    }
+}
+
 /// A layout placeholder with no size of its own nor on the master refuses
 /// the slide as invalid input, adding nothing (review M2).
 #[test]

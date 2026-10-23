@@ -15,8 +15,8 @@ use pptx_parse::{
 };
 use serde_json::{Value, json};
 
-use super::{PptxSession, STORIES, refused};
-use crate::common::{check_paragraph_text, len16};
+use super::{PptxSession, STORIES, missing_paragraph, refused};
+use crate::common::{check_paragraph_text, len16, malformed_id};
 use crate::error::{EditCode, Error, Result};
 use crate::session::Applied;
 use crate::touched::{self, Kept, Touched};
@@ -43,6 +43,23 @@ fn missing_slide(id: &str) -> Error {
         EditCode::UnavailableTarget,
         format!("slide {id} is no longer in the deck"),
     )
+}
+
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// `<client>:<counter>`: an id pptx-edit `next_id` made for a slide, shape
+/// or paragraph added since the seed, its prefix taken off.
+fn added(rest: &str) -> bool {
+    rest.split_once(':')
+        .is_some_and(|(client, counter)| digits(client) && digits(counter))
+}
+
+/// A slide id's form: `slide:<index>:<sldId>` seeded from the file, else
+/// `slide:<client>:<counter>`.
+fn slide_form(id: &str) -> bool {
+    id.strip_prefix("slide:").is_some_and(added)
 }
 
 /// A refusal carrying what its target reads now.
@@ -535,6 +552,99 @@ impl PptxSession {
         }
     }
 
+    /// A slide the deck was seeded with: `slide:<index>:<sldId>` of the
+    /// file's slide at that index.
+    fn seeded_slide(&self, id: &str) -> bool {
+        let slides = &self.deck.package().presentation.slides;
+        id.strip_prefix("slide:")
+            .and_then(|rest| rest.split_once(':'))
+            .and_then(|(index, sld)| Some((slides.get(index.parse::<usize>().ok()?)?, sld)))
+            .is_some_and(|(slide, sld)| slide.id.to_string() == sld)
+    }
+
+    /// A shape id's form: `shape:<client>:<counter>`, else seeded,
+    /// `<slide id>:shape:<path>` of a seeded slide, its path the shape's
+    /// place (`2`, `2.0` in a group).
+    fn shape_form(&self, id: &str) -> bool {
+        match id.strip_prefix("shape:") {
+            Some(rest) => added(rest),
+            None => id.split_once(":shape:").is_some_and(|(slide, path)| {
+                self.seeded_slide(slide) && path.split('.').all(digits)
+            }),
+        }
+    }
+
+    /// A paragraph id's form: `para:<client>:<counter>`, else seeded,
+    /// `para:<story>:<n>` of a shape's text (`story:<shape id>:0`) or a
+    /// table cell's (`story:<shape id>:table:<row>:<column>`).
+    fn paragraph_form(&self, id: &str) -> bool {
+        let Some(rest) = id.strip_prefix("para:") else {
+            return false;
+        };
+        if added(rest) {
+            return true;
+        }
+        let Some((story, n)) = rest
+            .strip_prefix("story:")
+            .and_then(|story| story.rsplit_once(':'))
+        else {
+            return false;
+        };
+        digits(n)
+            && (story
+                .strip_suffix(":0")
+                .is_some_and(|shape| self.shape_form(shape))
+                || story
+                    .rsplit_once(":table:")
+                    .is_some_and(|(shape, cell)| added(cell) && self.shape_form(shape)))
+    }
+
+    /// The refusal of a paragraph id the deck does not hold: gone when it
+    /// has a paragraph id's form, else malformed (Epo 2026-10-24, Q223).
+    pub(super) fn paragraph_refusal(&self, id: &str) -> Error {
+        if self.paragraph_form(id) {
+            missing_paragraph()
+        } else {
+            malformed_id(id, "PPTX paragraph", &self.read_example(true))
+        }
+    }
+
+    /// The read's ids for a malformed id's refusal: the deck's first slide,
+    /// or the first shape (`paragraph`: shape paragraph) of the first slide
+    /// holding one.
+    fn read_example(&self, paragraph: bool) -> String {
+        let total = self.deck.slide_ids().map_or(0, |ids| ids.len());
+        for index in 0..total {
+            let Ok(scope) = self.deck.slide_scope(index) else {
+                continue;
+            };
+            let mut found = None;
+            walk(&scope.slide.shapes, &mut |shape| {
+                if found.is_none() {
+                    found = if paragraph {
+                        shape
+                            .text_stories
+                            .iter()
+                            .flat_map(|story| &story.paragraphs)
+                            .map(|paragraph| paragraph.id.clone())
+                            .next()
+                    } else {
+                        Some(shape.id.clone())
+                    };
+                }
+            });
+            if let Some(id) = found {
+                let kind = if paragraph { "paragraph" } else { "shape" };
+                return format!("{kind} ids read like {id:?}, slide {}'s first", index + 1);
+            }
+        }
+        if paragraph {
+            "the deck holds no text".to_owned()
+        } else {
+            "the deck holds no shape".to_owned()
+        }
+    }
+
     /// The text story of a shape holding one.
     fn shape_story(&self, shape_id: &str) -> Result<StorySnapshot> {
         if let Ok(story) = self.deck.story(&format!("story:{shape_id}:0")) {
@@ -550,6 +660,9 @@ impl PptxSession {
             });
         }
         Err(match found {
+            None if !self.shape_form(shape_id) => {
+                malformed_id(shape_id, "shape", &self.read_example(false))
+            }
             None => Error::edit(
                 EditCode::UnavailableTarget,
                 "the shape is no longer in the deck",
@@ -643,11 +756,24 @@ impl PptxSession {
         Ok(())
     }
 
-    /// The slide's position in deck order.
+    /// The slide's position in deck order; a slide id the deck does not hold
+    /// is gone when it has a slide id's form, else malformed (Q223).
     fn slide_index(&self, ids: &[String], id: &str) -> Result<usize> {
-        ids.iter()
-            .position(|other| other == id)
-            .ok_or_else(|| missing_slide(id))
+        ids.iter().position(|other| other == id).ok_or_else(|| {
+            if slide_form(id) {
+                return missing_slide(id);
+            }
+            let first = self
+                .deck
+                .slide_ids()
+                .ok()
+                .and_then(|ids| ids.first().cloned());
+            let shown = first.map_or_else(
+                || "the deck has no slide".to_owned(),
+                |first| format!("slide ids read like {first:?}, slide 1's"),
+            );
+            malformed_id(id, "slide", &shown)
+        })
     }
 
     fn add_slide(&mut self, anchor: Option<(&str, bool)>, layout: Option<&str>) -> Result<()> {

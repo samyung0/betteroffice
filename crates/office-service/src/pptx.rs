@@ -290,7 +290,7 @@ impl PptxSession {
                 });
             match found {
                 Some(found) => return Ok(found),
-                None if fresh => return Err(missing_paragraph()),
+                None if fresh => return Err(self.paragraph_refusal(id)),
                 None => self.stories = None,
             }
         }

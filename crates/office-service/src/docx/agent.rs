@@ -24,7 +24,9 @@ use yrs::{Any, ID, Map, Out, ReadTxn, TextRef, Transact};
 
 use super::styles::{Numbering, StyleResolver, map_entries};
 use super::{DocxSession, Paragraph};
-use crate::common::{check_expected_paragraph, check_paragraph_text, check_replacement, len16};
+use crate::common::{
+    check_expected_paragraph, check_paragraph_text, check_replacement, len16, malformed_id,
+};
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
 use crate::session::Applied;
@@ -99,6 +101,13 @@ fn gone() -> Error {
     Error::edit(
         EditCode::UnavailableTarget,
         "the paragraph is no longer in the document",
+    )
+}
+
+fn table_gone() -> Error {
+    Error::edit(
+        EditCode::UnavailableTarget,
+        "the table is no longer in the document",
     )
 }
 
@@ -1238,16 +1247,18 @@ impl DocxSession {
         })
     }
 
-    /// `story` and paraId of a target id (`<story>:paragraph:<paraId>`). A
-    /// file without `w14:paraId` seeds paraIds that name their story
-    /// (`body:p9`, read as `body:paragraph:body:p9`), and the agent sent the
-    /// paraId alone, or a table's or cell's story id (`body:t0`,
-    /// `body:t0:r0c0`; UAT 2026-10-22), so the refusal names the read's id.
-    /// Where a command takes a table (`table`), a table's short id
+    /// `story` and paraId of a target id (`<story>:paragraph:<paraId>`).
+    /// A short paragraph id, the paraId alone, stands for the one paragraph
+    /// of its story it names (Epo 2026-10-24, Q222): a file without
+    /// `w14:paraId` seeds paraIds that name their story (`body:p9`, read as
+    /// `body:paragraph:body:p9`), and another paraId alone names a body
+    /// paragraph. Where a command takes a table (`table`), a table's short id
     /// `<story>:t<n>`, the slot its cells' stories name with or without
     /// paraIds (`body:t0` for `body:t0:r0c0`), stands for the read's id of
-    /// the one table of that story it names (Epo 2026-10-23); naming none or
-    /// several, it is refused naming the read's ids.
+    /// the one table of that story it names (Epo 2026-10-23). A short id
+    /// naming several is refused naming the read's ids; one naming no table
+    /// of a story is gone; any other id is malformed (Q223), its refusal
+    /// naming the read's id for what it names, else an id the read shows.
     pub(super) fn split<'a>(
         &self,
         id: &'a str,
@@ -1261,9 +1272,11 @@ impl DocxSession {
         }
         let story = id.rsplit_once(':').map_or(BODY, |(story, _)| story);
         let paras = self.story_paras(story).ok();
-        let known = paras
+        let named = paras
             .iter()
-            .any(|paras| paras.iter().any(|para| para.para_id == id));
+            .flat_map(|paras| paras.iter())
+            .filter(|para| para.para_id == id)
+            .count();
         // A story's first paragraph, the read's id for it as (story, paraId).
         let first = |story: &str| {
             let paras = self.story_paras(story).ok()?;
@@ -1272,8 +1285,9 @@ impl DocxSession {
         // The tables of `story` a short table id names: those with a cell
         // in its slot, each by its first cell's first paragraph as the read
         // names a table.
+        let short_table = table_story(&format!("{id}:r0c0")).is_some();
         let mut tables: Vec<(String, String)> = Vec::new();
-        if table_story(&format!("{id}:r0c0")).is_some() {
+        if short_table {
             let slot = format!("{id}:");
             for found in paras
                 .iter()
@@ -1291,27 +1305,78 @@ impl DocxSession {
             let (cell, para_id) = tables.remove(0);
             return Ok((cell.into(), para_id.into()));
         }
+        if named == 1 {
+            return Ok((story.into(), id.into()));
+        }
         let read = |(story, para_id): &(String, String)| {
             format!("{:?}", format!("{story}:paragraph:{para_id}"))
         };
+        let reads = |ids: &[(String, String)]| ids.iter().map(read).collect::<Vec<_>>().join(", ");
+        if named > 1 || (table && tables.len() > 1) {
+            let (count, kind, ids) = if named > 1 {
+                (
+                    named,
+                    "paragraphs",
+                    vec![(story.to_owned(), id.to_owned()); named],
+                )
+            } else {
+                (tables.len(), "tables", tables)
+            };
+            return Err(Error::edit(
+                EditCode::UnavailableTarget,
+                format!(
+                    "{id:?} names {count} {kind}, which the read shows as {}: copy each id whole from inspect_office_document, reading the file first",
+                    reads(&ids)
+                ),
+            ));
+        }
+        if table && short_table && paras.is_some() {
+            return Err(table_gone());
+        }
         let shown = match &tables[..] {
-            _ if known => format!("; the read shows it as \"{story}:paragraph:{id}\""),
-            [one] => format!("; the read shows that table as {}", read(one)),
-            [] => first(id).map_or_else(String::new, |para| {
-                format!("; the read shows its first paragraph as {}", read(&para))
-            }),
+            [] => match first(id) {
+                Some(para) => format!("the read shows its first paragraph as {}", read(&para)),
+                None => self.read_example(table),
+            },
+            [one] => format!("the read shows that table as {}", read(one)),
             several => format!(
-                "; it names {} tables, which the read shows as {}",
+                "it names {} tables, which the read shows as {}",
                 several.len(),
-                several.iter().map(read).collect::<Vec<_>>().join(", ")
+                reads(several)
             ),
         };
-        Err(Error::edit(
-            EditCode::UnavailableTarget,
-            format!(
-                "{id:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
-            ),
-        ))
+        let kind = if table {
+            "DOCX table"
+        } else {
+            "DOCX paragraph"
+        };
+        Err(malformed_id(id, kind, &shown))
+    }
+
+    /// Ids the read shows, for a malformed id's refusal: the body's first
+    /// paragraph's, with `table` its first table's short id and the read's.
+    fn read_example(&self, table: bool) -> String {
+        let body = self.story_paras(BODY).ok();
+        let mut paras = body.iter().flat_map(|paras| paras.iter());
+        if !table {
+            return paras.next().map_or_else(
+                || "the document body holds no paragraph".to_owned(),
+                |para| {
+                    let id = format!("{BODY}:paragraph:{}", para.para_id);
+                    format!("paragraph ids read like {id:?}, the body's first")
+                },
+            );
+        }
+        let read = paras.flat_map(Para::tables).find_map(|found| {
+            let cell = table_cells(&found.payload).first()?.first()?.clone();
+            let para_id = self.story_paras(&cell).ok()?.first()?.para_id.clone();
+            let slot = cell.rsplit_once(':')?.0.to_owned();
+            Some((slot, format!("{cell}:paragraph:{para_id}")))
+        });
+        read.map_or_else(
+            || "the document body holds no table".to_owned(),
+            |(slot, id)| format!("table ids read like {slot:?} or {id:?}, the body's first table"),
+        )
     }
 
     /// The paragraph `id` names, its story and its story's paragraphs (body
@@ -1700,9 +1765,12 @@ impl DocxSession {
     }
 
     /// The [`Table`] holding cell paragraph `id`, or the one its short id
-    /// names ([`Self::split`]).
+    /// names ([`Self::split`]); a cell's story goes with its table.
     fn table(&self, id: &str) -> Result<Table> {
         let (story, para_id) = self.split(id, true)?;
+        if table_story(&story).is_some() && self.story_paras(&story).is_err() {
+            return Err(table_gone());
+        }
         let (cell, _, _) = self.find_split(story, &para_id)?;
         let story = table_story(&cell).ok_or_else(|| {
             invalid("id must be a paragraph of a table cell, as inspect_office_document marks it")
@@ -1724,10 +1792,7 @@ impl DocxSession {
                 ordinal += 1;
             }
         }
-        Err(Error::edit(
-            EditCode::UnavailableTarget,
-            "the table is no longer in the document",
-        ))
+        Err(table_gone())
     }
 
     /// The table holding paragraph `id`, refused unless its cells read
@@ -2022,7 +2087,7 @@ mod tests {
         let refusal = Error::edit(
             EditCode::UnavailableTarget,
             format!(
-                "\"body:t1\" is not a DOCX paragraph id; it names 2 tables, which the read shows as {:?}, {:?}: copy each id whole from inspect_office_document, reading the file first",
+                "\"body:t1\" names 2 tables, which the read shows as {:?}, {:?}: copy each id whole from inspect_office_document, reading the file first",
                 read("body:t1:r0c0"),
                 read("body:t2:r0c0"),
             ),

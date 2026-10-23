@@ -640,111 +640,187 @@ fn docx_without_para_ids() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-/// The agent sent a seeded paraId alone, or a table's or cell's story id
-/// (UAT 2026-10-22): every command, an insert's anchor and replace_text
-/// included, refuses it naming the id the read shows, a cell paragraph's
-/// and a table's too (a table's short id only delete_table takes); an id
-/// naming nothing says to copy ids whole from a read. The read's full
-/// seeded ids work for each kind of command.
+/// A short paragraph id, the paraId alone, stands for the one paragraph of
+/// its story it names, in every command (Epo 2026-10-24, Q222): a seeded
+/// paraId names its story (`body:p1`, a cell's `body:t0:r0c0:p0`), another
+/// paraId a body paragraph.
 #[test]
-fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
+fn a_short_paragraph_id_stands_for_the_one_paragraph_it_names() {
+    for base in [docx_without_para_ids(), docx()] {
+        let mut doc = Doc::new(Format::Docx, base);
+        let short = |doc: &Doc, text: &str| {
+            let id = doc.id(text);
+            id.split_once(":paragraph:").unwrap().1.to_owned()
+        };
+        let (title, timed, chapter) = (
+            short(&doc, "Lab report"),
+            short(&doc, "We timed it."),
+            short(&doc, "Chapter"),
+        );
+        let next = short(&doc, "Next section");
+        doc.apply(&[
+            after(&timed, "Added"),
+            Command::FormatText {
+                target_id: timed.clone(),
+                text: "timed".into(),
+                format: TextFormat {
+                    bold: Some(true),
+                    ..TextFormat::default()
+                },
+            },
+            Command::SetList {
+                ids: vec![title],
+                list: ListKind::Bullet,
+            },
+            delete(&chapter, "Chapter"),
+            Command::ReplaceText {
+                target_id: next,
+                expected_text: "Next".into(),
+                text: "Following".into(),
+            },
+        ])
+        .unwrap();
+        let texts = doc.texts();
+        assert!(
+            texts.contains(&"Added".to_owned())
+                && texts.contains(&"Following section".to_owned())
+                && !texts.contains(&"Chapter".to_owned()),
+            "{texts:?}"
+        );
+        assert!(doc.paragraph_xml("timed").contains("<w:b/>"));
+        assert!(doc.paragraph_xml("Lab report").contains("<w:numPr>"));
+    }
+    // A cell paragraph's seeded paraId names its cell's story.
     let mut doc = Doc::new(Format::Docx, docx_without_para_ids());
-    assert_eq!(doc.id("We timed it."), "body:paragraph:body:p1");
+    doc.apply(&[Command::DeleteTable {
+        id: "body:t0:r0c0:p0".into(),
+        expected: vec![vec!["Cell".into()]],
+    }])
+    .unwrap();
+    assert!(!doc.xml().contains("<w:tbl>"));
+}
+
+/// A short paragraph id naming several paragraphs (two people split the
+/// title at once, each first half keeping its id) is refused with the ids
+/// the read shows; the whole id still names the first (Q222).
+#[test]
+fn a_short_paragraph_id_naming_several_is_refused_with_the_reads_ids() {
+    use docx_edit::{EditCtx, EditingDoc, Position};
+    for base in [docx_without_para_ids(), docx()] {
+        let mut doc = Doc::new(Format::Docx, base);
+        let whole = doc.id("Lab report");
+        let short = whole.split_once(":paragraph:").unwrap().1.to_owned();
+        let peers: Vec<EditingDoc> = [(3001, 2), (3002, 6)]
+            .into_iter()
+            .map(|(client, at)| {
+                let peer = EditingDoc::new(client);
+                peer.load_state_v1(&doc.state).unwrap();
+                peer.split_paragraph(&EditCtx::local("", ""), Position::new("body", at))
+                    .unwrap();
+                peer
+            })
+            .collect();
+        peers[0]
+            .load_state_v1(&peers[1].encode_state_as_update_v1())
+            .unwrap();
+        doc.state = peers[0].encode_state_as_update_v1();
+        assert_eq!(doc.texts()[..3], ["La", "b re", "port"]);
+        assert_eq!(
+            doc.apply(&[delete(&short, "La")]).unwrap_err(),
+            refused(
+                EditCode::UnavailableTarget,
+                &format!(
+                    "{short:?} names 2 paragraphs, which the read shows as {whole:?}, {whole:?}: copy each id whole from inspect_office_document, reading the file first"
+                ),
+            )
+        );
+        doc.apply(&[delete(&whole, "La")]).unwrap();
+        assert_eq!(doc.texts()[..2], ["b re", "port"]);
+    }
+}
+
+/// An id that is neither a whole id the read shows nor a short id naming
+/// what the command takes is malformed: its refusal says so and shows the
+/// read's id for what it names, else one the read lists; a table's short id
+/// naming no table of its story is gone, as is a deleted table's whole id
+/// (Epo 2026-10-24, Q223; the MiniMax probe sent `t0`, and `body:t0` again
+/// after deleting it).
+#[test]
+fn a_malformed_docx_id_is_refused_showing_the_reads_form() {
+    let mut doc = Doc::new(Format::Docx, docx_without_para_ids());
     let cell = "body:t0:r0c0:paragraph:body:t0:r0c0:p0";
     assert_eq!(doc.id("Cell"), cell);
-    let refusal = |sent: &str, shown: &str| {
-        refused(
-            EditCode::UnavailableTarget,
-            &format!(
-                "{sent:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
-            ),
-        )
+    let malformed = |sent: &str, kind: &str, shown: &str| {
+        invalid(&format!(
+            "{sent:?} is a malformed DOCX {kind} id; {shown}: copy each id whole from inspect_office_document, reading the file first"
+        ))
     };
-    let timed = refusal(
-        "body:p1",
-        r#"; the read shows it as "body:paragraph:body:p1""#,
-    );
-    let replace = Command::ReplaceText {
-        target_id: "body:p1".into(),
-        expected_text: "We".into(),
-        text: "They".into(),
-    };
-    for command in [
-        delete("body:p1", "We timed it."),
-        after("body:p1", "x"),
-        replace,
-    ] {
-        assert_eq!(doc.apply(&[command]).unwrap_err(), timed);
-    }
-    let bold = TextFormat {
-        bold: Some(true),
-        ..TextFormat::default()
-    };
+    let paragraph = r#"paragraph ids read like "body:paragraph:body:p0", the body's first"#;
     let table = |id: &str| Command::DeleteTable {
         id: id.into(),
         expected: vec![vec!["Cell".into()]],
     };
+    let first_of_cell = format!("the read shows its first paragraph as {cell:?}");
     let cases = [
         (
-            Command::FormatText {
-                target_id: "body:t0:r0c0:p0".into(),
-                text: "Cell".into(),
-                format: bold.clone(),
-            },
-            refusal(
-                "body:t0:r0c0:p0",
-                &format!("; the read shows it as {cell:?}"),
-            ),
-        ),
-        // A paragraph command takes no table's short id.
-        (
-            delete("body:t0", "Cell"),
-            refusal(
-                "body:t0",
-                &format!("; the read shows that table as {cell:?}"),
+            table("t0"),
+            malformed(
+                "t0",
+                "table",
+                &format!(r#"table ids read like "body:t0" or {cell:?}, the body's first table"#),
             ),
         ),
         (
             table("body:t0:r0c0"),
-            refusal(
-                "body:t0:r0c0",
-                &format!("; the read shows its first paragraph as {cell:?}"),
+            malformed("body:t0:r0c0", "table", &first_of_cell),
+        ),
+        (
+            delete("t0", "Cell"),
+            malformed("t0", "paragraph", paragraph),
+        ),
+        (
+            delete("body:x9", "Cell"),
+            malformed("body:x9", "paragraph", paragraph),
+        ),
+        // A paragraph command takes no table's short id.
+        (
+            delete("body:t0", "Cell"),
+            malformed(
+                "body:t0",
+                "paragraph",
+                &format!("the read shows that table as {cell:?}"),
             ),
         ),
-        (table("body:t5"), refusal("body:t5", "")),
-        (delete("body:x9", "Cell"), refusal("body:x9", "")),
+        (
+            after("body:t0:r0c0", "x"),
+            malformed("body:t0:r0c0", "paragraph", &first_of_cell),
+        ),
     ];
     for (command, error) in cases {
         assert_eq!(doc.apply(&[command]).unwrap_err(), error);
     }
+    // A seeded paraId's form names nothing in a file with real paraIds.
+    let mut real = Doc::new(Format::Docx, docx());
+    assert_eq!(
+        real.apply(&[delete("body:p1", "We timed it.")])
+            .unwrap_err(),
+        malformed(
+            "body:p1",
+            "paragraph",
+            r#"paragraph ids read like "body:paragraph:0000000A", the body's first"#
+        )
+    );
 
-    let (title, timed, chapter) = (
-        doc.id("Lab report"),
-        doc.id("We timed it."),
-        doc.id("Chapter"),
-    );
-    doc.apply(&[
-        after(&timed, "Added"),
-        Command::FormatText {
-            target_id: timed.clone(),
-            text: "timed".into(),
-            format: bold,
-        },
-        Command::SetList {
-            ids: vec![title],
-            list: ListKind::Bullet,
-        },
-        delete(&chapter, "Chapter"),
-    ])
-    .unwrap();
-    let texts = doc.texts();
-    assert!(
-        texts.contains(&"Added".to_owned()) && !texts.contains(&"Chapter".to_owned()),
-        "{texts:?}"
-    );
-    // The bold run splits the paragraph's text: find it by that run.
-    assert!(doc.paragraph_xml("timed").contains("<w:b/>"));
-    assert!(doc.paragraph_xml("Lab report").contains("<w:numPr>"));
+    doc.apply(&[table("body:t0")]).unwrap();
+    for id in ["body:t0", cell] {
+        assert_eq!(
+            doc.apply(&[table(id)]).unwrap_err(),
+            refused(
+                EditCode::UnavailableTarget,
+                "the table is no longer in the document"
+            )
+        );
+    }
 }
 
 /// delete_table takes a table's short id, the slot its cells' stories
