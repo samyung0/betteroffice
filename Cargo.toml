@@ -89,7 +89,7 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   structs applying as nothing); pending structs are retried once the unit
 #   they wait on arrives; the struct picker runs in a loop, not a call per
 #   drained client; `BlockStore::push` replaces only a skip, never a block
-#   already placed;
+#   already placed; an item next to a collected unit is collected, as in Yjs;
 # - read-only APIs: item, branch (`start`, `item`, `entry_item`, `map_items`),
 #   store (`get_item`, `get_block_range`, `blocks_in`) and update
 #   (`Update::blocks`) accessors, `Store::next_live_item` (the first live item

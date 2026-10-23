@@ -171,6 +171,9 @@ Transactions and updates:
 - `BlockStore::push` (`src/block_store.rs`) replaces only a skip; a block
   already placed stays, so it is never freed while its sequence links it
   (tests in `crates/pptx-edit/tests/yrs_placement.rs`);
+- an item next to a collected unit (its origin or right origin) is collected
+  too, as in Yjs 13.6.31's `Item.getMissing` (`missing_dependency` in
+  `src/update.rs`; tests in `crates/pptx-edit/tests/yrs_hostile.rs`);
 - `ClientBlockList::find_index` (`src/block_store.rs`) answers `None` for a
   clock its list does not hold (an empty list, a clock past its last block
   or before its first) instead of panicking, so `Store::get_item`,
