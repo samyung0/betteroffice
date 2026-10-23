@@ -478,12 +478,12 @@ fn delete_table_removes_the_table_whose_cells_read_as_expected() {
 }
 
 #[test]
-fn format_text_formats_the_one_occurrence_of_its_expected_text() {
+fn format_text_formats_the_one_occurrence_of_its_text() {
     let mut doc = report();
     let text = doc.id("We timed the pendulum.");
     doc.apply(&[Command::FormatText {
         target_id: text.clone(),
-        expected_text: "pendulum".into(),
+        text: "pendulum".into(),
         format: TextFormat {
             bold: Some(true),
             italic: Some(true),
@@ -520,7 +520,7 @@ fn format_text_formats_the_one_occurrence_of_its_expected_text() {
     }}));
     let format = |expected: &str, format: TextFormat| Command::FormatText {
         target_id: text.clone(),
-        expected_text: expected.into(),
+        text: expected.into(),
         format,
     };
     let bold = TextFormat {
@@ -801,7 +801,7 @@ fn touched_counts_what_the_undo_re_creates() {
     )));
     let format = |id: String| Command::FormatText {
         target_id: id,
-        expected_text: "abcd".repeat(12),
+        text: "abcd".repeat(12),
         format: TextFormat {
             color: Some("#1F4E79".into()),
             ..TextFormat::default()
@@ -897,7 +897,7 @@ fn a_fields_own_paragraph_takes_no_text_command() {
         },
         Command::FormatText {
             target_id: intro.clone(),
-            expected_text: "Intro".into(),
+            text: "Intro".into(),
             format: TextFormat {
                 bold: Some(true),
                 ..TextFormat::default()
@@ -961,7 +961,7 @@ fn a_calls_paragraph_index_follows_its_replacements() {
     };
     let format = |id: String, expected: &str, format: TextFormat| Command::FormatText {
         target_id: id,
-        expected_text: expected.into(),
+        text: expected.into(),
         format,
     };
     let (a, b, c, d) = (
@@ -1092,7 +1092,7 @@ fn a_call_applies_up_to_its_first_command_past_a_limit() {
     let bold: Vec<Command> = (0..31)
         .map(|_| Command::FormatText {
             target_id: timed.clone(),
-            expected_text: "pendulum".into(),
+            text: "pendulum".into(),
             format: TextFormat {
                 bold: Some(true),
                 ..TextFormat::default()
@@ -1180,7 +1180,7 @@ fn docx_commands_parse_from_their_wire_json() {
         { "type": "set_list", "ids": ["body:paragraph:1"], "list": "none" },
         { "type": "insert_table", "afterId": "body:paragraph:1", "rows": [["a", "b"]] },
         { "type": "delete_table", "id": "body:t0:r0c0:paragraph:2", "expected": [["a", "b"]] },
-        { "type": "format_text", "targetId": "body:paragraph:1", "expectedText": "Hi", "bold": true, "fontSize": 12 },
+        { "type": "format_text", "targetId": "body:paragraph:1", "text": "Hi", "bold": true, "fontSize": 12 },
         { "type": "set_alignment", "targetId": "body:paragraph:1", "alignment": "justify" },
     ]))
     .unwrap();
@@ -1199,7 +1199,7 @@ fn docx_commands_parse_from_their_wire_json() {
         commands[6],
         Command::FormatText {
             target_id: "body:paragraph:1".into(),
-            expected_text: "Hi".into(),
+            text: "Hi".into(),
             format: TextFormat {
                 bold: Some(true),
                 font_size: Some(12.0),

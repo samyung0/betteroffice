@@ -444,7 +444,7 @@ fn format_text_and_set_alignment_write_a_paragraphs_runs_and_alignment() {
     deck.apply(&[
         Command::FormatText {
             target_id: title.clone(),
-            expected_text: "Mendel".into(),
+            text: "Mendel".into(),
             format,
         },
         Command::SetAlignment {
@@ -476,7 +476,7 @@ fn format_text_and_set_alignment_write_a_paragraphs_runs_and_alignment() {
     assert_eq!(
         deck.apply(&[Command::FormatText {
             target_id: title.clone(),
-            expected_text: "Mendel".into(),
+            text: "Mendel".into(),
             format: TextFormat {
                 font_family: Some("Ari\u{fffe}al".into()),
                 ..TextFormat::default()
@@ -492,7 +492,7 @@ fn format_text_and_set_alignment_write_a_paragraphs_runs_and_alignment() {
     assert_eq!(
         deck.apply(&[Command::FormatText {
             target_id: title.clone(),
-            expected_text: "Mendel".into(),
+            text: "Mendel".into(),
             format: highlight,
         }])
         .unwrap_err(),
@@ -503,7 +503,7 @@ fn format_text_and_set_alignment_write_a_paragraphs_runs_and_alignment() {
     assert_eq!(
         deck.apply(&[Command::FormatText {
             target_id: title.clone(),
-            expected_text: "Mendeleev".into(),
+            text: "Mendeleev".into(),
             format: TextFormat {
                 italic: Some(true),
                 ..TextFormat::default()
@@ -529,7 +529,7 @@ fn the_slide_commands_parse_from_their_wire_json() {
         { "type": "delete_slide", "slideId": "s1", "expectedText": "a" },
         { "type": "move_slide", "slideId": "s1", "beforeSlide": "s2" },
         { "type": "add_text_box", "slideId": "s1", "paragraphs": ["x"], "x": 1, "y": 2.5, "w": 3, "h": 4 },
-        { "type": "format_text", "targetId": "p", "expectedText": "a", "italic": true },
+        { "type": "format_text", "targetId": "p", "text": "a", "italic": true },
     ]))
     .unwrap();
     assert_eq!(
@@ -555,7 +555,7 @@ fn the_slide_commands_parse_from_their_wire_json() {
             },
             Command::FormatText {
                 target_id: "p".into(),
-                expected_text: "a".into(),
+                text: "a".into(),
                 format: TextFormat {
                     italic: Some(true),
                     ..TextFormat::default()

@@ -312,9 +312,9 @@ impl PptxSession {
             } => self.add_text_box(slide_id, paragraphs, [*x, *y, *w, *h]),
             Command::FormatText {
                 target_id,
-                expected_text,
+                text,
                 format,
-            } => self.format_text(target_id, expected_text, format),
+            } => self.format_text(target_id, text, format),
             Command::SetAlignment {
                 target_id,
                 alignment,
@@ -785,16 +785,16 @@ impl PptxSession {
         Ok(())
     }
 
-    /// The one occurrence of `expected_text` in a paragraph, as a range of
-    /// its story.
-    fn find_text(&mut self, id: &str, expected_text: &str) -> Result<(String, u32, u32)> {
+    /// The one occurrence of `text` in a paragraph, as a range of its
+    /// story.
+    fn find_text(&mut self, id: &str, text: &str) -> Result<(String, u32, u32)> {
         let (story_id, paragraph) = self.paragraph(id)?;
-        if expected_text.is_empty() {
-            return Err(invalid("expected_text names the text to format"));
+        if text.is_empty() {
+            return Err(invalid("text names the text to format"));
         }
         let found: Vec<usize> = paragraph
             .text
-            .match_indices(expected_text)
+            .match_indices(text)
             .map(|(at, _)| at)
             .collect();
         let refusal = |code, message: String| Error::Edit {
@@ -823,12 +823,12 @@ impl PptxSession {
             }
         };
         let start = paragraph.start + len16(&paragraph.text[..at]);
-        Ok((story_id, start, start + len16(expected_text)))
+        Ok((story_id, start, start + len16(text)))
     }
 
-    fn format_text(&mut self, id: &str, expected_text: &str, format: &TextFormat) -> Result<()> {
+    fn format_text(&mut self, id: &str, text: &str, format: &TextFormat) -> Result<()> {
         let patch = text_patch(format)?;
-        let (story_id, start, end) = self.find_text(id, expected_text)?;
+        let (story_id, start, end) = self.find_text(id, text)?;
         self.deck
             .format_text(&ctx(), &story_id, start, end, &patch)
             .map_err(refused)?;

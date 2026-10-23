@@ -520,10 +520,10 @@ impl DocxSession {
     }
 
     fn paragraph(&self, id: &str) -> Result<(String, Paragraph)> {
-        let (story, para_id) = self.split(id)?;
+        let (story, para_id) = self.split(id, false)?;
         // The call's index: no story read again per lookup (review r2 L9).
-        let paragraph = self.indexed_paragraph(story, para_id)?;
-        Ok((story.to_owned(), paragraph))
+        let paragraph = self.indexed_paragraph(&story, &para_id)?;
+        Ok((story.into_owned(), paragraph))
     }
 
     pub fn editable(&mut self) -> Result<Vec<Entry>> {

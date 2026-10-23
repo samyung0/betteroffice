@@ -236,12 +236,12 @@ pub enum Command {
         id: String,
         expected: Vec<Vec<String>>,
     },
-    /// DOCX, PPTX: formats the one occurrence of `expected_text` in a
-    /// paragraph (`highlight` DOCX only).
+    /// DOCX, PPTX: formats the one occurrence of `text` in a paragraph
+    /// (`highlight` DOCX only).
     #[serde(rename_all = "camelCase")]
     FormatText {
         target_id: String,
-        expected_text: String,
+        text: String,
         #[serde(flatten)]
         format: TextFormat,
     },

@@ -321,12 +321,12 @@ impl PptxSession {
                     Err(_) => return Touched::default(),
                 }
             }
-            Command::FormatText { expected_text, .. } => {
-                let Some(at) = paragraph.text.find(expected_text.as_str()) else {
+            Command::FormatText { text, .. } => {
+                let Some(at) = paragraph.text.find(text.as_str()) else {
                     return Touched::default();
                 };
                 let at = len16(&paragraph.text[..at]);
-                (at, at + len16(expected_text), Kept::Formatting)
+                (at, at + len16(text), Kept::Formatting)
             }
             Command::SetAlignment { .. } => {
                 return touched::mark_entries(

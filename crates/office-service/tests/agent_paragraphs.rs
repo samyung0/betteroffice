@@ -643,8 +643,9 @@ fn docx_without_para_ids() -> Vec<u8> {
 /// The agent sent a seeded paraId alone, or a table's or cell's story id
 /// (UAT 2026-10-22): every command, an insert's anchor and replace_text
 /// included, refuses it naming the id the read shows, a cell paragraph's
-/// and a table's too; an id naming nothing says to copy ids whole from a
-/// read. The read's full seeded ids work for each kind of command.
+/// and a table's too (a table's short id only delete_table takes); an id
+/// naming nothing says to copy ids whole from a read. The read's full
+/// seeded ids work for each kind of command.
 #[test]
 fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
     let mut doc = Doc::new(Format::Docx, docx_without_para_ids());
@@ -687,7 +688,7 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
         (
             Command::FormatText {
                 target_id: "body:t0:r0c0:p0".into(),
-                expected_text: "Cell".into(),
+                text: "Cell".into(),
                 format: bold.clone(),
             },
             refusal(
@@ -695,8 +696,9 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
                 &format!("; the read shows it as {cell:?}"),
             ),
         ),
+        // A paragraph command takes no table's short id.
         (
-            table("body:t0"),
+            delete("body:t0", "Cell"),
             refusal(
                 "body:t0",
                 &format!("; the read shows that table as {cell:?}"),
@@ -709,6 +711,7 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
                 &format!("; the read shows its first paragraph as {cell:?}"),
             ),
         ),
+        (table("body:t5"), refusal("body:t5", "")),
         (delete("body:x9", "Cell"), refusal("body:x9", "")),
     ];
     for (command, error) in cases {
@@ -724,7 +727,7 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
         after(&timed, "Added"),
         Command::FormatText {
             target_id: timed.clone(),
-            expected_text: "timed".into(),
+            text: "timed".into(),
             format: bold,
         },
         Command::SetList {
@@ -742,6 +745,33 @@ fn a_bare_seeded_para_id_is_refused_with_the_id_the_read_shows() {
     // The bold run splits the paragraph's text: find it by that run.
     assert!(doc.paragraph_xml("timed").contains("<w:b/>"));
     assert!(doc.paragraph_xml("Lab report").contains("<w:numPr>"));
+}
+
+/// delete_table takes a table's short id, the slot its cells' stories
+/// name (`body:t1`), for the one table of the story it names, in a file
+/// with `w14:paraId` and one without (Epo 2026-10-23).
+#[test]
+fn delete_table_takes_the_short_id_of_one_table() {
+    for base in [docx(), docx_without_para_ids()] {
+        let mut doc = Doc::new(Format::Docx, base);
+        doc.apply(&[Command::InsertTable {
+            after_id: Some(doc.id("Chapter")),
+            rows: vec![vec!["New".into()]],
+        }])
+        .unwrap();
+        let table = |id: &str, cell: &str| Command::DeleteTable {
+            id: id.into(),
+            expected: vec![vec![cell.into()]],
+        };
+        doc.apply(&[table("body:t1", "New")]).unwrap();
+        let texts: Vec<String> = doc.paragraphs().into_iter().map(|(_, text)| text).collect();
+        assert!(
+            texts.contains(&"Cell".to_owned()) && !texts.contains(&"New".to_owned()),
+            "{texts:?}"
+        );
+        doc.apply(&[table("body:t0", "Cell")]).unwrap();
+        assert!(!doc.xml().contains("<w:tbl>"));
+    }
 }
 
 /// In a shape's text, inserts after and before a paragraph land in call

@@ -6,6 +6,7 @@
 //! file's paragraph styles. A new paragraph continues its anchor as Enter
 //! does; a named style takes the place of the anchor style's next style.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -842,20 +843,18 @@ impl DocxSession {
                     range(&story, &paras, index, start, end, Kept::Content)
                 }
                 Command::FormatText {
-                    target_id,
-                    expected_text,
-                    ..
+                    target_id, text, ..
                 } => {
                     let (story, index, paras) = self.find(target_id)?;
                     let para = &paras[index];
-                    let at = para.text.find(expected_text.as_str()).ok_or_else(gone)?;
+                    let at = para.text.find(text.as_str()).ok_or_else(gone)?;
                     let start = para.start + len16(&para.text[..at]);
                     range(
                         &story,
                         &paras,
                         index,
                         start,
-                        start + len16(expected_text),
+                        start + len16(text),
                         Kept::Formatting,
                     )
                 }
@@ -881,14 +880,14 @@ impl DocxSession {
                 }
                 Command::SetList { ids, .. } => {
                     // Each story read once: a list may name 200 paragraphs.
-                    let mut read: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
+                    let mut read: HashMap<Cow<str>, Arc<Vec<Para>>> = HashMap::new();
                     let mut sum = Touched::default();
                     for id in ids {
-                        let (story, para_id) = self.split(id)?;
-                        if !read.contains_key(story) {
-                            read.insert(story, self.story_paras(story)?);
+                        let (story, para_id) = self.split(id, false)?;
+                        if !read.contains_key(&story) {
+                            read.insert(story.clone(), self.story_paras(&story)?);
                         }
-                        let para = read[story]
+                        let para = read[&story]
                             .iter()
                             .find(|para| para.para_id == para_id)
                             .ok_or_else(gone)?;
@@ -952,9 +951,9 @@ impl DocxSession {
             Command::DeleteTable { id, expected } => self.delete_table(id, expected).map(none),
             Command::FormatText {
                 target_id,
-                expected_text,
+                text,
                 format,
-            } => self.format_text(target_id, expected_text, format).map(none),
+            } => self.format_text(target_id, text, format).map(none),
             Command::SetAlignment {
                 target_id,
                 alignment,
@@ -1244,51 +1243,97 @@ impl DocxSession {
     /// (`body:p9`, read as `body:paragraph:body:p9`), and the agent sent the
     /// paraId alone, or a table's or cell's story id (`body:t0`,
     /// `body:t0:r0c0`; UAT 2026-10-22), so the refusal names the read's id.
-    pub(super) fn split<'a>(&self, id: &'a str) -> Result<(&'a str, &'a str)> {
-        id.rsplit_once(":paragraph:")
+    /// Where a command takes a table (`table`), a table's short id
+    /// `<story>:t<n>`, the slot its cells' stories name with or without
+    /// paraIds (`body:t0` for `body:t0:r0c0`), stands for the read's id of
+    /// the one table of that story it names (Epo 2026-10-23); naming none or
+    /// several, it is refused naming the read's ids.
+    pub(super) fn split<'a>(
+        &self,
+        id: &'a str,
+        table: bool,
+    ) -> Result<(Cow<'a, str>, Cow<'a, str>)> {
+        if let Some((story, para_id)) = id
+            .rsplit_once(":paragraph:")
             .filter(|(story, _)| !story.is_empty())
-            .ok_or_else(|| {
-                let story = id.rsplit_once(':').map_or(BODY, |(story, _)| story);
-                let known = self
-                    .story_paras(story)
-                    .is_ok_and(|paras| paras.iter().any(|para| para.para_id == id));
-                // A story's first paragraph as the read names it.
-                let first = |story: &str| {
-                    let paras = self.story_paras(story).ok()?;
-                    let para = paras.first()?;
-                    Some(format!("{story}:paragraph:{}", para.para_id))
-                };
-                let shown = if known {
-                    format!("; the read shows it as \"{story}:paragraph:{id}\"")
-                } else if let Some(table) = first(&format!("{id}:r0c0")) {
-                    // A table's slot: the read names a table by its first
-                    // cell's first paragraph.
-                    format!("; the read shows that table as {table:?}")
-                } else if let Some(para) = first(id) {
-                    format!("; the read shows its first paragraph as {para:?}")
-                } else {
-                    String::new()
-                };
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    format!(
-                        "{id:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
-                    ),
-                )
-            })
+        {
+            return Ok((story.into(), para_id.into()));
+        }
+        let story = id.rsplit_once(':').map_or(BODY, |(story, _)| story);
+        let paras = self.story_paras(story).ok();
+        let known = paras
+            .iter()
+            .any(|paras| paras.iter().any(|para| para.para_id == id));
+        // A story's first paragraph, the read's id for it as (story, paraId).
+        let first = |story: &str| {
+            let paras = self.story_paras(story).ok()?;
+            Some((story.to_owned(), paras.first()?.para_id.clone()))
+        };
+        // The tables of `story` a short table id names: those with a cell
+        // in its slot, each by its first cell's first paragraph as the read
+        // names a table.
+        let mut tables: Vec<(String, String)> = Vec::new();
+        if table_story(&format!("{id}:r0c0")).is_some() {
+            let slot = format!("{id}:");
+            for found in paras
+                .iter()
+                .flat_map(|paras| paras.iter().flat_map(Para::tables))
+            {
+                let cells = table_cells(&found.payload);
+                if cells.iter().flatten().any(|cell| cell.starts_with(&slot))
+                    && let Some(cell) = cells.first().and_then(|row| row.first())
+                {
+                    tables.extend(first(cell));
+                }
+            }
+        }
+        if table && tables.len() == 1 {
+            let (cell, para_id) = tables.remove(0);
+            return Ok((cell.into(), para_id.into()));
+        }
+        let read = |(story, para_id): &(String, String)| {
+            format!("{:?}", format!("{story}:paragraph:{para_id}"))
+        };
+        let shown = match &tables[..] {
+            _ if known => format!("; the read shows it as \"{story}:paragraph:{id}\""),
+            [one] => format!("; the read shows that table as {}", read(one)),
+            [] => first(id).map_or_else(String::new, |para| {
+                format!("; the read shows its first paragraph as {}", read(&para))
+            }),
+            several => format!(
+                "; it names {} tables, which the read shows as {}",
+                several.len(),
+                several.iter().map(read).collect::<Vec<_>>().join(", ")
+            ),
+        };
+        Err(Error::edit(
+            EditCode::UnavailableTarget,
+            format!(
+                "{id:?} is not a DOCX paragraph id{shown}: copy each id whole from inspect_office_document, reading the file first"
+            ),
+        ))
     }
 
     /// The paragraph `id` names, its story and its story's paragraphs (body
     /// stories only, as every command but `replace_text` edits).
     fn find(&self, id: &str) -> Result<(String, usize, Arc<Vec<Para>>)> {
-        let (story, para_id) = self.split(id)?;
-        in_body(story)?;
-        let paras = self.story_paras(story)?;
+        let (story, para_id) = self.split(id, false)?;
+        self.find_split(story, &para_id)
+    }
+
+    /// [`Self::find`] of a split id.
+    fn find_split(
+        &self,
+        story: Cow<'_, str>,
+        para_id: &str,
+    ) -> Result<(String, usize, Arc<Vec<Para>>)> {
+        in_body(&story)?;
+        let paras = self.story_paras(&story)?;
         let index = paras
             .iter()
             .position(|para| para.para_id == para_id)
             .ok_or_else(gone)?;
-        Ok((story.to_owned(), index, paras))
+        Ok((story.into_owned(), index, paras))
     }
 
     /// Where a new body paragraph goes: right after `after_id`, after what
@@ -1305,7 +1350,7 @@ impl DocxSession {
         refusal: &str,
     ) -> Result<Placement> {
         let index = |id: &str| -> Result<usize> {
-            let (story, para_id) = self.split(id)?;
+            let (story, para_id) = self.split(id, false)?;
             if story != BODY {
                 return Err(invalid(refusal));
             }
@@ -1557,19 +1602,19 @@ impl DocxSession {
             )));
         }
         let num_id = self.list_num_id(list)?;
-        let mut stories: HashMap<&str, Arc<Vec<Para>>> = HashMap::new();
+        let mut stories: HashMap<Cow<str>, Arc<Vec<Para>>> = HashMap::new();
         let mut targets = Vec::with_capacity(ids.len());
         for id in ids {
-            let (story, para_id) = self.split(id)?;
-            in_body(story)?;
-            if !stories.contains_key(story) {
-                stories.insert(story, self.story_paras(story)?);
+            let (story, para_id) = self.split(id, false)?;
+            in_body(&story)?;
+            if !stories.contains_key(&story) {
+                stories.insert(story.clone(), self.story_paras(&story)?);
             }
-            let index = stories[story]
+            let index = stories[&story]
                 .iter()
                 .position(|para| para.para_id == para_id)
                 .ok_or_else(gone)?;
-            let para = &stories[story][index];
+            let para = &stories[&story][index];
             if para.tracked {
                 return Err(tracked_refusal());
             }
@@ -1584,12 +1629,12 @@ impl DocxSession {
         }
         drop(stories);
         let before = self.index_mark();
-        for &(story, _, at, ilvl) in &targets {
+        for &(ref story, _, at, ilvl) in &targets {
             self.engine
                 .doc()
                 .set_paragraph_attrs(
                     &ctx(),
-                    &ParaSelector::Range(StoryRange::new(story, at, at)),
+                    &ParaSelector::Range(StoryRange::new(&**story, at, at)),
                     &ParaAttrDelta {
                         other: list_attrs(list, num_id, ilvl).into_iter().collect(),
                         ..ParaAttrDelta::default()
@@ -1599,7 +1644,7 @@ impl DocxSession {
         }
         let doc = self.engine.doc();
         self.keep_index(before, |stories| {
-            for &(story, slot, _, _) in &targets {
+            for &(ref story, slot, _, _) in &targets {
                 reread(doc, stories, story, slot, slot);
             }
         });
@@ -1654,9 +1699,11 @@ impl DocxSession {
         Ok(())
     }
 
-    /// The [`Table`] holding cell paragraph `id`.
+    /// The [`Table`] holding cell paragraph `id`, or the one its short id
+    /// names ([`Self::split`]).
     fn table(&self, id: &str) -> Result<Table> {
-        let (cell, _, _) = self.find(id)?;
+        let (story, para_id) = self.split(id, true)?;
+        let (cell, _, _) = self.find_split(story, &para_id)?;
         let story = table_story(&cell).ok_or_else(|| {
             invalid("id must be a paragraph of a table cell, as inspect_office_document marks it")
         })?;
@@ -1741,7 +1788,7 @@ impl DocxSession {
         Ok(())
     }
 
-    fn format_text(&mut self, id: &str, expected_text: &str, format: &TextFormat) -> Result<()> {
+    fn format_text(&mut self, id: &str, text: &str, format: &TextFormat) -> Result<()> {
         let delta = inline_delta(format)?;
         let (story, index, paras) = self.find(id)?;
         let para = &paras[index];
@@ -1751,14 +1798,10 @@ impl DocxSession {
                 format!("the paragraph {reason}"),
             ));
         }
-        if expected_text.is_empty() {
-            return Err(invalid("expected_text names the text to format"));
+        if text.is_empty() {
+            return Err(invalid("text names the text to format"));
         }
-        let found: Vec<usize> = para
-            .text
-            .match_indices(expected_text)
-            .map(|(at, _)| at)
-            .collect();
+        let found: Vec<usize> = para.text.match_indices(text).map(|(at, _)| at).collect();
         let at = match found[..] {
             [at] => at,
             [] => {
@@ -1787,7 +1830,7 @@ impl DocxSession {
             .doc()
             .format_range(
                 &ctx(),
-                StoryRange::new(&story, start, start + len16(expected_text)),
+                StoryRange::new(&story, start, start + len16(text)),
                 &delta,
             )
             .map_err(op)?;
@@ -1943,6 +1986,56 @@ mod tests {
         assert_eq!(table_story("hf:rId1"), None);
     }
 
+    /// A table's short id naming two tables is refused naming both: a row
+    /// added to a table names its cells from the table's place (docx-edit
+    /// `table_base`), so once the first table is gone, a row added to the
+    /// third (now second) shares the second's slot `body:t1` (Epo
+    /// 2026-10-23).
+    #[test]
+    fn a_short_table_id_naming_two_tables_is_refused_naming_both() {
+        let mut session =
+            DocxSession::open(crate::starter(crate::Format::Docx).unwrap(), None).unwrap();
+        let delete = |id: &str, rows: &[&str]| Command::DeleteTable {
+            id: id.into(),
+            expected: rows.iter().map(|row| vec![(*row).to_owned()]).collect(),
+        };
+        for text in ["A", "B", "C"] {
+            session
+                .apply(&Command::InsertTable {
+                    after_id: None,
+                    rows: vec![vec![text.into()]],
+                })
+                .unwrap();
+        }
+        // Slots t0, t1 and t2; without A, C is the body's second table.
+        session.apply(&delete("body:t0", &["A"])).unwrap();
+        session
+            .engine
+            .doc()
+            .insert_row(&ctx(), &docx_edit::CellLoc::new(BODY, 1, 0, 0), true)
+            .unwrap();
+        assert!(session.story_paras("body:t1:r1c0").is_ok());
+        let read = |cell: &str| {
+            let para_id = session.story_paras(cell).unwrap()[0].para_id.clone();
+            format!("{cell}:paragraph:{para_id}")
+        };
+        let refusal = Error::edit(
+            EditCode::UnavailableTarget,
+            format!(
+                "\"body:t1\" is not a DOCX paragraph id; it names 2 tables, which the read shows as {:?}, {:?}: copy each id whole from inspect_office_document, reading the file first",
+                read("body:t1:r0c0"),
+                read("body:t2:r0c0"),
+            ),
+        );
+        assert_eq!(
+            session.apply(&delete("body:t1", &["B"])).err(),
+            Some(refusal)
+        );
+        session.apply(&delete("body:t2", &["C", ""])).unwrap();
+        session.apply(&delete("body:t1", &["B"])).unwrap();
+        assert!(session.story_paras("body:t1:r0c0").is_err());
+    }
+
     /// xorshift64: the commands a seed draws.
     struct Draw(u64);
 
@@ -2030,7 +2123,7 @@ mod tests {
                 let unique = para.text.matches(span.as_str()).count() == 1;
                 Command::FormatText {
                     target_id: id(story, para),
-                    expected_text: if unique { span } else { para.text.clone() },
+                    text: if unique { span } else { para.text.clone() },
                     format: TextFormat {
                         bold: Some(draw.below(2) == 0),
                         italic: (draw.below(2) == 0).then_some(true),

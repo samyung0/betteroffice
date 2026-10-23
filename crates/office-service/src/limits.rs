@@ -204,7 +204,7 @@ mod tests {
     fn format_text() -> Command {
         Command::FormatText {
             target_id: "body:paragraph:1".into(),
-            expected_text: "x".into(),
+            text: "x".into(),
             format: Default::default(),
         }
     }
