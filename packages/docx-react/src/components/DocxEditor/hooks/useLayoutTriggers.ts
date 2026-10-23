@@ -19,7 +19,7 @@
  *     local pass and keeps the caret in view. A peer's change (a comment
  *     anywhere renumbers the env, a peer's header edit) keeps the view; the
  *     reader's own header or footer save schedules its local pass itself
- *     (DocxEditor's header/footer push).
+ *     (useHeaderFooterEditing).
  */
 
 import { useEffect, useRef } from 'react';

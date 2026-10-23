@@ -1054,16 +1054,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [history]
   );
 
-  // The reader's own header or footer save lays out as a local pass, so the
-  // caret stays in view; a peer's header edit keeps the view (Epo
-  // 2026-10-23).
-  const pushHeaderFooter = useCallback(
-    (document: Document) => {
-      pagedEditorRef.current?.scheduleLayout('local');
-      return pushDocument(document);
-    },
-    [pushDocument]
-  );
+  // The reader's own header or footer save lays out as a local pass
+  // (useHeaderFooterEditing).
+  const scheduleLocalLayout = useCallback(() => {
+    pagedEditorRef.current?.scheduleLayout('local');
+  }, []);
 
   const notifyDocumentChange = useCallback(
     (document: Document) => {
@@ -1581,7 +1576,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleRemoveHeaderFooter,
   } = useHeaderFooterEditing({
     document: history.state,
-    pushDocument: pushHeaderFooter,
+    pushDocument,
+    scheduleLocalLayout,
     partEditTarget,
     setPartEditTarget,
   });

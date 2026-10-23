@@ -28,19 +28,23 @@ afterAll(() => {
 function render(document: Document, partEditTarget: PartEditTarget | null = null) {
   const pushed: Document[] = [];
   const targets: Array<PartEditTarget | null> = [];
+  // The order of layout schedules and pushes.
+  const calls: string[] = [];
   const hook = renderHook(() =>
     useHeaderFooterEditing({
       document,
       pushDocument: (doc) => {
+        calls.push('push');
         pushed.push(doc);
       },
+      scheduleLocalLayout: () => calls.push('schedule local'),
       partEditTarget,
       setPartEditTarget: (next) => {
         targets.push(typeof next === 'function' ? next(partEditTarget) : next);
       },
     })
   );
-  return { hook, pushed, targets };
+  return { calls, hook, pushed, targets };
 }
 
 function withSectionProperties(
@@ -74,17 +78,25 @@ describe('useHeaderFooterEditing on a last section that inherits its header', ()
   });
 
   test('double-clicking the header on the last page opens the inherited header', () => {
-    const { hook, pushed, targets } = render(probe);
+    const { calls, hook, pushed, targets } = render(probe);
     expect(hook.result.current.headerContent).toBe(probe.package.headers?.get('rId3') ?? null);
     act(() => hook.result.current.handleHeaderFooterDoubleClick('header', 2));
     expect(pushed).toEqual([]);
+    // Opening saves nothing, so the view stays.
+    expect(calls).toEqual([]);
     expect(targets).toEqual([{ kind: 'header', isFirstPage: false, pageIndex: 1 }]);
   });
 
   test('removing the header drops the inherited reference from the resolved last section', () => {
-    const { hook, pushed } = render(probe, { kind: 'header', isFirstPage: false, pageIndex: 1 });
+    const { calls, hook, pushed } = render(probe, {
+      kind: 'header',
+      isFirstPage: false,
+      pageIndex: 1,
+    });
     act(() => hook.result.current.handleRemoveHeaderFooter());
     expect(pushed).toHaveLength(1);
+    // The reader's save: a local pass first (Epo 2026-10-23).
+    expect(calls).toEqual(['schedule local', 'push']);
     const next = pushed[0].package;
     expect(next.headers?.has('rId3')).toBe(false);
     expect(next.document.sections?.at(-1)?.properties.headerReferences).toEqual([]);
@@ -121,10 +133,11 @@ describe('useHeaderFooterEditing on a last section that inherits its header', ()
       ...properties,
       headerReferences: undefined,
     }));
-    const { hook, pushed, targets } = render(document);
+    const { calls, hook, pushed, targets } = render(document);
     expect(hook.result.current.headerContent).toBeNull();
     act(() => hook.result.current.handleHeaderFooterDoubleClick('header', 2));
     expect(pushed).toHaveLength(1);
+    expect(calls).toEqual(['schedule local', 'push']);
     const next = pushed[0].package;
     const created: HeaderReference = { type: 'default', rId: 'rId_new_header_default' };
     expect(next.headers?.has(created.rId)).toBe(true);
