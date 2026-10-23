@@ -171,6 +171,7 @@ export function useYrsCoreSession(
   callbacks?: YrsCoreSessionCallbacks
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
+  const collaborationWorkerClientId = collaboration?.workerClientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
   const facadeRef = useRef<YrsFacadeModule | null>(null);
@@ -200,7 +201,10 @@ export function useYrsCoreSession(
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
-        const next = await yrs.createYrsSession({ clientId: collaborationClientId });
+        const next = await yrs.createYrsSession({
+          clientId: collaborationClientId,
+          workerClientId: collaborationWorkerClientId,
+        });
         if (
           cancelled ||
           callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false
@@ -244,6 +248,7 @@ export function useYrsCoreSession(
     seedBytes,
     seedGeneration,
     collaborationClientId,
+    collaborationWorkerClientId,
     collaborationInitialUpdate,
   ]);
 

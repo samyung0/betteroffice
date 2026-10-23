@@ -561,6 +561,8 @@ export type YrsResidentFontRegistration =
 
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
+  /** The id the worker's replica writes under; absent, it draws a random one. */
+  workerClientId?: number;
   /** Full document state, or a state-vector diff when the caller supplied
    * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
@@ -1166,6 +1168,11 @@ export interface CreateYrsSessionOptions {
    * 32-bit id, yjs-style.
    */
   clientId?: number;
+  /**
+   * The client id the resident layout worker writes under (non-negative safe
+   * integer). Omit to give each worker a random one.
+   */
+  workerClientId?: number;
 }
 
 function randomClientId(): number {
@@ -1239,7 +1246,11 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
-function wrapSession(session: EditSession, clientId: number): YrsSession {
+function wrapSession(
+  session: EditSession,
+  clientId: number,
+  workerClientId?: number
+): YrsSession {
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -1483,6 +1494,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       return {
         clientId,
+        workerClientId,
         state: state ?? session.encode_state(),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
         fonts: fontsCurrent
@@ -2199,5 +2211,5 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   const clientId = options?.clientId ?? randomClientId();
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
-  return wrapSession(wasm.createEditSession(clientId), clientId);
+  return wrapSession(wasm.createEditSession(clientId), clientId, options?.workerClientId);
 }
