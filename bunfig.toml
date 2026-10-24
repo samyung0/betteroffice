@@ -1,4 +1,9 @@
 [install]
 minimumReleaseAge = 604800
 # Per-advisory exemptions; remove each after its pinned version clears the release-age window.
-minimumReleaseAgeExcludes = ["postcss", "brace-expansion", "nanoid"]
+minimumReleaseAgeExcludes = ["postcss", "brace-expansion", "nanoid", "happy-dom", "@happy-dom/global-registrator", "body-parser"]
+# package.json overrides zod to ^4.6.7 for GHSA-mrhx-c7xc-m3w5 (no patched 3.x).
+# It matters only for shadcn 4.13, which declares zod ^3.24.1: only its CLI
+# uses zod, and no build or runtime path loads it (the apps import only
+# shadcn/tailwind.css); every other zod user already takes 4.x. Drop the
+# override once shadcn moves to a zod-4 release.
