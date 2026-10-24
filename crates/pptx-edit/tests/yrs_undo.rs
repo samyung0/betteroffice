@@ -6,7 +6,10 @@ use std::sync::Arc;
 use yrs::types::ToJson;
 use yrs::undo::{Options, UndoManager};
 use yrs::updates::decoder::Decode;
-use yrs::{Any, ClientID, Doc, ID, Map, MapPrelim, MapRef, ReadTxn, Transact, Update};
+use yrs::{
+    Any, ClientID, Doc, GetString, ID, Map, MapPrelim, MapRef, ReadTxn, StateVector, Text,
+    TextPrelim, TextRef, Transact, Update,
+};
 
 /// Every peer takes what it lacks from every other, untracked.
 fn exchange(docs: &[&Doc]) {
@@ -47,6 +50,27 @@ fn object(entries: &[(&str, f64)]) -> Any {
 
 fn nested<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> MapRef {
     map.get(txn, key).unwrap().cast::<MapRef>().unwrap()
+}
+
+fn text<T: ReadTxn>(map: &MapRef, txn: &T) -> TextRef {
+    map.get(txn, "p").unwrap().cast::<TextRef>().unwrap()
+}
+
+/// Text "p" as `doc` reads it and as a document loaded from its state does.
+fn read_and_reload(doc: &Doc) -> [String; 2] {
+    let state = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let reloaded = Doc::with_client_id(99);
+    reloaded
+        .transact_mut()
+        .apply_update(Update::decode_v1(&state).unwrap())
+        .unwrap();
+    [doc, &reloaded].map(|doc| {
+        let map = doc.get_or_insert_map("m");
+        let txn = doc.transact();
+        text(&map, &txn).get_string(&txn)
+    })
 }
 
 /// `UndoManager::try_process`: an Undo step passes an inserted item whose
@@ -252,7 +276,7 @@ fn undo_does_not_restore_past_a_removed_winner() {
 #[test]
 fn undo_of_an_attribute_change_and_delete_syncs_the_attributes() {
     use yrs::types::text::{Diff, YChange};
-    use yrs::{GetString, Out, Text, Xml, XmlTextPrelim, XmlTextRef};
+    use yrs::{Out, Xml, XmlTextPrelim, XmlTextRef};
     let doc = Doc::with_client_id(1);
     let root = doc.get_or_insert_text("sharedRoot");
     let button: XmlTextRef = {
@@ -302,4 +326,69 @@ fn undo_of_an_attribute_change_and_delete_syncs_the_attributes() {
         .apply_update(Update::decode_v2(&state).unwrap())
         .unwrap();
     assert_eq!(embedded(&remote), expected);
+}
+
+/// `Item::redo`: Undo restores text "p", whose pieces include a copy an
+/// earlier Undo made that typing then split. A restored copy keeps its traced
+/// right neighbour only when it lies after its left, so the writer, a peer and
+/// both reloads read alike (unpatched, the peer and its reload read "abefcdX").
+#[test]
+fn undo_restoring_a_text_with_a_split_copy_reads_alike_everywhere() {
+    let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(15));
+    let (m1, m2) = (d1.get_or_insert_map("m"), d2.get_or_insert_map("m"));
+    m1.insert(&mut d1.transact_mut(), "p", TextPrelim::new("abcdef"));
+    exchange(&[&d1, &d2]);
+    let mut undo = manager(&d2, &m2);
+    {
+        let mut txn = d2.transact_mut();
+        text(&m2, &txn).remove_range(&mut txn, 2, 4); // "ab"
+    }
+    undo.undo_blocking(); // a copy of "cdef" comes back
+    {
+        let mut txn = d2.transact_mut();
+        text(&m2, &txn).insert(&mut txn, 4, "X"); // "abcdXef": the copy splits
+    }
+    m2.remove(&mut d2.transact_mut(), "p");
+    undo.undo_blocking(); // "p" comes back with its pieces
+    exchange(&[&d1, &d2]);
+    assert_eq!(read_and_reload(&d2), ["abcdXef"; 2]);
+    assert_eq!(read_and_reload(&d1), ["abcdXef"; 2]);
+}
+
+/// `Item::redo`: the check that a traced right lies after the left walks at
+/// most 4,096 items. Undo restores "c" of "acb" into a restored copy where a
+/// peer with a lower client id has put 5,000 items between "a" and "b". Past
+/// the bound the copy's right is the item after "a", so "c" lands right after
+/// "a"; an unbounded walk keeps "b", and "c" lands after the peer's items.
+#[test]
+fn undo_past_the_right_walk_bound_takes_the_item_after_the_left() {
+    let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(15));
+    let (m1, m2) = (d1.get_or_insert_map("m"), d2.get_or_insert_map("m"));
+    {
+        let mut txn = d1.transact_mut();
+        let p = m1.insert(&mut txn, "p", TextPrelim::new("ab"));
+        p.insert(&mut txn, 1, "c"); // "acb", three items
+    }
+    exchange(&[&d1, &d2]);
+    let mut undo = manager(&d2, &m2);
+    {
+        let mut txn = d2.transact_mut();
+        text(&m2, &txn).remove_range(&mut txn, 1, 1); // step 1: "ab"
+    }
+    m2.remove(&mut d2.transact_mut(), "p"); // step 2
+    undo.undo_blocking(); // "p" comes back as a copy holding "ab"
+    exchange(&[&d1, &d2]);
+    {
+        let mut txn = d1.transact_mut();
+        let p = text(&m1, &txn);
+        for _ in 0..5000 {
+            p.insert(&mut txn, 1, "x"); // one item each
+        }
+    }
+    exchange(&[&d1, &d2]);
+    undo.undo_blocking(); // takes back step 1: "c" comes back
+    exchange(&[&d1, &d2]);
+    for read in read_and_reload(&d2).into_iter().chain(read_and_reload(&d1)) {
+        assert_eq!((read.find('c'), read.len()), (Some(1), 5003));
+    }
 }

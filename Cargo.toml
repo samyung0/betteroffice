@@ -77,8 +77,10 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 #   restored value, the winner to its right), every other value blocking as
 #   in Yjs (Epo 2026-10-08 narrow Undo rule; Yjs leaves the key without a
 #   value), under its own parent (Yjs #757), and Redo keeps the restored
-#   value's parents as Yjs does; `clear_undo` and `clear_redo` clear only
-#   their own stack;
+#   value's parents as Yjs does; a restored list item keeps its traced right
+#   neighbour only when it lies after its left (a bounded walk), else takes
+#   the item now after the left, so peers and reloads place it alike;
+#   `clear_undo` and `clear_redo` clear only their own stack;
 # - garbage collection takes a collected type's children even when Undo keeps
 #   them (`Item::gc`, `GCCollector::collect_marked`; upstream PR #682 for
 #   #667/#676), so none is left pointing into the type's freed branch;

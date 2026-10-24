@@ -628,6 +628,34 @@ impl ItemPtr {
                 }
                 right = right_item.right.clone();
             }
+            // Patched for BetterOffice: the traced right stays only when it lies
+            // after the left. A trace through a copy an earlier Undo made (the
+            // copy of an earlier piece of the same deleted run) can land at or
+            // before the left, and a copy whose right origin comes before its
+            // origin is placed by each replica's block boundaries, so peers and
+            // reloads read it elsewhere. Then the item now after the left is the
+            // right, as a local insert takes it. The walk is bounded (measured
+            // walks stay within 20 steps); past the bound the item after the left
+            // is the right too.
+            if let Some(traced) = right {
+                const MAX_STEPS: usize = 4096;
+                let after_left = match left {
+                    Some(left) => left.right,
+                    None => parent_branch.start,
+                };
+                let mut next = after_left;
+                let mut steps = 0;
+                while let Some(item) = next {
+                    if item == traced || steps == MAX_STEPS {
+                        break;
+                    }
+                    next = item.right;
+                    steps += 1;
+                }
+                if next != Some(traced) {
+                    right = after_left;
+                }
+            }
         }
 
         let next_clock = txn.store.get_local_state();
