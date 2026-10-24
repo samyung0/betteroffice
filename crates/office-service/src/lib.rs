@@ -350,7 +350,8 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 /// styles; PPTX: a page of its slides with their shapes, the first with the
 /// deck's layouts, or one slide's shapes and a page of its paragraphs), or
 /// by `ids` the pictures and charts a read listed. An XLSX by-id read takes
-/// them from the package's drawing parts without opening the workbook.
+/// them from the package's drawing parts without opening the workbook, of
+/// the state only the sheets it still holds.
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
@@ -359,7 +360,7 @@ pub fn inspect_scoped(
     guard(|| {
         if let (Format::Xlsx, Some(ids)) = (checkpoint.format, &query.ids) {
             assert_checkpoint(Format::Xlsx, base, Some(checkpoint))?;
-            return xlsx_drawing::by_ids(base, ids);
+            return xlsx_drawing::by_ids(base, checkpoint.state, ids);
         }
         Session::open(checkpoint.format, base, Some(checkpoint))?.inspect_scoped(query)
     })

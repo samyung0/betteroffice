@@ -878,9 +878,9 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
     )
     .unwrap();
     book.state = result.state;
-    let sheets = sheets(&book);
-    assert_eq!(sheets[0]["name"], "Sales");
-    let ids: Vec<&str> = sheets[0]["objects"]
+    let renamed = sheets(&book);
+    assert_eq!(renamed[0]["name"], "Sales");
+    let ids: Vec<&str> = renamed[0]["objects"]
         .as_array()
         .unwrap()
         .iter()
@@ -900,13 +900,18 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
         json!((0..20).map(point).collect::<Vec<_>>())
     );
 
-    // A state the workbook could not open: the by-id read never opens it.
-    book.state = vec![0];
+    // A state holding only a sheet order naming a sheet the workbook does
+    // not hold, which it cannot open: the by-id read reads no more of it.
+    let state = std::mem::replace(
+        &mut book.state,
+        sheet_order_only(&["sheet:0", "sheet:missing"]),
+    );
     assert_eq!(
         data(&book.ids(&[ids[0]]).unwrap()["items"][0]),
         png(64, 32, 100)
     );
     assert!(book.read(InspectQuery::default()).is_err());
+    book.state = state;
     let (code, message) = refusal(book.ids(&["Data!B3"]).unwrap_err());
     assert_eq!(code, EditCode::InvalidInput);
     assert!(
@@ -917,4 +922,45 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
         refusal(book.ids(&["xl/drawings/drawing1.xml#9:0"]).unwrap_err()).0,
         EditCode::UnavailableTarget
     );
+    let (code, message) = refusal(book.ids(&["xl/drawings/drawing9.xml#0:0"]).unwrap_err());
+    assert_eq!(code, EditCode::UnavailableTarget);
+    assert!(message.contains("names no picture or chart"), "{message}");
+
+    // Its sheet deleted, a picture is gone from the by-id read as from the
+    // sheet list (the state's sheets, not the package's).
+    let result = apply_commands(
+        &book.base,
+        book.checkpoint(),
+        &[Command::DeleteSheet {
+            sheet: "Sales".into(),
+            expected_name: "Sales".into(),
+        }],
+    )
+    .unwrap();
+    book.state = result.state;
+    let listed = sheets(&book);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(listed[0].get("objects").is_none());
+    assert_eq!(
+        refusal(book.ids(&[ids[0]]).unwrap_err()),
+        (
+            EditCode::UnavailableTarget,
+            format!(
+                "{} is no longer in the workbook: its sheet was deleted; read the sheet list for the ids",
+                ids[0]
+            )
+        )
+    );
+}
+
+/// A Yjs state whose `xlsx:sheet-order` holds `keys` and nothing else.
+fn sheet_order_only(keys: &[&str]) -> Vec<u8> {
+    use yrs::{Array, Transact, WriteTxn};
+    let doc = yrs::Doc::new();
+    let mut txn = doc.transact_mut();
+    let order = txn.get_or_insert_array("xlsx:sheet-order");
+    for key in keys {
+        order.push_back(&mut txn, *key);
+    }
+    txn.encode_update_v1()
 }
