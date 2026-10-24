@@ -273,10 +273,17 @@ export function syncMirrorPositions(root: HTMLElement): boolean {
     if (delta) moved = true;
   }
   if (!moved) return true;
-  for (const binding of bindings) {
-    const delta = bindingShift(binding.sources, deltas);
+  // every element's shift first, so a give-up leaves the mirror untouched
+  const shifts = new Float64Array(bindings.length);
+  for (let index = 0; index < bindings.length; index++) {
+    const delta = bindingShift(bindings[index]!.sources, deltas);
     if (delta === undefined) return false;
+    shifts[index] = delta;
+  }
+  for (let index = 0; index < bindings.length; index++) {
+    const delta = shifts[index]!;
     if (!delta) continue;
+    const binding = bindings[index]!;
     const { el } = binding;
     if (!Number.isNaN(binding.start)) {
       binding.start += delta;
