@@ -364,7 +364,6 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
         LayoutBlock::Table(table) => {
             shift(&mut table.pm_start);
             shift(&mut table.pm_end);
-            shift_sdt_groups(&mut table.sdt_groups, units);
             for row in &mut table.rows {
                 for cell in &mut row.cells {
                     for nested in &mut cell.blocks {
@@ -376,7 +375,6 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
         LayoutBlock::Image(image) => {
             shift(&mut image.pm_start);
             shift(&mut image.pm_end);
-            shift_sdt_groups(&mut image.sdt_groups, units);
         }
         LayoutBlock::Shape(shape) => shift_shape(shape, units),
         LayoutBlock::Chart(chart) => {
@@ -384,29 +382,23 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
             shift(&mut chart.pm_end);
             shift(&mut chart.doc_start);
             shift(&mut chart.doc_end);
-            shift_sdt_groups(&mut chart.sdt_groups, units);
         }
         LayoutBlock::TextBox(text_box) => {
             shift(&mut text_box.pm_start);
             shift(&mut text_box.pm_end);
-            shift_sdt_groups(&mut text_box.sdt_groups, units);
             for paragraph in &mut text_box.content {
                 shift_paragraph(paragraph, units);
             }
         }
-        LayoutBlock::SectionBreak(section_break) => {
-            shift_sdt_groups(&mut section_break.sdt_groups, units);
-        }
+        LayoutBlock::SectionBreak(_) => {}
         LayoutBlock::PageBreak(page_break) => {
             shift(&mut page_break.pm_start);
             shift(&mut page_break.pm_end);
-            shift_sdt_groups(&mut page_break.sdt_groups, units);
             shift_break_id(&mut page_break.id, story_id, "pageBreak", units);
         }
         LayoutBlock::ColumnBreak(column_break) => {
             shift(&mut column_break.pm_start);
             shift(&mut column_break.pm_end);
-            shift_sdt_groups(&mut column_break.sdt_groups, units);
             shift_break_id(&mut column_break.id, story_id, "columnBreak", units);
         }
         LayoutBlock::Unsupported => {}
@@ -422,7 +414,6 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
     };
     shift(&mut paragraph.pm_start);
     shift(&mut paragraph.pm_end);
-    shift_sdt_groups(&mut paragraph.sdt_groups, units);
     if let Some(attrs) = &mut paragraph.attrs {
         for rule in &mut attrs.horizontal_rules {
             rule.pm_start += delta;
@@ -477,20 +468,11 @@ fn shift_shape(shape: &mut ShapeBlock, units: u32) {
     {
         *value += delta;
     }
-    shift_sdt_groups(&mut shape.sdt_groups, units);
     for paragraph in shape.inner_text.iter_mut().flatten() {
         shift_paragraph(paragraph, units);
     }
     for child in &mut shape.children {
         shift_shape(child, units);
-    }
-}
-
-fn shift_sdt_groups(groups: &mut Option<Vec<SdtGroup>>, units: u32) {
-    for group in groups.iter_mut().flatten() {
-        if let Some(pos) = &mut group.pos {
-            *pos += i64::from(units);
-        }
     }
 }
 
