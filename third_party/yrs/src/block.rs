@@ -635,8 +635,8 @@ impl ItemPtr {
             // origin is placed by each replica's block boundaries, so peers and
             // reloads read it elsewhere. Then the item now after the left is the
             // right, as a local insert takes it. The walk is bounded (measured
-            // walks stay within 20 steps); past the bound the item after the left
-            // is the right too.
+            // walks stay within 20 steps): a traced right with more than 4,096
+            // items between the left and it gives way to the item after the left.
             if let Some(traced) = right {
                 const MAX_STEPS: usize = 4096;
                 let after_left = match left {

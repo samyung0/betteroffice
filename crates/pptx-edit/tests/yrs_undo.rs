@@ -331,7 +331,7 @@ fn undo_of_an_attribute_change_and_delete_syncs_the_attributes() {
 /// `Item::redo`: Undo restores text "p", whose pieces include a copy an
 /// earlier Undo made that typing then split. A restored copy keeps its traced
 /// right neighbour only when it lies after its left, so the writer, a peer and
-/// both reloads read alike (unpatched, the peer and its reload read "abefcdX").
+/// both reloads read alike (unpatched, the writer's reload reads "abefcdX").
 #[test]
 fn undo_restoring_a_text_with_a_split_copy_reads_alike_everywhere() {
     let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(15));
@@ -355,13 +355,10 @@ fn undo_restoring_a_text_with_a_split_copy_reads_alike_everywhere() {
     assert_eq!(read_and_reload(&d1), ["abcdXef"; 2]);
 }
 
-/// `Item::redo`: the check that a traced right lies after the left walks at
-/// most 4,096 items. Undo restores "c" of "acb" into a restored copy where a
-/// peer with a lower client id has put 5,000 items between "a" and "b". Past
-/// the bound the copy's right is the item after "a", so "c" lands right after
-/// "a"; an unbounded walk keeps "b", and "c" lands after the peer's items.
-#[test]
-fn undo_past_the_right_walk_bound_takes_the_item_after_the_left() {
+/// Undo restores "c" of "acb" into a restored copy where a peer with a lower
+/// client id has put `peer_items` items between "a" and "b": "c"'s position in
+/// the writer, the peer and both reloads.
+fn restored_c_after_peer_items(peer_items: usize) -> Vec<Option<usize>> {
     let (d1, d2) = (Doc::with_client_id(1), Doc::with_client_id(15));
     let (m1, m2) = (d1.get_or_insert_map("m"), d2.get_or_insert_map("m"));
     {
@@ -381,14 +378,35 @@ fn undo_past_the_right_walk_bound_takes_the_item_after_the_left() {
     {
         let mut txn = d1.transact_mut();
         let p = text(&m1, &txn);
-        for _ in 0..5000 {
+        for _ in 0..peer_items {
             p.insert(&mut txn, 1, "x"); // one item each
         }
     }
     exchange(&[&d1, &d2]);
     undo.undo_blocking(); // takes back step 1: "c" comes back
     exchange(&[&d1, &d2]);
-    for read in read_and_reload(&d2).into_iter().chain(read_and_reload(&d1)) {
-        assert_eq!((read.find('c'), read.len()), (Some(1), 5003));
-    }
+    let reads = read_and_reload(&d2).into_iter().chain(read_and_reload(&d1));
+    reads
+        .map(|read| {
+            assert_eq!(read.len(), peer_items + 3);
+            read.find('c')
+        })
+        .collect()
+}
+
+/// `Item::redo`: a traced right that lies after the left stays. "b" is 5
+/// items past "a", so "c" lands after the peer's items, as in Yjs (taking the
+/// item after the left instead would put it right after "a").
+#[test]
+fn undo_keeps_a_traced_right_that_lies_after_the_left() {
+    assert_eq!(restored_c_after_peer_items(5), [Some(6); 4]);
+}
+
+/// `Item::redo`: a traced right with more than 4,096 items between the left
+/// and it is not looked for further; the copy's right is the item after "a",
+/// so "c" lands right after "a" (an unbounded walk keeps "b", and "c" lands
+/// after the peer's 5,000 items).
+#[test]
+fn undo_past_the_right_walk_bound_takes_the_item_after_the_left() {
+    assert_eq!(restored_c_after_peer_items(5000), [Some(1); 4]);
 }

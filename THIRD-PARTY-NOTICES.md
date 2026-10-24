@@ -219,12 +219,12 @@ Undo and garbage collection:
   `crates/betteroffice-xlsx/tests/stable_collaboration.rs`);
 - `Item::redo` (`src/block.rs`) keeps the right neighbour a restored list
   item's trace finds only when it lies after the item's left neighbour, else
-  takes the item now after the left, as a local insert does; the check walks
-  at most 4,096 items, and past that takes the item after the left. A trace
-  through a copy an earlier Undo made can land at or before the left, and a
-  copy whose right origin comes before its origin is placed by each
-  replica's block boundaries, so peers and reloads read it elsewhere (tests
-  in `crates/pptx-edit/tests/yrs_undo.rs`, which CI runs);
+  takes the item now after the left, as a local insert does; a traced right
+  with more than 4,096 items between the left and it gives way to the item
+  after the left too. A trace through a copy an earlier Undo made can land at
+  or before the left, and a copy whose right origin comes before its origin
+  is placed by each replica's block boundaries, so peers and reloads read it
+  elsewhere (tests in `crates/pptx-edit/tests/yrs_undo.rs`, which CI runs);
 - `UndoManager::clear_undo` and `clear_redo` (`src/undo.rs`) clear only their
   own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`).
 
