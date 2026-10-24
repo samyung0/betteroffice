@@ -163,3 +163,75 @@ describe('a body story carrying a block embed', () => {
     }
   });
 });
+
+/** Every position's node and pointer target, and each paragraph's start. */
+function positions(session: YrsSession, projection: YrsPositionProjection) {
+  const out: unknown[] = [];
+  for (let position = 0; position <= projection.size; position += 1) {
+    const node = projection.nodeAt(position);
+    out.push([
+      position,
+      node && [node.kind, node.nodeSize, node.story, node.attrs.paraId],
+      projection.targetAt(position),
+      projection.tableAtPosition(position)?.start,
+    ]);
+  }
+  for (const story of ['body', ...session.storyIds()]) {
+    for (const { paraId } of session.paragraphs(story)) {
+      out.push(projection.positionForLoc({ story, paraId, offset: 1 }));
+    }
+    out.push(projection.blockSdtForStory(story)?.start);
+  }
+  return out;
+}
+
+describe('typed text', () => {
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+
+  for (const [name, embed] of [
+    ['table', TABLE],
+    ['page break', PAGE_BREAK],
+    ['block content control', BLOCK_SDT],
+  ] as const) {
+    test(`moves the positions after it in place, as a fresh read gives them, around a ${name}`, async () => {
+      const session = await createYrsSession({ clientId: 71002 });
+      try {
+        session.seedFromDocx(bodyDocx(embed));
+        let reads = 0;
+        const counted = new Proxy(session, {
+          get(target, key, receiver) {
+            if (key === 'storySegments') reads += 1;
+            return Reflect.get(target, key, receiver);
+          },
+        });
+        const projection = new YrsPositionProjection(counted, 'body');
+        const before = reads;
+        const typedInto = session.storyIds().filter((story) => story !== 'body').concat('body');
+        for (const story of typedInto) {
+          const [first] = session.paragraphs(story);
+          session.insertText({ story, paraId: first!.paraId, offset: 1 }, 'xyz');
+          expect(projection.sync()).toBe(true);
+        }
+        expect(reads).toBe(before);
+        expect(positions(session, projection)).toEqual(
+          positions(session, new YrsPositionProjection(session, 'body'))
+        );
+      } finally {
+        session.destroy();
+      }
+    });
+  }
+
+  test('asks for a new read after anything but plain typing', async () => {
+    const session = await createYrsSession({ clientId: 71003 });
+    try {
+      session.seedFromDocx(bodyDocx(TABLE));
+      const projection = new YrsPositionProjection(session, 'body');
+      const [alpha] = session.paragraphs('body');
+      session.splitParagraph({ story: 'body', paraId: alpha!.paraId, offset: 2 });
+      expect(projection.sync()).toBe(false);
+    } finally {
+      session.destroy();
+    }
+  });
+});

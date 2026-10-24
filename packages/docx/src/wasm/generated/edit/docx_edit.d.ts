@@ -304,6 +304,10 @@ export class EditSession {
      */
     distribute_columns(range_json: string): string;
     /**
+     * Counts committed transactions: it moves on with every document change.
+     */
+    doc_epoch(): number;
+    /**
      * Pops the oldest queued transaction, in arrival order. Byte 0 is `1`
      * when the transaction had no local origin and `0` otherwise; the rest is
      * the v1 update. Empty when the queue is drained or observation never
@@ -370,6 +374,10 @@ export class EditSession {
      */
     has_field_changes(): boolean;
     /**
+     * Whether the document holds `story`, without listing every story.
+     */
+    has_story(story: string): boolean;
+    /**
      * Stories changed by the latest undo or redo, sorted.
      */
     history_stories(): string[];
@@ -434,6 +442,12 @@ export class EditSession {
      * edit. Errors when the JSON is not an object.
      */
     insert_watermark(story: string, para_id: string, offset: number, watermark_json: string): void;
+    /**
+     * `{"epoch","story","at","len"}` when the last committed transaction
+     * inserted text alone into one story (`at` and `len` in story units), so
+     * a host index can follow it instead of rereading the story.
+     */
+    last_plain_insert(): string | undefined;
     /**
      * `{ measured, options }` JSON in, `Layout` JSON out. Both the measured
      * input and the resulting layout are retained for the resident edit path.
@@ -1157,6 +1171,7 @@ export interface InitOutput {
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_distribute_columns: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_doc_epoch: (a: number) => number;
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
@@ -1165,6 +1180,7 @@ export interface InitOutput {
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_has_field_changes: (a: number) => number;
+    readonly editsession_has_story: (a: number, b: number, c: number) => number;
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -1175,6 +1191,7 @@ export interface InitOutput {
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
+    readonly editsession_last_plain_insert: (a: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];

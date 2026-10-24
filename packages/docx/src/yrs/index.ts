@@ -377,6 +377,14 @@ export interface YrsInsertReceipt extends YrsRevisionReceipt {
   range: YrsStoryRange;
 }
 
+/** Text inserted alone into one story by one transaction ({@link YrsSession.lastPlainInsert}). */
+export interface YrsPlainInsert {
+  epoch: number;
+  story: string;
+  at: number;
+  len: number;
+}
+
 /** Receipt of a Backspace, Delete or paragraph merge: `caret` is where it leaves the caret. */
 export interface YrsCaretReceipt extends YrsRevisionReceipt {
   caret: YrsLoc;
@@ -1114,6 +1122,15 @@ export interface YrsSession extends CollaborationReplica {
   listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
+  /** Whether the document holds `story`, without listing every story. */
+  hasStory(story: string): boolean;
+  /** Moves on with every committed document change. */
+  docEpoch(): number;
+  /**
+   * The last committed transaction when it inserted text alone into one story
+   * (`at` and `len` in story units), with the {@link docEpoch} it made.
+   */
+  lastPlainInsert(): YrsPlainInsert | null;
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
   /** Returns the story's canonical-stream checksum. */
@@ -2119,6 +2136,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     storyIds: () => session.story_ids(),
+    hasStory: (story) => session.has_story(story),
+    docEpoch: () => session.doc_epoch(),
+    lastPlainInsert: () => {
+      const json = session.last_plain_insert();
+      return json === undefined ? null : (JSON.parse(json) as YrsPlainInsert);
+    },
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {

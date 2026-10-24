@@ -30,6 +30,7 @@ const segments: Record<string, YrsStorySegment[]> = {
 };
 
 const session = {
+  docEpoch: () => 0,
   storySegments: (story: string) => segments[story] ?? [],
 } as unknown as YrsSession;
 
@@ -37,7 +38,7 @@ describe('YrsPositionProjection', () => {
   test('returns null without reading a missing story', () => {
     let readStory = false;
     const missingStorySession = {
-      storyIds: () => ['body'],
+      hasStory: (story: string) => story === 'body',
       storySegments: () => {
         readStory = true;
         throw new Error('missing story');

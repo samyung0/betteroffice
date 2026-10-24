@@ -777,17 +777,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsInputRef.current?.focus();
     }, []);
 
-    const yrsProjectionVersionRef = useRef(0);
     const lastYrsToolbarSelectionKeyRef = useRef<string | null>(null);
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const publishYrsDirectInput = useCallback((): void => {
       yrsCore.publishDirectInput();
-      // Structural input can mint a paragraph before the existing projection
-      // can map its new sticky caret. Invalidate first so emitSelection can
-      // rebuild the projection and reach the normal layout-refresh callback.
-      yrsProjectionVersionRef.current += 1;
     }, [yrsCore.publishDirectInput]);
     useEffect(
       () => () => {
@@ -799,7 +794,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
     const refreshYrsLayout = useCallback(
       (origin: LayoutUpdateOrigin): void => {
-        yrsProjectionVersionRef.current += 1;
         syncCoordinator.incrementStateSeq();
         syncCoordinator.requestRender();
         scheduleLayout(origin);
@@ -1426,9 +1420,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
-    // stories and cache it across gestures until the next mutation.
+    // stories once; typed text moves its positions in place (`sync`), and any
+    // other document change builds it again.
     const yrsPositionProjectionCacheRef = useRef<{
-      version: number;
       session: YrsSession;
       rootStory: string;
       projection: YrsPositionProjection;
@@ -1436,23 +1430,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
-        if (!session || !session.storyIds().includes(rootStory)) return null;
+        if (!session) return null;
         const cached = yrsPositionProjectionCacheRef.current;
         if (
-          cached?.version === yrsProjectionVersionRef.current &&
-          cached.session === session &&
-          cached.rootStory === rootStory
+          cached?.session === session &&
+          cached.rootStory === rootStory &&
+          cached.projection.sync()
         ) {
           return cached.projection;
         }
         const projection = createYrsPositionProjection(session, rootStory);
         if (!projection) return null;
-        yrsPositionProjectionCacheRef.current = {
-          version: yrsProjectionVersionRef.current,
-          session,
-          rootStory,
-          projection,
-        };
+        yrsPositionProjectionCacheRef.current = { session, rootStory, projection };
         return projection;
       },
       [yrsCore.session]

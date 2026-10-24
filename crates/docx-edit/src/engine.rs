@@ -1183,6 +1183,16 @@ impl EngineSession {
         self.doc_epoch.get()
     }
 
+    /// The last committed transaction when it inserted text alone into one
+    /// story: the document epoch it made, the story, the story index and the
+    /// UTF-16 length.
+    pub fn last_plain_insert(&self) -> Option<(u64, String, u32, u32)> {
+        match self.edits.borrow().last.clone()? {
+            (epoch, StoryEdit::PlainInsert { story, at, len }) => Some((epoch, story, at, len)),
+            (_, StoryEdit::Other) => None,
+        }
+    }
+
     /// Runs a callback with resident lowered blocks.
     pub fn with_lowered_story<T>(
         &self,
