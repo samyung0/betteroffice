@@ -739,18 +739,33 @@ impl XlsxSession {
         })
     }
 
-    /// Scoped reads without projecting the workbook: the sheet list, or the
-    /// non-empty cells of a range of at most [`MAX_READ_CELLS`].
+    /// Scoped reads without projecting the workbook: the sheet list, each
+    /// sheet with the pictures, charts and drawn shapes' text of its
+    /// drawings (`objects`), or the non-empty cells of a range of at most
+    /// [`MAX_READ_CELLS`].
     pub fn inspect_scoped(&self, query: &InspectQuery) -> Result<serde_json::Value> {
         let Some(range) = &query.range else {
             let info = self.workbook.sheet_info().map_err(Error::engine)?;
-            let sheets: Vec<_> = info
+            let sheets = info
                 .sheet_ids
                 .iter()
                 .zip(&info.sheet_names)
                 .enumerate()
-                .map(|(index, (id, name))| self.summary(index, id, name))
-                .collect();
+                .map(|(index, (id, name))| {
+                    let mut summary = self.summary(index, id, name);
+                    if let Some((package, path)) = self.workbook.source_sheet(SheetId(index as u32))
+                    {
+                        let (objects, more) = crate::xlsx_drawing::sheet_lines(package, path)?;
+                        if !objects.is_empty() {
+                            summary["objects"] = serde_json::json!(objects);
+                        }
+                        if more > 0 {
+                            summary["moreObjects"] = serde_json::json!(more);
+                        }
+                    }
+                    Ok(summary)
+                })
+                .collect::<Result<Vec<_>>>()?;
             return Ok(serde_json::json!({ "sheets": sheets }));
         };
         let sheet = query

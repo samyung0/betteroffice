@@ -38,5 +38,7 @@ sha2 = "0.10"
 # and inputs classified and cells shown as the editor does.
 xlsx-calc.workspace = true
 xlsx-ops.workspace = true
+# A sheet's drawing parts, for its pictures and charts.
+xlsx-parse.workspace = true
 xlsx-render.workspace = true
 yrs = "0.27.3"

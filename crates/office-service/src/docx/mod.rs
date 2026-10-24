@@ -172,7 +172,7 @@ fn decode_document(envelope: docx_parse::S9WireEnvelope) -> Result<V> {
 }
 
 /// `authoredText`: the text a projected node shows.
-fn authored_text(value: &V) -> String {
+pub(super) fn authored_text(value: &V) -> String {
     if let Some(items) = value.arr() {
         return items.items().iter().map(authored_text).collect();
     }

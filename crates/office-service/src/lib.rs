@@ -17,6 +17,7 @@ mod formula;
 pub mod js;
 pub mod jsv;
 mod limits;
+mod objects;
 mod pptx;
 mod rebase;
 mod replicas;
@@ -25,6 +26,7 @@ mod touched;
 mod types;
 pub mod wire;
 mod xlsx;
+mod xlsx_drawing;
 
 use std::collections::{BTreeMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -342,17 +344,25 @@ pub fn inspect(base: &[u8], checkpoint: Checkpoint) -> Result<Vec<Entry>> {
 }
 
 /// What the agent reads of an Office file without projecting all of it
-/// (XLSX: the sheet list, or a range's non-empty cells; DOCX: a page of its
-/// paragraphs, the body's then the headers', footers' and notes', the first
-/// with the file's paragraph styles; PPTX: a page of its slides with their
-/// shapes, the first with the deck's layouts, or one slide's shapes and a
-/// page of its paragraphs).
+/// (XLSX: the sheet list with each sheet's pictures and charts, or a range's
+/// non-empty cells; DOCX: a page of its paragraphs, the body's then the
+/// headers', footers' and notes', the first with the file's paragraph
+/// styles; PPTX: a page of its slides with their shapes, the first with the
+/// deck's layouts, or one slide's shapes and a page of its paragraphs), or
+/// by `ids` the pictures and charts a read listed. An XLSX by-id read takes
+/// them from the package's drawing parts without opening the workbook.
 pub fn inspect_scoped(
     base: &[u8],
     checkpoint: Checkpoint,
     query: &InspectQuery,
 ) -> Result<serde_json::Value> {
-    guard(|| Session::open(checkpoint.format, base, Some(checkpoint))?.inspect_scoped(query))
+    guard(|| {
+        if let (Format::Xlsx, Some(ids)) = (checkpoint.format, &query.ids) {
+            assert_checkpoint(Format::Xlsx, base, Some(checkpoint))?;
+            return xlsx_drawing::by_ids(base, ids);
+        }
+        Session::open(checkpoint.format, base, Some(checkpoint))?.inspect_scoped(query)
+    })
 }
 
 /// The blank file the agent's `create` and the Create tab start from; a

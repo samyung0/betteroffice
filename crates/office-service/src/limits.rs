@@ -6,7 +6,11 @@
 //! its counts to the table. `shapeText` bounds the text one PPTX command
 //! writes into one shape (review L2: gen:openapi writes it into the tool's
 //! schema and the skill's generated limits), `slideNotes` the speaker notes
-//! a slide read shows.
+//! a slide read shows, `inspectIds` the by-id read (Epo 2026-10-24, Q278,
+//! Q284): the pictures and charts one call names, and the JSON bytes of its
+//! answer, Go's 8 MiB read of the collaboration server's answer
+//! (`store/collaboration_documents.go` `postCollaboration`) less 4 KiB for
+//! the inspection around it.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -25,6 +29,7 @@ struct Table {
     shape_text: ShapeText,
     /// The speaker notes a PPTX slide read shows of one slide.
     slide_notes: SlideNotes,
+    inspect_ids: InspectIds,
     /// Each format's counts.
     formats: BTreeMap<String, Vec<Limit>>,
 }
@@ -49,6 +54,19 @@ struct SlideNotes {
 /// The characters of a slide's notes the slide read shows (Epo 2026-10-22).
 pub(crate) fn slide_notes() -> Result<usize> {
     Ok(table()?.slide_notes.characters)
+}
+
+/// The ids a by-id read takes and the JSON bytes its answer holds.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InspectIds {
+    pub per_call: usize,
+    pub answer_bytes: usize,
+}
+
+/// [`InspectIds`] from the table.
+pub(crate) fn inspect_ids() -> Result<InspectIds> {
+    Ok(table()?.inspect_ids)
 }
 
 /// One count: the commands that add to it and the most a call holds.

@@ -9,15 +9,18 @@ use pptx_edit::{
     EditCtx, ParagraphSnapshot, ShapeDraft, ShapeKind, ShapeRect, ShapeSnapshot, SlideSnapshot,
     StorySnapshot, TextStyle, TextStylePatch,
 };
+use std::borrow::Cow;
+
 use pptx_parse::{
-    GraphicFrameData, PptxPackage, ShapeNode, ShapeTransform, SlideLayout, find_placeholder,
-    master_for_layout,
+    GraphicFrameData, Picture, PptxPackage, ShapeNode, ShapeTransform, SlideLayout,
+    find_placeholder, master_for_layout,
 };
 use serde_json::{Value, json};
 
 use super::{PptxSession, STORIES, missing_paragraph, refused};
 use crate::common::{check_paragraph_text, len16, malformed_id};
 use crate::error::{EditCode, Error, Result};
+use crate::objects::{self, Chart, Found, Stored, crop_side};
 use crate::session::Applied;
 use crate::touched::{self, Kept, Touched};
 use crate::types::{Alignment, Command, InspectQuery, TextFormat};
@@ -220,6 +223,37 @@ fn kind(shape: &ShapeSnapshot) -> &'static str {
     }
 }
 
+/// The source picture a picture shape of a seeded slide came from: its alt
+/// text and crop, which the deck's snapshot leaves out.
+fn source_picture<'a>(
+    package: &'a PptxPackage,
+    slide: &SlideSnapshot,
+    shape: &ShapeSnapshot,
+) -> Option<&'a Picture> {
+    fn find(nodes: &[ShapeNode], id: u32) -> Option<&Picture> {
+        nodes.iter().find_map(|node| match node {
+            ShapeNode::Picture(picture) if picture.base.id == id => Some(picture),
+            ShapeNode::Group(group) => find(&group.children, id),
+            _ => None,
+        })
+    }
+    let path = slide.source_part_path.as_deref()?;
+    let source = package
+        .slides
+        .iter()
+        .find(|source| source.part_path == path)?;
+    find(&source.shapes, shape.source_id)
+}
+
+/// `line`'s fields `entry` does not have yet.
+fn merge(entry: &mut Value, line: Value) {
+    if let (Some(entry), Value::Object(line)) = (entry.as_object_mut(), line) {
+        for (key, value) in line {
+            entry.entry(key).or_insert(value);
+        }
+    }
+}
+
 /// A table cell's (row, column) from its story id.
 fn cell_of(story_id: &str) -> Option<(u32, u32)> {
     let (_, cell) = story_id.rsplit_once(":table:")?;
@@ -356,8 +390,15 @@ impl PptxSession {
     /// followed by its paragraphs (review M1: a slide of hundreds of shapes
     /// pages like its text), a shape with its name, placeholder type and,
     /// outside a group, its box in points; the first page also gives the
-    /// slide's speaker notes ([`shown_notes`]).
+    /// slide's speaker notes ([`shown_notes`]). A picture lists its alt
+    /// text and whether the model can see it, a chart its type and title,
+    /// the slide read adding a picture's pixel size and crop and a chart's
+    /// series ([`objects`]). `ids`: those pictures and charts
+    /// ([`Self::read_ids`]).
     pub(crate) fn inspect_scoped(&mut self, query: &InspectQuery) -> Result<Value> {
+        if let Some(ids) = &query.ids {
+            return self.read_ids(ids);
+        }
         let count = query
             .count
             .filter(|count| (1..=MAX_READ).contains(count))
@@ -372,6 +413,10 @@ impl PptxSession {
             let scopes = (start.min(end)..end)
                 .map(scope)
                 .collect::<Result<Vec<_>>>()?;
+            let slides = scopes
+                .iter()
+                .map(|scope| self.listed_slide(package, &scope.slide, scope.index + 1))
+                .collect::<Result<Vec<_>>>()?;
             let (width, height) = match scopes.first() {
                 Some(first) => (first.width_emu, first.height_emu),
                 None => {
@@ -382,10 +427,7 @@ impl PptxSession {
             let mut answer = json!({
                 "width": points(width),
                 "height": points(height),
-                "slides": scopes
-                    .iter()
-                    .map(|scope| self.listed_slide(package, &scope.slide, scope.index + 1))
-                    .collect::<Vec<_>>(),
+                "slides": slides,
                 "total": total,
                 "nextStart": (end < total).then_some(end),
             });
@@ -433,17 +475,19 @@ impl PptxSession {
                     transform = (found.x, found.y, found.width, found.height);
                 }
             }
-            let at = self.read_shape(shape, &mut items);
+            let at = self.read_shape(slide, shape, &mut items)?;
             items[at].1["box"] = json!([
                 points(transform.0),
                 points(transform.1),
                 points(transform.2),
                 points(transform.3)
             ]);
-            walk(&shape.children, &mut |child| {
-                let at = self.read_shape(child, &mut items);
+            let mut children = Vec::new();
+            walk(&shape.children, &mut |child| children.push(child));
+            for child in children {
+                let at = self.read_shape(slide, child, &mut items)?;
                 items[at].1["inGroup"] = json!(true);
-            });
+            }
         }
         let end = (start + count).min(items.len());
         let (shapes, paragraphs): (Vec<_>, Vec<_>) = items[start.min(end)..end]
@@ -472,16 +516,47 @@ impl PptxSession {
     }
 
     /// A slide of the slide list.
-    fn listed_slide(&self, package: &PptxPackage, slide: &SlideSnapshot, number: usize) -> Value {
-        let mut shapes = Vec::new();
+    fn listed_slide(
+        &self,
+        package: &PptxPackage,
+        slide: &SlideSnapshot,
+        number: usize,
+    ) -> Result<Value> {
+        let mut listed = Vec::new();
         let mut more = 0;
         walk(&slide.shapes, &mut |shape| {
-            if shapes.len() == MAX_LISTED_SHAPES {
+            if listed.len() == MAX_LISTED_SHAPES {
                 more += 1;
-                return;
+            } else {
+                listed.push(shape);
             }
+        });
+        let mut shapes = Vec::with_capacity(listed.len());
+        for shape in listed {
             let mut entry = json!({ "id": shape.id, "kind": kind(shape) });
             self.mark(shape, &mut entry);
+            match kind(shape) {
+                "picture" => {
+                    let line = self.picture(slide, shape).line()?;
+                    for key in ["viewable", "reason"] {
+                        if let Some(value) = line.get(key) {
+                            entry[key] = value.clone();
+                        }
+                    }
+                    if let Some(alt) = line["alt"].as_str() {
+                        entry["alt"] = json!(objects::shown(alt, FIRST_LINE_CHARS));
+                    }
+                }
+                "chart" => {
+                    let line = objects::chart_line(None, self.chart(shape).as_ref());
+                    for key in ["chartType", "title", "reason"] {
+                        if let Some(value) = line.get(key) {
+                            entry[key] = value.clone();
+                        }
+                    }
+                }
+                _ => {}
+            }
             let first = shape
                 .text_stories
                 .iter()
@@ -496,7 +571,7 @@ impl PptxSession {
                 });
             }
             shapes.push(entry);
-        });
+        }
         let mut entry = json!({
             "id": slide.id,
             "number": number,
@@ -506,14 +581,126 @@ impl PptxSession {
         if more > 0 {
             entry["moreShapes"] = json!(more);
         }
-        entry
+        Ok(entry)
+    }
+
+    /// A picture shape of `slide` as the reads show it.
+    fn picture<'a>(&'a self, slide: &SlideSnapshot, shape: &ShapeSnapshot) -> objects::Picture<'a> {
+        let package = self.deck.package();
+        let source = source_picture(package, slide, shape);
+        let (stored, part) = match (&shape.media_part_path, &shape.pending_media) {
+            (Some(path), _) => {
+                let bytes = package
+                    .media
+                    .iter()
+                    .find(|media| media.part_path == *path)
+                    .map_or(&[][..], |media| media.bytes.as_slice());
+                (Stored::Bytes(Cow::Borrowed(bytes)), path.clone())
+            }
+            (None, Some(pending)) => (
+                Stored::Bytes(Cow::Owned(
+                    self.deck
+                        .media_bytes(&format!("pending-media:{}", shape.id))
+                        .unwrap_or_default(),
+                )),
+                pending.content_type.replace('/', "."),
+            ),
+            (None, None) => (Stored::Linked, String::new()),
+        };
+        objects::Picture {
+            id: Some(shape.id.clone()),
+            alt: source.and_then(|picture| picture.base.description.clone()),
+            stored,
+            part,
+            crop: source.map_or([0.0; 4], |picture| {
+                let crop = &picture.crop;
+                [crop.left, crop.top, crop.right, crop.bottom]
+                    .map(|side| crop_side(f64::from(side)))
+            }),
+            cell: None,
+        }
+    }
+
+    /// A chart shape's chart, read again from its part.
+    fn chart(&self, shape: &ShapeSnapshot) -> Option<Chart> {
+        let Some(GraphicFrameData::Chart {
+            part_path: Some(path),
+            ..
+        }) = &shape.graphic
+        else {
+            return None;
+        };
+        objects::read_chart(self.deck.package().part_bytes(path)?, path)
+    }
+
+    /// The by-id read ([`objects::answer`]): picture and chart shape ids from
+    /// a read.
+    fn read_ids(&self, ids: &[String]) -> Result<Value> {
+        let (ids, past) = objects::requested(ids)?;
+        let deck = self.deck.snapshot().map_err(Error::engine)?;
+        let mut shapes: Vec<(&SlideSnapshot, &ShapeSnapshot)> = Vec::new();
+        for slide in &deck.slides {
+            walk(&slide.shapes, &mut |shape| shapes.push((slide, shape)));
+        }
+        let mut answered = Vec::new();
+        for id in ids {
+            let Some(&(slide, shape)) = shapes.iter().find(|(_, shape)| shape.id == id) else {
+                if self.shape_form(&id) {
+                    return Err(Error::edit(
+                        EditCode::UnavailableTarget,
+                        format!("{id} is no longer in the deck"),
+                    ));
+                }
+                let first = shapes
+                    .iter()
+                    .position(|(_, shape)| matches!(kind(shape), "picture" | "chart"));
+                let shown = first.map_or_else(
+                    || "the deck holds no picture or chart".to_owned(),
+                    |at| {
+                        let (slide, shape) = shapes[at];
+                        let number = deck.slides.iter().position(|other| other.id == slide.id);
+                        format!(
+                            "picture and chart ids read like {:?}, slide {}'s",
+                            shape.id,
+                            number.map_or(0, |number| number + 1)
+                        )
+                    },
+                );
+                return Err(malformed_id(&id, "picture or chart", &shown));
+            };
+            let found = match kind(shape) {
+                "picture" => Found::Picture(self.picture(slide, shape)),
+                "chart" => Found::Chart(self.chart(shape)),
+                other => {
+                    return Err(invalid(format!(
+                        "{id} is a {other}, not a picture or chart; the slide read shows its text"
+                    )));
+                }
+            };
+            answered.push((id, found));
+        }
+        objects::answer(answered, &past)
     }
 
     /// A shape of the slide read and then its paragraphs, added to `items`
-    /// (`true` marks the shape); the shape's index there.
-    fn read_shape(&self, shape: &ShapeSnapshot, items: &mut Vec<(bool, Value)>) -> usize {
+    /// (`true` marks the shape); the shape's index there. A picture adds its
+    /// read line's fields, a chart its type, title and series.
+    fn read_shape(
+        &self,
+        slide: &SlideSnapshot,
+        shape: &ShapeSnapshot,
+        items: &mut Vec<(bool, Value)>,
+    ) -> Result<usize> {
         let mut entry = json!({ "id": shape.id, "kind": kind(shape), "name": shape.name });
         self.mark(shape, &mut entry);
+        match kind(shape) {
+            "picture" => merge(&mut entry, self.picture(slide, shape).line()?),
+            "chart" => merge(
+                &mut entry,
+                objects::chart_line(None, self.chart(shape).as_ref()),
+            ),
+            _ => {}
+        }
         let at = items.len();
         items.push((true, entry));
         for story in &shape.text_stories {
@@ -534,7 +721,7 @@ impl PptxSession {
                 items.push((false, item));
             }
         }
-        at
+        Ok(at)
     }
 
     /// A shape's placeholder type (`obj` when the file names none) and
