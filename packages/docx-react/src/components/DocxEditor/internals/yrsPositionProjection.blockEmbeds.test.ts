@@ -31,11 +31,11 @@ const PACKAGE_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Relationships>`;
 
 /** Paragraph, block embed, then two more paragraphs — drift starts at the second. */
-function bodyDocx(embed: string): Uint8Array {
+function bodyDocx(embed: string, alpha = '<w:r><w:t>Alpha</w:t></w:r>'): Uint8Array {
   const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    <w:p><w:r><w:t>Alpha</w:t></w:r></w:p>
+    <w:p>${alpha}</w:p>
     ${embed}
     <w:p><w:r><w:t>Bravo</w:t></w:r></w:p>
     <w:p><w:r><w:t>Charlie</w:t></w:r></w:p>
@@ -61,6 +61,9 @@ const BLOCK_SDT = `<w:sdt>
   <w:sdtPr><w:alias w:val="Control"/><w:tag w:val="control"/></w:sdtPr>
   <w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent>
 </w:sdt>`;
+
+/** "Al", a PAGE field, then "pha": the field is one inline embed unit. */
+const ALPHA_WITH_FIELD = `<w:r><w:t>Al</w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t>pha</w:t></w:r>`;
 
 /** The pointer path: a display-list position to the yrs Loc typing inserts at. */
 function clickToLoc(session: YrsSession, projection: YrsPositionProjection, position: number) {
@@ -222,16 +225,80 @@ describe('typed text', () => {
     });
   }
 
-  test('asks for a new read after anything but plain typing', async () => {
-    const session = await createYrsSession({ clientId: 71003 });
+  test('moves what follows the caret, around an inline field and after a peer, as a fresh read does', async () => {
+    const session = await createYrsSession({ clientId: 71004 });
+    const peer = await createYrsSession({ clientId: 71005 });
     try {
-      session.seedFromDocx(bodyDocx(TABLE));
-      const projection = new YrsPositionProjection(session, 'body');
-      const [alpha] = session.paragraphs('body');
-      session.splitParagraph({ story: 'body', paraId: alpha!.paraId, offset: 2 });
-      expect(projection.sync()).toBe(false);
+      session.seedFromDocx(bodyDocx(TABLE, ALPHA_WITH_FIELD));
+      peer.loadState(session.encodeState());
+      let reads = 0;
+      const counted = new Proxy(session, {
+        get(target, key, receiver) {
+          if (key === 'storySegments') reads += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const projection = new YrsPositionProjection(counted, 'body');
+      const before = reads;
+      const field = () =>
+        Array.from({ length: projection.size + 1 }, (_, at) => projection.nodeAt(at)).find(
+          (node) => node?.kind === 'field'
+        )?.start;
+      const fieldAt = field();
+      expect(fieldAt).toBeDefined();
+      const [alpha, bravo, charlie] = session.paragraphs('body');
+      const matchesFreshRead = () => {
+        expect(projection.sync()).toBe(true);
+        expect(positions(session, projection)).toEqual(
+          positions(session, new YrsPositionProjection(session, 'body'))
+        );
+      };
+      const type = (paraId: string, offset: number) => {
+        session.insertText({ story: 'body', paraId, offset }, 'xy');
+        matchesFreshRead();
+      };
+
+      // "Al|F|pha": just after the field it stays, at the caret before it it moves
+      type(alpha!.paraId, 3);
+      expect(field()).toBe(fieldAt);
+      type(alpha!.paraId, 2);
+      expect(field()).toBe(fieldAt! + 2);
+      type(alpha!.paraId, 0);
+      // the paragraph's end: its text and the field
+      type(alpha!.paraId, session.paragraphs('body')[0]!.text.length + 1);
+      type(charlie!.paraId, 3);
+      peer.insertText({ story: 'body', paraId: bravo!.paraId, offset: 2 }, 'peer');
+      session.applyUpdate(peer.encodeStateAsUpdate(session.encodeStateVector()));
+      matchesFreshRead();
+      type(bravo!.paraId, 1);
+      expect(reads).toBe(before);
     } finally {
+      peer.destroy();
       session.destroy();
     }
   });
+
+  for (const [name, edit] of [
+    ['a split', (session: YrsSession, paraId: string) =>
+      session.splitParagraph({ story: 'body', paraId, offset: 2 })],
+    ['a Backspace', (session: YrsSession, paraId: string) =>
+      session.deleteAt({ story: 'body', paraId, offset: 3 }, 'backward')],
+    ['two keys read as one', (session: YrsSession, paraId: string) => {
+      session.insertText({ story: 'body', paraId, offset: 1 }, 'x');
+      session.insertText({ story: 'body', paraId, offset: 2 }, 'y');
+    }],
+  ] as const) {
+    test(`asks for a new read after ${name}`, async () => {
+      const session = await createYrsSession({ clientId: 71003 });
+      try {
+        session.seedFromDocx(bodyDocx(TABLE));
+        const projection = new YrsPositionProjection(session, 'body');
+        const [alpha] = session.paragraphs('body');
+        edit(session, alpha!.paraId);
+        expect(projection.sync()).toBe(false);
+      } finally {
+        session.destroy();
+      }
+    });
+  }
 });
