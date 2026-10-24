@@ -1202,6 +1202,19 @@ impl Workbook {
         }
     }
 
+    /// The source package and the part path of the sheet `sheet` came from,
+    /// none for a sheet added since.
+    pub fn source_sheet(&self, sheet: SheetId) -> Option<(&xlsx_parse::PreservedPackage, &str)> {
+        let package = self.source_package.as_ref()?;
+        let index = self
+            .preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten()?;
+        Some((package, package.sheet_path(index)?))
+    }
+
     pub fn cell_identity(&self, sheet: SheetId, at: CellRef) -> Result<String> {
         self.authority
             .cell_identity(sheet, at)

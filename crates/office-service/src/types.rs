@@ -357,10 +357,14 @@ pub struct CellStyle {
 /// read that range's cells. DOCX: `count` (1 to 200) paragraphs from
 /// `start`. PPTX: no `slide` lists `count` slides from `start`; `slide`
 /// (its number, from 1) reads that slide's shapes and `count` of its
-/// paragraphs from `start`.
+/// paragraphs from `start`. `ids` (any format, in place of the rest):
+/// pictures and charts an earlier read listed, each picture's stored bytes
+/// and each chart's whole series (Epo 2026-10-24, Q278, Q284).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

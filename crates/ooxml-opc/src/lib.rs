@@ -121,6 +121,43 @@ pub fn unzip_parts_with_limits(
     Ok(parts)
 }
 
+/// One part's bytes, found by its path as OPC names parts (no leading slash,
+/// case-insensitive), without inflating the rest; `Ok(None)` when the
+/// package holds no such part. A part inflating past `max_bytes` is refused
+/// as a bomb is by [`unzip_parts`].
+pub fn read_part(data: &[u8], path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
+    let Some(wanted) = normalized_security_path(path.trim_start_matches('/')) else {
+        return Ok(None);
+    };
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
+    if archive.len() > MAX_ENTRY_COUNT {
+        return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
+    }
+    let Some(index) = (0..archive.len()).find(|&index| {
+        archive
+            .name_for_index(index)
+            .and_then(|name| normalized_security_path(&name.ok()?))
+            .is_some_and(|name| name == wanted)
+    }) else {
+        return Ok(None);
+    };
+    let budget = max_bytes.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
+    let mut entry = archive
+        .by_index(index)
+        .map_err(|e| format!("bad zip entry: {e}"))?;
+    let mut buf = Vec::new();
+    entry
+        .by_ref()
+        .take(budget + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read failed for {path}: {e}"))?;
+    if buf.len() as u64 > budget {
+        return Err(format!("{path} inflates past {budget} bytes"));
+    }
+    Ok(Some(buf))
+}
+
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
 pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
     rezip_parts_borrowed(entries)
