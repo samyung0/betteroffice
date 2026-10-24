@@ -48,6 +48,7 @@ use docx_layout::types::{
     TableRow, TextRun, UnderlineSpec,
 };
 use serde_json::{Map as JsonMap, Value};
+use yrs::branch::{Branch, BranchID};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
@@ -348,9 +349,9 @@ fn out_width(out: &Out) -> u32 {
 }
 
 /// Moves a block that sits `units` story units later than it was lowered:
-/// every absolute document position, and the ids derived from one (a body
-/// break's story index, `shape:`/`chart:` and `sdt@` positions). Breaks in
-/// other stories (`story_id` `None`, as inside table cells) keep their ids.
+/// every absolute document position, and a body break's id (its story index).
+/// Breaks in other stories (`story_id` `None`, as inside table cells) keep
+/// their ids; shapes, charts and content controls are named by their embed.
 fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
     let delta = f64::from(units);
     let shift = |value: &mut Option<f64>| {
@@ -384,9 +385,6 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
             shift(&mut chart.doc_start);
             shift(&mut chart.doc_end);
             shift_sdt_groups(&mut chart.sdt_groups, units);
-            if let BlockId::Str(id) = &mut chart.id {
-                shift_position_id(id, "chart:", units);
-            }
         }
         LayoutBlock::TextBox(text_box) => {
             shift(&mut text_box.pm_start);
@@ -440,9 +438,6 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
                     if let Some(pos) = widget.get("pos").and_then(Value::as_i64) {
                         widget.insert("pos".to_owned(), Value::from(pos + i64::from(units)));
                     }
-                    if let Some(Value::String(group)) = widget.get_mut("groupId") {
-                        shift_position_id(group, "sdt@", units);
-                    }
                 }
             }
             Run::Tab(tab) => {
@@ -483,14 +478,8 @@ fn shift_shape(shape: &mut ShapeBlock, units: u32) {
         *value += delta;
     }
     shift_sdt_groups(&mut shape.sdt_groups, units);
-    if let BlockId::Str(id) = &mut shape.id {
-        shift_position_id(id, "shape:", units);
-    }
     for paragraph in shape.inner_text.iter_mut().flatten() {
         shift_paragraph(paragraph, units);
-        if let BlockId::Str(id) = &mut paragraph.id {
-            shift_position_id(id, "shape:", units);
-        }
     }
     for child in &mut shape.children {
         shift_shape(child, units);
@@ -499,25 +488,10 @@ fn shift_shape(shape: &mut ShapeBlock, units: u32) {
 
 fn shift_sdt_groups(groups: &mut Option<Vec<SdtGroup>>, units: u32) {
     for group in groups.iter_mut().flatten() {
-        shift_position_id(&mut group.id, "sdt@", units);
         if let Some(pos) = &mut group.pos {
             *pos += i64::from(units);
         }
     }
-}
-
-/// `{prefix}{position}{rest}` with the position moved by `units`.
-fn shift_position_id(id: &mut String, prefix: &str, units: u32) {
-    let Some(rest) = id.strip_prefix(prefix) else {
-        return;
-    };
-    let digits = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    let Ok(position) = rest[..digits].parse::<u64>() else {
-        return;
-    };
-    *id = format!("{prefix}{}{}", position + u64::from(units), &rest[digits..]);
 }
 
 /// A body break's `{story}:{kind}:{story index}` id, moved by `units`.
@@ -859,7 +833,7 @@ fn lower_story<T: ReadTxn>(
                         });
                     };
                     slot.close(&mut blocks, false);
-                    let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    let group = lower_sdt_group(&block_sdt, txn, &child_story);
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
                         &child_story,
@@ -1651,6 +1625,15 @@ fn any_json(value: &Any) -> Option<Value> {
     (!value.is_null()).then_some(value)
 }
 
+/// `{client}:{clock}` of the yrs item holding an embed: the same on every
+/// replica, and it does not move when text before the embed changes.
+fn embed_item_key(map: &MapRef) -> String {
+    match AsRef::<Branch>::as_ref(map).id() {
+        BranchID::Nested(id) => format!("{}:{}", id.client.get(), id.clock),
+        BranchID::Root(name) => name.to_string(),
+    }
+}
+
 fn shared_values<T: ReadTxn>(map: &MapRef, txn: &T) -> std::collections::HashMap<String, Any> {
     map.iter(txn)
         .filter_map(|(key, value)| match value {
@@ -1934,9 +1917,10 @@ fn lower_shape_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
     let values = shared_values(shape, txn);
+    let id = format!("shape:{}", embed_item_key(shape));
     if let Some(block) = map_string(&values, "shapeJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-        .and_then(|value| shapes::lower_shape_json(&value, pm_start, env))
+        .and_then(|value| shapes::lower_shape_json(&value, id.clone(), pm_start, env))
     {
         return Some(block);
     }
@@ -1958,7 +1942,7 @@ fn lower_shape_block<T: ReadTxn>(
     );
     Some(ShapeBlock {
         sdt_groups: None,
-        id: BlockId::Str(format!("shape:{pm_start}")),
+        id: BlockId::Str(id),
         shape_type,
         geometry_path,
         fill: shape_fill(&values),
@@ -1997,6 +1981,7 @@ fn lower_chart_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
     let values = shared_values(chart, txn);
+    let id = format!("chart:{}", embed_item_key(chart));
     let chart = map_string(&values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
     let (width, height) = constrain_to_page(
@@ -2010,7 +1995,7 @@ fn lower_chart_block<T: ReadTxn>(
     );
     Some(ChartBlock {
         sdt_groups: None,
-        id: BlockId::Str(format!("chart:{pm_start}")),
+        id: BlockId::Str(id),
         chart,
         width,
         height,
@@ -2036,9 +2021,12 @@ fn repeating_sdt_item(raw: Option<&str>) -> Option<bool> {
         .then_some(true)
 }
 
-fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, pos: i64) -> SdtGroup {
+/// A block content control's group, named by its child story so the id stays
+/// put when text before the control moves it (the overlay's widget finds the
+/// control through that story).
+fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, story: &str) -> SdtGroup {
     SdtGroup {
-        id: format!("sdt@{pos}"),
+        id: format!("sdt:{story}"),
         sdt_type: map_string(values, "sdtType").unwrap_or_else(|| "richText".to_owned()),
         tag: map_string(values, "tag"),
         alias: map_string(values, "alias"),
@@ -2053,8 +2041,8 @@ fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, pos: i
     }
 }
 
-fn lower_sdt_group<T: ReadTxn>(sdt: &MapRef, txn: &T, pos: i64) -> SdtGroup {
-    sdt_group_from_values(&shared_values(sdt, txn), pos)
+fn lower_sdt_group<T: ReadTxn>(sdt: &MapRef, txn: &T, story: &str) -> SdtGroup {
+    sdt_group_from_values(&shared_values(sdt, txn), story)
 }
 
 fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
@@ -2077,6 +2065,7 @@ fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
 
 fn inline_checkbox_widget(
     values: &std::collections::HashMap<String, Any>,
+    group_id: &str,
     pos: i64,
 ) -> Option<Value> {
     if map_string(values, "sdtType").as_deref() != Some("checkbox") {
@@ -2091,7 +2080,7 @@ fn inline_checkbox_widget(
     }
     let mut widget = JsonMap::from_iter([
         ("kind".to_owned(), Value::String("checkbox".to_owned())),
-        ("groupId".to_owned(), Value::String(format!("sdt@{pos}"))),
+        ("groupId".to_owned(), Value::String(group_id.to_owned())),
         ("pos".to_owned(), Value::from(pos)),
     ]);
     if let Some(value) = map_string(values, "tag") {
@@ -2129,6 +2118,7 @@ fn lower_inline_sdt<T: ReadTxn>(
 ) -> u32 {
     lower_inline_sdt_values(
         &shared_values(sdt, txn),
+        &format!("sdt:{}", embed_item_key(sdt)),
         env,
         story_index,
         paragraph_pm_start,
@@ -2138,9 +2128,12 @@ fn lower_inline_sdt<T: ReadTxn>(
     )
 }
 
+/// `group_id` names the control without its position: the embed's yrs item,
+/// and a nested control's index path under it.
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt_values(
     values: &std::collections::HashMap<String, Any>,
+    group_id: &str,
     env: &RenderEnv,
     story_index: u32,
     paragraph_pm_start: u64,
@@ -2149,14 +2142,14 @@ fn lower_inline_sdt_values(
     runs: &mut Vec<RawRun>,
 ) -> u32 {
     let absolute_pos = paragraph_pm_start + 1 + u64::from(node_pm_start);
-    let widget = inline_checkbox_widget(values, absolute_pos as i64).or(inherited_widget);
+    let widget = inline_checkbox_widget(values, group_id, absolute_pos as i64).or(inherited_widget);
     let mut content_size = 0_u32;
     let content = match values.get("content") {
         Some(Any::Array(content)) => content,
         _ => return 2,
     };
 
-    for child in content.iter() {
+    for (index, child) in content.iter().enumerate() {
         let Some(child) = any_map(child) else {
             continue;
         };
@@ -2310,6 +2303,7 @@ fn lower_inline_sdt_values(
             "sdt" => payload.map_or(2, |payload| {
                 lower_inline_sdt_values(
                     payload,
+                    &format!("{group_id}/{index}"),
                     env,
                     story_index,
                     paragraph_pm_start,

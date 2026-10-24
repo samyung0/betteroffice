@@ -32,7 +32,10 @@ export type YrsEditorCommand =
   | { type: 'insertImage'; image: Readonly<Record<string, unknown>> }
   | {
       type: 'contentControlValue';
-      pmPos: number;
+      /** An inline control's position; a block control is named by `story`. */
+      pmPos?: number;
+      /** A block control's child story. */
+      story?: string;
       embedId?: string;
       value: YrsContentControlValue;
     }

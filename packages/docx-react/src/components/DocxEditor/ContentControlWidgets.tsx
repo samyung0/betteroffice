@@ -7,7 +7,10 @@ import type { YrsContentControlValue } from '@betteroffice/docx/yrs';
 const WIDGET_SELECTOR = '.layout-sdt-widget, .layout-inline-sdt-widget';
 
 type ControlTarget = {
+  /** An inline control's position (`data-sdt-pos`). */
   pos: number | null;
+  /** A block control's child story, named by its group id `sdt:{story}`. */
+  story?: string;
   tag?: string;
   id?: number;
 };
@@ -24,20 +27,29 @@ type Popup =
 
 export interface ContentControlWidgetsProps {
   containerRef: RefObject<HTMLElement | null>;
-  applyYrsValue: (pos: number, value: YrsContentControlValue, embedId?: string) => boolean;
+  applyYrsValue: (
+    target: { pos: number; story?: undefined } | { story: string; pos?: undefined },
+    value: YrsContentControlValue,
+    embedId?: string
+  ) => boolean;
 }
 
 function positionFromTrigger(trigger: HTMLElement): number | null {
-  const group = /^sdt@(\d+)$/.exec(trigger.dataset.sdtGroupId ?? '');
-  const raw = group?.[1] ?? trigger.dataset.sdtPos;
+  const raw = trigger.dataset.sdtPos;
   const position = raw == null || raw === '' ? Number.NaN : Number(raw);
   return Number.isFinite(position) ? position : null;
 }
 
 function targetFromTrigger(trigger: HTMLElement): ControlTarget {
   const rawId = Number(trigger.dataset.sdtControlId);
+  // Block widgets carry no position: their group id names the control's story.
+  const story =
+    trigger.dataset.sdtPos === undefined
+      ? /^sdt:(.+)$/.exec(trigger.dataset.sdtGroupId ?? '')?.[1]
+      : undefined;
   return {
     pos: positionFromTrigger(trigger),
+    ...(story !== undefined ? { story } : {}),
     ...(trigger.dataset.sdtTag ? { tag: trigger.dataset.sdtTag } : {}),
     ...(Number.isFinite(rawId) ? { id: rawId } : {}),
   };
@@ -73,9 +85,15 @@ export function ContentControlWidgets({
 
   const apply = useCallback(
     (target: ControlTarget, value: YrsContentControlValue) => {
-      if (target.pos == null) return;
+      const at =
+        target.story !== undefined
+          ? { story: target.story }
+          : target.pos != null
+            ? { pos: target.pos }
+            : null;
+      if (!at) return;
       try {
-        applyYrsValue(target.pos, value, target.id === undefined ? undefined : String(target.id));
+        applyYrsValue(at, value, target.id === undefined ? undefined : String(target.id));
       } catch {
         // Locked, bound, or invalid values remain inert in the UI layer.
       }

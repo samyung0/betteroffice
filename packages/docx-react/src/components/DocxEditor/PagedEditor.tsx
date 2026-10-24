@@ -1066,7 +1066,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             const { range } = session.insertImage(at, command.image, structuralAuthor);
             session.setSelection({ story: range.story, ...range.end });
           } else if (command.type === 'contentControlValue') {
-            const node = positionProjection.nodeAt(command.pmPos);
+            const node =
+              command.story !== undefined
+                ? positionProjection.blockSdtForStory(command.story)
+                : command.pmPos !== undefined
+                  ? positionProjection.nodeAt(command.pmPos)
+                  : null;
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);
             if (embedId) {
               session.setContentControlValue(embedId, command.value);

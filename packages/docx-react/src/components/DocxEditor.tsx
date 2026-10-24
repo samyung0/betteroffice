@@ -2222,10 +2222,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             {!readOnly && (
               <ContentControlWidgets
                 containerRef={containerRef}
-                applyYrsValue={(pmPos, value, embedId) =>
+                applyYrsValue={(target, value, embedId) =>
                   pagedEditorRef.current?.applyYrsCommand({
                     type: 'contentControlValue',
-                    pmPos,
+                    ...(target.story !== undefined ? { story: target.story } : { pmPos: target.pos }),
                     ...(embedId ? { embedId } : {}),
                     value,
                   }) ?? false

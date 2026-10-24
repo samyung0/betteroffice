@@ -67,6 +67,8 @@ export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
   private readonly nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
+  /** Block content controls by their child story. */
+  private readonly blockSdts = new Map<string, YrsProjectedNode>();
 
   constructor(
     private readonly session: YrsSession,
@@ -81,6 +83,11 @@ export class YrsPositionProjection {
 
   nodeAt(position: number): YrsProjectedNode | null {
     return this.nodes.get(position) ?? null;
+  }
+
+  /** The block content control owning `story`. */
+  blockSdtForStory(story: string): YrsProjectedNode | null {
+    return this.blockSdts.get(story) ?? null;
   }
 
   tableAtPosition(position: number): YrsProjectedTable | null {
@@ -248,6 +255,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        this.blockSdts.set(childStory, node);
         cursor += node.nodeSize;
         paragraphStart = cursor;
         leading += 1;

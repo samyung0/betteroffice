@@ -14,12 +14,15 @@ const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
 const MAX_SHAPE_BODY_DEPTH: usize = 8;
 
+/// `block_id` names the embed, not its position, so it stays put when text
+/// before the shape moves it.
 pub(super) fn lower_shape_json(
     shape: &Value,
+    block_id: String,
     pm_start: u64,
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
-    lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
+    lower_shape(shape, block_id, env, Some(pm_start))
 }
 
 /// A `wp:anchor` shape rather than a `wp:inline` one. A malformed anchor can
@@ -1120,7 +1123,8 @@ mod tests {
     #[test]
     fn shape_wrap_distances_lower_from_emu_to_pixels() {
         let shape = json!({"shapeType":"rect","wrap":{"type":"square","distT":45720,"distB":0,"distL":114300,"distR":114300}});
-        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
         let distances = block.wrap_distances.unwrap();
         assert!((distances.top - 4.8).abs() < 1e-10);
         assert_eq!(
@@ -1142,7 +1146,8 @@ mod tests {
             },
             "wrap": {"type": "none"}, "title": "Header", "description": "Decoration"
         });
-        let block = lower_shape_json(&shape, 7, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 7, &RenderEnv::default()).unwrap();
         let position = block.position.unwrap();
         assert_eq!(position.simple_pos, Some(json!({"x": 100.0, "y": -10.0})));
         assert_eq!(position.horizontal.unwrap().align.as_deref(), Some("right"));
@@ -1183,7 +1188,8 @@ mod tests {
             "textBodyProperties": {"anchor": "middle"}
         });
 
-        let block = lower_shape_json(&shape, 7, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 7, &RenderEnv::default()).unwrap();
 
         assert_eq!(block.shape_type, "chevron");
         assert_eq!((block.width, block.height), (96.0, 48.0));
@@ -1221,7 +1227,8 @@ mod tests {
                 }]}]
             }]}
         });
-        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
         let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
             panic!()
         };
@@ -1242,7 +1249,8 @@ mod tests {
     fn zero_extent_connectors_keep_their_authored_axis() {
         for (width, height) in [(0, 914400), (914400, 0)] {
             let shape = json!({"shapeType":"line","size":{"width":width,"height":height}});
-            let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            let block =
+                lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
             assert_eq!(
                 (block.width, block.height),
                 (emu_to_pixels(width as f64), emu_to_pixels(height as f64))
@@ -1263,7 +1271,8 @@ mod tests {
             "textBody": {"content": []}
         });
 
-        let block = lower_shape_json(&shape, 3, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 3, &RenderEnv::default()).unwrap();
         let margins = &block.text_body_properties.unwrap()["margins"];
 
         assert_eq!(margins["left"], json!(emu_to_pixels(91440.0)));
@@ -1295,7 +1304,8 @@ mod tests {
             }]}
         });
 
-        let block = lower_shape_json(&shape, 3, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 3, &RenderEnv::default()).unwrap();
         let inner = block.inner_text.as_ref().unwrap();
 
         assert_eq!(inner.len(), 1);
@@ -1311,6 +1321,7 @@ mod tests {
         assert!(
             lower_shape_json(
                 &json!({"shapeType": "unsupported", "size": {"width": 1, "height": 1}}),
+                "shape:1:1".to_owned(),
                 0,
                 &RenderEnv::default()
             )
@@ -1328,7 +1339,10 @@ mod tests {
             json!([]),
         ] {
             let shape = json!({"shapeType": "unknown", "position": position});
-            assert!(lower_shape_json(&shape, 527, &RenderEnv::default()).is_none());
+            assert!(
+                lower_shape_json(&shape, "shape:1:1".to_owned(), 527, &RenderEnv::default())
+                    .is_none()
+            );
         }
     }
 
@@ -1344,7 +1358,13 @@ mod tests {
             },
             "wrap": {"type": "inFront"}
         });
-        let block = lower_shape_json(&anchored, 528, &RenderEnv::default()).unwrap();
+        let block = lower_shape_json(
+            &anchored,
+            "shape:1:1".to_owned(),
+            528,
+            &RenderEnv::default(),
+        )
+        .unwrap();
         assert_eq!(block.shape_type, "bracketPair");
         assert!((block.width - 600.0).abs() < 1e-6);
         assert!((block.height - 72.0).abs() < 1e-6);
@@ -1354,7 +1374,8 @@ mod tests {
             "shapeType": "rect",
             "size": {"width": 914400, "height": 685800}
         });
-        let block = lower_shape_json(&inline, 529, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&inline, "shape:1:1".to_owned(), 529, &RenderEnv::default()).unwrap();
         assert!(block.position.is_none());
         assert!((block.height - 72.0).abs() < 1e-6);
     }
@@ -1365,7 +1386,8 @@ mod tests {
             "shapeType": "plus",
             "size": {"width": 557530, "height": 538480}
         });
-        let block = lower_shape_json(&shape, 530, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 530, &RenderEnv::default()).unwrap();
         assert_eq!(block.geometry_path.len(), 13);
         assert_eq!(
             block.geometry_path[0],
@@ -1385,7 +1407,8 @@ mod tests {
             "size": {"width": 557530, "height": 538480},
             "geometryPath": authored
         });
-        let block = lower_shape_json(&shape, 531, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 531, &RenderEnv::default()).unwrap();
         assert_eq!(block.geometry_path, authored);
     }
 
@@ -1406,7 +1429,8 @@ mod tests {
                 {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
             ]
         });
-        let block = lower_shape_json(&shape, 600, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 600, &RenderEnv::default()).unwrap();
         assert!(inline_native_shape(&block));
         assert_eq!(block.geometry_path.len(), 3);
         assert_eq!(block.children.len(), 1);
@@ -1425,7 +1449,13 @@ mod tests {
             },
             "wrap": {"type": "square"}
         });
-        let block = lower_shape_json(&anchored, 601, &RenderEnv::default()).unwrap();
+        let block = lower_shape_json(
+            &anchored,
+            "shape:1:1".to_owned(),
+            601,
+            &RenderEnv::default(),
+        )
+        .unwrap();
         assert!(!inline_native_shape(&block));
         let textbox = json!({
             "shapeType": "rect",
@@ -1438,7 +1468,8 @@ mod tests {
                 }]
             }]}
         });
-        let block = lower_shape_json(&textbox, 602, &RenderEnv::default()).unwrap();
+        let block =
+            lower_shape_json(&textbox, "shape:1:1".to_owned(), 602, &RenderEnv::default()).unwrap();
         assert!(!inline_native_shape(&block));
         let child_text = json!({
             "shapeType": "rect",
@@ -1458,13 +1489,25 @@ mod tests {
                 }
             ]
         });
-        let block = lower_shape_json(&child_text, 603, &RenderEnv::default()).unwrap();
+        let block = lower_shape_json(
+            &child_text,
+            "shape:1:1".to_owned(),
+            603,
+            &RenderEnv::default(),
+        )
+        .unwrap();
         assert!(!inline_native_shape(&block));
         let textbox_kind = json!({
             "shapeType": "textBox",
             "size": {"width": 914400, "height": 457200}
         });
-        let block = lower_shape_json(&textbox_kind, 604, &RenderEnv::default()).unwrap();
+        let block = lower_shape_json(
+            &textbox_kind,
+            "shape:1:1".to_owned(),
+            604,
+            &RenderEnv::default(),
+        )
+        .unwrap();
         assert!(!inline_native_shape(&block));
     }
 
@@ -1507,7 +1550,9 @@ mod tests {
                 "size": {"width": 914400, "height": 457200},
                 "textBody": {"content": content}
             });
-            let block = lower_shape_json(&shape, 606, &RenderEnv::default()).unwrap();
+            let block =
+                lower_shape_json(&shape, "shape:1:1".to_owned(), 606, &RenderEnv::default())
+                    .unwrap();
             assert!(
                 block
                     .inner_text
@@ -1525,7 +1570,13 @@ mod tests {
                 "size": {"width": 91440, "height": 91440}
             }]
         });
-        let block = lower_shape_json(&nested_textbox, 607, &RenderEnv::default()).unwrap();
+        let block = lower_shape_json(
+            &nested_textbox,
+            "shape:1:1".to_owned(),
+            607,
+            &RenderEnv::default(),
+        )
+        .unwrap();
         assert!(!inline_native_shape(&block), "recursive textBox");
     }
 
@@ -1542,7 +1593,8 @@ mod tests {
                 {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
             ]
         });
-        let mut block = lower_shape_json(&shape, 605, &RenderEnv::default()).unwrap();
+        let mut block =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 605, &RenderEnv::default()).unwrap();
         assert!(inline_native_shape(&block));
         block.width = f64::INFINITY;
         assert!(!inline_native_shape(&block));
