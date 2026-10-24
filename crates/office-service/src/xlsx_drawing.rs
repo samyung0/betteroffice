@@ -3,17 +3,22 @@
 //! takes them from the package alone, without opening the workbook, whose
 //! recalculation costs seconds on a large book (the Editor's call: only
 //! while the ids match the sheet read's). No workbook edit changes a
-//! drawing, so the package holds them as the sheet shows them. A picture's
+//! drawing (the state holds no drawing), so the package holds them as the
+//! sheet shows them; of the state the by-id read takes only the sheets it
+//! still holds, so a sheet deleted since the read answers its pictures as
+//! gone, as the sheet read no longer lists them. A picture's
 //! id is the workbook's own (xlsx-parse `sheet_images`):
 //! `<drawing>#<anchor>:<n>`, `n` counting the anchor's embedded pictures; a
 //! chart's is `<drawing>#<anchor>:chart`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 use docx_parse::{RelationshipMap, RelationshipTarget, parse_relationships};
 use serde_json::{Value, json};
+use yrs::updates::decoder::Decode;
+use yrs::{Array, ReadTxn, Transact, Update};
 
 use crate::common::malformed_id;
 use crate::error::{EditCode, Error, Result};
@@ -315,8 +320,70 @@ fn drawing_of(id: &str) -> Option<&str> {
         .then_some(drawing)
 }
 
-/// The by-id read of an XLSX package ([`objects::answer`]).
-pub(crate) fn by_ids(base: &[u8], ids: &[String]) -> Result<Value> {
+/// The drawing parts of the file's sheets, each with whether `state` still
+/// holds its sheet: the state's sheet order (`xlsx:sheet-order`) names such
+/// a sheet `sheet:<index>`, its place among the file's sheets
+/// (betteroffice-xlsx's keys; a sheet added since names none). Read from the
+/// state, the workbook part and the sheets' relationships alone.
+fn live_drawings(state: &[u8], read: &mut Read<'_, 'static>) -> Result<HashMap<String, bool>> {
+    let doc = yrs::Doc::new();
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(state).map_err(Error::engine)?)
+        .map_err(Error::engine)?;
+    let txn = doc.transact();
+    let order = txn
+        .get_array("xlsx:sheet-order")
+        .ok_or_else(|| Error::engine("the workbook state has no sheet order"))?;
+    let held: HashSet<usize> = order
+        .iter(&txn)
+        .filter_map(|key| key.cast::<String>().ok())
+        .filter_map(|key| key.strip_prefix("sheet:")?.parse().ok())
+        .collect();
+    const WORKBOOK: &str = "xl/workbook.xml";
+    let workbook = read(WORKBOOK, MAX_XML_BYTES)?
+        .ok_or_else(|| Error::engine("the package has no xl/workbook.xml"))?;
+    let workbook = parsed(&workbook, WORKBOOK)?;
+    let workbook_rels = relationships(
+        read(&rels_path(WORKBOOK), MAX_XML_BYTES)?.as_deref(),
+        WORKBOOK,
+    )?;
+    let sheets = workbook
+        .root()
+        .and_then(|root| root.child_by_local_name("sheets"))
+        .map(|sheets| sheets.children_by_local_name("sheet").collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut drawings = HashMap::new();
+    for (index, sheet) in sheets.into_iter().enumerate() {
+        // xlsx-parse's `PreservedPackage::capture` places a sheet the same way.
+        let path = sheet
+            .attribute(Some("r"), "id")
+            .and_then(|id| target(&workbook_rels, WORKBOOK, id))
+            .and_then(std::result::Result::ok)
+            .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
+        let rels = relationships(read(&rels_path(&path), MAX_XML_BYTES)?.as_deref(), &path)?;
+        for relationship in rels.values() {
+            if relationship.relationship_type.rsplit('/').next() == Some("drawing")
+                && let Some(Ok(drawing)) = target(&rels, &path, &relationship.id)
+            {
+                *drawings.entry(drawing).or_default() |= held.contains(&index);
+            }
+        }
+    }
+    Ok(drawings)
+}
+
+fn unknown(id: &str) -> Error {
+    Error::edit(
+        EditCode::UnavailableTarget,
+        format!(
+            "{id:?} names no picture or chart of the workbook; read the sheet list for their ids"
+        ),
+    )
+}
+
+/// The by-id read of an XLSX package over `state` ([`objects::answer`]): a
+/// picture or chart of a sheet `state` no longer holds is gone.
+pub(crate) fn by_ids(base: &[u8], state: &[u8], ids: &[String]) -> Result<Value> {
     let (ids, past) = objects::requested(ids)?;
     let media_bytes = crate::limits::inspect_ids()?.answer_bytes as u64;
     let mut read = |path: &str, most: u64| -> Result<Option<Cow<'static, [u8]>>> {
@@ -325,10 +392,27 @@ pub(crate) fn by_ids(base: &[u8], ids: &[String]) -> Result<Value> {
             .map_err(Error::Engine)
     };
     let mut drawings: HashMap<String, (Vec<Drawn>, RelationshipMap)> = HashMap::new();
+    let mut live: Option<HashMap<String, bool>> = None;
     let mut answered = Vec::new();
     for id in ids {
         let drawing =
             drawing_of(&id).ok_or_else(|| malformed_id(&id, "picture or chart", ID_FORMAT))?;
+        let live = match &live {
+            Some(live) => live,
+            None => live.insert(live_drawings(state, &mut read)?),
+        };
+        match live.get(drawing) {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Error::edit(
+                    EditCode::UnavailableTarget,
+                    format!(
+                        "{id} is no longer in the workbook: its sheet was deleted; read the sheet list for the ids"
+                    ),
+                ));
+            }
+            None => return Err(unknown(&id)),
+        }
         if !drawings.contains_key(drawing) {
             let xml = read(drawing, MAX_XML_BYTES)?;
             let objects = xml
@@ -345,12 +429,7 @@ pub(crate) fn by_ids(base: &[u8], ids: &[String]) -> Result<Value> {
         let object = objects
             .iter()
             .find(|object| object.id.as_deref() == Some(id.as_str()))
-            .ok_or_else(|| {
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    format!("{id:?} names no picture or chart of the workbook; read the sheet list for their ids"),
-                )
-            })?;
+            .ok_or_else(|| unknown(&id))?;
         let found = found(object, drawing, rels, &mut read, media_bytes)?
             .ok_or_else(|| Error::engine("a drawn shape has no id"))?;
         answered.push((id, found));
