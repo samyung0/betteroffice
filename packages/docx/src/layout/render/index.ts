@@ -37,6 +37,7 @@ export {
   buildMirrorTextPage,
   MIRROR_CLASS_NAMES,
   MIRROR_TEXT_PAGE_CLASS,
+  syncMirrorPositions,
   type BuildMirrorPageOptions,
   type MirrorLabels,
 } from './mirrorDom';
@@ -44,6 +45,7 @@ export {
 export {
   applyInteractiveSdtFocus,
   buildInteractiveOverlayPage,
+  syncInteractiveOverlayPositions,
   type BuildInteractiveOverlayOptions,
   type InteractiveOverlayLabels,
 } from './interactiveOverlay';

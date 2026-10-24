@@ -13,7 +13,7 @@ import type {
   TableCellRef,
 } from './displayList';
 import { textRunRect, glyphRunRect, lineRect, type GeoRect } from './displayListGeometry';
-import { clusterPieces, splitClusterRuns } from './clusterRuns';
+import { clusterPieces } from './clusterRuns';
 
 export const MIRROR_CLASS_NAMES = {
   page: 'layout-page layout-page-mirror',
@@ -84,7 +84,39 @@ interface MirrorBuildCtx {
   noteRefIds: Set<string>;
   /** Joined glyph runs stay one element unless their clip cuts them (text pages). */
   joinedRuns: boolean;
+  /** Elements stamped with document positions, for {@link syncMirrorPositions}. */
+  positions: BuildBinding[];
+  /** A glyph cluster piece's joined source run. */
+  sourceOf: Map<DisplayPrimitive, DisplayPrimitive>;
 }
+
+/**
+ * One mirror element's position attributes as written (NaN when absent) and
+ * the primitives they derive from.
+ */
+interface PositionBinding<Sources> {
+  readonly el: HTMLElement;
+  readonly sources: Sources;
+  start: number;
+  end: number;
+  sdtPos: number;
+}
+
+/** Sources as primitives while the mirror builds. */
+type BuildBinding = PositionBinding<DisplayPrimitive | readonly DisplayPrimitive[]>;
+
+interface MirrorPositions {
+  /** Sources as indexes into {@link sources}. */
+  readonly bindings: readonly PositionBinding<number | readonly number[]>[];
+  readonly sources: readonly DisplayPrimitive[];
+  /** {@link POSITION_FIELDS} per source as the mirror last wrote them, NaN when absent. */
+  readonly stamped: Float64Array;
+}
+
+/** docStart, docEnd, fragmentDocStart, fragmentDocEnd and the inline widget's pos. */
+const POSITION_FIELDS = 5;
+
+const mirrorPositions = new WeakMap<HTMLElement, MirrorPositions>();
 
 export interface BuildMirrorPageOptions {
   /** document to create elements in (default: global document) */
@@ -120,17 +152,27 @@ export function buildMirrorPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  return buildPage(page, options, false);
+  const positions: BuildBinding[] = [];
+  const pageEl = buildPage(page, options, false, positions);
+  registerPositions(pageEl, positions);
+  return pageEl;
 }
 
 function buildPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions,
-  joinedRuns: boolean
+  joinedRuns: boolean,
+  positions: BuildBinding[]
 ): HTMLElement {
   const doc = options.document ?? document;
   const labels = options.labels;
-  const ctx: MirrorBuildCtx = { labels, noteRefIds: new Set(), joinedRuns };
+  const ctx: MirrorBuildCtx = {
+    labels,
+    noteRefIds: new Set(),
+    joinedRuns,
+    positions,
+    sourceOf: new Map(),
+  };
 
   const pageEl = doc.createElement('div');
   pageEl.className = MIRROR_CLASS_NAMES.page;
@@ -194,13 +236,171 @@ export function buildMirrorTextPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
-  const pageEl = buildPage(page, options, true);
+  const positions: BuildBinding[] = [];
+  const pageEl = buildPage(page, options, true, positions);
   pageEl.classList.add(MIRROR_TEXT_PAGE_CLASS);
   pageEl.style.overflow = 'hidden';
   pageEl.style.setProperty('contain', 'strict');
   flattenMirrorChildren(pageEl);
   pageEl.normalize();
+  registerPositions(
+    pageEl,
+    positions.filter((binding) => pageEl.contains(binding.el))
+  );
   return pageEl;
+}
+
+/**
+ * Rewrites the document positions of a mirror built by {@link buildMirrorPage}
+ * or {@link buildMirrorTextPage} after its page's primitives were shifted in
+ * place (`applyFrameDeltaOwned`), instead of rebuilding it. Each stamped
+ * element moves by its source primitives' common shift. False when the mirror
+ * holds no record, a primitive's fields moved by different amounts or gained
+ * or lost a field, or one element's sources moved differently: the caller
+ * rebuilds then.
+ */
+export function syncMirrorPositions(root: HTMLElement): boolean {
+  const positions = mirrorPositions.get(root);
+  if (!positions) return false;
+  const { bindings, sources, stamped } = positions;
+  // NaN: a source without position fields, which moves no element
+  const deltas = new Float64Array(sources.length);
+  let moved = false;
+  for (let index = 0; index < sources.length; index++) {
+    const delta = sourceShift(sources[index]!, stamped, index * POSITION_FIELDS);
+    if (delta === undefined) return false;
+    deltas[index] = delta;
+    if (delta) moved = true;
+  }
+  if (!moved) return true;
+  for (const binding of bindings) {
+    const delta = bindingShift(binding.sources, deltas);
+    if (delta === undefined) return false;
+    if (!delta) continue;
+    const { el } = binding;
+    if (!Number.isNaN(binding.start)) {
+      binding.start += delta;
+      el.setAttribute('data-doc-start', String(binding.start));
+    }
+    if (!Number.isNaN(binding.end)) {
+      binding.end += delta;
+      el.setAttribute('data-doc-end', String(binding.end));
+    }
+    if (!Number.isNaN(binding.sdtPos)) {
+      binding.sdtPos += delta;
+      el.setAttribute('data-sdt-pos', String(binding.sdtPos));
+    }
+  }
+  for (let index = 0; index < sources.length; index++) {
+    readPositionFields(sources[index]!, stamped, index * POSITION_FIELDS);
+  }
+  return true;
+}
+
+function registerPositions(root: HTMLElement, built: readonly BuildBinding[]): void {
+  const sources: DisplayPrimitive[] = [];
+  const indexes = new Map<DisplayPrimitive, number>();
+  const indexOf = (source: DisplayPrimitive): number => {
+    let index = indexes.get(source);
+    if (index === undefined) {
+      index = sources.length;
+      indexes.set(source, index);
+      sources.push(source);
+    }
+    return index;
+  };
+  const bindings = built.map(({ el, sources: of, start, end, sdtPos }) => ({
+    el,
+    sources: Array.isArray(of) ? of.map(indexOf) : indexOf(of as DisplayPrimitive),
+    start,
+    end,
+    sdtPos,
+  }));
+  const stamped = new Float64Array(sources.length * POSITION_FIELDS);
+  for (let index = 0; index < sources.length; index++) {
+    readPositionFields(sources[index]!, stamped, index * POSITION_FIELDS);
+  }
+  mirrorPositions.set(root, { bindings, sources, stamped });
+}
+
+function positionField(p: DisplayPrimitive, field: number): number {
+  switch (field) {
+    case 0:
+      return p.docStart ?? Number.NaN;
+    case 1:
+      return p.docEnd ?? Number.NaN;
+    case 2:
+      return p.fragmentDocStart ?? Number.NaN;
+    case 3:
+      return p.fragmentDocEnd ?? Number.NaN;
+    default:
+      return p.inlineSdtWidget?.pos ?? Number.NaN;
+  }
+}
+
+function readPositionFields(p: DisplayPrimitive, out: Float64Array, offset: number): void {
+  for (let field = 0; field < POSITION_FIELDS; field++) out[offset + field] = positionField(p, field);
+}
+
+/**
+ * The one amount all of a primitive's position fields moved by: NaN without
+ * fields, undefined when they moved differently or one appeared or went.
+ */
+function sourceShift(p: DisplayPrimitive, stamped: Float64Array, offset: number): number | undefined {
+  let delta = Number.NaN;
+  for (let field = 0; field < POSITION_FIELDS; field++) {
+    const before = stamped[offset + field]!;
+    const after = positionField(p, field);
+    if (Number.isNaN(before) !== Number.isNaN(after)) return undefined;
+    if (Number.isNaN(before)) continue;
+    if (Number.isNaN(delta)) delta = after - before;
+    else if (after - before !== delta) return undefined;
+  }
+  return delta;
+}
+
+/** The sources' common shift: NaN when none has fields, undefined when they differ. */
+function bindingShift(sources: number | readonly number[], deltas: Float64Array): number | undefined {
+  if (typeof sources === 'number') return deltas[sources];
+  let delta = Number.NaN;
+  for (const index of sources) {
+    const shift = deltas[index]!;
+    if (Number.isNaN(shift)) continue;
+    if (Number.isNaN(delta)) delta = shift;
+    else if (shift !== delta) return undefined;
+  }
+  return delta;
+}
+
+/** Records an element stamped with these positions, derived from `prims`. */
+function bindPositions(
+  ctx: MirrorBuildCtx,
+  el: HTMLElement,
+  prims: DisplayPrimitive | readonly DisplayPrimitive[],
+  start: number | undefined,
+  end: number | undefined,
+  sdtPos?: number
+): void {
+  if (start === undefined && end === undefined && sdtPos === undefined) return;
+  let sources: DisplayPrimitive | DisplayPrimitive[];
+  if (Array.isArray(prims)) {
+    sources = [];
+    for (const p of prims as readonly DisplayPrimitive[]) {
+      const source = ctx.sourceOf.get(p) ?? p;
+      // a joined run's pieces sit next to each other
+      if (sources[sources.length - 1] !== source) sources.push(source);
+    }
+  } else {
+    const p = prims as DisplayPrimitive;
+    sources = ctx.sourceOf.get(p) ?? p;
+  }
+  ctx.positions.push({
+    el,
+    sources,
+    start: start ?? Number.NaN,
+    end: end ?? Number.NaN,
+    sdtPos: sdtPos ?? Number.NaN,
+  });
 }
 
 /** Marks a page built by {@link buildMirrorTextPage}. */
@@ -294,7 +494,7 @@ function appendMirrorPrimitives(
   ctx: MirrorBuildCtx
 ): void {
   const blocks = new Map<number | string, BlockGroup>();
-  const runs = ctx.joinedRuns ? primitives.flatMap(splitWhereClipped) : splitClusterRuns(primitives);
+  const runs = mirrorRuns(primitives, ctx);
 
   for (const p of runs) {
     // live-pipeline blocks carry string ids in blockKey, goldens numeric ids
@@ -469,14 +669,16 @@ function populateBlock(
         populateParagraphBlock(paragraphEl, blockPrims, doc, offsetY, ctx);
         cellEl.appendChild(paragraphEl);
       }
-      stampDocRangeFromDescendants(cellEl, cell.prims);
+      const cellRange = stampDocRangeFromDescendants(cellEl, cell.prims);
+      bindPositions(ctx, cellEl, cell.prims, cellRange.start, cellRange.end);
       applyContainerLanguageAndDirection(cellEl, cell.prims);
       group.cells.push({ el: cellEl, bounds: boundsOfPrimitives(cell.prims) });
       rowEl.appendChild(cellEl);
     }
   }
 
-  stampDocRange(el, prims);
+  const range = stampDocRange(el, prims);
+  bindPositions(ctx, el, prims, range.start, range.end);
 }
 
 /** Populate one paragraph-like block without re-interpreting table metadata. */
@@ -498,7 +700,7 @@ function populateParagraphBlock(
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
   if (pmarkRevision) applyStructuralRevisionAttrs(el, pmarkRevision);
-  stampParagraphDocRange(el, prims, doc, offsetY);
+  stampParagraphDocRange(el, prims, doc, offsetY, ctx);
   applyBlockSdtAttrs(el, prims.find((p) => p.sdt !== undefined)?.sdt);
   const paraId = prims.find((p) => p.paraId !== undefined)?.paraId;
   if (paraId !== undefined) el.dataset.paraId = paraId;
@@ -522,11 +724,12 @@ function stampParagraphDocRange(
   el: HTMLElement,
   prims: BlockGroup['prims'],
   doc: Document,
-  offsetY: number
+  offsetY: number,
+  ctx: MirrorBuildCtx
 ): void {
-  stampDocRange(el, prims);
-  const stampedStart = Number(el.dataset.docStart);
-  const stampedEnd = Number(el.dataset.docEnd);
+  const stamped = stampDocRange(el, prims);
+  const stampedStart = stamped.start ?? Number.NaN;
+  const stampedEnd = stamped.end ?? Number.NaN;
   const fragmentStarts = prims
     .map((p) => p.fragmentDocStart)
     .filter((value): value is number => Number.isFinite(value));
@@ -560,12 +763,17 @@ function stampParagraphDocRange(
       anchor.dataset.docEnd = String(structuralStart);
       placeAt(anchor, rect, offsetY);
       el.insertBefore(anchor, el.firstChild);
+      bindPositions(ctx, anchor, prims, structuralStart, structuralStart);
     }
   }
+  bindPositions(ctx, el, prims, structuralStart ?? stamped.start, fragmentEnd ?? stamped.end);
 }
 
 /** Union paragraph structural ranges, falling back to primitive ranges. */
-function stampDocRangeFromDescendants(el: HTMLElement, fallbackPrims: BlockGroup['prims']): void {
+function stampDocRangeFromDescendants(
+  el: HTMLElement,
+  fallbackPrims: BlockGroup['prims']
+): DocRange {
   const descendants = el.querySelectorAll<HTMLElement>('.layout-paragraph[data-doc-start]');
   let start = Infinity;
   let end = -Infinity;
@@ -577,7 +785,11 @@ function stampDocRangeFromDescendants(el: HTMLElement, fallbackPrims: BlockGroup
   }
   if (start !== Infinity) el.dataset.docStart = String(start);
   if (end !== -Infinity) el.dataset.docEnd = String(end);
-  if (start === Infinity && end === -Infinity) stampDocRange(el, fallbackPrims);
+  if (start === Infinity && end === -Infinity) return stampDocRange(el, fallbackPrims);
+  return {
+    start: start === Infinity ? undefined : start,
+    end: end === -Infinity ? undefined : end,
+  };
 }
 
 /** Nests tables using parent IDs and cell clips; incomplete metadata remains flat. */
@@ -684,9 +896,14 @@ function applyBlockObjectA11y(el: HTMLElement, prims: BlockGroup['prims']): void
   applyObjectA11y(el, attrs);
 }
 
+interface DocRange {
+  start: number | undefined;
+  end: number | undefined;
+}
+
 // union doc range of a primitive set → data-doc-start/end on the wrapper
 // (the fragment-level part of the painter contract)
-function stampDocRange(el: HTMLElement, prims: BlockGroup['prims']): void {
+function stampDocRange(el: HTMLElement, prims: BlockGroup['prims']): DocRange {
   let docStart: number | undefined;
   let docEnd: number | undefined;
   for (const p of prims) {
@@ -699,6 +916,7 @@ function stampDocRange(el: HTMLElement, prims: BlockGroup['prims']): void {
   }
   if (docStart !== undefined) el.dataset.docStart = String(docStart);
   if (docEnd !== undefined) el.dataset.docEnd = String(docEnd);
+  return { start: docStart, end: docEnd };
 }
 
 function findStructuralRevision(
@@ -717,6 +935,18 @@ function findStructuralRevision(
 }
 
 function renderMirrorPrimitive(
+  p: DisplayPrimitive,
+  doc: Document,
+  offsetY: number,
+  ctx: MirrorBuildCtx
+): HTMLElement {
+  const el = createMirrorPrimitive(p, doc, offsetY, ctx);
+  // line primitives carry no document attributes
+  if (p.kind !== 'line') bindPositions(ctx, el, p, p.docStart, p.docEnd, p.inlineSdtWidget?.pos);
+  return el;
+}
+
+function createMirrorPrimitive(
   p: DisplayPrimitive,
   doc: Document,
   offsetY: number,
@@ -897,6 +1127,27 @@ function clippedOut(rect: GeoRect, clip: ClipBox): boolean {
     (clip.x === undefined || clip.w === undefined || (x >= clip.x && x <= clip.x + clip.w)) &&
     (clip.y === undefined || clip.h === undefined || (y >= clip.y && y <= clip.y + clip.h))
   );
+}
+
+/**
+ * The runs the mirror places: joined glyph runs split back into one per glyph
+ * cluster (on text pages only where their clip cuts them), each piece mapped to
+ * its joined source run.
+ */
+function mirrorRuns(primitives: DisplayPrimitive[], ctx: MirrorBuildCtx): DisplayPrimitive[] {
+  const runs: DisplayPrimitive[] = [];
+  for (const p of primitives) {
+    const pieces = ctx.joinedRuns
+      ? splitWhereClipped(p)
+      : p.kind === 'glyphRun' && p.clusterRuns
+        ? clusterPieces(p)
+        : [p];
+    for (const piece of pieces) {
+      if (piece !== p) ctx.sourceOf.set(piece, p);
+      runs.push(piece);
+    }
+  }
+  return runs;
 }
 
 /** A joined run splits per glyph cluster only when its clip hides some clusters and not others. */

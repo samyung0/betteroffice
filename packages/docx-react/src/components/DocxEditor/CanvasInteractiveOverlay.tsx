@@ -12,12 +12,14 @@
  * listener on the overlay root): a synthetic React handler here would fire at
  * the React root, after the canvas host's native pointer routing already moved
  * the caret. Rebuilt whenever the page's display list changes — the same
- * trigger that re-rasters the canvas.
+ * trigger that re-rasters the canvas. A position shift (same page object, new
+ * revision) rewrites the existing widgets' positions instead.
  */
 
 import { useEffect, useRef } from 'react';
 import {
   buildInteractiveOverlayPage,
+  syncInteractiveOverlayPositions,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -45,8 +47,13 @@ export function CanvasInteractiveOverlay({
     const host = hostRef.current;
     if (!host) return;
     const built = builtForRef.current;
-    if (built?.page === page && built.revision === revision && built.t === t) {
-      return;
+    if (built?.page === page && built.t === t) {
+      if (built.revision === revision) return;
+      const overlay = host.firstElementChild;
+      if (overlay instanceof HTMLElement && syncInteractiveOverlayPositions(overlay)) {
+        builtForRef.current = { ...built, revision };
+        return;
+      }
     }
     const build = (): void => {
       const overlay = buildInteractiveOverlayPage(page, {
@@ -60,11 +67,10 @@ export function CanvasInteractiveOverlay({
       builtForRef.current = { page, revision, t };
     };
     if (!defer) {
+      // The previous overlay stays until this replacement is ready, as the
+      // mirror's does; unmounting removes the host with it.
       build();
-      return () => {
-        host.replaceChildren();
-        builtForRef.current = null;
-      };
+      return;
     }
     if (typeof requestIdleCallback === 'function') {
       const id = requestIdleCallback(build, { timeout: 1500 });
