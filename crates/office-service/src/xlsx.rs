@@ -64,6 +64,12 @@ impl XlsxSession {
         self.workbook.encode_state_as_update_v1()
     }
 
+    /// The by-id read with the workbook open, for a call naming a chart.
+    pub fn read_ids(&self, base: &[u8], state: &[u8], ids: &[String]) -> Result<serde_json::Value> {
+        let book = crate::xlsx_drawing::Book::of(&self.workbook)?;
+        crate::xlsx_drawing::by_ids(base, state, ids, Some(&book))
+    }
+
     /// [`crate::CommandResult::touched`]: a deleted sheet's key in the sheet
     /// order, all `delete_sheet` removes (the sheet's map and cells stay in
     /// Yjs, as a row or column delete only adds an axis change); nothing for
@@ -746,6 +752,8 @@ impl XlsxSession {
     pub fn inspect_scoped(&self, query: &InspectQuery) -> Result<serde_json::Value> {
         let Some(range) = &query.range else {
             let info = self.workbook.sheet_info().map_err(Error::engine)?;
+            let book = crate::xlsx_drawing::Book::of(&self.workbook)?;
+            let mut cache = crate::xlsx_drawing::Cache::default();
             let sheets = info
                 .sheet_ids
                 .iter()
@@ -753,15 +761,16 @@ impl XlsxSession {
                 .enumerate()
                 .map(|(index, (id, name))| {
                     let mut summary = self.summary(index, id, name);
-                    if let Some((package, path)) = self.workbook.source_sheet(SheetId(index as u32))
-                    {
-                        let (objects, more) = crate::xlsx_drawing::sheet_lines(package, path)?;
-                        if !objects.is_empty() {
-                            summary["objects"] = serde_json::json!(objects);
-                        }
-                        if more > 0 {
-                            summary["moreObjects"] = serde_json::json!(more);
-                        }
+                    let (objects, more, notice) =
+                        crate::xlsx_drawing::sheet_lines(&book, index, &mut cache)?;
+                    if !objects.is_empty() {
+                        summary["objects"] = serde_json::json!(objects);
+                    }
+                    if more > 0 {
+                        summary["moreObjects"] = serde_json::json!(more);
+                    }
+                    if let Some(notice) = notice {
+                        summary["notice"] = serde_json::json!(notice);
                     }
                     Ok(summary)
                 })

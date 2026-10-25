@@ -15,7 +15,9 @@ mod write;
 mod xml;
 
 pub use axis::{AxisMap, SheetAxes};
-pub use chart::{EmbeddedImage, chart_space, preserved_chart_space};
+pub use chart::{
+    EmbeddedImage, chart_reference_area, chart_space, preserved_chart_space, with_chart_refs,
+};
 pub use package::PreservedPackage;
 pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use reference::UnpatchableReference;

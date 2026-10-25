@@ -40,11 +40,23 @@ pub(crate) fn assert_checkpoint(
 
 /// office-checkpoint.ts `assetFromDataUrl` for a string `src`.
 pub(crate) fn asset_from_data_url(src: &str) -> Result<Asset> {
-    let unsupported =
-        || Error::Engine("Image object does not contain supported embedded image bytes".into());
-    let rest = src.strip_prefix("data:").ok_or_else(unsupported)?;
-    let (mime, data) = rest.split_once(";base64,").ok_or_else(unsupported)?;
-    let subtype = mime.strip_prefix("image/").ok_or_else(unsupported)?;
+    let (mime, body) = data_url_base64(src).ok_or_else(|| {
+        Error::Engine("Image object does not contain supported embedded image bytes".into())
+    })?;
+    let bytes = node_base64(body);
+    Ok(Asset {
+        sha256: sha256_hex(&bytes),
+        bytes,
+        mime_type: mime.to_owned(),
+    })
+}
+
+/// An image data URL's type and its base64 without the padding, when both
+/// are well formed.
+pub(crate) fn data_url_base64(src: &str) -> Option<(&str, &str)> {
+    let rest = src.strip_prefix("data:")?;
+    let (mime, data) = rest.split_once(";base64,")?;
+    let subtype = mime.strip_prefix("image/")?;
     let mime_ok = !subtype.is_empty()
         && subtype
             .bytes()
@@ -55,20 +67,17 @@ pub(crate) fn asset_from_data_url(src: &str) -> Result<Asset> {
         && body
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/');
-    if !mime_ok || !data_ok {
-        return Err(unsupported());
-    }
-    let bytes = node_base64(body);
-    Ok(Asset {
-        sha256: sha256_hex(&bytes),
-        bytes,
-        mime_type: mime.to_owned(),
-    })
+    (mime_ok && data_ok).then_some((mime, body))
+}
+
+/// The bytes [`node_base64`] makes of `chars` characters of base64.
+pub(crate) fn node_base64_len(chars: usize) -> usize {
+    chars / 4 * 3 + [0, 0, 1, 2][chars % 4]
 }
 
 /// `Buffer.from(text, "base64")` on validated base64 without its padding:
 /// trailing bits that do not make a byte are dropped, as Node does.
-fn node_base64(body: &str) -> Vec<u8> {
+pub(crate) fn node_base64(body: &str) -> Vec<u8> {
     let usable = body.len() - body.len() % 4;
     let mut bytes = base64::engine::general_purpose::STANDARD_NO_PAD
         .decode(&body[..usable])

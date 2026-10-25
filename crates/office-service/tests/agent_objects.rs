@@ -57,6 +57,11 @@ const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height
 /// A column chart of `points` months whose values cache skips idx 5 and
 /// holds `#N/A` at idx 7: the categories and values pair by idx.
 fn chart_xml(points: u32) -> String {
+    chart_xml_on("Sheet1", points)
+}
+
+/// [`chart_xml`] with its references on sheet `sheet`.
+fn chart_xml_on(sheet: &str, points: u32) -> String {
     let categories: String = (0..points)
         .map(|idx| format!(r#"<c:pt idx="{idx}"><c:v>M{idx}</c:v></c:pt>"#))
         .collect();
@@ -72,7 +77,7 @@ fn chart_xml(points: u32) -> String {
         })
         .collect();
     format!(
-        r#"<c:chartSpace xmlns:c="{C}" xmlns:a="{A}"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Monthly sales</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$2:$A${end}</c:f><c:strCache><c:ptCount val="{points}"/>{categories}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!$B$2:$B${end}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{points}"/>{values}</c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
+        r#"<c:chartSpace xmlns:c="{C}" xmlns:a="{A}"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Monthly sales</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>{sheet}!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>{sheet}!$A$2:$A${end}</c:f><c:strCache><c:ptCount val="{points}"/>{categories}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>{sheet}!$B$2:$B${end}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{points}"/>{values}</c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#,
         end = points + 1
     )
 }
@@ -189,7 +194,7 @@ fn slide_xml(shapes: &str) -> Vec<u8> {
 
 /// Slide 1: a cropped PNG, a JPEG, an EMF, an SVG alone, an SVG with its
 /// PNG, a linked picture, a chart and a text box; slide 2: four 2.5 MB
-/// pictures.
+/// pictures and a cropped one whose shape id is 0.
 fn deck() -> File {
     let slide1 = [
         picture_xml(2, "Photo", "A red square", r#"<a:blip r:embed="rIdPng"/><a:srcRect l="10000" t="5000"/>"#),
@@ -202,7 +207,7 @@ fn deck() -> File {
         r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Words"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp>"#.to_owned(),
     ]
     .concat();
-    let slide2: String = (0..4)
+    let mut slide2: String = (0..4)
         .map(|n| {
             picture_xml(
                 10 + n,
@@ -212,6 +217,12 @@ fn deck() -> File {
             )
         })
         .collect();
+    slide2 += &picture_xml(
+        0,
+        "Zero",
+        "Old alt",
+        r#"<a:blip r:embed="rIdBig0"/><a:srcRect l="20000"/>"#,
+    );
     let mut files = vec![
         (
             "[Content_Types].xml",
@@ -270,7 +281,7 @@ fn deck() -> File {
         "ppt/media/big3.png",
     ];
     for (n, path) in big.into_iter().enumerate() {
-        files.push((path, png(4000 + n as u32, 3000, 2_500_000)));
+        files.push((path, png(2000 + n as u32, 1500, 2_500_000)));
     }
     File::new(Format::Pptx, zip(files))
 }
@@ -474,53 +485,95 @@ fn ids_stop_at_four_a_call_and_at_the_answer_bytes() {
     let answer = deck.ids(&refs).unwrap();
     let items = answer["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
-    assert_eq!(data(&items[0]), png(4000, 3000, 2_500_000));
-    assert_eq!(data(&items[1]), png(4001, 3000, 2_500_000));
+    assert_eq!(data(&items[0]), png(2000, 1500, 2_500_000));
+    assert_eq!(data(&items[1]), png(2001, 1500, 2_500_000));
     assert_eq!(
         answer["notice"],
         format!(
-            "Not sent: {}, {}, past the 8 MB one read carries; read them in another call.",
+            "Not sent: {}, {}: a read carries at most 6 MB of pictures; read them in another call.",
             big[2], big[3]
         )
     );
     assert!(serde_json::to_vec(&answer).unwrap().len() <= ANSWER_BYTES);
 }
 
-/// An unknown id of a shape's form is gone; anything else is malformed and
-/// the refusal shows the deck's ids; a text shape is no picture.
+/// The ids found are answered and the rest named with why (Epo 2026-10-26,
+/// Q381): an unknown id of a shape's form is gone, anything else is
+/// malformed and shows the deck's ids, a text shape is no picture; blank
+/// ids alone are refused.
 #[test]
-fn unknown_and_malformed_ids_are_refused() {
+fn unknown_and_malformed_ids_are_named_beside_the_ids_found() {
     let deck = deck();
     let read = slide_read(&deck, 1);
-    let photo = by_name(&read["shapes"], "Photo")["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let gone = format!("{}9", photo);
-    assert_eq!(
-        refusal(deck.ids(&[&gone]).unwrap_err()),
-        (
-            EditCode::UnavailableTarget,
-            format!("{gone} is no longer in the deck")
-        )
-    );
-    let (code, message) = refusal(deck.ids(&["picture 1"]).unwrap_err());
-    assert_eq!(code, EditCode::InvalidInput);
+    let id = |name: &str| {
+        by_name(&read["shapes"], name)["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let photo = id("Photo");
+    let gone = format!("{photo}9");
+    let answer = deck
+        .ids(&[&gone, &photo, "picture 1", &id("Words")])
+        .unwrap();
+    let items = answer["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{answer}");
+    assert_eq!(data(&items[0]), png(64, 32, 100));
+    let notice = answer["notice"].as_str().unwrap();
     assert!(
-        message.contains(&format!("picture and chart ids read like {photo:?}")),
-        "{message}"
+        notice.starts_with(&format!("Not found: {gone} is no longer in the deck; picture 1 is a malformed picture or chart id; picture and chart ids read like {photo:?}, slide 1's")),
+        "{notice}"
     );
-    let words = by_name(&read["shapes"], "Words")["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let (code, message) = refusal(deck.ids(&[&words]).unwrap_err());
-    assert_eq!(code, EditCode::InvalidInput);
-    assert!(message.contains("not a picture or chart"), "{message}");
+    assert!(
+        notice.contains(&format!(
+            "{} is a text, not a picture or chart",
+            id("Words")
+        )),
+        "{notice}"
+    );
     assert_eq!(
         refusal(deck.ids(&[" ", "[]"]).unwrap_err()).0,
         EditCode::InvalidInput
     );
+}
+
+/// A picture added in the editor (source id 0 in the deck's state) takes no
+/// alt text or crop from the file's picture of id 0, which keeps its own
+/// (review r1 L5).
+#[test]
+fn an_added_picture_takes_nothing_from_a_file_picture() {
+    let mut deck = deck();
+    let session =
+        pptx_edit::DeckSession::open_from_update_with_source(&deck.state, &deck.base, 7).unwrap();
+    let slide = session.slide_ids().unwrap()[1].clone();
+    session
+        .add_picture(
+            &pptx_edit::EditCtx::local("test"),
+            &slide,
+            &pptx_edit::PictureDraft {
+                name: "Pasted".into(),
+                rect: pptx_edit::ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 914_400,
+                    height: 914_400,
+                },
+                content_type: "image/png".into(),
+                media_bytes: png(30, 20, 200),
+            },
+        )
+        .unwrap();
+    deck.state = session.encode_state_as_update_v1();
+    let shapes = slide_read(&deck, 2)["shapes"].clone();
+    let zero = by_name(&shapes, "Zero");
+    assert_eq!(
+        (&zero["alt"], &zero["crop"]["left"]),
+        (&json!("Old alt"), &json!(0.2))
+    );
+    let pasted = by_name(&shapes, "Pasted");
+    assert_eq!(pasted["pixels"], json!([30, 20]));
+    assert!(pasted.get("alt").is_none(), "{pasted}");
+    assert!(pasted.get("crop").is_none(), "{pasted}");
 }
 
 // ------------------------------------------------------------------ DOCX
@@ -677,19 +730,72 @@ fn docx_ids_return_pictures_and_charts() {
     let answer = document.ids(&[paragraph]).unwrap();
     assert_eq!(data(&answer["items"][0]), png(64, 32, 100));
 
+    // A gone id and a malformed one are named; the ids found answer (Q381).
     let photo = id(1);
     let (client, _) = photo.rsplit_once('.').unwrap();
     let gone = format!("{client}.999999");
+    let answer = document.ids(&[&gone, "image1.png", &id(4)]).unwrap();
+    assert_eq!(answer["items"].as_array().unwrap().len(), 1, "{answer}");
+    assert_eq!(data(&answer["items"][0]), png(48, 48, 80));
     assert_eq!(
-        refusal(document.ids(&[&gone]).unwrap_err()).0,
-        EditCode::UnavailableTarget
+        answer["notice"],
+        format!(
+            "Not found: {gone} is no longer in the document; image1.png is a malformed picture or chart id; picture and chart ids read like {photo:?}: copy each id whole from inspect_office_document."
+        )
     );
-    let (code, message) = refusal(document.ids(&["image1.png"]).unwrap_err());
-    assert_eq!(code, EditCode::InvalidInput);
-    assert!(
-        message.contains(&format!("picture and chart ids read like {photo:?}")),
-        "{message}"
-    );
+}
+
+/// A page names each media and chart part many times; the read reads each
+/// part once (review r1 M3), and so does a deck's slide list.
+#[test]
+fn a_read_reads_each_part_once() {
+    let mut body = String::new();
+    for n in 0..60 {
+        body += &docx_picture(100 + n, "Same", r#"<a:blip r:embed="rIdPng"/>"#);
+        body += &format!(
+            r#"<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="4572000" cy="2743200"/><wp:docPr id="{}" name="Chart {n}"/><a:graphic xmlns:a="{A}"><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
+            1000 + n
+        );
+    }
+    let files = vec![
+        (
+            "[Content_Types].xml",
+            content_types(&[
+                ("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
+                ("/word/charts/chart1.xml", "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"),
+            ]),
+        ),
+        ("_rels/.rels", rels(&[("rId1", "officeDocument", "word/document.xml")])),
+        (
+            "word/_rels/document.xml.rels",
+            rels(&[("rIdPng", "image", "media/red.png"), ("rIdChart", "chart", "charts/chart1.xml")]),
+        ),
+        (
+            "word/document.xml",
+            format!(r#"<w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:wp="{WP}"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#).into_bytes(),
+        ),
+        ("word/media/red.png", png(64, 32, 100)),
+        ("word/charts/chart1.xml", chart_xml(20).into_bytes()),
+    ];
+    let document = File::new(Format::Docx, zip(files));
+    let before = office_service::part_reads();
+    let listed = page(&document)
+        .iter()
+        .filter(|paragraph| paragraph.get("objects").is_some())
+        .count();
+    assert_eq!(listed, 120);
+    assert_eq!(office_service::part_reads() - before, 2);
+
+    let deck = deck();
+    let before = office_service::part_reads();
+    deck.read(InspectQuery {
+        start: Some(0),
+        count: Some(10),
+        ..InspectQuery::default()
+    })
+    .unwrap();
+    // Slide 1's six picture parts and its chart, slide 2's four parts.
+    assert!(office_service::part_reads() - before <= 11);
 }
 
 /// A drawn shape comes through as its text, an equation as its own.
@@ -737,7 +843,7 @@ fn workbook() -> File {
         )
     };
     let drawing = [
-        anchor(1, 2, &pic(2, "A red square", "rIdPng", r#"<a:srcRect r="25000"/>"#)),
+        anchor(1, 2, &pic(2, "A red square", "rIdPng", r#"<a:srcRect l="NaN" r="25000"/>"#)),
         anchor(
             5,
             2,
@@ -751,9 +857,21 @@ fn workbook() -> File {
         anchor(8, 10, r#"<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="7" name="Note"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr/><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>Check Q2</a:t></a:r></a:p></xdr:txBody></xdr:sp>"#),
     ]
     .concat();
-    let sheet = |extra: &str| {
-        format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{R}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c></row></sheetData>{extra}</worksheet>"#).into_bytes()
+    let sheet = |rows: &str, extra: &str| {
+        format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{R}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c><c r="B1" t="inlineStr"><is><t>Revenue</t></is></c></row>{rows}</sheetData>{extra}</worksheet>"#).into_bytes()
     };
+    // The cells the chart names, as its cache holds them.
+    let rows: String = (0..20)
+        .map(|idx| {
+            let row = idx + 2;
+            let value = match idx {
+                5 => String::new(),
+                7 => format!(r#"<c r="B{row}" t="e"><v>#N/A</v></c>"#),
+                _ => format!(r#"<c r="B{row}"><v>{}</v></c>"#, idx * 10),
+            };
+            format!(r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>M{idx}</t></is></c>{value}</row>"#)
+        })
+        .collect();
     let files = vec![
         (
             "[Content_Types].xml",
@@ -774,9 +892,9 @@ fn workbook() -> File {
             "xl/_rels/workbook.xml.rels",
             rels(&[("rId1", "worksheet", "worksheets/sheet1.xml"), ("rId2", "worksheet", "worksheets/sheet2.xml")]),
         ),
-        ("xl/worksheets/sheet1.xml", sheet(r#"<drawing r:id="rIdDrawing"/>"#)),
+        ("xl/worksheets/sheet1.xml", sheet(&rows, r#"<drawing r:id="rIdDrawing"/>"#)),
         ("xl/worksheets/_rels/sheet1.xml.rels", rels(&[("rIdDrawing", "drawing", "../drawings/drawing1.xml")])),
-        ("xl/worksheets/sheet2.xml", sheet("")),
+        ("xl/worksheets/sheet2.xml", sheet("", "")),
         (
             "xl/drawings/drawing1.xml",
             format!(r#"<xdr:wsDr xmlns:xdr="{XDR}" xmlns:a="{A}" xmlns:r="{R}">{drawing}</xdr:wsDr>"#).into_bytes(),
@@ -793,7 +911,7 @@ fn workbook() -> File {
         ("xl/media/red.png", png(64, 32, 100)),
         ("xl/media/photo.jpg", jpeg()),
         ("xl/media/logo.emf", emf()),
-        ("xl/charts/chart1.xml", chart_xml(20).into_bytes()),
+        ("xl/charts/chart1.xml", chart_xml_on("Data", 20).into_bytes()),
     ];
     File::new(Format::Xlsx, zip(files))
 }
@@ -845,9 +963,12 @@ fn the_sheet_list_shows_pictures_charts_and_shapes() {
 }
 
 /// The ids the sheet list shows are the workbook's own image ids, and the
-/// by-id read, which takes them from the package's drawing parts without
-/// opening the workbook, returns their bytes and the chart's every point,
-/// a renamed sheet included.
+/// by-id read, which takes pictures from the package's drawing parts without
+/// opening the workbook, returns their bytes and the chart's every point.
+/// The chart's references and cell follow a rename and an inserted row, as
+/// the workbook holds them, and its points are the cells' now, an edited
+/// one included (Epo 2026-10-26, Q381); a picture's cell moves with the
+/// rows.
 #[test]
 fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
     let mut book = workbook();
@@ -867,22 +988,54 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
         .collect();
     assert_eq!(listed, images);
 
-    let result = apply_commands(
-        &book.base,
-        book.checkpoint(),
-        &[Command::RenameSheet {
+    let edit = |book: &mut File, command: Command| {
+        book.state = apply_commands(&book.base, book.checkpoint(), &[command])
+            .unwrap()
+            .state;
+    };
+    edit(
+        &mut book,
+        Command::RenameSheet {
             sheet: "Data".into(),
             expected_name: "Data".into(),
             name: "Sales".into(),
-        }],
-    )
-    .unwrap();
-    book.state = result.state;
+        },
+    );
+    edit(
+        &mut book,
+        Command::InsertRows {
+            sheet: "Sales".into(),
+            at: 1,
+            count: 3,
+        },
+    );
+    edit(
+        &mut book,
+        Command::SetCell {
+            sheet: "Sales".into(),
+            cell: "B5".into(),
+            expected_value: "0".into(),
+            value: "999".into(),
+        },
+    );
+    // M0's value, now 999 in its cell where the file's cache holds 0.
+    let points = |count: u32| {
+        let mut points: Vec<Value> = (0..count).map(point).collect();
+        points[0] = json!([0, "M0", 999.0]);
+        points
+    };
     let renamed = sheets(&book);
     assert_eq!(renamed[0]["name"], "Sales");
-    let ids: Vec<&str> = renamed[0]["objects"]
-        .as_array()
-        .unwrap()
+    let objects = renamed[0]["objects"].as_array().unwrap();
+    assert_eq!(objects[0]["cell"], "B6");
+    let chart = &objects[3];
+    assert_eq!(chart["cell"], "B14");
+    // The workbook writes a renamed sheet's references quoted.
+    let refs = json!({ "name": "'Sales'!$B$4", "categories": "'Sales'!$A$5:$A$24", "values": "'Sales'!$B$5:$B$24" });
+    assert_eq!(chart["series"][0]["refs"], refs);
+    assert_eq!(chart["series"][0]["name"], "Revenue");
+    assert_eq!(chart["series"][0]["points"], json!(points(12)));
+    let ids: Vec<&str> = objects
         .iter()
         .filter_map(|object| object["id"].as_str())
         .collect();
@@ -895,13 +1048,12 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
         (&items[2]["viewable"], &items[2]["alt"]),
         (&json!(false), &json!("Second"))
     );
-    assert_eq!(
-        items[3]["series"][0]["points"],
-        json!((0..20).map(point).collect::<Vec<_>>())
-    );
+    assert_eq!(items[3]["series"][0]["refs"], refs);
+    assert_eq!(items[3]["series"][0]["points"], json!(points(20)));
 
-    // A state holding only a sheet order naming a sheet the workbook does
-    // not hold, which it cannot open: the by-id read reads no more of it.
+    // A picture read by id with a state holding only a sheet order naming a
+    // sheet the workbook does not hold, which it cannot open: the package
+    // path reads no more of it.
     let state = std::mem::replace(
         &mut book.state,
         sheet_order_only(&["sheet:0", "sheet:missing"]),
@@ -912,43 +1064,109 @@ fn xlsx_ids_round_trip_between_the_sheet_list_and_the_by_id_read() {
     );
     assert!(book.read(InspectQuery::default()).is_err());
     book.state = state;
-    let (code, message) = refusal(book.ids(&["Data!B3"]).unwrap_err());
-    assert_eq!(code, EditCode::InvalidInput);
+
+    // Malformed, unknown and gone ids are named beside the ids found (Q381).
+    let answer = book
+        .ids(&[
+            "Data!B3",
+            "xl/drawings/drawing1.xml#9:0",
+            "xl/drawings/drawing9.xml#0:0",
+            ids[0],
+        ])
+        .unwrap();
+    assert_eq!(answer["items"].as_array().unwrap().len(), 1);
+    let notice = answer["notice"].as_str().unwrap();
     assert!(
-        message.contains("xl/drawings/drawing1.xml#0:0"),
-        "{message}"
+        notice.starts_with("Not found: Data!B3 is a malformed picture or chart id; XLSX picture ids read like \"xl/drawings/drawing1.xml#0:0\""),
+        "{notice}"
     );
-    assert_eq!(
-        refusal(book.ids(&["xl/drawings/drawing1.xml#9:0"]).unwrap_err()).0,
-        EditCode::UnavailableTarget
-    );
-    let (code, message) = refusal(book.ids(&["xl/drawings/drawing9.xml#0:0"]).unwrap_err());
-    assert_eq!(code, EditCode::UnavailableTarget);
-    assert!(message.contains("names no picture or chart"), "{message}");
+    for unknown in [
+        "xl/drawings/drawing1.xml#9:0",
+        "xl/drawings/drawing9.xml#0:0",
+    ] {
+        assert!(
+            notice.contains(&format!(
+                "{unknown} names no picture or chart of the workbook; read the sheet list"
+            )),
+            "{notice}"
+        );
+    }
 
     // Its sheet deleted, a picture is gone from the by-id read as from the
     // sheet list (the state's sheets, not the package's).
-    let result = apply_commands(
-        &book.base,
-        book.checkpoint(),
-        &[Command::DeleteSheet {
+    edit(
+        &mut book,
+        Command::DeleteSheet {
             sheet: "Sales".into(),
             expected_name: "Sales".into(),
-        }],
-    )
-    .unwrap();
-    book.state = result.state;
+        },
+    );
     let listed = sheets(&book);
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert!(listed[0].get("objects").is_none());
+    let answer = book.ids(&[ids[0]]).unwrap();
+    assert_eq!(answer["items"], json!([]));
     assert_eq!(
-        refusal(book.ids(&[ids[0]]).unwrap_err()),
+        answer["notice"],
+        format!(
+            "Not found: {} is no longer in the workbook: its sheet was deleted; read the sheet list for the ids.",
+            ids[0]
+        )
+    );
+}
+
+/// A drawing part that does not read is named in its sheet's notice and
+/// skipped, the rest of the sheet list read (review r1 M1), and an id in it
+/// is named by the by-id read.
+#[test]
+fn an_unreadable_drawing_is_named_and_skipped() {
+    let good = workbook();
+    let mut parts = ooxml_opc::unzip_parts(&good.base).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/drawings/drawing1.xml" {
+            bytes.truncate(bytes.len() / 2);
+        }
+    }
+    let book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let sheets = sheets(&book);
+    assert_eq!(sheets.as_array().unwrap().len(), 2);
+    assert!(sheets[0].get("objects").is_none());
+    assert_eq!(
+        sheets[0]["notice"],
+        "Not listed: the pictures and charts of xl/drawings/drawing1.xml, a part that could not be read."
+    );
+    assert_eq!(
+        book.ids(&["xl/drawings/drawing1.xml#0:0"]).unwrap()["notice"],
+        "Not found: xl/drawings/drawing1.xml#0:0 is in a drawing part that could not be read."
+    );
+}
+
+/// Security regression (Q240 review r1 M4): an XLSX picture past what one
+/// answer carries is read no further than that and answers its alt text.
+#[test]
+fn an_xlsx_picture_past_the_answer_bytes_is_too_large_to_send() {
+    let good = workbook();
+    let mut parts = ooxml_opc::unzip_parts(&good.base).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/media/red.png" {
+            *bytes = png(64, 32, ANSWER_BYTES + 1);
+        }
+    }
+    let book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let answer = book.ids(&["xl/drawings/drawing1.xml#0:0"]).unwrap();
+    let item = &answer["items"][0];
+    assert_eq!(
         (
-            EditCode::UnavailableTarget,
-            format!(
-                "{} is no longer in the workbook: its sheet was deleted; read the sheet list for the ids",
-                ids[0]
-            )
+            &item["viewable"],
+            &item["reason"],
+            &item["alt"],
+            item.get("data")
+        ),
+        (
+            &json!(false),
+            &json!("too large to send: a read carries at most 6 MB of pictures"),
+            &json!("A red square"),
+            None
         )
     );
 }

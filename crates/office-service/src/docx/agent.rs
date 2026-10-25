@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use docx_edit::{
@@ -30,7 +31,7 @@ use crate::common::{
 };
 use crate::error::{EditCode, Error, Result};
 use crate::jsv::V;
-use crate::objects::{Found, Stored};
+use crate::objects::{Found, Head, Stored};
 use crate::session::Applied;
 use crate::touched::{self, Kept, Touched};
 use crate::types::{Alignment, Command, InspectQuery, ListKind, TextFormat};
@@ -740,6 +741,8 @@ struct CellMark {
 /// The read's walk: paragraphs counted in order, the page's listed.
 struct Walk<'a> {
     session: &'a DocxSession,
+    /// The page's media and parts, each read once.
+    objects: ObjectParts,
     doc: &'a EditingDoc,
     lists: Lists,
     /// The file's default paragraph style, which the read does not name.
@@ -793,7 +796,8 @@ impl Walk<'_> {
                 }
                 // An object locks its paragraph.
                 if para.locked.is_some() {
-                    let (objects, more) = self.session.object_lines(story, &para)?;
+                    let (objects, more) =
+                        self.session.object_lines(story, &para, &mut self.objects)?;
                     if !objects.is_empty() {
                         entry["objects"] = Value::Array(objects);
                     }
@@ -1080,6 +1084,7 @@ impl DocxSession {
         let styles = self.paragraph_styles();
         let mut walk = Walk {
             session: self,
+            objects: ObjectParts::default(),
             doc: self.engine.doc(),
             lists: Lists {
                 styles: StyleResolver::new(&package.get("styles")),
@@ -1957,9 +1962,6 @@ impl DocxSession {
 /// The mark keys [`list_attrs`] writes.
 const LIST_KEYS: [&str; 4] = ["numPr", "listIsBullet", "listNumFmt", "listMarker"];
 
-/// The paragraph properties a list writes, as the toolbar's buttons write
-/// them: `num_id` (0 for `none`, which also ends a list the paragraph's
-/// style gives it) at level `ilvl`.
 /// A picture, chart, equation or drawn shape embedded in a paragraph.
 struct Object {
     id: ID,
@@ -1967,9 +1969,9 @@ struct Object {
     payload: BTreeMap<String, Any>,
 }
 
-fn any_string(payload: &BTreeMap<String, Any>, key: &str) -> Option<String> {
+fn any_str<'p>(payload: &'p BTreeMap<String, Any>, key: &str) -> Option<&'p str> {
     match payload.get(key) {
-        Some(Any::String(text)) => Some(text.to_string()),
+        Some(Any::String(text)) => Some(text),
         _ => None,
     }
 }
@@ -1999,6 +2001,15 @@ fn parse_object_id(id: &str) -> Option<(&'static str, ID)> {
         .ok()
         .filter(|client| *client < 1 << 53)?;
     Some((kind, ID::new(ClientID::new(client), clock.parse().ok()?)))
+}
+
+/// One read's media and parts: each picture's header and each chart part
+/// read once however many objects name it (review r1 M3).
+#[derive(Default)]
+pub(crate) struct ObjectParts {
+    parts: crate::objects::Parts,
+    /// The package's media data URLs by part, gathered on first use.
+    media: Option<HashMap<String, Rc<str>>>,
 }
 
 impl DocxSession {
@@ -2035,66 +2046,73 @@ impl DocxSession {
         objects
     }
 
-    /// A picture's stored bytes: its package part's (`media:<part>`), its
-    /// own data URL, or none for a linked one.
-    fn picture_bytes(&self, src: &str) -> (Stored<'static>, String) {
+    /// A picture's header and stored bytes: its package part's
+    /// (`media:<part>`), its own data URL, or none for a linked one. Only the
+    /// header is read here; the bytes are decoded when a by-id read sends
+    /// them.
+    fn picture_head(&self, src: &str, cache: &mut ObjectParts) -> (Head, Stored<'static>) {
         if src.is_empty() {
-            return (Stored::Linked, String::new());
+            return (Head::linked(), Stored::Nothing);
         }
-        let (url, part) = match src.strip_prefix("media:") {
-            Some(part) => {
-                let url = self
-                    .package()
-                    .get("media")
-                    .items()
-                    .iter()
-                    .find_map(|pair| {
-                        let pair = pair.arr()?;
-                        (pair.get(0).to_js_string() == part).then(|| pair.get(1))
-                    })
-                    .and_then(|file| file.get("dataUrl").as_str())
-                    .map(|url| url.to_string())
-                    .unwrap_or_default();
-                (url, part.to_owned())
-            }
-            None => {
-                let subtype = src
-                    .strip_prefix("data:image/")
-                    .and_then(|rest| rest.split(';').next())
-                    .unwrap_or_default();
-                (
-                    src.to_owned(),
-                    format!("inline.{}", subtype.trim_start_matches("x-")),
-                )
-            }
+        let Some(part) = src.strip_prefix("media:") else {
+            let subtype = src
+                .strip_prefix("data:image/")
+                .and_then(|rest| rest.split(';').next())
+                .unwrap_or_default();
+            let part = format!("inline.{}", subtype.trim_start_matches("x-"));
+            return (
+                Head::of_data_url(src, &part),
+                Stored::DataUrl(Rc::from(src)),
+            );
         };
-        let bytes = crate::common::asset_from_data_url(&url)
-            .map(|asset| asset.bytes)
-            .unwrap_or_default();
-        (Stored::Bytes(Cow::Owned(bytes)), part)
+        let media = cache.media.get_or_insert_with(|| {
+            self.package()
+                .get("media")
+                .items()
+                .iter()
+                .filter_map(|pair| {
+                    let pair = pair.arr()?;
+                    Some((
+                        pair.get(0).to_js_string(),
+                        pair.get(1).get("dataUrl").as_str()?,
+                    ))
+                })
+                .collect()
+        });
+        let url = media.get(part).cloned().unwrap_or_else(|| Rc::from(""));
+        let head = cache.parts.head(part, || Head::of_data_url(&url, part));
+        (head, Stored::DataUrl(url))
     }
 
-    /// What a by-id read finds of a picture or chart object.
-    fn object_found(&self, story: &str, object: &Object) -> Option<Found<'static>> {
+    /// What a read finds of a picture or chart object.
+    fn object_found(
+        &self,
+        story: &str,
+        object: &Object,
+        cache: &mut ObjectParts,
+    ) -> Option<Found<'static>> {
         let id = object_id(story, object)?;
         if object.kind == "chart" {
-            let chart = any_string(&object.payload, "path").and_then(|path| {
-                let xml = ooxml_opc::read_part(&self.base, &path, 32 << 20).ok()??;
-                crate::objects::read_chart(&xml, &path)
+            let chart = any_str(&object.payload, "path").and_then(|path| {
+                cache.parts.chart(path, || {
+                    ooxml_opc::read_part(&self.base, path, 32 << 20)
+                        .ok()
+                        .flatten()
+                })
             });
             return Some(Found::Chart(chart));
         }
-        let (stored, part) =
-            self.picture_bytes(&any_string(&object.payload, "src").unwrap_or_default());
+        let (head, stored) =
+            self.picture_head(any_str(&object.payload, "src").unwrap_or_default(), cache);
         let side = |key: &str| match object.payload.get(key) {
             Some(Any::Number(value)) if value.is_finite() => *value,
             _ => 0.0,
         };
         Some(Found::Picture(crate::objects::Picture {
             id: Some(id),
-            alt: any_string(&object.payload, "alt"),
+            alt: any_str(&object.payload, "alt").map(str::to_owned),
+            head,
             stored,
-            part,
             crop: [
                 side("cropLeft"),
                 side("cropTop"),
@@ -2107,31 +2125,36 @@ impl DocxSession {
 
     /// A paragraph's objects as its read lists them, at most
     /// [`crate::objects::MAX_LISTED`], and how many more it holds.
-    fn object_lines(&self, story: &str, para: &Para) -> Result<(Vec<Value>, usize)> {
+    fn object_lines(
+        &self,
+        story: &str,
+        para: &Para,
+        cache: &mut ObjectParts,
+    ) -> Result<(Vec<Value>, usize)> {
         let objects = self.objects(para);
         let more = objects.len().saturating_sub(crate::objects::MAX_LISTED);
         let mut lines = Vec::new();
         for object in objects.into_iter().take(crate::objects::MAX_LISTED) {
             let text = |key: &str| {
-                any_string(&object.payload, key)
-                    .and_then(|text| crate::objects::shown(&text, crate::objects::MAX_TEXT_CHARS))
+                any_str(&object.payload, key)
+                    .and_then(|text| crate::objects::shown(text, crate::objects::MAX_TEXT_CHARS))
             };
             let line = match object.kind.as_str() {
                 "math" => text("plainText").map(|text| json!({ "kind": "equation", "text": text })),
                 // A text box's paragraphs are its text body's content.
-                "shape" => any_string(&object.payload, "shapeJson")
-                    .and_then(|shape| V::parse(&shape).ok())
+                "shape" => any_str(&object.payload, "shapeJson")
+                    .and_then(|shape| V::parse(shape).ok())
                     .and_then(|shape| {
                         let text = super::authored_text(&shape.get("textBody").get("content"))
                             + &super::authored_text(&shape);
                         crate::objects::shown(&text, crate::objects::MAX_TEXT_CHARS)
                     })
                     .map(|text| json!({ "kind": "drawing", "text": text })),
-                _ => match self.object_found(story, &object) {
+                _ => match self.object_found(story, &object, cache) {
                     Some(Found::Picture(picture)) => Some(picture.line()?),
                     Some(Found::Chart(chart)) => Some(crate::objects::chart_line(
                         object_id(story, &object).as_deref(),
-                        chart.as_ref(),
+                        chart.as_deref(),
                     )),
                     None => None,
                 },
@@ -2143,27 +2166,34 @@ impl DocxSession {
 
     /// The by-id read ([`crate::objects::answer`]): picture and chart ids
     /// from a read; a paragraph id holding exactly one picture or chart
-    /// stands for it (a clear repair, Q277).
+    /// stands for it (a clear repair, Q277); a gone or malformed id is named
+    /// in the notice (Q381).
     fn read_ids(&self, ids: &[String]) -> Result<Value> {
         let (ids, past) = crate::objects::requested(ids)?;
+        let mut cache = ObjectParts::default();
         let mut answered = Vec::new();
+        let mut missing = Vec::new();
         for id in ids {
             let found = match parse_object_id(&id) {
-                Some((kind, item)) => self.object_by_item(&id, kind, item)?,
-                None => self.object_of_paragraph(&id)?,
+                Some((kind, item)) => self.object_by_item(&id, kind, item, &mut cache),
+                None => self.object_of_paragraph(&id, &mut cache),
             };
-            answered.push((id, found));
+            match found {
+                Ok(found) => answered.push((id, found)),
+                Err(why) => missing.push((id, why)),
+            }
         }
-        crate::objects::answer(answered, &past)
+        crate::objects::answer(answered, &missing, &past)
     }
 
-    fn object_by_item(&self, id: &str, kind: &str, item: ID) -> Result<Found<'static>> {
-        let gone = || {
-            Error::edit(
-                EditCode::UnavailableTarget,
-                format!("{id} is no longer in the document"),
-            )
-        };
+    fn object_by_item(
+        &self,
+        id: &str,
+        kind: &str,
+        item: ID,
+        cache: &mut ObjectParts,
+    ) -> std::result::Result<Found<'static>, String> {
+        let gone = || "is no longer in the document".to_owned();
         let story = id
             .rsplit_once(if kind == "image" {
                 ":picture:"
@@ -2190,27 +2220,31 @@ impl DocxSession {
                 _ => return Err(gone()),
             }
         };
-        self.object_found(story, &object).ok_or_else(gone)
+        self.object_found(story, &object, cache).ok_or_else(gone)
     }
 
     /// A paragraph id named in place of its one picture or chart.
-    fn object_of_paragraph(&self, id: &str) -> Result<Found<'static>> {
-        let malformed = || malformed_id(id, "picture or chart", &self.object_example());
+    fn object_of_paragraph(
+        &self,
+        id: &str,
+        cache: &mut ObjectParts,
+    ) -> std::result::Result<Found<'static>, String> {
+        let malformed = || crate::objects::malformed(&self.object_example());
         let Ok((story, index, paras)) = self.find(id) else {
             return Err(malformed());
         };
         let found: Vec<Found<'static>> = self
             .objects(&paras[index])
             .iter()
-            .filter_map(|object| self.object_found(&story, object))
+            .filter_map(|object| self.object_found(&story, object, cache))
             .collect();
         match <[Found; 1]>::try_from(found) {
             Ok([found]) => Ok(found),
             Err(found) if found.is_empty() => Err(malformed()),
-            Err(found) => Err(invalid(format!(
-                "{id} is a paragraph holding {} pictures and charts; name each by the id its read lists",
+            Err(found) => Err(format!(
+                "is a paragraph holding {} pictures and charts; name each by the id its read lists",
                 found.len()
-            ))),
+            )),
         }
     }
 
@@ -2235,6 +2269,9 @@ impl DocxSession {
     }
 }
 
+/// The paragraph properties a list writes, as the toolbar's buttons write
+/// them: `num_id` (0 for `none`, which also ends a list the paragraph's
+/// style gives it) at level `ilvl`.
 fn list_attrs(list: ListKind, num_id: f64, ilvl: f64) -> [(String, Option<Any>); 4] {
     let null = || Some(Any::Null);
     let mut num_pr = HashMap::from([("numId".to_owned(), Any::Number(num_id))]);

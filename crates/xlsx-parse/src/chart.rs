@@ -939,31 +939,19 @@ fn resolve_reference(
     owner: &str,
     limit: usize,
 ) -> Result<Vec<CellValue>, ParseError> {
-    let trimmed = formula.trim();
-    if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
-        return Ok(Vec::new());
-    }
-    let refused =
-        |reason: &str| ParseError::UnsupportedEdit(format!("chart reference {trimmed} {reason}"));
-    let (sheet_name, area) =
-        split_qualifier(trimmed).ok_or_else(|| refused("is not a single same-workbook area"))?;
-    let sheet_name = sheet_name.unwrap_or_else(|| owner.to_owned());
-    let Some(sheet) = workbook
-        .sheets
-        .iter()
-        .find(|sheet| sheet.name.eq_ignore_ascii_case(&sheet_name))
-    else {
-        return Err(refused("names a sheet this workbook does not hold"));
+    let refused = |reason: &str| {
+        ParseError::UnsupportedEdit(format!("chart reference {} {reason}", formula.trim()))
     };
-    let (start, end) = parse_area(area).ok_or_else(|| refused("is not a cell range"))?;
-    let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
-    if rows > 1 && cols > 1 {
-        return Err(refused("spans more than one row and column"));
-    }
-    let count = u64::from(rows) * u64::from(cols);
+    let Some((sheet, start, end)) =
+        chart_reference_area(formula, workbook, owner).map_err(refused)?
+    else {
+        return Ok(Vec::new());
+    };
+    let count = u64::from(end.row - start.row + 1) * u64::from(end.col - start.col + 1);
     if count > limit as u64 {
         return Err(refused("would hold more points than a chart can carry"));
     }
+    let sheet = &workbook.sheets[sheet];
     let mut values = Vec::with_capacity(count as usize);
     for row in start.row..=end.row {
         for col in start.col..=end.col {
@@ -976,6 +964,61 @@ fn resolve_reference(
         }
     }
     Ok(values)
+}
+
+/// Where a chart reference points, as a cache lists its cells: the index of
+/// the sheet `workbook` holds (`owner` when unqualified) and the first and
+/// last cell of a single contiguous one-dimensional area; `None` for `#REF!`
+/// or nothing, which names no cell. Every other form (a union, an external
+/// book, a defined name, a two-dimensional area) is refused with why.
+pub fn chart_reference_area(
+    formula: &str,
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Result<Option<(usize, CellRef, CellRef)>, &'static str> {
+    let trimmed = formula.trim();
+    if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
+        return Ok(None);
+    }
+    let (sheet_name, area) =
+        split_qualifier(trimmed).ok_or("is not a single same-workbook area")?;
+    let sheet_name = sheet_name.unwrap_or_else(|| owner.to_owned());
+    let sheet = workbook
+        .sheets
+        .iter()
+        .position(|sheet| sheet.name.eq_ignore_ascii_case(&sheet_name))
+        .ok_or("names a sheet this workbook does not hold")?;
+    let (start, end) = parse_area(area).ok_or("is not a cell range")?;
+    if end.row > start.row && end.col > start.col {
+        return Err("spans more than one row and column");
+    }
+    Ok(Some((sheet, start, end)))
+}
+
+/// `part` with `refs` written into its `c:f` elements in document order (as
+/// [`patch_chart_refs`] writes them, its caches left as they are), for a
+/// reader that wants the references the workbook holds now; `None` when the
+/// part no longer holds that many references or cannot take them.
+pub fn with_chart_refs(part: &[u8], refs: &[ChartRef]) -> Option<Vec<u8>> {
+    let source = Part::decode(part).ok()?;
+    let sites = ref_sites(&source.tree().ok()?).ok()?;
+    if sites.len() != refs.len() {
+        return None;
+    }
+    let mut edits: Vec<Edit> = Vec::new();
+    for (site, reference) in sites.iter().zip(refs) {
+        if site.formula != reference.formula {
+            edits.push((
+                site.span.clone()?,
+                Replacement::Text(reference.formula.clone()),
+            ));
+        }
+    }
+    if edits.is_empty() {
+        return Some(part.to_vec());
+    }
+    edits.sort_by_key(|(span, _)| span.start);
+    source.splice(&edits).ok()
 }
 
 /// Splits `Sheet!$A$1:$A$5` into its sheet name and its area. `None` when the

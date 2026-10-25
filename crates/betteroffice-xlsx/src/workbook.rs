@@ -1202,6 +1202,14 @@ impl Workbook {
         }
     }
 
+    /// Where each sheet's source rows and columns sit after the row and
+    /// column edits made since the package was read, as a save moves the
+    /// drawing anchors the model does not hold; none for a sheet without
+    /// them.
+    pub fn source_axes(&self) -> Result<Vec<Option<xlsx_parse::SheetAxes>>> {
+        self.authority.source_axes().map_err(authority_error)
+    }
+
     /// The source package and the part path of the sheet `sheet` came from,
     /// none for a sheet added since.
     pub fn source_sheet(&self, sheet: SheetId) -> Option<(&xlsx_parse::PreservedPackage, &str)> {

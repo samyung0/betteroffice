@@ -11,7 +11,9 @@
 //! gives the pixel size, and the AI process shrinks what it sends.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use base64::Engine as _;
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
@@ -24,8 +26,30 @@ pub(crate) const MAX_TEXT_CHARS: usize = 1_000;
 /// Objects a read lists of one XLSX sheet or DOCX paragraph.
 pub(crate) const MAX_LISTED: usize = 50;
 /// Series of a chart, and points of a series, a read line shows.
-const LINE_SERIES: usize = 8;
-const LINE_POINTS: usize = 12;
+pub(crate) const LINE_SERIES: usize = 8;
+pub(crate) const LINE_POINTS: usize = 12;
+/// Pixels on its long side past which a picture is not viewable: the upload
+/// check's (Epo 2026-10-24, Q286; Capy's collaboration-rs sources
+/// `pictures::MAX_SIDE` and Go `imagecheck.MaxSide`), so a picture stored
+/// before that check never reaches the AI process's decode (Q381).
+const MAX_SIDE: u32 = 2_400;
+/// Bytes of a data URL's picture its header is read from.
+const HEAD_BYTES: usize = 256 << 10;
+
+thread_local! {
+    static PART_READS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Chart parts parsed and picture headers read on this thread: a read reads
+/// each once however many objects name it (review r1 M3), and a test counts
+/// them.
+pub fn part_reads() -> usize {
+    PART_READS.with(Cell::get)
+}
+
+fn count_read() {
+    PART_READS.with(|reads| reads.set(reads.get() + 1));
+}
 
 /// `text` trimmed, cut at `most` characters with `…`; `None` when blank.
 pub(crate) fn shown(text: &str, most: usize) -> Option<String> {
@@ -42,18 +66,71 @@ pub(crate) fn shown(text: &str, most: usize) -> Option<String> {
 /// A picture's stored bytes as far as a read holds them.
 pub(crate) enum Stored<'a> {
     Bytes(Cow<'a, [u8]>),
-    /// Linked to a file outside this one: nothing is stored.
-    Linked,
-    /// Past what one by-id answer can carry, left unread.
-    Oversized,
+    /// A data URL (a DOCX picture's), decoded only when a by-id read sends it.
+    DataUrl(Rc<str>),
+    /// Linked to a file outside this one, or past what one answer carries.
+    Nothing,
+}
+
+/// What a picture's header says ([`Parts::head`] reads it once a call).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Head {
+    /// Its type and pixel size, else why the model cannot see it.
+    seen: std::result::Result<(&'static str, Option<[u32; 2]>), String>,
+    /// Its stored bytes.
+    len: usize,
+}
+
+impl Head {
+    /// The header at the start of `bytes`, of `len` stored bytes in all
+    /// (`part` names the format its bytes do not tell); past [`MAX_SIDE`]
+    /// it is not viewable.
+    pub(crate) fn of(bytes: &[u8], len: usize, part: &str) -> Self {
+        count_read();
+        let seen = raster(bytes, part).map_err(str::to_owned).and_then(
+            |(mime, pixels)| match pixels {
+                Some([width, height]) if width.max(height) > MAX_SIDE => Err(format!(
+                    "{width} by {height} pixels, over the {MAX_SIDE} pixels a side the app takes"
+                )),
+                _ => Ok((mime, pixels)),
+            },
+        );
+        Self { seen, len }
+    }
+
+    /// A data URL's header, read from the start of its base64 alone.
+    pub(crate) fn of_data_url(url: &str, part: &str) -> Self {
+        let Some((_, body)) = crate::common::data_url_base64(url) else {
+            return Self::of(&[], 0, part);
+        };
+        let head = &body[..body.len().min(HEAD_BYTES / 3 * 4)];
+        Self::of(
+            &crate::common::node_base64(head),
+            crate::common::node_base64_len(body.len()),
+            part,
+        )
+    }
+
+    pub(crate) fn linked() -> Self {
+        Self {
+            seen: Err("linked to a file outside this one".into()),
+            len: 0,
+        }
+    }
+
+    pub(crate) fn oversized(answer_bytes: usize) -> Self {
+        Self {
+            seen: Err(too_large(answer_bytes)),
+            len: 0,
+        }
+    }
 }
 
 pub(crate) struct Picture<'a> {
     pub id: Option<String>,
     pub alt: Option<String>,
+    pub head: Head,
     pub stored: Stored<'a>,
-    /// Its part's name, for a format its bytes do not tell.
-    pub part: String,
     /// Fractions of the image its frame leaves out: left, top, right, bottom
     /// (negative ones pad it).
     pub crop: [f64; 4],
@@ -161,23 +238,31 @@ fn jpeg_size(bytes: &[u8]) -> Option<[u32; 2]> {
     }
 }
 
-/// A viewable picture: its type, pixel size when its header gives one, and
-/// bytes.
-type Seen<'b> = (&'static str, Option<[u32; 2]>, &'b [u8]);
-
 impl Picture<'_> {
-    /// What the model gets of it, else why it cannot see it.
-    fn seen(&self, answer_bytes: usize) -> std::result::Result<Seen<'_>, String> {
-        let bytes = match &self.stored {
-            Stored::Bytes(bytes) => bytes.as_ref(),
-            Stored::Linked => return Err("linked to a file outside this one".into()),
-            Stored::Oversized => return Err(too_large(answer_bytes)),
-        };
-        let (mime, pixels) = raster(bytes, &self.part).map_err(str::to_owned)?;
-        if encoded_len(bytes.len()) + ITEM_RESERVE > answer_bytes {
+    /// Its type and pixel size when one answer can carry it to the model,
+    /// else why not.
+    fn seen(
+        &self,
+        answer_bytes: usize,
+    ) -> std::result::Result<(&'static str, Option<[u32; 2]>), String> {
+        let seen = self.head.seen.clone()?;
+        if encoded_len(self.head.len) + ITEM_RESERVE > answer_bytes {
             return Err(too_large(answer_bytes));
         }
-        Ok((mime, pixels, bytes))
+        Ok(seen)
+    }
+
+    /// Its stored bytes, decoded when a data URL holds them.
+    fn bytes(&self) -> Cow<'_, [u8]> {
+        match &self.stored {
+            Stored::Bytes(bytes) => Cow::Borrowed(bytes.as_ref()),
+            Stored::DataUrl(url) => Cow::Owned(
+                crate::common::data_url_base64(url)
+                    .map(|(_, body)| crate::common::node_base64(body))
+                    .unwrap_or_default(),
+            ),
+            Stored::Nothing => Cow::Borrowed(&[]),
+        }
     }
 
     /// Its read line: id, alt text, pixel size, crop, anchor cell, and
@@ -204,7 +289,7 @@ impl Picture<'_> {
             line["cell"] = json!(cell);
         }
         match self.seen(answer_bytes) {
-            Ok((_, pixels, _)) => {
+            Ok((_, pixels)) => {
                 line["viewable"] = json!(true);
                 if let Some(pixels) = pixels {
                     line["pixels"] = json!(pixels);
@@ -229,19 +314,56 @@ impl Picture<'_> {
 
 fn too_large(answer_bytes: usize) -> String {
     format!(
-        "too large to send: a read carries at most {} MB",
-        encoded_capacity(answer_bytes) / 1_000_000
+        "too large to send: a read carries at most {} MB of pictures",
+        megabytes(answer_bytes)
     )
 }
 
-/// The stored bytes the base64 of one answer can carry.
-fn encoded_capacity(answer_bytes: usize) -> usize {
-    (answer_bytes - ITEM_RESERVE) / 4 * 3
+/// The stored picture bytes, in whole MB, the base64 of one answer carries:
+/// the one figure the reads name (review r1 N2).
+fn megabytes(answer_bytes: usize) -> usize {
+    (answer_bytes - ITEM_RESERVE) / 4 * 3 / 1_000_000
 }
 
 /// JSON an answer holds besides one picture's base64: its frame, notice and
 /// the picture's other fields (alt text of up to [`MAX_TEXT_CHARS`]).
 const ITEM_RESERVE: usize = 16_384;
+
+/// One read's parts: each chart part parsed and each picture header read
+/// once, however many objects name it (review r1 M3).
+#[derive(Default)]
+pub(crate) struct Parts {
+    charts: HashMap<String, Option<Rc<Chart>>>,
+    heads: HashMap<String, Head>,
+}
+
+impl Parts {
+    /// The chart part at `path`, `xml` giving its bytes the first time.
+    pub(crate) fn chart<B: AsRef<[u8]>>(
+        &mut self,
+        path: &str,
+        xml: impl FnOnce() -> Option<B>,
+    ) -> Option<Rc<Chart>> {
+        if let Some(chart) = self.charts.get(path) {
+            return chart.clone();
+        }
+        let chart = xml()
+            .and_then(|xml| read_chart(xml.as_ref(), path))
+            .map(Rc::new);
+        self.charts.insert(path.to_owned(), chart.clone());
+        chart
+    }
+
+    /// The picture header `key` names, `read` reading it the first time.
+    pub(crate) fn head(&mut self, key: &str, read: impl FnOnce() -> Head) -> Head {
+        if let Some(head) = self.heads.get(key) {
+            return head.clone();
+        }
+        let head = read();
+        self.heads.insert(key.to_owned(), head.clone());
+        head
+    }
+}
 
 /// A chart part as the reads show it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -257,10 +379,16 @@ pub(crate) struct Series {
     pub name: Option<String>,
     /// The cell references of its name, categories (or x values) and values.
     pub refs: [Option<String>; 3],
-    /// Its values cache's declared point count.
+    /// Its values cache's declared point count, or the cells its values
+    /// reference names when read from them.
     pub count: Option<u64>,
-    /// `(idx, category, value)` in idx order: each idx either cache holds.
+    /// `(idx, category, value)` in idx order: each idx either cache, or the
+    /// cells read, hold.
     pub points: Vec<(u32, Option<String>, Option<Value>)>,
+    /// Positions its references name past the cells read.
+    pub unread: u64,
+    /// Why its points are not shown, when they could not be read.
+    pub reason: Option<&'static str>,
 }
 
 fn text_of(element: &XmlElement) -> String {
@@ -270,6 +398,7 @@ fn text_of(element: &XmlElement) -> String {
 /// A chart part's plot types, title and series; `None` when it is no
 /// `c:chartSpace` with a plot this reads.
 pub(crate) fn read_chart(xml: &[u8], part: &str) -> Option<Chart> {
+    count_read();
     let limits = ParseLimits::default();
     let document = parse_xml(xml, part, &mut ParseBudget::new(&limits)).ok()?;
     let root = document
@@ -355,6 +484,7 @@ fn read_series(ser: &XmlElement) -> Series {
             .into_iter()
             .map(|(idx, (category, value))| (idx, category, value))
             .collect(),
+        ..Series::default()
     }
 }
 
@@ -451,7 +581,15 @@ impl Series {
         if let Some(count) = self.count {
             series["count"] = json!(count);
         }
+        if let Some(reason) = self.reason {
+            series["reason"] = json!(reason);
+        }
         series
+    }
+
+    /// Points it holds past the first `shown`, and positions not read.
+    fn left(&self, shown: usize) -> u64 {
+        self.points.len().saturating_sub(shown) as u64 + self.unread
     }
 }
 
@@ -480,8 +618,9 @@ impl Chart {
                     .take(LINE_POINTS)
                     .map(point_json)
                     .collect();
-                if series.points.len() > LINE_POINTS {
-                    entry["more"] = json!(series.points.len() - LINE_POINTS);
+                let more = series.left(LINE_POINTS);
+                if more > 0 {
+                    entry["more"] = json!(more);
                 }
                 entry
             })
@@ -511,7 +650,7 @@ const UNREAD_CHART: &str = "its chart data could not be read";
 pub(crate) enum Found<'a> {
     Picture(Picture<'a>),
     /// `None` when the chart part does not read.
-    Chart(Option<Chart>),
+    Chart(Option<Rc<Chart>>),
 }
 
 /// The by-id read's ids: each trimmed of spaces, quotes and the brackets a
@@ -539,21 +678,46 @@ pub(crate) fn requested(ids: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     Ok((clean, rest))
 }
 
+/// An id the by-id read did not find, and why: gone from the file, or not
+/// the id of a picture or chart (Epo 2026-10-26, Q381: named in the
+/// notice, the ids found still answered).
+pub(crate) type Missing = (String, String);
+
+/// Why an id of no form a read shows is not found; `shown` how the file's
+/// ids read.
+pub(crate) fn malformed(shown: &str) -> String {
+    format!(
+        "is a malformed picture or chart id; {shown}: copy each id whole from inspect_office_document"
+    )
+}
+
+/// `text`'s length written inside a JSON string.
+fn json_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(text.len() * 6, |json| json.len() - 2)
+}
+
 /// The by-id answer: `items` in the order asked, each picture's bytes
 /// (`data`, base64) or, when not viewable, its alt text and why, each
 /// chart's every point; within limits.json's `answerBytes`, a picture that
 /// does not fit and the points of a series past it are left for another
-/// call, and `notice` names them with the ids past the per-call count.
-pub(crate) fn answer(found: Vec<(String, Found<'_>)>, past_limit: &[String]) -> Result<Value> {
+/// call. `notice` names them, the ids not found and why, and the ids past
+/// the per-call count.
+pub(crate) fn answer(
+    found: Vec<(String, Found<'_>)>,
+    missing: &[Missing],
+    past_limit: &[String],
+) -> Result<Value> {
     let limits = crate::limits::inspect_ids()?;
+    // The answer's frame and its notice's words, then what the notice may
+    // name, measured as JSON writes it (review r1 L4).
     let names: usize = found
         .iter()
-        .map(|(id, _)| id.len())
-        .chain(past_limit.iter().map(String::len))
+        .map(|(id, _)| json_len(id))
+        .chain(past_limit.iter().map(|id| json_len(id)))
+        .chain(missing.iter().map(|(id, why)| json_len(id) + json_len(why)))
         .map(|len| len + 4)
         .sum();
-    // The answer's frame and its notice, whatever it names.
-    let mut used = 400 + names;
+    let mut used = 600 + names;
     let budget = limits.answer_bytes;
     let size = |value: &Value| serde_json::to_vec(value).map(|bytes| bytes.len() + 1);
     let mut items = Vec::new();
@@ -567,18 +731,20 @@ pub(crate) fn answer(found: Vec<(String, Found<'_>)>, past_limit: &[String]) -> 
                 picture.describe(&mut item, budget);
                 let mut cost = size(&item).map_err(Error::engine)?;
                 let seen = picture.seen(budget).ok();
-                if let Some((mime, _, bytes)) = seen {
+                if let Some((mime, _)) = seen {
                     item["mimeType"] = json!(mime);
-                    cost +=
-                        r#","mimeType":"","data":"""#.len() + mime.len() + encoded_len(bytes.len());
+                    cost += r#","mimeType":"","data":"""#.len()
+                        + mime.len()
+                        + encoded_len(picture.head.len);
                 }
                 if used + cost > budget {
                     later.push(id);
                     continue;
                 }
                 used += cost;
-                if let Some((_, _, bytes)) = seen {
-                    item["data"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+                if seen.is_some() {
+                    item["data"] =
+                        json!(base64::engine::general_purpose::STANDARD.encode(picture.bytes()));
                 }
             }
             Found::Chart(chart) => {
@@ -602,7 +768,7 @@ pub(crate) fn answer(found: Vec<(String, Found<'_>)>, past_limit: &[String]) -> 
                 for series in &chart.series {
                     let mut entry = series.head();
                     let head = size(&entry).map_err(Error::engine)?
-                        + r#","points":[],"cut":4294967295"#.len();
+                        + r#","points":[],"cut":18446744073709551615"#.len();
                     if used + head > budget {
                         series_cut += 1;
                         continue;
@@ -618,14 +784,15 @@ pub(crate) fn answer(found: Vec<(String, Found<'_>)>, past_limit: &[String]) -> 
                         used += cost;
                         points.push(point);
                     }
-                    if points.len() < series.points.len() {
-                        entry["cut"] = json!(series.points.len() - points.len());
+                    let cut = series.left(points.len());
+                    if cut > 0 {
+                        entry["cut"] = json!(cut);
+                        cut_charts = true;
                     }
                     entry["points"] = Value::Array(points);
                     listed.push(entry);
                 }
-                cut_charts |=
-                    series_cut > 0 || listed.iter().any(|entry| entry.get("cut").is_some());
+                cut_charts |= series_cut > 0;
                 item["series"] = Value::Array(listed);
                 if series_cut > 0 {
                     item["seriesCut"] = json!(series_cut);
@@ -635,17 +802,23 @@ pub(crate) fn answer(found: Vec<(String, Found<'_>)>, past_limit: &[String]) -> 
         items.push(item);
     }
     let mut notices = Vec::new();
+    if !missing.is_empty() {
+        let named: Vec<String> = missing
+            .iter()
+            .map(|(id, why)| format!("{id} {why}"))
+            .collect();
+        notices.push(format!("Not found: {}.", named.join("; ")));
+    }
+    let megabytes = megabytes(budget);
     if !later.is_empty() {
         notices.push(format!(
-            "Not sent: {}, past the {} MB one read carries; read them in another call.",
-            later.join(", "),
-            budget / 1_000_000
+            "Not sent: {}: a read carries at most {megabytes} MB of pictures; read them in another call.",
+            later.join(", ")
         ));
     }
     if cut_charts {
         notices.push(format!(
-            "The points a series' cut counts, and the series seriesCut counts, did not fit the {} MB one read carries; the cells their references name hold them.",
-            budget / 1_000_000
+            "The points a series' cut counts, and the series seriesCut counts, were not sent (a read carries at most {megabytes} MB); the cells their references name hold them."
         ));
     }
     if !past_limit.is_empty() {
@@ -717,11 +890,61 @@ mod tests {
         Found::Picture(Picture {
             id: Some("p".into()),
             alt: Some("A photo".into()),
+            head: Head::of(&bytes, bytes.len(), "a.png"),
             stored: Stored::Bytes(Cow::Owned(bytes)),
-            part: "a.png".into(),
             crop: [0.0; 4],
             cell: None,
         })
+    }
+
+    /// Security regression (Epo 2026-10-26, Q381): a picture whose header
+    /// passes the upload check's 2,400 pixels a side is not viewable, so its
+    /// bytes are never sent; one at the limit is.
+    #[test]
+    fn a_picture_past_the_upload_side_is_not_viewable() {
+        let answer = answer(
+            vec![
+                ("p".into(), picture(png(2400, 1600))),
+                ("q".into(), picture(png(50_000, 50_000))),
+            ],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(answer["items"][0]["data"].is_string());
+        let item = &answer["items"][1];
+        assert_eq!(
+            (&item["viewable"], &item["reason"], item.get("data")),
+            (
+                &json!(false),
+                &json!("50000 by 50000 pixels, over the 2400 pixels a side the app takes"),
+                None
+            )
+        );
+    }
+
+    /// Security regression (review r1 L4): ids the notice names are
+    /// measured as JSON writes them, so ids of quotes do not push the answer
+    /// past its bytes.
+    #[test]
+    fn a_notice_of_escaped_ids_stays_within_the_answer_bytes() {
+        let quotes = "\"".repeat(20_000);
+        // Two pictures that fit beside the ids counted as their raw length,
+        // and not beside them written as JSON.
+        let mut big = png(2000, 1500);
+        big.resize(3_121_000, 0);
+        let answer = answer(
+            vec![
+                ("p".into(), picture(big.clone())),
+                ("q".into(), picture(big)),
+            ],
+            &[(quotes.clone(), "names no picture or chart".into())],
+            &[quotes],
+        )
+        .unwrap();
+        let limit = crate::limits::inspect_ids().unwrap().answer_bytes;
+        assert_eq!(answer["items"].as_array().unwrap().len(), 1);
+        assert!(serde_json::to_vec(&answer).unwrap().len() <= limit);
     }
 
     /// Security regression (limits.json `inspectIds.answerBytes`): a
@@ -730,9 +953,9 @@ mod tests {
     /// count of the points left out; the answer stays within the bytes.
     #[test]
     fn the_answer_bytes_cut_a_series_and_refuse_a_picture_too_large() {
-        let mut big = png(4000, 3000);
+        let mut big = png(2400, 1800);
         big.resize(6_200_000, 0);
-        let mut too_large = png(8000, 6000);
+        let mut too_large = png(2400, 1800);
         too_large.resize(6_300_000, 0);
         let chart = Chart {
             kind: "line".into(),
@@ -744,14 +967,16 @@ mod tests {
                 points: (0..10_000)
                     .map(|idx| (idx, Some(format!("D{idx}")), Some(json!(idx))))
                     .collect(),
+                ..Series::default()
             }],
         };
         let answer = answer(
             vec![
                 ("p".into(), picture(big)),
                 ("q".into(), picture(too_large)),
-                ("c".into(), Found::Chart(Some(chart))),
+                ("c".into(), Found::Chart(Some(Rc::new(chart)))),
             ],
+            &[],
             &[],
         )
         .unwrap();
@@ -761,7 +986,7 @@ mod tests {
             (&items[1]["viewable"], &items[1]["reason"], &items[1]["alt"]),
             (
                 &json!(false),
-                &json!("too large to send: a read carries at most 6 MB"),
+                &json!("too large to send: a read carries at most 6 MB of pictures"),
                 &json!("A photo")
             )
         );

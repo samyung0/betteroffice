@@ -438,6 +438,46 @@ mod tests {
         );
     }
 
+    /// Security regression (Q240 review r1 M4): one part's read stops at its
+    /// byte budget however small the entry compresses, finds a part by its
+    /// normalized name only, and never answers a traversal or drive name,
+    /// requested or stored.
+    #[test]
+    fn read_part_holds_its_budget_and_refuses_traversal_names() {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, bytes) in [
+                ("word/media/zeros.bin", vec![0_u8; 1 << 20]),
+                ("../escape.xml", b"x".to_vec()),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let zipped = cursor.into_inner();
+        assert!(zipped.len() < 1 << 14, "{}", zipped.len());
+        let error = read_part(&zipped, "word/media/zeros.bin", 1_000).unwrap_err();
+        assert!(error.contains("inflates past 1000 bytes"), "{error}");
+        assert_eq!(
+            read_part(&zipped, "/WORD/media/./zeros.bin", 1 << 20)
+                .unwrap()
+                .map(|bytes| bytes.len()),
+            Some(1 << 20)
+        );
+        for name in [
+            "escape.xml",
+            "../escape.xml",
+            "C:/escape.xml",
+            "word/missing.xml",
+        ] {
+            assert_eq!(read_part(&zipped, name, 1 << 20).unwrap(), None, "{name}");
+        }
+    }
+
     fn stored_zip(entries: &[(String, Vec<u8>)], stored: &str) -> Vec<u8> {
         let mut cursor = Cursor::new(Vec::new());
         {
