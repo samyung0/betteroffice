@@ -3573,10 +3573,10 @@ function PptxEditorContent({
                 active={speakerNotes}
                 onClick={toggleSpeakerNotes}
                 testId="pptx-notes-toggle"
-                style={narrowLayout ? undefined : { gap: 6, padding: '0 10px' }}
+                style={{ gap: 6, padding: '0 10px' }}
               >
                 <ToolbarIcon name="notes" size={16} />
-                {narrowLayout ? null : <span>{t('notes.toggle')}</span>}
+                <span>{t('notes.toggle')}</span>
               </ToolbarButton>
             </span>
           ) : null}
