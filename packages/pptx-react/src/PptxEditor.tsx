@@ -220,6 +220,8 @@ export interface PptxEditorProps {
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
+  /** Puts the slide strip under the slide at any width, as an editor under 640px has it. */
+  stripBelow?: boolean;
   /** The zoom it opens at (default 'fit'); the toolbar and `view.zoom` change it. */
   initialZoom?: PptxZoom;
   /** Called whenever what `runCommand` can do changes, for host menus. */
@@ -442,6 +444,7 @@ function PptxEditorContent({
   showFontPicker = true,
   showFontSizePicker = true,
   showZoomControl = true,
+  stripBelow = false,
   initialZoom = 'fit',
   onCommandState,
   defaultSpeakerNotes = false,
@@ -505,7 +508,8 @@ function PptxEditorContent({
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const [narrowLayout, setNarrowLayout] = useState(false);
+  const [narrowEditor, setNarrowEditor] = useState(false);
+  const narrowLayout = stripBelow || narrowEditor;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pictureInputRef = useRef<HTMLInputElement>(null);
   const [stageFocused, setStageFocused] = useState(false);
@@ -990,7 +994,7 @@ function PptxEditorContent({
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const update = () => setNarrowLayout(root.clientWidth < NARROW_LAYOUT_WIDTH);
+    const update = () => setNarrowEditor(root.clientWidth < NARROW_LAYOUT_WIDTH);
     update();
     const observer = new ResizeObserver(update);
     observer.observe(root);
