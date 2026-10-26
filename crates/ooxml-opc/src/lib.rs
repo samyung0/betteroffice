@@ -478,12 +478,14 @@ mod tests {
         );
     }
 
-    /// Security regression (Q240 review r1 M4, r2 M1): one part's read stops
-    /// at its byte budget however small the entry compresses: an entry whose
-    /// checksum is wrong answers "inflates past" because the read never
-    /// reaches its end (read whole, it fails its checksum), finds a part by
-    /// its normalized name only, and never answers a traversal or drive name,
-    /// requested or stored.
+    /// Security regression (Q240 review r1 M4, r2 M1, r4 L1): one part's
+    /// read stops at its byte budget however small the entry compresses: an
+    /// entry whose checksum is wrong answers "inflates past" because the read
+    /// never reaches its end (read whole, it fails its checksum), finds a
+    /// part by its normalized name only (stored names normalized too, so an
+    /// entry stored in other case or with backslashes is found by its OPC
+    /// name), and never answers a traversal or drive name, requested or
+    /// stored.
     #[test]
     fn a_part_read_holds_its_budget_and_refuses_traversal_names() {
         let mut cursor = Cursor::new(Vec::new());
@@ -492,6 +494,8 @@ mod tests {
             for (name, bytes) in [
                 ("word/media/zeros.bin", vec![0_u8; 1 << 20]),
                 ("word/media/ones.bin", vec![1_u8; 1 << 20]),
+                ("Word/Media/Upper.BIN", b"upper".to_vec()),
+                ("word\\media\\back.bin", b"back".to_vec()),
                 ("../escape.xml", b"x".to_vec()),
             ] {
                 writer
@@ -532,6 +536,14 @@ mod tests {
                 .unwrap()
                 .map(|bytes| bytes.len()),
             Some(1 << 20)
+        );
+        assert_eq!(
+            read("word/media/upper.bin", 1 << 20).unwrap(),
+            Some(b"upper".to_vec())
+        );
+        assert_eq!(
+            read("word/media/back.bin", 1 << 20).unwrap(),
+            Some(b"back".to_vec())
         );
         for name in [
             "escape.xml",

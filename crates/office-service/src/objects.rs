@@ -281,8 +281,6 @@ fn jpeg_size(bytes: &[u8]) -> Option<[u32; 2]> {
 }
 
 impl Picture<'_> {
-    /// Its type and pixel size when one answer can carry it to the model,
-    /// else why not.
     /// Its type and pixel size when the model can see it, else why not. As
     /// the upload check refuses them (Q286, Q381, Q384, Q388), a picture
     /// whose header gives no size or a side of 0, or whose long side is past
