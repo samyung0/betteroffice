@@ -2,7 +2,7 @@
   "commands": 50,
   "shapeText": { "paragraphs": 50, "characters": 5000 },
   "slideNotes": { "characters": 2000 },
-  "inspectIds": { "perCall": 4, "answerBytes": 8384512 },
+  "inspectIds": { "perCall": 4, "answerBytes": 8384512, "pictureSide": 2400 },
   "formats": {
     "xlsx": [
       {

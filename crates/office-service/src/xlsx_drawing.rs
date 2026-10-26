@@ -22,6 +22,7 @@ use std::rc::Rc;
 use betteroffice_xlsx::{CellRef, CellValue, SheetChart, SheetId, Workbook, WorkbookModel};
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 use docx_parse::{RelationshipMap, RelationshipTarget, parse_relationships};
+use ooxml_opc::PartError;
 use serde_json::{Value, json};
 use yrs::updates::decoder::Decode;
 use yrs::{Array, ReadTxn, Transact, Update};
@@ -232,7 +233,8 @@ impl Walk<'_> {
 }
 
 /// Where a read gets a part's bytes, at most the bytes it names.
-type Read<'r, 'a> = dyn FnMut(&str, u64) -> Result<Option<Cow<'a, [u8]>>> + 'r;
+type Read<'r, 'a> =
+    dyn FnMut(&str, u64) -> std::result::Result<Option<Cow<'a, [u8]>>, PartError> + 'r;
 
 /// A drawing part's objects and relationships.
 type Drawing = Rc<(Vec<Drawn>, RelationshipMap)>;
@@ -243,8 +245,10 @@ type Drawing = Rc<(Vec<Drawn>, RelationshipMap)>;
 pub(crate) struct Cache {
     parts: Parts,
     drawings: HashMap<String, Option<Drawing>>,
-    /// A chart frame's chart as the workbook holds it now.
-    charts: HashMap<String, Option<Rc<Chart>>>,
+    /// A chart frame's chart as the workbook holds it now, by sheet and
+    /// frame: an unqualified reference names the sheet's own cells (review
+    /// r2 N3).
+    charts: HashMap<(usize, String), Option<Rc<Chart>>>,
 }
 
 impl Cache {
@@ -269,7 +273,8 @@ impl Cache {
 }
 
 /// A picture as a read finds it, its media part followed (at most
-/// `media_bytes` of it).
+/// `media_bytes` of it): one past that is too large to send, one that does
+/// not read damaged (review r2 N4).
 fn picture<'a>(
     object: &Drawn,
     drawing: &str,
@@ -291,7 +296,8 @@ fn picture<'a>(
                 let head = parts.head(&path, || Head::of(&bytes, bytes.len(), &path));
                 (head, Stored::Bytes(bytes))
             }
-            Err(_) => (Head::oversized(media_bytes as usize), Stored::Nothing),
+            Err(PartError::TooLarge(_)) => (Head::oversized(media_bytes as usize), Stored::Nothing),
+            Err(PartError::Unreadable(_)) => (Head::damaged(), Stored::Nothing),
         },
         _ => (Head::linked(), Stored::Nothing),
     };
@@ -301,7 +307,6 @@ fn picture<'a>(
         head,
         stored,
         crop: *crop,
-        cell: None,
     })
 }
 
@@ -333,7 +338,9 @@ impl<'b> Book<'b> {
         })
     }
 
-    fn read(&self) -> impl FnMut(&str, u64) -> Result<Option<Cow<'b, [u8]>>> + 'b {
+    fn read(
+        &self,
+    ) -> impl FnMut(&str, u64) -> std::result::Result<Option<Cow<'b, [u8]>>, PartError> + 'b {
         let package = self.package;
         move |path: &str, _: u64| {
             Ok(package
@@ -365,7 +372,7 @@ impl<'b> Book<'b> {
         most: u64,
         cache: &mut Cache,
     ) -> Option<Rc<Chart>> {
-        let frame = format!("{drawing}#{}", object.anchor);
+        let frame = (sheet, format!("{drawing}#{}", object.anchor));
         if let Some(chart) = cache.charts.get(&frame) {
             return chart.clone();
         }
@@ -434,9 +441,12 @@ type Cells = (Vec<(Option<String>, Option<Value>)>, u64);
 
 /// Series `series`'s name and points read from the cells its references
 /// name now in `model` (`owner` holding an unqualified one), at most `most`
-/// a reference; a literal keeps its own. When a reference does not read (a
-/// union, a defined name, another book, a two-dimensional range) the series
-/// shows no points and says so, never the file's cached ones (Q381).
+/// a reference; a literal keeps its own. A reference that does not read (a
+/// union, a defined name, another book, a two-dimensional range such as a
+/// multi-level category axis) shows nothing of its part, never the file's
+/// cached one (Q381), and the series says which: without its values it shows
+/// no points; without its name or categories it keeps the values (review r2
+/// L2).
 fn read_cells(series: &mut objects::Series, model: &WorkbookModel, owner: &str, most: u64) {
     let cells = |formula: &str, limit: u64| -> Option<Cells> {
         let Some((sheet, start, end)) =
@@ -464,34 +474,45 @@ fn read_cells(series: &mut objects::Series, model: &WorkbookModel, owner: &str, 
             .collect();
         Some((cells, named))
     };
-    let unread = |series: &mut objects::Series| {
-        series.points.clear();
-        series.count = None;
-        series.reason = Some(
-            "its points could not be read from the cells its references name; read those cells",
-        );
-    };
-    if let Some(formula) = series.refs[0].clone() {
-        match cells(&formula, 1) {
-            Some((name, _)) => series.name = name.into_iter().next().and_then(|(shown, _)| shown),
-            None => return unread(series),
+    let [name, categories, values] = series.refs.clone();
+    let name_read = name.is_none_or(|formula| match cells(&formula, 1) {
+        Some((name, _)) => {
+            series.name = name.into_iter().next().and_then(|(shown, _)| shown);
+            true
         }
-    }
-    let [_, categories, values] = series.refs.clone();
+        None => {
+            series.name = None;
+            false
+        }
+    });
+    let categories = categories.map(|formula| cells(&formula, most).ok_or(()));
+    let values = match values.map(|formula| cells(&formula, most)) {
+        Some(None) => {
+            series.points.clear();
+            series.count = None;
+            series.reason = Some(
+                "its points could not be read from the cells its references name; read those cells",
+            );
+            return;
+        }
+        read => read.flatten(),
+    };
     let categories = match categories {
-        Some(formula) => match cells(&formula, most) {
-            Some(read) => Some(read),
-            None => return unread(series),
-        },
+        Some(Err(())) => {
+            series.reason = Some(if name_read {
+                "its categories could not be read from the cells their reference names; read those cells"
+            } else {
+                "its name and categories could not be read from the cells their references name; read those cells"
+            });
+            Some((Vec::new(), 0))
+        }
+        Some(Ok(read)) => Some(read),
         None => None,
     };
-    let values = match values {
-        Some(formula) => match cells(&formula, most) {
-            Some(read) => Some(read),
-            None => return unread(series),
-        },
-        None => None,
-    };
+    if !name_read && series.reason.is_none() {
+        series.reason =
+            Some("its name could not be read from the cell its reference names; read that cell");
+    }
     if categories.is_none() && values.is_none() {
         return;
     }
@@ -503,9 +524,13 @@ fn read_cells(series: &mut objects::Series, model: &WorkbookModel, owner: &str, 
         .collect();
     let read = |cells: &Option<Cells>| cells.as_ref().map_or(0, |(cells, _)| cells.len());
     let named = |cells: &Option<Cells>| cells.as_ref().map_or(0, |(_, named)| *named);
+    // The literal's positions count only where it gives a part: a cache's
+    // longer run past the cells read would hide the positions left unread.
+    let from_literal = categories.is_none() || values.is_none();
     let positions = read(&categories).max(read(&values)).max(
         literal
             .keys()
+            .filter(|_| from_literal)
             .map(|idx| *idx as usize + 1)
             .max()
             .unwrap_or(0),
@@ -728,11 +753,10 @@ pub(crate) fn by_ids(
 ) -> Result<Value> {
     let (ids, past) = objects::requested(ids)?;
     let media_bytes = crate::limits::inspect_ids()?.answer_bytes as u64;
-    let mut read = |path: &str, most: u64| -> Result<Option<Cow<'static, [u8]>>> {
-        ooxml_opc::read_part(base, path, most)
-            .map(|bytes| bytes.map(Cow::Owned))
-            .map_err(Error::Engine)
-    };
+    // One open of the package for every part the call reads (review r2 L3).
+    let mut package = ooxml_opc::Package::open(base).map_err(Error::Engine)?;
+    let mut read =
+        |path: &str, most: u64| package.read(path, most).map(|bytes| bytes.map(Cow::Owned));
     let mut cache = Cache::default();
     let mut live: Option<HashMap<String, bool>> = None;
     let mut answered = Vec::new();

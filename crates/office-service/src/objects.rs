@@ -28,13 +28,9 @@ pub(crate) const MAX_LISTED: usize = 50;
 /// Series of a chart, and points of a series, a read line shows.
 pub(crate) const LINE_SERIES: usize = 8;
 pub(crate) const LINE_POINTS: usize = 12;
-/// Pixels on its long side past which a picture is not viewable: the upload
-/// check's (Epo 2026-10-24, Q286; Capy's collaboration-rs sources
-/// `pictures::MAX_SIDE` and Go `imagecheck.MaxSide`), so a picture stored
-/// before that check never reaches the AI process's decode (Q381).
-const MAX_SIDE: u32 = 2_400;
-/// Bytes of a data URL's picture its header is read from.
-const HEAD_BYTES: usize = 256 << 10;
+/// Bytes of a data URL's picture its header is read from (Go's
+/// `imagecheck` reads as much of an upload).
+const HEAD_BYTES: usize = 1 << 20;
 
 thread_local! {
     static PART_READS: Cell<usize> = const { Cell::new(0) };
@@ -83,18 +79,24 @@ pub(crate) struct Head {
 
 impl Head {
     /// The header at the start of `bytes`, of `len` stored bytes in all
-    /// (`part` names the format its bytes do not tell); past [`MAX_SIDE`]
-    /// it is not viewable.
+    /// (`part` names the format its bytes do not tell). As the upload check
+    /// refuses them (Q286, Q381, Q384), a picture past limits.json's
+    /// `pictureSide` on its long side, or whose header gives no size, is not
+    /// viewable, so the AI process never decodes one it could not measure.
     pub(crate) fn of(bytes: &[u8], len: usize, part: &str) -> Self {
         count_read();
-        let seen = raster(bytes, part).map_err(str::to_owned).and_then(
-            |(mime, pixels)| match pixels {
-                Some([width, height]) if width.max(height) > MAX_SIDE => Err(format!(
-                    "{width} by {height} pixels, over the {MAX_SIDE} pixels a side the app takes"
-                )),
-                _ => Ok((mime, pixels)),
-            },
-        );
+        // The table is built in; were it unreadable no side would pass.
+        let side = crate::limits::inspect_ids().map_or(0, |limits| limits.picture_side);
+        let seen =
+            raster(bytes, part)
+                .map_err(str::to_owned)
+                .and_then(|(mime, pixels)| match pixels {
+                    Some([width, height]) if width.max(height) > side => Err(format!(
+                        "{width} by {height} pixels, over the {side} pixels a side the app takes"
+                    )),
+                    Some(_) => Ok((mime, pixels)),
+                    None => Err("its size cannot be read".to_owned()),
+                });
         Self { seen, len }
     }
 
@@ -124,7 +126,17 @@ impl Head {
             len: 0,
         }
     }
+
+    /// A picture whose stored bytes do not read (a damaged entry).
+    pub(crate) fn damaged() -> Self {
+        Self {
+            seen: Err(DAMAGED.to_owned()),
+            len: 0,
+        }
+    }
 }
+
+const DAMAGED: &str = "damaged or unknown picture data";
 
 pub(crate) struct Picture<'a> {
     pub id: Option<String>,
@@ -134,8 +146,6 @@ pub(crate) struct Picture<'a> {
     /// Fractions of the image its frame leaves out: left, top, right, bottom
     /// (negative ones pad it).
     pub crop: [f64; 4],
-    /// The cell an XLSX picture is anchored at.
-    pub cell: Option<String>,
 }
 
 /// An OOXML `a:srcRect` side in thousandths of a percent, as a fraction.
@@ -148,7 +158,8 @@ fn encoded_len(bytes: usize) -> usize {
     bytes.div_ceil(3) * 4
 }
 
-/// What the model reads (PNG, JPEG, GIF, BMP, WebP, TIFF; the AI process
+/// What the model reads (PNG, JPEG, GIF, BMP, WebP; a TIFF's size is not read,
+/// so [`Head::of`] lists one not viewable; the AI process
 /// converts what it sends): the type and pixel size its header gives, else
 /// why it is not viewable.
 fn raster(
@@ -168,7 +179,7 @@ fn raster(
         return Ok(("image/jpeg", jpeg_size(bytes)));
     }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Ok(("image/gif", pair(le16(6), le16(8))));
+        return Ok(("image/gif", gif_size(bytes)));
     }
     if bytes.starts_with(b"BM") {
         let signed = |from| le32(from).map(|value| (value as i32).unsigned_abs());
@@ -204,7 +215,48 @@ fn raster(
     if head.contains("<svg") || extension == "svg" {
         return Err("an SVG without the PNG copy Office stores beside it");
     }
-    Err("damaged or unknown picture data")
+    Err(DAMAGED)
+}
+
+/// A GIF's size: the larger of its logical screen and its first frame's
+/// extent, past any extensions before it (Q384; Capy's collaboration-rs
+/// sources `pictures::gif_size`).
+fn gif_size(bytes: &[u8]) -> Option<[u32; 2]> {
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from(u16::from_le_bytes([
+            *bytes.get(at)?,
+            *bytes.get(at + 1)?,
+        ])))
+    };
+    let (width, height) = (word(6)?, word(8)?);
+    let flags = *bytes.get(10)?;
+    let mut at = 13;
+    if flags & 0x80 != 0 {
+        at += 3 << ((flags & 7) + 1);
+    }
+    loop {
+        match *bytes.get(at)? {
+            0x2c => {
+                let (left, top) = (word(at + 1)?, word(at + 3)?);
+                return Some([
+                    width.max(left + word(at + 5)?),
+                    height.max(top + word(at + 7)?),
+                ]);
+            }
+            // An extension: its label, then sub-blocks up to an empty one.
+            0x21 => {
+                at += 2;
+                loop {
+                    let size = usize::from(*bytes.get(at)?);
+                    at += 1 + size;
+                    if size == 0 {
+                        break;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// A JPEG's size from its first frame header (SOF0 to SOF15 but DHT, JPG
@@ -265,8 +317,8 @@ impl Picture<'_> {
         }
     }
 
-    /// Its read line: id, alt text, pixel size, crop, anchor cell, and
-    /// whether it is viewable (the reason when not).
+    /// Its read line: id, alt text, pixel size, crop, and whether it is
+    /// viewable (the reason when not).
     pub(crate) fn line(&self) -> Result<Value> {
         let limits = crate::limits::inspect_ids()?;
         let mut line = json!({ "kind": "picture" });
@@ -284,9 +336,6 @@ impl Picture<'_> {
             .and_then(|alt| shown(alt, MAX_TEXT_CHARS))
         {
             line["alt"] = json!(alt);
-        }
-        if let Some(cell) = &self.cell {
-            line["cell"] = json!(cell);
         }
         match self.seen(answer_bytes) {
             Ok((_, pixels)) => {
@@ -858,8 +907,12 @@ mod tests {
             0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 1, 44, 1, 144, 3, 1, 0x11, 0,
         ];
         assert_eq!(raster(&jpeg, "a.jpg"), Ok(("image/jpeg", Some([400, 300]))));
+        // A 32 by 16 screen and a frame of the same size.
         assert_eq!(
-            raster(b"GIF89a\x20\x00\x10\x00", "a.gif"),
+            raster(
+                b"GIF89a\x20\x00\x10\x00\x00\x00\x00\x2c\0\0\0\0\x20\x00\x10\x00\x00",
+                "a.gif"
+            ),
             Ok(("image/gif", Some([32, 16])))
         );
         let mut emf = vec![1, 0, 0, 0];
@@ -884,6 +937,10 @@ mod tests {
         // A truncated header names no size and never reads past the bytes.
         assert_eq!(raster(&png(1, 1)[..18], "a.png"), Ok(("image/png", None)));
         assert_eq!(raster(&jpeg[..12], "a.jpg"), Ok(("image/jpeg", None)));
+        assert_eq!(
+            raster(b"GIF89a\x20\x00\x10\x00", "a.gif"),
+            Ok(("image/gif", None))
+        );
     }
 
     fn picture(bytes: Vec<u8>) -> Found<'static> {
@@ -893,7 +950,6 @@ mod tests {
             head: Head::of(&bytes, bytes.len(), "a.png"),
             stored: Stored::Bytes(Cow::Owned(bytes)),
             crop: [0.0; 4],
-            cell: None,
         })
     }
 
@@ -920,6 +976,49 @@ mod tests {
                 &json!("50000 by 50000 pixels, over the 2400 pixels a side the app takes"),
                 None
             )
+        );
+    }
+
+    /// Security regression (Epo 2026-10-26, Q384; review r2 L1): a GIF is
+    /// measured by its first frame where that runs past its logical screen,
+    /// and a picture whose header gives no size is not viewable, as the
+    /// upload check refuses both.
+    #[test]
+    fn a_gif_frame_past_its_screen_and_an_unmeasured_picture_are_not_viewable() {
+        // A 10 by 10 screen, a graphic control extension, then a frame at
+        // (0, 0) of 3,000 by 10.
+        let mut gif = b"GIF89a\x0a\x00\x0a\x00\x00\x00\x00".to_vec();
+        gif.extend([0x21, 0xf9, 4, 0, 0, 0, 0, 0]);
+        gif.extend([0x2c, 0, 0, 0, 0, 0xb8, 0x0b, 10, 0, 0]);
+        assert_eq!(raster(&gif, "a.gif"), Ok(("image/gif", Some([3000, 10]))));
+        let answer = answer(
+            vec![
+                ("g".into(), picture(gif)),
+                ("t".into(), picture(png(1, 1)[..18].to_vec())),
+            ],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let refused = |at: usize| {
+            let item = &answer["items"][at];
+            (
+                item["viewable"].clone(),
+                item["reason"].clone(),
+                item.get("data").is_some(),
+            )
+        };
+        assert_eq!(
+            refused(0),
+            (
+                json!(false),
+                json!("3000 by 10 pixels, over the 2400 pixels a side the app takes"),
+                false
+            )
+        );
+        assert_eq!(
+            refused(1),
+            (json!(false), json!("its size cannot be read"), false)
         );
     }
 

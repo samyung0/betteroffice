@@ -735,18 +735,8 @@ pub(crate) fn patch_chart_refs(
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
-    if sites.len() != refs.len() {
-        return Err(ParseError::UnsupportedEdit(format!(
-            "chart part holds {} references but the model carries {}",
-            sites.len(),
-            refs.len()
-        )));
-    }
     let mut edits: Vec<Edit> = Vec::new();
-    for (site, reference) in sites.iter().zip(refs) {
-        if site.formula == reference.formula {
-            continue;
-        }
+    for (site, reference) in changed_sites(&sites, refs)? {
         let Some(span) = site.span.clone() else {
             return Err(ParseError::UnsupportedEdit(
                 "a self-closing c:f cannot take a rewritten reference".into(),
@@ -777,6 +767,28 @@ pub(crate) fn patch_chart_refs(
     }
     edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// The part's reference sites whose formula `refs` changes, each with its
+/// reference, matched in document order; refused when the part no longer
+/// holds the references the model was built from. [`patch_chart_refs`] and
+/// [`with_chart_refs`] match them alike.
+fn changed_sites<'s, 'r>(
+    sites: &'s [RefSite],
+    refs: &'r [ChartRef],
+) -> Result<Vec<(&'s RefSite, &'r ChartRef)>, ParseError> {
+    if sites.len() != refs.len() {
+        return Err(ParseError::UnsupportedEdit(format!(
+            "chart part holds {} references but the model carries {}",
+            sites.len(),
+            refs.len()
+        )));
+    }
+    Ok(sites
+        .iter()
+        .zip(refs)
+        .filter(|(site, reference)| site.formula != reference.formula)
+        .collect())
 }
 
 /// What a rebuilt cache must be able to stand behind, and how many points the
@@ -1002,18 +1014,16 @@ pub fn chart_reference_area(
 pub fn with_chart_refs(part: &[u8], refs: &[ChartRef]) -> Option<Vec<u8>> {
     let source = Part::decode(part).ok()?;
     let sites = ref_sites(&source.tree().ok()?).ok()?;
-    if sites.len() != refs.len() {
-        return None;
-    }
-    let mut edits: Vec<Edit> = Vec::new();
-    for (site, reference) in sites.iter().zip(refs) {
-        if site.formula != reference.formula {
-            edits.push((
+    let mut edits = changed_sites(&sites, refs)
+        .ok()?
+        .into_iter()
+        .map(|(site, reference)| {
+            Some((
                 site.span.clone()?,
                 Replacement::Text(reference.formula.clone()),
-            ));
-        }
-    }
+            ))
+        })
+        .collect::<Option<Vec<Edit>>>()?;
     if edits.is_empty() {
         return Some(part.to_vec());
     }

@@ -2119,7 +2119,6 @@ impl DocxSession {
                 side("cropRight"),
                 side("cropBottom"),
             ],
-            cell: None,
         }))
     }
 

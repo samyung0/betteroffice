@@ -10,7 +10,9 @@
 //! Q284): the pictures and charts one call names, and the JSON bytes of its
 //! answer, Go's 8 MiB read of the collaboration server's answer
 //! (`store/collaboration_documents.go` `postCollaboration`) less 4 KiB for
-//! the inspection around it.
+//! the inspection around it, and the pixels on a picture's long side past
+//! which a read lists it as not viewable (the upload check's, Epo
+//! 2026-10-24, Q286; Capy pins it to its own).
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -62,6 +64,7 @@ pub(crate) fn slide_notes() -> Result<usize> {
 pub(crate) struct InspectIds {
     pub per_call: usize,
     pub answer_bytes: usize,
+    pub picture_side: u32,
 }
 
 /// [`InspectIds`] from the table.

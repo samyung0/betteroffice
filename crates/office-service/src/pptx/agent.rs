@@ -636,7 +636,6 @@ impl PptxSession {
                 [crop.left, crop.top, crop.right, crop.bottom]
                     .map(|side| crop_side(f64::from(side)))
             }),
-            cell: None,
         }
     }
 

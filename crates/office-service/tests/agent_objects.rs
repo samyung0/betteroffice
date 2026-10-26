@@ -794,8 +794,10 @@ fn a_read_reads_each_part_once() {
         ..InspectQuery::default()
     })
     .unwrap();
-    // Slide 1's six picture parts and its chart, slide 2's four parts.
-    assert!(office_service::part_reads() - before <= 11);
+    // Slide 1's red, photo, logo, star and icon headers and its chart (the
+    // linked picture reads nothing), slide 2's four parts ("Zero" shares
+    // big0); without the per-call cache, 11 (review r2 L4).
+    assert_eq!(office_service::part_reads() - before, 10);
 }
 
 /// A drawn shape comes through as its text, an equation as its own.
@@ -1141,18 +1143,56 @@ fn an_unreadable_drawing_is_named_and_skipped() {
     );
 }
 
-/// Security regression (Q240 review r1 M4): an XLSX picture past what one
-/// answer carries is read no further than that and answers its alt text.
-#[test]
-fn an_xlsx_picture_past_the_answer_bytes_is_too_large_to_send() {
-    let good = workbook();
-    let mut parts = ooxml_opc::unzip_parts(&good.base).unwrap();
-    for (path, bytes) in &mut parts {
+/// `zipped` with part `name`'s stored checksum made wrong in its local and
+/// central headers, so only a read to the part's end finds it damaged.
+fn wrong_checksum(mut zipped: Vec<u8>, name: &str) -> Vec<u8> {
+    let name = name.as_bytes();
+    let mut places = 0;
+    for at in 0..zipped.len() - name.len() {
+        if &zipped[at..at + name.len()] != name {
+            continue;
+        }
+        let header = |back: usize, signature: &[u8; 4]| {
+            at.checked_sub(back)
+                .filter(|&start| &zipped[start..start + 4] == signature)
+        };
+        let crc = match (header(46, b"PK\x01\x02"), header(30, b"PK\x03\x04")) {
+            (Some(central), _) => central + 16,
+            (None, Some(local)) => local + 14,
+            (None, None) => continue,
+        };
+        for byte in &mut zipped[crc..crc + 4] {
+            *byte ^= 0xff;
+        }
+        places += 1;
+    }
+    assert_eq!(places, 2);
+    zipped
+}
+
+/// [`workbook`] with `xl/media/red.png` holding `bytes` and a wrong stored
+/// checksum in the package the by-id read takes it from (the state is the
+/// sound package's).
+fn workbook_with_damaged_png(bytes: Vec<u8>) -> File {
+    let mut parts = ooxml_opc::unzip_parts(&workbook().base).unwrap();
+    for (path, part) in &mut parts {
         if path == "xl/media/red.png" {
-            *bytes = png(64, 32, ANSWER_BYTES + 1);
+            *part = bytes.clone();
         }
     }
-    let book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let mut book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    book.base = wrong_checksum(std::mem::take(&mut book.base), "xl/media/red.png");
+    book.sha = sha256_hex(&book.base);
+    book
+}
+
+/// Security regression (Q240 review r1 M4, review r2 M1): an XLSX picture
+/// past what one answer carries is read no further than that and answers
+/// its alt text. Its checksum is wrong, so a read past the bound would reach
+/// its end and answer it damaged instead.
+#[test]
+fn an_xlsx_picture_past_the_answer_bytes_is_too_large_to_send() {
+    let book = workbook_with_damaged_png(png(64, 32, ANSWER_BYTES + 1));
     let answer = book.ids(&["xl/drawings/drawing1.xml#0:0"]).unwrap();
     let item = &answer["items"][0];
     assert_eq!(
@@ -1168,6 +1208,100 @@ fn an_xlsx_picture_past_the_answer_bytes_is_too_large_to_send() {
             &json!("A red square"),
             None
         )
+    );
+}
+
+/// A media part that does not read answers damaged, not too large (review
+/// r2 N4).
+#[test]
+fn a_damaged_xlsx_picture_answers_damaged() {
+    let book = workbook_with_damaged_png(png(64, 32, 100));
+    let answer = book.ids(&["xl/drawings/drawing1.xml#0:0"]).unwrap();
+    let item = &answer["items"][0];
+    assert_eq!(
+        (&item["viewable"], &item["reason"], item.get("data")),
+        (
+            &json!(false),
+            &json!("damaged or unknown picture data"),
+            None
+        )
+    );
+}
+
+/// A chart whose categories name a two-dimensional range (a multi-level
+/// axis) keeps its values from the cells, its categories empty and the
+/// reason on the series (review r2 L2).
+#[test]
+fn a_chart_keeps_its_values_when_its_categories_do_not_read() {
+    let mut parts = ooxml_opc::unzip_parts(&workbook().base).unwrap();
+    for (path, part) in &mut parts {
+        if path == "xl/charts/chart1.xml" {
+            *part = String::from_utf8(std::mem::take(part))
+                .unwrap()
+                .replace("Data!$A$2:$A$21", "Data!$A$2:$B$21")
+                .into_bytes();
+        }
+    }
+    let book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let values: Vec<Value> = (0..20)
+        .filter(|idx| *idx != 5)
+        .map(|idx| {
+            let mut point = point(idx);
+            point[1] = Value::Null;
+            point
+        })
+        .collect();
+    let reason =
+        "its categories could not be read from the cells their reference names; read those cells";
+    // The eight positions past the twelve shown are counted.
+    let listed = &sheets(&book)[0]["objects"][3]["series"][0];
+    assert_eq!(
+        (
+            &listed["name"],
+            &listed["points"],
+            &listed["reason"],
+            &listed["more"]
+        ),
+        (
+            &json!("Revenue"),
+            &json!(values[..11]),
+            &json!(reason),
+            &json!(8)
+        )
+    );
+    let answer = book.ids(&["xl/drawings/drawing1.xml#2:chart"]).unwrap();
+    let series = &answer["items"][0]["series"][0];
+    assert_eq!(
+        (&series["points"], &series["reason"]),
+        (&json!(values), &json!(reason))
+    );
+}
+
+/// A picture's cell in the sheet list moves up when rows above it are
+/// deleted, onto the first row after them when its own row goes (review r2
+/// N5).
+#[test]
+fn a_picture_cell_moves_up_with_deleted_rows() {
+    let mut book = workbook();
+    book.state = apply_commands(
+        &book.base,
+        book.checkpoint(),
+        &[Command::DeleteRows {
+            sheet: "Data".into(),
+            at: 2,
+            count: 2,
+            expected: vec![
+                vec!["M0".into(), "0".into()],
+                vec!["M1".into(), "10".into()],
+            ],
+        }],
+    )
+    .unwrap()
+    .state;
+    let objects = &sheets(&book)[0]["objects"];
+    assert_eq!(
+        (&objects[0]["cell"], &objects[3]["cell"]),
+        (&json!("B2"), &json!("B9"))
     );
 }
 
