@@ -1228,21 +1228,23 @@ fn a_damaged_xlsx_picture_answers_damaged() {
     );
 }
 
+/// [`workbook`] with its chart part `edit`ed.
+fn workbook_with_chart(edit: impl Fn(&str) -> String) -> File {
+    let mut parts = ooxml_opc::unzip_parts(&workbook().base).unwrap();
+    for (path, part) in &mut parts {
+        if path == "xl/charts/chart1.xml" {
+            *part = edit(std::str::from_utf8(part).unwrap()).into_bytes();
+        }
+    }
+    File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap())
+}
+
 /// A chart whose categories name a two-dimensional range (a multi-level
 /// axis) keeps its values from the cells, its categories empty and the
 /// reason on the series (review r2 L2).
 #[test]
 fn a_chart_keeps_its_values_when_its_categories_do_not_read() {
-    let mut parts = ooxml_opc::unzip_parts(&workbook().base).unwrap();
-    for (path, part) in &mut parts {
-        if path == "xl/charts/chart1.xml" {
-            *part = String::from_utf8(std::mem::take(part))
-                .unwrap()
-                .replace("Data!$A$2:$A$21", "Data!$A$2:$B$21")
-                .into_bytes();
-        }
-    }
-    let book = File::new(Format::Xlsx, ooxml_opc::rezip_parts(&parts).unwrap());
+    let book = workbook_with_chart(|xml| xml.replace("Data!$A$2:$A$21", "Data!$A$2:$B$21"));
     let values: Vec<Value> = (0..20)
         .filter(|idx| *idx != 5)
         .map(|idx| {
@@ -1274,6 +1276,61 @@ fn a_chart_keeps_its_values_when_its_categories_do_not_read() {
     assert_eq!(
         (&series["points"], &series["reason"]),
         (&json!(values), &json!(reason))
+    );
+}
+
+/// A series whose categories are cells and whose values are a literal
+/// counts the categories' cells past those read, not their cache (review r3
+/// N2).
+#[test]
+fn a_literal_part_does_not_hide_the_cells_left_unread() {
+    let literal: String = (0..10)
+        .map(|idx| format!(r#"<c:pt idx="{idx}"><c:v>{}</c:v></c:pt>"#, idx * 10))
+        .collect();
+    let book = workbook_with_chart(|xml| {
+        let start = xml.find("<c:val>").unwrap();
+        let end = xml.find("</c:val>").unwrap() + "</c:val>".len();
+        format!(
+            r#"{}<c:val><c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="10"/>{literal}</c:numLit></c:val>{}"#,
+            &xml[..start],
+            &xml[end..]
+        )
+    });
+    let points: Vec<Value> = (0_u32..12)
+        .map(|idx| {
+            let value = if idx < 10 {
+                json!(f64::from(idx * 10))
+            } else {
+                Value::Null
+            };
+            json!([idx, format!("M{idx}"), value])
+        })
+        .collect();
+    let listed = &sheets(&book)[0]["objects"][3]["series"][0];
+    assert_eq!(
+        (&listed["points"], &listed["more"]),
+        (&json!(points), &json!(8))
+    );
+}
+
+/// A series whose name and values both do not read names both in its
+/// reason (review r3 N5).
+#[test]
+fn a_series_without_its_name_and_values_says_so() {
+    let book = workbook_with_chart(|xml| {
+        xml.replace("Data!$B$1", "Data!$B$1:$C$2")
+            .replace("Data!$B$2:$B$21", "Data!$B$2:$C$21")
+    });
+    let listed = &sheets(&book)[0]["objects"][3]["series"][0];
+    assert_eq!(
+        (listed.get("name"), &listed["points"], &listed["reason"]),
+        (
+            None,
+            &json!([]),
+            &json!(
+                "its name and points could not be read from the cells their references name; read those cells"
+            )
+        )
     );
 }
 

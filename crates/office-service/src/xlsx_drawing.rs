@@ -490,9 +490,11 @@ fn read_cells(series: &mut objects::Series, model: &WorkbookModel, owner: &str, 
         Some(None) => {
             series.points.clear();
             series.count = None;
-            series.reason = Some(
-                "its points could not be read from the cells its references name; read those cells",
-            );
+            series.reason = Some(if name_read {
+                "its points could not be read from the cells its references name; read those cells"
+            } else {
+                "its name and points could not be read from the cells their references name; read those cells"
+            });
             return;
         }
         read => read.flatten(),
@@ -524,14 +526,17 @@ fn read_cells(series: &mut objects::Series, model: &WorkbookModel, owner: &str, 
         .collect();
     let read = |cells: &Option<Cells>| cells.as_ref().map_or(0, |(cells, _)| cells.len());
     let named = |cells: &Option<Cells>| cells.as_ref().map_or(0, |(_, named)| *named);
-    // The literal's positions count only where it gives a part: a cache's
-    // longer run past the cells read would hide the positions left unread.
-    let from_literal = categories.is_none() || values.is_none();
+    // A literal idx counts only where it gives the part no reference reads:
+    // a referenced part's cache past the cells read would hide the positions
+    // left unread (review r3 N2).
     let positions = read(&categories).max(read(&values)).max(
         literal
-            .keys()
-            .filter(|_| from_literal)
-            .map(|idx| *idx as usize + 1)
+            .iter()
+            .filter(|(_, (category, value))| {
+                (categories.is_none() && category.is_some())
+                    || (values.is_none() && value.is_some())
+            })
+            .map(|(idx, _)| *idx as usize + 1)
             .max()
             .unwrap_or(0),
     );

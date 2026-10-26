@@ -20,6 +20,7 @@ use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 use serde_json::{Value, json};
 
 use crate::error::{EditCode, Error, Result};
+use crate::limits::InspectIds;
 
 /// Characters of alt text, and of a drawing's text, a read shows.
 pub(crate) const MAX_TEXT_CHARS: usize = 1_000;
@@ -79,25 +80,14 @@ pub(crate) struct Head {
 
 impl Head {
     /// The header at the start of `bytes`, of `len` stored bytes in all
-    /// (`part` names the format its bytes do not tell). As the upload check
-    /// refuses them (Q286, Q381, Q384), a picture past limits.json's
-    /// `pictureSide` on its long side, or whose header gives no size, is not
-    /// viewable, so the AI process never decodes one it could not measure.
+    /// (`part` names the format its bytes do not tell); [`Picture::seen`]
+    /// judges the size it gives.
     pub(crate) fn of(bytes: &[u8], len: usize, part: &str) -> Self {
         count_read();
-        // The table is built in; were it unreadable no side would pass.
-        let side = crate::limits::inspect_ids().map_or(0, |limits| limits.picture_side);
-        let seen =
-            raster(bytes, part)
-                .map_err(str::to_owned)
-                .and_then(|(mime, pixels)| match pixels {
-                    Some([width, height]) if width.max(height) > side => Err(format!(
-                        "{width} by {height} pixels, over the {side} pixels a side the app takes"
-                    )),
-                    Some(_) => Ok((mime, pixels)),
-                    None => Err("its size cannot be read".to_owned()),
-                });
-        Self { seen, len }
+        Self {
+            seen: raster(bytes, part).map_err(str::to_owned),
+            len,
+        }
     }
 
     /// A data URL's header, read from the start of its base64 alone.
@@ -293,15 +283,26 @@ fn jpeg_size(bytes: &[u8]) -> Option<[u32; 2]> {
 impl Picture<'_> {
     /// Its type and pixel size when one answer can carry it to the model,
     /// else why not.
-    fn seen(
-        &self,
-        answer_bytes: usize,
-    ) -> std::result::Result<(&'static str, Option<[u32; 2]>), String> {
-        let seen = self.head.seen.clone()?;
-        if encoded_len(self.head.len) + ITEM_RESERVE > answer_bytes {
-            return Err(too_large(answer_bytes));
+    /// Its type and pixel size when the model can see it, else why not. As
+    /// the upload check refuses them (Q286, Q381, Q384, Q388), a picture
+    /// whose header gives no size or a side of 0, or whose long side is past
+    /// limits.json's `pictureSide`, is not viewable, so the AI process never
+    /// decodes one it could not measure; nor is one past the answer's bytes.
+    fn seen(&self, limits: &InspectIds) -> std::result::Result<(&'static str, [u32; 2]), String> {
+        let (mime, pixels) = self.head.seen.clone()?;
+        let [width, height] = pixels
+            .filter(|pixels| !pixels.contains(&0))
+            .ok_or_else(|| "its size cannot be read".to_owned())?;
+        let side = limits.picture_side;
+        if width.max(height) > side {
+            return Err(format!(
+                "{width} by {height} pixels, over the {side} pixels a side the app takes"
+            ));
         }
-        Ok(seen)
+        if encoded_len(self.head.len) + ITEM_RESERVE > limits.answer_bytes {
+            return Err(too_large(limits.answer_bytes));
+        }
+        Ok((mime, [width, height]))
     }
 
     /// Its stored bytes, decoded when a data URL holds them.
@@ -325,11 +326,11 @@ impl Picture<'_> {
         if let Some(id) = &self.id {
             line["id"] = json!(id);
         }
-        self.describe(&mut line, limits.answer_bytes);
+        self.describe(&mut line, &limits);
         Ok(line)
     }
 
-    fn describe(&self, line: &mut Value, answer_bytes: usize) {
+    fn describe(&self, line: &mut Value, limits: &InspectIds) {
         if let Some(alt) = self
             .alt
             .as_deref()
@@ -337,12 +338,10 @@ impl Picture<'_> {
         {
             line["alt"] = json!(alt);
         }
-        match self.seen(answer_bytes) {
+        match self.seen(limits) {
             Ok((_, pixels)) => {
                 line["viewable"] = json!(true);
-                if let Some(pixels) = pixels {
-                    line["pixels"] = json!(pixels);
-                }
+                line["pixels"] = json!(pixels);
                 if self.crop.iter().any(|side| *side != 0.0) {
                     let side = |value: f64| (value * 10_000.0).round() / 10_000.0;
                     line["crop"] = json!({
@@ -777,9 +776,9 @@ pub(crate) fn answer(
         match found {
             Found::Picture(picture) => {
                 item["kind"] = json!("picture");
-                picture.describe(&mut item, budget);
+                picture.describe(&mut item, &limits);
                 let mut cost = size(&item).map_err(Error::engine)?;
-                let seen = picture.seen(budget).ok();
+                let seen = picture.seen(&limits).ok();
                 if let Some((mime, _)) = seen {
                     item["mimeType"] = json!(mime);
                     cost += r#","mimeType":"","data":"""#.len()
@@ -979,10 +978,10 @@ mod tests {
         );
     }
 
-    /// Security regression (Epo 2026-10-26, Q384; review r2 L1): a GIF is
-    /// measured by its first frame where that runs past its logical screen,
-    /// and a picture whose header gives no size is not viewable, as the
-    /// upload check refuses both.
+    /// Security regression (Epo 2026-10-26, Q384, Q388; review r2 L1, r3
+    /// N4): a GIF is measured by its first frame where that runs past its
+    /// logical screen, and a picture whose header gives no size, or a width
+    /// of 0, is not viewable, as the upload check refuses them.
     #[test]
     fn a_gif_frame_past_its_screen_and_an_unmeasured_picture_are_not_viewable() {
         // A 10 by 10 screen, a graphic control extension, then a frame at
@@ -995,6 +994,7 @@ mod tests {
             vec![
                 ("g".into(), picture(gif)),
                 ("t".into(), picture(png(1, 1)[..18].to_vec())),
+                ("z".into(), picture(png(0, 16))),
             ],
             &[],
             &[],
@@ -1016,10 +1016,12 @@ mod tests {
                 false
             )
         );
-        assert_eq!(
-            refused(1),
-            (json!(false), json!("its size cannot be read"), false)
-        );
+        for at in [1, 2] {
+            assert_eq!(
+                refused(at),
+                (json!(false), json!("its size cannot be read"), false)
+            );
+        }
     }
 
     /// Security regression (review r1 L4): ids the notice names are

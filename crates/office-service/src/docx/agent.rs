@@ -742,7 +742,7 @@ struct CellMark {
 struct Walk<'a> {
     session: &'a DocxSession,
     /// The page's media and parts, each read once.
-    objects: ObjectParts,
+    objects: ObjectParts<'a>,
     doc: &'a EditingDoc,
     lists: Lists,
     /// The file's default paragraph style, which the read does not name.
@@ -2006,10 +2006,28 @@ fn parse_object_id(id: &str) -> Option<(&'static str, ID)> {
 /// One read's media and parts: each picture's header and each chart part
 /// read once however many objects name it (review r1 M3).
 #[derive(Default)]
-pub(crate) struct ObjectParts {
+pub(crate) struct ObjectParts<'a> {
     parts: crate::objects::Parts,
     /// The package's media data URLs by part, gathered on first use.
     media: Option<HashMap<String, Rc<str>>>,
+    /// The base package, opened on the first chart part read (`None` inside
+    /// when it does not open), so a read opens it once (review r3 L1).
+    package: Option<Option<ooxml_opc::Package<'a>>>,
+}
+
+impl<'a> ObjectParts<'a> {
+    /// Chart part `path` of `base`, read once a read.
+    fn chart(&mut self, base: &'a [u8], path: &str) -> Option<Rc<crate::objects::Chart>> {
+        let package = &mut self.package;
+        self.parts.chart(path, || {
+            package
+                .get_or_insert_with(|| ooxml_opc::Package::open(base).ok())
+                .as_mut()?
+                .read(path, 32 << 20)
+                .ok()
+                .flatten()
+        })
+    }
 }
 
 impl DocxSession {
@@ -2050,7 +2068,7 @@ impl DocxSession {
     /// (`media:<part>`), its own data URL, or none for a linked one. Only the
     /// header is read here; the bytes are decoded when a by-id read sends
     /// them.
-    fn picture_head(&self, src: &str, cache: &mut ObjectParts) -> (Head, Stored<'static>) {
+    fn picture_head(&self, src: &str, cache: &mut ObjectParts<'_>) -> (Head, Stored<'static>) {
         if src.is_empty() {
             return (Head::linked(), Stored::Nothing);
         }
@@ -2085,21 +2103,16 @@ impl DocxSession {
     }
 
     /// What a read finds of a picture or chart object.
-    fn object_found(
-        &self,
+    fn object_found<'s>(
+        &'s self,
         story: &str,
         object: &Object,
-        cache: &mut ObjectParts,
+        cache: &mut ObjectParts<'s>,
     ) -> Option<Found<'static>> {
         let id = object_id(story, object)?;
         if object.kind == "chart" {
-            let chart = any_str(&object.payload, "path").and_then(|path| {
-                cache.parts.chart(path, || {
-                    ooxml_opc::read_part(&self.base, path, 32 << 20)
-                        .ok()
-                        .flatten()
-                })
-            });
+            let chart =
+                any_str(&object.payload, "path").and_then(|path| cache.chart(&self.base, path));
             return Some(Found::Chart(chart));
         }
         let (head, stored) =
@@ -2124,11 +2137,11 @@ impl DocxSession {
 
     /// A paragraph's objects as its read lists them, at most
     /// [`crate::objects::MAX_LISTED`], and how many more it holds.
-    fn object_lines(
-        &self,
+    fn object_lines<'s>(
+        &'s self,
         story: &str,
         para: &Para,
-        cache: &mut ObjectParts,
+        cache: &mut ObjectParts<'s>,
     ) -> Result<(Vec<Value>, usize)> {
         let objects = self.objects(para);
         let more = objects.len().saturating_sub(crate::objects::MAX_LISTED);
@@ -2185,12 +2198,12 @@ impl DocxSession {
         crate::objects::answer(answered, &missing, &past)
     }
 
-    fn object_by_item(
-        &self,
+    fn object_by_item<'s>(
+        &'s self,
         id: &str,
         kind: &str,
         item: ID,
-        cache: &mut ObjectParts,
+        cache: &mut ObjectParts<'s>,
     ) -> std::result::Result<Found<'static>, String> {
         let gone = || "is no longer in the document".to_owned();
         let story = id
@@ -2223,10 +2236,10 @@ impl DocxSession {
     }
 
     /// A paragraph id named in place of its one picture or chart.
-    fn object_of_paragraph(
-        &self,
+    fn object_of_paragraph<'s>(
+        &'s self,
         id: &str,
-        cache: &mut ObjectParts,
+        cache: &mut ObjectParts<'s>,
     ) -> std::result::Result<Found<'static>, String> {
         let malformed = || crate::objects::malformed(&self.object_example());
         let Ok((story, index, paras)) = self.find(id) else {

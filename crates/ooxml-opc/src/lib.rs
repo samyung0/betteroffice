@@ -121,16 +121,6 @@ pub fn unzip_parts_with_limits(
     Ok(parts)
 }
 
-/// One part's bytes, found by its path as OPC names parts (no leading slash,
-/// case-insensitive), without inflating the rest; `Ok(None)` when the
-/// package holds no such part. A part inflating past `max_bytes` is refused
-/// as a bomb is by [`unzip_parts`].
-pub fn read_part(data: &[u8], path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, String> {
-    Package::open(data)?
-        .read(path, max_bytes)
-        .map_err(|error| error.to_string())
-}
-
 /// Why [`Package::read`] answered no part.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PartError {
@@ -176,7 +166,10 @@ impl<'a> Package<'a> {
         Ok(Self { archive, names })
     }
 
-    /// A part's bytes, as [`read_part`] reads them.
+    /// One part's bytes, found by its path as OPC names parts (no leading
+    /// slash, case-insensitive), without inflating the rest; `Ok(None)` when
+    /// the package holds no such part. A part inflating past `max_bytes` is
+    /// refused as a bomb is by [`unzip_parts`].
     pub fn read(&mut self, path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, PartError> {
         let Some(&index) = normalized_security_path(path.trim_start_matches('/'))
             .and_then(|wanted| self.names.get(&wanted))
@@ -492,7 +485,7 @@ mod tests {
     /// its normalized name only, and never answers a traversal or drive name,
     /// requested or stored.
     #[test]
-    fn read_part_holds_its_budget_and_refuses_traversal_names() {
+    fn a_part_read_holds_its_budget_and_refuses_traversal_names() {
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut cursor);
@@ -524,12 +517,18 @@ mod tests {
         for at in places {
             zipped[at] ^= 0xff;
         }
-        let whole = read_part(&zipped, "word/media/ones.bin", 2 << 20).unwrap_err();
+        let read = |name: &str, max_bytes: u64| {
+            Package::open(&zipped)
+                .unwrap()
+                .read(name, max_bytes)
+                .map_err(|error| error.to_string())
+        };
+        let whole = read("word/media/ones.bin", 2 << 20).unwrap_err();
         assert!(whole.contains("checksum"), "{whole}");
-        let error = read_part(&zipped, "word/media/ones.bin", 1_000).unwrap_err();
+        let error = read("word/media/ones.bin", 1_000).unwrap_err();
         assert!(error.contains("inflates past 1000 bytes"), "{error}");
         assert_eq!(
-            read_part(&zipped, "/WORD/media/./zeros.bin", 1 << 20)
+            read("/WORD/media/./zeros.bin", 1 << 20)
                 .unwrap()
                 .map(|bytes| bytes.len()),
             Some(1 << 20)
@@ -540,7 +539,7 @@ mod tests {
             "C:/escape.xml",
             "word/missing.xml",
         ] {
-            assert_eq!(read_part(&zipped, name, 1 << 20).unwrap(), None, "{name}");
+            assert_eq!(read(name, 1 << 20).unwrap(), None, "{name}");
         }
     }
 
