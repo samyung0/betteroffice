@@ -3565,8 +3565,9 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
           {model ? (
-            // As PowerPoint's status-bar Notes button, over the slide area's corner.
-            <span style={styles.notesToggle}>
+            // As PowerPoint's status-bar Notes button, over the slide area's corner;
+            // with the strip under the slide, the left one, over the first thumbnail.
+            <span style={narrowLayout ? styles.narrowNotesToggle : styles.notesToggle}>
               <ToolbarButton
                 title={t('notes.toggle')}
                 active={speakerNotes}
@@ -4363,6 +4364,7 @@ const styles: Record<string, CSSProperties> = {
   },
   // Hosts move it left with --pptx-notes-toggle-right when their own chrome covers the corner.
   notesToggle: { position: 'absolute', right: 'var(--pptx-notes-toggle-right, 8px)', bottom: 8, zIndex: 5 },
+  narrowNotesToggle: { position: 'absolute', left: 8, bottom: 8, zIndex: 5 },
   notesPanel: {
     flex: '0 0 auto',
     display: 'flex',
