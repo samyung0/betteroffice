@@ -44,9 +44,9 @@ use crate::resolve_lines::utf16_len;
 use crate::section_breaks::resolve_page_margins;
 use crate::types::{
     BlockExtent, ChartBlock, ChartExtent, ChartFragment, Fragment, ImageBlock, ImageExtent,
-    ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphFragment, Run, SectionBreakType, ShapeBlock, ShapeExtent,
-    ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
+    ImageFragment, ImageRunPosition, Input, Layout, LayoutBlock, MeasuredBlock, Page,
+    ParagraphBlock, ParagraphExtent, ParagraphFragment, Run, SectionBreakType, ShapeBlock,
+    ShapeExtent, ShapeFragment, Size, TextBoxBlock, TextBoxExtent, TextBoxFragment,
 };
 
 /// Default page size (US Letter in pixels at 96 DPI).
@@ -246,6 +246,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
         options.body_break_type,
     )?;
     plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
+    plan.continuous_flow = options.continuous_flow;
 
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
@@ -279,10 +280,14 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     }
 
     let page_count = paginator.pages.len();
+    let mut pages = paginator.pages;
+    if options.continuous_flow {
+        end_pages_at_their_content(&mut pages);
+    }
     Ok(CheckpointedLayout {
         layout: Layout {
             page_size,
-            pages: paginator.pages,
+            pages,
             columns: options.columns.clone(),
             headers: None,
             footers: None,
@@ -342,6 +347,7 @@ pub fn layout_document_incremental(
         options.body_break_type,
     )?;
     plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
+    plan.continuous_flow = options.continuous_flow;
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
     let resume = previous_checkpoints
         .iter()
@@ -414,6 +420,9 @@ pub fn layout_document_incremental(
         );
     }
 
+    if options.continuous_flow {
+        end_pages_at_their_content(&mut pages);
+    }
     Ok(CheckpointedLayout {
         layout: Layout {
             page_size,
@@ -428,6 +437,30 @@ pub fn layout_document_incremental(
         rebuilt_page_start: resume.page_index,
         rebuilt_page_end,
     })
+}
+
+/// In a continuous flow pages abut, so each ends where its flowed content
+/// does: what did not fit at the foot of one leaves no gap. A page holding
+/// footnotes keeps its height, as its notes sit at its foot.
+fn end_pages_at_their_content(pages: &mut [Page]) {
+    for page in pages {
+        if page
+            .footnote_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty())
+        {
+            continue;
+        }
+        let bottom = page
+            .fragments
+            .iter()
+            .filter_map(Fragment::flow_box)
+            .map(|(y, height, _)| y + height)
+            .fold(0.0, f64::max);
+        if bottom > 0.0 {
+            page.size.h = (bottom + page.margins.bottom).ceil().min(page.size.h);
+        }
+    }
 }
 
 struct PlacementOutcome {
@@ -513,7 +546,7 @@ fn place(
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore forces a fresh page and keeps the paragraph's
         // space-before net of the previous space-after
-        if hooks::breaks_before_block(&mb.block)? {
+        if !plan.continuous_flow && hooks::breaks_before_block(&mb.block)? {
             paginator.force_authored_page_break(true);
         }
 
@@ -599,7 +632,9 @@ fn place(
             }
 
             LayoutBlock::PageBreak(block) => {
-                paginator.force_authored_page_break(block.keeps_leading_spacing == Some(true));
+                if !plan.continuous_flow {
+                    paginator.force_authored_page_break(block.keeps_leading_spacing == Some(true));
+                }
             }
 
             LayoutBlock::ColumnBreak(_) => {
@@ -609,7 +644,11 @@ fn place(
             LayoutBlock::SectionBreak(block) => {
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
-                let next_type = break_type_after_section(plan, section_idx);
+                let next_type = if plan.continuous_flow {
+                    Some(SectionBreakType::Continuous)
+                } else {
+                    break_type_after_section(plan, section_idx)
+                };
                 let restart = plan
                     .section_page_restarts
                     .get(section_idx + 1)

@@ -1956,6 +1956,9 @@ pub struct LayoutOptions {
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+    /// Authored page breaks, page-break-before and new-page section breaks
+    /// start no page: a reading layout's text flows on.
+    pub continuous_flow: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

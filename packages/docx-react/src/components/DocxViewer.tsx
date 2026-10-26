@@ -32,6 +32,8 @@ export interface DocxDisplayListViewerProps {
   /** A two-finger pinch zooms the pages; the level goes to `onZoomChange`. */
   pinchZoom?: boolean;
   onZoomChange?: (zoom: number) => void;
+  /** Pages abut with no gap, padding or shadow, as a reading layout's do. */
+  flush?: boolean;
 }
 
 /**
@@ -43,6 +45,7 @@ export function DocxDisplayListViewer({
   zoom = 1,
   pinchZoom = false,
   onZoomChange,
+  flush = false,
 }: DocxDisplayListViewerProps) {
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -70,6 +73,7 @@ export function DocxDisplayListViewer({
   return (
     <CanvasPagesView
       displayList={displayList}
+      flush={flush}
       glyphOutlineProvider={false}
       hostRef={hostRef}
       interactive={false}

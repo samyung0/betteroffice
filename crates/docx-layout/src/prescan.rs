@@ -70,6 +70,8 @@ pub struct LayoutPlan {
     pub section_page_restarts: Vec<Option<SectionPageRestart>>,
     /// Keep-with-next groups keyed by head, plus their interior-member set.
     pub keep_with_next: KeepWithNextScan,
+    /// See `LayoutOptions::continuous_flow`.
+    pub continuous_flow: bool,
 }
 
 /// Gathers pagination look-ahead into one plan.
@@ -96,5 +98,6 @@ pub fn prescan(
         section_break_types,
         section_page_restarts: Vec::new(),
         keep_with_next,
+        continuous_flow: false,
     })
 }

@@ -92,6 +92,80 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Lowers for a reading layout; `None` lowers as authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading: Option<ReadingEnv>,
+}
+
+/// A reading layout (text reflowed into one narrow column): sizes eased around
+/// the body, halved indents, one column, tables and pictures fitted to it.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingEnv {
+    /// The document's body size in pt, which reads at `text_size`.
+    pub body_size: f64,
+    pub text_size: f64,
+    /// The column's content width in px.
+    pub content_width: f64,
+}
+
+const READING_INDENT_SCALE: f64 = 0.5;
+/// `w:tblW` as a percentage is in fiftieths: 100%.
+const FULL_WIDTH_PCT: f64 = 5000.0;
+/// The smallest size, as a share of the reading size.
+const READING_MIN_SIZE: f64 = 0.875;
+
+impl ReadingEnv {
+    /// Sizes above the body grow by the square root of their ratio to it.
+    pub fn font_size(&self, size: f64) -> f64 {
+        if !(self.body_size > 0.0 && size > 0.0) {
+            return size;
+        }
+        let ratio = size / self.body_size;
+        let eased = if ratio > 1.0 {
+            ratio.sqrt()
+        } else {
+            ratio.max(READING_MIN_SIZE)
+        };
+        self.text_size * eased
+    }
+
+    fn run(&self, formatting: &mut RunFormatting) {
+        formatting.font_size = formatting.font_size.map(|size| self.font_size(size));
+        formatting.font_size_cs = formatting.font_size_cs.map(|size| self.font_size(size));
+    }
+
+    fn paragraph(&self, attrs: &mut ParagraphAttrs) {
+        attrs.default_font_size = attrs.default_font_size.map(|size| self.font_size(size));
+        attrs.list_marker_font_size = attrs.list_marker_font_size.map(|size| self.font_size(size));
+        if let Some(indent) = attrs.indent.as_mut() {
+            for value in [
+                &mut indent.left,
+                &mut indent.right,
+                &mut indent.first_line,
+                &mut indent.hanging,
+            ] {
+                *value = value.map(|px| px * READING_INDENT_SCALE);
+            }
+        }
+        for tab in attrs.tabs.iter_mut().flatten() {
+            tab.pos *= READING_INDENT_SCALE;
+        }
+        attrs.default_tab_stop_twips = attrs
+            .default_tab_stop_twips
+            .map(|twips| twips * READING_INDENT_SCALE);
+    }
+
+    /// Images keep their aspect ratio within the column.
+    fn fit(&self, width: f64, height: f64) -> (f64, f64) {
+        if width <= self.content_width || width <= 0.0 {
+            return (width, height);
+        }
+        (
+            self.content_width,
+            (height * self.content_width / width).round(),
+        )
+    }
 }
 
 impl RenderEnv {
@@ -647,7 +721,12 @@ fn lower_story<T: ReadTxn>(
                     hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
-                    let section_break = section_break_block(&values, &mut section_margins);
+                    let mut section_break = section_break_block(&values, &mut section_margins);
+                    if env.reading.is_some()
+                        && let Some(section_break) = section_break.as_mut()
+                    {
+                        section_break.columns = None;
+                    }
                     if let (Some(list_state), Some(paragraphs)) = (list_before, paragraphs.as_mut())
                         && single
                         && pushed
@@ -1558,6 +1637,10 @@ fn lower_table<T: ReadTxn>(
         .and_then(|margins| map_number(margins, "left"))
         .map(twips_to_pixels)
         .filter(|value| value.is_finite() && *value > 0.0);
+    // A table wider than a reading column scales its grid to the column.
+    let fitted = env.reading.is_some_and(|reading| {
+        column_widths.iter().sum::<f64>() + indent.unwrap_or(0.0) > reading.content_width
+    });
 
     Ok((
         TableBlock {
@@ -1566,8 +1649,16 @@ fn lower_table<T: ReadTxn>(
             rows,
             column_widths: (!column_widths.is_empty()).then_some(column_widths),
             grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
+            width: if fitted {
+                Some(FULL_WIDTH_PCT)
+            } else {
+                map_number(tbl_pr, "width")
+            },
+            width_type: if fitted {
+                Some("pct".to_owned())
+            } else {
+                map_string(tbl_pr, "widthType")
+            },
             preferred_width: None,
             // `w:tblLayout` reaches the content-fit and no-wrap passes; the
             // column algorithm stays the grid ("legacy") one.
@@ -1577,7 +1668,7 @@ fn lower_table<T: ReadTxn>(
             background: None,
             justification: map_string(tbl_pr, "justification"),
             bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
+            indent: indent.filter(|_| !fitted),
             floating,
             compatibility_mode,
             cell_margin_left,
@@ -1635,6 +1726,10 @@ fn attrs_from_any(value: Option<&Any>) -> Attrs {
 }
 
 fn constrain_to_page(width: f64, height: f64, env: &RenderEnv) -> (f64, f64) {
+    let (width, height) = match &env.reading {
+        Some(reading) => reading.fit(width, height),
+        None => (width, height),
+    };
     let Some(limit) = env.page_content_height.filter(|limit| *limit > 0.0) else {
         return (width, height);
     };
@@ -1717,7 +1812,7 @@ fn lower_image_values(
             serde_json::from_value::<ImageRunPosition>(value).ok()
         });
 
-    ImageRun {
+    let mut image = ImageRun {
         src: map_string(values, "src").unwrap_or_default(),
         width,
         height,
@@ -1758,7 +1853,16 @@ fn lower_image_values(
         change_revision_id: formatting.change_revision_id,
         pm_start: None,
         pm_end: None,
+    };
+    // A reading column has no room to wrap around a picture: it goes in line.
+    // One in front of or behind the text stays where it is.
+    if env.reading.is_some() && !matches!(image.wrap_type.as_deref(), Some("behind" | "inFront")) {
+        image.position = None;
+        image.wrap_type = None;
+        image.css_float = None;
+        image.display_mode = Some("inline".to_owned());
     }
+    image
 }
 
 fn lower_image_run<T: ReadTxn>(
@@ -2837,9 +2941,15 @@ fn flush_paragraph(
         if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
+        if let Some(reading) = &env.reading {
+            reading.run(&mut run.formatting);
+        }
     }
     let raw_runs = coalesce_runs(raw_runs);
     let mut attrs = lower_paragraph_attrs(values, pilcrow_attributes, env, list_state);
+    if let Some(reading) = &env.reading {
+        reading.paragraph(&mut attrs);
+    }
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();
