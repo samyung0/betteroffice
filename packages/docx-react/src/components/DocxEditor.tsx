@@ -1417,6 +1417,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const {
     findResultRef,
+    handleClose: handleFindClose,
     handleFind,
     handleFindNext,
     handleFindPrevious,
@@ -2251,6 +2252,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           <DocxEditorDialogs
             findReplace={findReplace}
             findResultRef={findResultRef}
+            onFindClose={handleFindClose}
             onFind={handleFind}
             onFindNext={handleFindNext}
             onFindPrevious={handleFindPrevious}
