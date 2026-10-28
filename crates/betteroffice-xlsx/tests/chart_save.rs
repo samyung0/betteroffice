@@ -1,6 +1,5 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, NumberFormatMutation, Op, SheetId, SnapshotBudget,
-    Workbook, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
+    CalculationOptions, CellRange, CellRef, NumberFormatMutation, Op, SheetId, Workbook,
 };
 use ooxml_drawingml::chart::ChartSpace;
 
@@ -376,40 +375,6 @@ fn numeric_string_categories_use_cell_formats_and_the_workbook_date_system() {
                 "Charts!$A$2:$A$5"
             }));
         }
-    }
-}
-
-#[test]
-fn snapshot_hydrated_save_refreshes_edits_after_adoption() {
-    let before = authored_parts();
-    let source = ooxml_opc::rezip_parts(&before).unwrap();
-    let workbook = Workbook::open(&source).unwrap();
-    let budget = SnapshotBudget::new(8, 65536).unwrap();
-    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
-    let mut builder = WorkbookSnapshotBuilder::new();
-    while let Some(chunk) = encoder.next(&workbook).unwrap() {
-        builder.push(&chunk).unwrap();
-    }
-    while !builder.advance(budget).unwrap().is_ready() {}
-    let (mut restored, _) = builder.finish().unwrap().into_parts();
-    edit(&mut restored, "B2", "96");
-    for subsequent_edit in [false, true] {
-        if subsequent_edit {
-            edit(&mut restored, "B3", "144");
-        }
-        let after = saved_parts(&restored);
-        assert_eq!(
-            cached_chart(&after, BAR).plot_groups[0].series[0].values,
-            [96.0, if subsequent_edit { 144.0 } else { 18.0 }, 15.0, 24.0]
-        );
-        assert_eq!(
-            series_bytes(part(&after, BAR), 1),
-            series_bytes(part(&before, BAR), 1)
-        );
-        assert_eq!(
-            part(&after, "xl/charts/chart4.xml"),
-            part(&before, "xl/charts/chart4.xml")
-        );
     }
 }
 

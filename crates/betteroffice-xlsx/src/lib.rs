@@ -13,6 +13,7 @@ pub use types::{
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
     TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
+pub use workbook::selection::{SelectionData, SelectionDirection, SelectionRegion};
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, EDITED_CELL_UPDATE_BYTES, MAX_COLLABORATION_BYTES,
     MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_DISPLAY_CELLS,
@@ -31,6 +32,7 @@ pub use xlsx_ops::{
     NumberFormatMutation, Op, Proposal, ProposedEdit, Provenance, StylePatch, StyleProperty,
     TextWrapping, Transaction, VerticalAlignment,
 };
+pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
     HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,

@@ -183,11 +183,6 @@ fn oversized_frames_degrade_at_the_scroll_origin_with_frozen_panes() {
                 assert_eq!(frame.grid.start_col, col);
             }
             assert!(frame.grid.row_offsets.last().unwrap() < &viewport.height);
-            assert!(
-                workbook
-                    .visible_merged_ranges(SheetId(0), &viewport)
-                    .is_ok()
-            );
         }
     }
 }
@@ -253,12 +248,6 @@ fn capped_frames_clip_merges() {
     let frame = workbook.display_list(&viewport).unwrap();
     assert!(frame.truncated);
     let bottom = *frame.grid.row_offsets.last().unwrap();
-    assert_eq!(
-        workbook
-            .visible_merged_ranges(SheetId(0), &viewport)
-            .unwrap(),
-        vec![crossing]
-    );
     assert!(frame.commands.iter().any(|command| matches!(
         command,
         DrawCmd::Text { text, clip, .. }

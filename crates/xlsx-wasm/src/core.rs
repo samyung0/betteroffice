@@ -116,10 +116,14 @@ struct EditBatchArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CellEditInput {
     row: u32,
     col: u32,
     input: String,
+    /// where a pasted formula was copied from: its relative references shift
+    /// by the distance to this cell, as Excel pastes them.
+    copy_from: Option<CellRef>,
 }
 
 #[derive(Deserialize)]
@@ -132,6 +136,14 @@ struct CellArgs {
     sheet: u32,
     row: u32,
     col: u32,
+}
+
+#[derive(Deserialize)]
+struct SelectionDataArgs {
+    sheet: u32,
+    row: u32,
+    col: u32,
+    direction: Option<betteroffice_xlsx::SelectionDirection>,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +257,8 @@ struct DisplayListProfile {
 #[serde(rename_all = "camelCase")]
 struct CalculationStatus {
     limited_cells: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    budget_exhausted: bool,
 }
 
 #[derive(Serialize)]
@@ -584,8 +598,10 @@ impl Session {
     }
 
     pub fn calculation_status_json(&self) -> Result<String, String> {
+        let calculation = self.workbook.last_calculation();
         serde_json::to_string(&CalculationStatus {
-            limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),
+            limited_cells: self.changed_list(&calculation.limited_cells),
+            budget_exhausted: calculation.budget_exhausted,
         })
         .map_err(|error| error.to_string())
     }
@@ -647,11 +663,24 @@ impl Session {
         let edits = args
             .edits
             .into_iter()
-            .map(|edit| WorkbookCellInput {
-                cell: CellRef::new(edit.row, edit.col),
-                input: edit.input,
+            .map(|edit| {
+                let cell = CellRef::new(edit.row, edit.col);
+                let input = match (edit.copy_from, edit.input.strip_prefix('=')) {
+                    (Some(origin), Some(formula)) => {
+                        if origin.row >= betteroffice_xlsx::MAX_ROWS
+                            || origin.col >= betteroffice_xlsx::MAX_COLS
+                        {
+                            return Err("bad edit args: copy origin is outside the grid".to_owned());
+                        }
+                        let formula = betteroffice_xlsx::translate_formula(formula, origin, cell)
+                            .map_err(|_| "formula exceeds the length limit".to_owned())?;
+                        format!("={formula}")
+                    }
+                    _ => edit.input,
+                };
+                Ok(WorkbookCellInput { cell, input })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let result = self
             .workbook
             .edit_cells(SheetId(args.sheet), &edits, calculation_options(now_serial))
@@ -896,6 +925,23 @@ impl Session {
         self.edit_result(result)
     }
 
+    /// What keyboard navigation from a cell reaches: the data edge in a
+    /// direction, the last data cell of its row, the used range, or the current
+    /// region (no direction), and the merge it lands in.
+    pub fn selection_data_json(&self, args: &str) -> Result<String, String> {
+        let args: SelectionDataArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad selection args: {error}"))?;
+        let data = self
+            .workbook
+            .selection_data(
+                SheetId(args.sheet),
+                CellRef::new(args.row, args.col),
+                args.direction,
+            )
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&data).map_err(|error| error.to_string())
+    }
+
     pub fn merged_ranges_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
@@ -1058,6 +1104,99 @@ mod tests {
             .iter()
             .find(|command| command["op"] == "text" && command["text"] == text)
             .unwrap()
+    }
+
+    /// upstream #1520: a pasted formula's relative references shift from the
+    /// cell it was copied from, and the whole paste undoes as one step.
+    #[test]
+    fn copied_cell_inputs_rebase_only_internal_formulas_and_undo_as_a_batch() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        session.edit_cells_json(
+            r#"{"sheet":0,"edits":[{"row":42,"col":3,"input":"=A1+$B$1+A$2+$B2","copyFrom":{"row":40,"col":3}},{"row":43,"col":3,"input":"=A1","copyFrom":{"row":40,"col":3}},{"row":42,"col":4,"input":"=A1"}]}"#,
+            None,
+        ).unwrap();
+        let input = |session: &Session, row, col| {
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(row, col))
+                .unwrap()
+                .input
+        };
+        for (row, col, expected) in [(42, 3, "=A3+$B$1+A$2+$B4"), (43, 3, "=A4"), (42, 4, "=A1")] {
+            assert_eq!(input(&session, row, col), expected);
+        }
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(input(&session, 42, 3), "");
+        assert!(
+            session
+                .edit_cells_json(
+                    r#"{"sheet":0,"edits":[{"row":0,"col":0,"input":"=A1","copyFrom":{"row":1048576,"col":0}}]}"#,
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selection_data_json_reads_the_model_without_changing_it() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let before = session.workbook.save().unwrap();
+        let data: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":0,"row":0,"col":1,"direction":"down"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data["edge"], serde_json::json!({ "row": 1, "col": 1 }));
+        let used: serde_json::Value = serde_json::from_str(
+            &session
+                .selection_data_json(r#"{"sheet":0,"row":0,"col":0,"direction":"usedRange"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            used["usedRange"],
+            serde_json::json!({ "top": 0, "left": 0, "bottom": 1, "right": 1 })
+        );
+        assert!(
+            session
+                .selection_data_json(r#"{"sheet":0,"row":1048576,"col":0}"#)
+                .is_err()
+        );
+        assert_eq!(session.workbook.save().unwrap(), before);
+    }
+
+    /// upstream #1658: the calculation status says when a recalculation ran
+    /// out of its budget, and only then.
+    #[test]
+    fn a_spent_recalculation_is_visible_on_the_wire() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        for row in 0..11 {
+            let edit = format!(
+                r#"{{"sheet":0,"row":{row},"col":21,"input":"=ROWS(SEQUENCE(1000000+U1))"}}"#
+            );
+            session.edit_cell_json(&edit, None).unwrap();
+        }
+        assert!(
+            !session
+                .calculation_status_json()
+                .unwrap()
+                .contains("budgetExhausted")
+        );
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":20,"input":"1"}"#, None)
+            .unwrap();
+        let status = session.calculation_status_json().unwrap();
+        assert!(status.contains(r#""budgetExhausted":true"#), "{status}");
+        session
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":22,"input":"1"}"#, None)
+            .unwrap();
+        assert_eq!(
+            session.calculation_status_json().unwrap(),
+            r#"{"limitedCells":[]}"#
+        );
     }
 
     fn sample_xlsx() -> Vec<u8> {

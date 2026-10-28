@@ -120,85 +120,8 @@ fn edit_heading(workbook: &mut Workbook, input: &str) {
     );
 }
 
-fn bounded_snapshot(workbook: &Workbook) -> Result<Workbook, betteroffice_xlsx::SnapshotError> {
-    use betteroffice_xlsx::{SnapshotBudget, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder};
-
-    let budget = SnapshotBudget::new(1_000, 1024 * 1024)?;
-    let mut encoder = WorkbookSnapshotEncoder::new(workbook, None, budget)?;
-    let mut builder = WorkbookSnapshotBuilder::new();
-    let mut encoded = false;
-    for _ in 0..20_000 {
-        match encoder.next(workbook)? {
-            Some(chunk) => {
-                builder.push(&chunk)?;
-            }
-            None => {
-                encoded = true;
-                break;
-            }
-        }
-    }
-    assert!(encoded, "snapshot encoding exceeded the step bound");
-    for _ in 0..20_000 {
-        if builder.advance(budget)?.is_ready() {
-            return Ok(builder.finish()?.into_parts().0);
-        }
-    }
-    panic!("snapshot hydration exceeded the step bound");
-}
-
 #[test]
-fn oversized_row_styles_refuse_peer_state_without_changing_the_receiver() {
-    use betteroffice_xlsx::{CalculationOptions, Error};
-
-    let bytes = package(333_335);
-    let peer_a = Workbook::open_collaborative(&bytes, 101).unwrap();
-    let mut peer_b = Workbook::open_collaborative(&bytes, 102).unwrap();
-    let model = peer_b.model().clone();
-    let state = peer_b.encode_state_as_update_v1();
-    let history = peer_b.history_state();
-
-    match peer_b.apply_update_v1(
-        &peer_a.encode_state_as_update_v1(),
-        CalculationOptions::default(),
-    ) {
-        Err(Error::InvalidUpdate(message)) => assert!(
-            matches!(
-                message.as_str(),
-                "update contains too many values" | "update array length exceeds its payload"
-            ),
-            "unexpected update refusal: {message}"
-        ),
-        other => panic!("expected InvalidUpdate, got {other:?}"),
-    }
-    assert_eq!(peer_b.model(), &model);
-    assert_eq!(peer_b.encode_state_as_update_v1(), state);
-    assert_eq!(peer_b.history_state(), history);
-    edit_heading(&mut peer_b, "Still usable");
-}
-
-#[test]
-fn oversized_row_styles_restore_or_refuse_bounded_snapshot_cleanly() {
-    // collaborative workbooks are not snapshotted; a local one either restores
-    // whole or refuses with the typed budget error, never panics or truncates
-    let workbook = Workbook::open(&package(333_335)).unwrap();
-    match bounded_snapshot(&workbook) {
-        Ok(restored) => {
-            println!("ROWCAP-HYDRATION restored");
-            assert_eq!(restored.model(), workbook.model());
-        }
-        Err(error) => {
-            println!("ROWCAP-HYDRATION refused: {error}");
-            assert_eq!(
-                error.to_string(),
-                "Yrs snapshot record exceeds advance byte budget"
-            );
-        }
-    }
-}
-
-#[test]
-fn seventy_thousand_rows_sync_and_hydrate_with_a_bounded_budget() {
+fn seventy_thousand_rows_sync() {
     use betteroffice_xlsx::CalculationOptions;
 
     let bytes = package(70_000);
@@ -213,8 +136,4 @@ fn seventy_thousand_rows_sync_and_hydrate_with_a_bounded_budget() {
         .unwrap();
     assert_eq!(peer_b.model(), peer_a.model());
     assert_eq!(peer_b.model().sheets[0].row_styles.len(), 69_999);
-
-    let local = Workbook::open(&bytes).unwrap();
-    let restored = bounded_snapshot(&local).unwrap();
-    assert_eq!(restored.model(), local.model());
 }

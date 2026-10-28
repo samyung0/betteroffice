@@ -1,6 +1,7 @@
 pub(crate) mod rebase;
 #[cfg(test)]
 mod remote_equivalence;
+pub mod selection;
 
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -21,13 +22,13 @@ use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
+    insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
-    chart_at_point, chart_regions_with_geometry, display_text, moved_chart_anchor,
-    resolve_chart_anchor,
+    chart_at_point, chart_regions_with_geometry, display_text, display_viewport_with_geometry,
+    moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -1455,9 +1456,12 @@ impl Workbook {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
-            Some(cell) => match &cell.formula {
+            Some(stored) => match &stored.formula {
                 Some(formula) => (format!("={formula}"), true),
-                None => (value_to_input(&cell.value), false),
+                None => (
+                    value_to_input(&self.model, sheet, cell, &stored.value),
+                    false,
+                ),
             },
             None => (String::new(), false),
         };
@@ -1748,7 +1752,7 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let state = edit_cell_state(&self.model, sheet, cell, input);
+        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
         if typed
             && state.formula.is_none()
             && input.starts_with('=')
@@ -1757,18 +1761,21 @@ impl Workbook {
             return Err(Error::UnparsedFormula);
         }
         validate_cell_state(&state)?;
-        if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
+        if format.is_none()
+            && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
+        {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
         self.ensure_graph();
         let exact = self.is_exact();
         let formula = state.formula.clone();
-        let ops = vec![Op::SetCell {
+        let mut ops = vec![Op::SetCell {
             sheet,
             at: cell,
             cell: state,
         }];
+        ops.extend(format);
         let respill = self.commit_user(&ops, None)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
@@ -1859,27 +1866,25 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let state = edit_cell_state(&preview, sheet, edit.cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
-            if cell_states_semantically_equal(&old, &state) {
+            if format.is_none() && cell_states_semantically_equal(&old, &state) {
                 continue;
             }
-            preview
-                .sheet_mut(sheet)
-                .expect("sheet validated")
-                .set_cell(edit.cell, state.clone().into());
             touched.push((sheet, edit.cell, state.formula.clone()));
-            per_op.push(vec![Op::SetCell {
-                sheet,
-                at: edit.cell,
-                cell: old,
-            }]);
-            ops.push(Op::SetCell {
+            let op = Op::SetCell {
                 sheet,
                 at: edit.cell,
                 cell: state,
-            });
+            };
+            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+            ops.push(op);
+            if let Some(format) = format {
+                per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
+                ops.push(format);
+            }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
@@ -2205,12 +2210,21 @@ impl Workbook {
         let mut preview = self.model.clone();
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
-            let state = edit_cell_state(&preview, edit.sheet, edit.cell, &edit.input);
+            let (state, format) = edit_cell_state(
+                &preview,
+                edit.sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             preview
                 .sheet_mut(edit.sheet)
                 .ok_or(Error::SheetOutOfRange(edit.sheet))?
                 .set_cell(edit.cell, state.into());
+            if let Some(format) = format {
+                xlsx_ops::apply_in_place(&mut preview, &format)?;
+            }
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
@@ -2292,7 +2306,8 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let state = edit_cell_state(&preview, sheet, cell, &edit.input);
+            let (state, format) =
+                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 preview
@@ -2305,6 +2320,10 @@ impl Workbook {
                     at: cell,
                     cell: state,
                 });
+            }
+            if let Some(format) = format {
+                xlsx_ops::apply_in_place(&mut preview, &format)?;
+                ops.push(format);
             }
             if let Some(format) = &edit.number_format {
                 apply_proposed_number_format(&mut preview, sheet, cell, format)?;
@@ -2391,14 +2410,6 @@ impl Workbook {
         {
             return Err(Error::InvalidViewport);
         }
-        let cells = (u64::from(range.end.row - range.start.row) + 2)
-            * (u64::from(range.end.col - range.start.col) + 2);
-        if cells > MAX_DISPLAY_CELLS {
-            return Err(Error::DisplayTooLarge {
-                cells,
-                max: MAX_DISPLAY_CELLS,
-            });
-        }
         let sheet_ref = self.sheet(sheet)?;
         let geometry = GridGeometry::for_print(sheet_ref, &self.model.styles, metrics);
         let viewport = Viewport {
@@ -2408,6 +2419,11 @@ impl Workbook {
             height: geometry.row_y(range.end.row + 1) - geometry.row_y(range.start.row),
         };
         validate_viewport(&viewport)?;
+        let (rows, columns) = geometry.viewport_range(&viewport);
+        validate_display_cells(
+            visible_count(rows, |rows| sheet_ref.hidden_row_spans(rows)),
+            visible_count(columns, |columns| sheet_ref.hidden_col_spans(columns)),
+        )?;
         let mut frame = build_print_display_list_with_charts(
             &self.model,
             sheet,
@@ -2432,8 +2448,8 @@ impl Workbook {
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
-        validate_display_region(sheet_ref, &geometry, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -2479,6 +2495,7 @@ impl Workbook {
             viewport,
             &ghosts,
             &geometry,
+            Some(MAX_DISPLAY_CELLS),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -2504,7 +2521,11 @@ impl Workbook {
         y: f32,
     ) -> Result<Option<ChartRegion>> {
         let geometry = self.sheet_geometry(sheet)?;
-        let regions = chart_regions_with_geometry(self.sheet(sheet)?, &geometry, viewport)?;
+        let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
+        let viewport =
+            display_viewport_with_geometry(sheet_ref, viewport, &geometry, MAX_DISPLAY_CELLS);
+        let regions = chart_regions_with_geometry(sheet_ref, &geometry, &viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -2573,6 +2594,8 @@ impl Workbook {
         let width = viewport.width.ceil().max(1.0) as u32;
         let height = viewport.height.ceil().max(1.0) as u32;
         validate_render_size(width, height)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(self.sheet(sheet)?, &geometry, viewport)?;
         let display_list = self.display_list_for(sheet, viewport)?;
         let bytes = xlsx_raster::render_png(&display_list).map_err(Error::Raster)?;
         Ok(RenderedPng {
@@ -3053,6 +3076,13 @@ impl Workbook {
                 | Op::RestoreRowDimension { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
+                | Op::SetHyperlink { sheet, .. }
+                | Op::RemoveHyperlink { sheet, .. }
+                | Op::SetAutoFilter { sheet, .. }
+                | Op::RestoreAutoFilter { sheet, .. }
+                | Op::AddConditionalFormat { sheet, .. }
+                | Op::RemoveConditionalFormat { sheet, .. }
+                | Op::SetConditionalFormats { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
                 | Op::RestoreRowStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
@@ -3091,7 +3121,11 @@ impl Workbook {
                     }
                     cache.extend_bounds(*at, self.active_sheet_freeze_pane());
                 }
-                Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
+                Op::SetCharts { .. }
+                | Op::SetChartAnchor { .. }
+                | Op::SetDefinedName { .. }
+                | Op::DeleteDefinedName { .. }
+                | Op::SetDefinedNames { .. } => {}
             }
         }
     }
@@ -3437,6 +3471,7 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .iter()
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
+        budget_exhausted: result.budget_exhausted,
     }
 }
 
@@ -3607,6 +3642,14 @@ fn parse_source(bytes: &[u8]) -> Result<xlsx_parse::ParsedWorkbook> {
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
+    // upstream #1704: a name table is bounded by bytes, not count.
+    if xlsx_model::workbook::defined_names_bytes(&model.defined_names)
+        > xlsx_model::workbook::MAX_DEFINED_NAME_BYTES
+    {
+        return Err(Error::InvalidOperation(
+            "defined name table exceeds the size limit".to_owned(),
+        ));
+    }
     validate_model_sheets(model)
 }
 
@@ -3833,6 +3876,13 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetHyperlink { sheet, .. }
+        | Op::RemoveHyperlink { sheet, .. }
+        | Op::SetAutoFilter { sheet, .. }
+        | Op::RestoreAutoFilter { sheet, .. }
+        | Op::AddConditionalFormat { sheet, .. }
+        | Op::RemoveConditionalFormat { sheet, .. }
+        | Op::SetConditionalFormats { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::SetColVisibility { sheet, .. }
         | Op::RestoreColDimension { sheet, .. }
@@ -3851,6 +3901,8 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::MoveSheet { .. }
         | Op::RenameSheet { .. }
         | Op::RestoreSheet { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. } => None,
     }
 }
@@ -3988,7 +4040,9 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         | Op::RestoreColStyles { .. }
         | Op::RestoreRowStyles { .. }
         | Op::RestoreColDimension { .. }
-        | Op::RestoreRowDimension { .. } => {
+        | Op::RestoreRowDimension { .. }
+        | Op::RestoreAutoFilter { .. }
+        | Op::SetConditionalFormats { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -3996,6 +4050,18 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetColVisibility { .. } | Op::SetRowVisibility { .. } | Op::MoveSheet { .. } => {
             return Err(Error::InvalidOperation(
                 "hiding rows or columns and moving sheets are not supported".to_string(),
+            ));
+        }
+        Op::SetHyperlink { .. }
+        | Op::RemoveHyperlink { .. }
+        | Op::SetAutoFilter { .. }
+        | Op::AddConditionalFormat { .. }
+        | Op::RemoveConditionalFormat { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. } => {
+            return Err(Error::InvalidOperation(
+                "hyperlink, filter, conditional format and defined name edits are not supported"
+                    .to_string(),
             ));
         }
     }
@@ -4417,27 +4483,47 @@ fn written_cell_style(
     }
 }
 
+/// The state typed `input` gives `cell`, and the number format a General cell
+/// takes from it (a typed date, time, percentage or currency, as Excel does).
 fn edit_cell_state(
     workbook: &WorkbookModel,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
-) -> CellState {
+    now_serial: Option<f64>,
+) -> (CellState, Option<Op>) {
     let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.effective_style(cell));
-    let mut state = if !input.is_empty() && text_formatted(workbook, style) {
-        CellState {
-            value: CellValue::Text {
-                value: input.strip_prefix('\'').unwrap_or(input).to_string(),
-            },
-            ..Default::default()
-        }
-    } else {
-        cell_state_for_input_no_eval(input)
-    };
+    let number_format = workbook
+        .styles
+        .resolved_format(Some(style.unwrap_or(0)))
+        .number_format;
+    let (parsed, inferred) =
+        xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
+    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
-    state
+    let format = inferred.map(|id| {
+        let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
+        format.number_format = NumberFormat::Builtin { id };
+        Op::ApplyRangeFormat {
+            sheet,
+            range: CellRange::new(cell, cell),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 1,
+                source_formats: vec![xlsx_ops::PreservedCellFormat {
+                    format: format.clone(),
+                    source_xf: None,
+                    derived_from: Some(style.unwrap_or(0)),
+                }],
+                formats: vec![format],
+                kept: Vec::new(),
+                source_styles: Vec::new(),
+            },
+        }
+    });
+    (state, format)
 }
 
 /// Whether a cell in `style` (none means xf 0) takes typed input as text (the Text number format).
@@ -4656,17 +4742,43 @@ fn proposal_alignment_value(
         .unwrap_or_default()
 }
 
-fn value_to_input(value: &CellValue) -> String {
+/// A serial in a leap year, so a day-month text such as `29/2` is read as a
+/// date whichever year it is typed in.
+const LEAP_YEAR_SERIAL: f64 = 45_292.0;
+
+/// The input that re-enters `value` unchanged: a text that typing would read
+/// as something else (a number, a date in this cell's format or a General one)
+/// gets a leading `'`.
+fn value_to_input(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    value: &CellValue,
+) -> String {
     match value {
         CellValue::Empty => String::new(),
         CellValue::Number { value } => value.to_string(),
         CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
         CellValue::Text { value } => {
-            if !matches!(xlsx_ops::parse_input(value), xlsx_ops::ParsedInput::Text(text) if text == *value)
-            {
-                format!("'{value}")
-            } else {
+            let style = workbook
+                .sheet(sheet)
+                .and_then(|sheet| sheet.effective_style(cell));
+            let format = workbook
+                .styles
+                .resolved_format(Some(style.unwrap_or(0)))
+                .number_format;
+            let stays_text = [format, FormatCode::Builtin(0)].into_iter().all(|format| {
+                [None, Some(LEAP_YEAR_SERIAL)].into_iter().all(|now| {
+                    matches!(
+                        xlsx_ops::parse_input_with_context(value, format.clone(), workbook.date_system, now).0,
+                        xlsx_ops::ParsedInput::Text(text) if text == *value
+                    )
+                })
+            });
+            if stays_text {
                 value.clone()
+            } else {
+                format!("'{value}")
             }
         }
         CellValue::Error { value } => value.as_str().to_string(),
@@ -4736,6 +4848,9 @@ impl Workbook {
     }
 }
 
+/// Raster exports refuse a region whose visible cells pass the cap; viewer
+/// frames degrade to a bounded part instead.
+#[cfg(feature = "raster")]
 fn validate_display_region(
     sheet: &Sheet,
     geometry: &GridGeometry,
@@ -4746,9 +4861,34 @@ fn validate_display_region(
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
-    let row_count = u64::from(rows.end - rows.start).saturating_add(u64::from(frozen_rows));
-    let column_count =
-        u64::from(columns.end - columns.start).saturating_add(u64::from(frozen_cols));
+    let row_count =
+        visible_count(rows, |rows| sheet.hidden_row_spans(rows))
+            .saturating_add(visible_count(0..frozen_rows, |rows| {
+                sheet.hidden_row_spans(rows)
+            }));
+    let column_count = visible_count(columns, |columns| sheet.hidden_col_spans(columns))
+        .saturating_add(visible_count(0..frozen_cols, |columns| {
+            sheet.hidden_col_spans(columns)
+        }));
+    validate_display_cells(row_count, column_count)
+}
+
+/// Tracks of `range` that are not hidden.
+fn visible_count<I: Iterator<Item = (u32, u32)>>(
+    range: std::ops::Range<u32>,
+    hidden: impl FnOnce(std::ops::RangeInclusive<u32>) -> I,
+) -> u64 {
+    if range.is_empty() {
+        return 0;
+    }
+    let count = u64::from(range.end - range.start);
+    let hidden = hidden(range.start..=range.end - 1)
+        .map(|(first, last)| u64::from(last - first) + 1)
+        .sum::<u64>();
+    count - hidden
+}
+
+fn validate_display_cells(row_count: u64, column_count: u64) -> Result<()> {
     let cells = row_count.saturating_mul(column_count);
     if cells > MAX_DISPLAY_CELLS {
         return Err(Error::DisplayTooLarge {
