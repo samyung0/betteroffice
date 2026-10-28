@@ -5,7 +5,9 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody};
+use pptx_parse::{
+    GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody, master_for_layout,
+};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,

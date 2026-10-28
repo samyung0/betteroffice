@@ -751,7 +751,8 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
                 let payload = crate::seed::chart_payload(chart, &Default::default());
                 let values = crate::seed::payload(payload).ok()?;
                 let values = values.into_iter().collect();
-                let chart = super::lower_chart_block(&values, "chart:inline".to_owned(), None, env)?;
+                let chart =
+                    super::lower_chart_block(&values, "chart:inline".to_owned(), None, env)?;
                 let mut image = super::lower_image_values(&values, &formatting, env);
                 image.width = chart.width;
                 image.height = chart.height;
@@ -1404,7 +1405,8 @@ mod tests {
         let runs = |content: &Value| {
             let shape = json!({"shapeType": "rect",
                 "textBody": {"content": [{"type": "paragraph", "content": [content]}]}});
-            let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            let block =
+                lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
             block.inner_text.unwrap().remove(0).runs
         };
         let projected = runs(&reference);
@@ -1455,7 +1457,8 @@ mod tests {
                 "structuredCode": {"inline": [sequence]}, "structuredResult": {"inline": result}});
             let shape = json!({"shapeType": "rect",
                 "textBody": {"content": [{"type": "paragraph", "content": [quote]}]}});
-            let shape = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            let shape =
+                lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
             assert_eq!(shape.nested_sequences, ["figure"]);
             let projected = shape.inner_text.as_ref().unwrap()[0].runs.clone();
             assert_eq!(projected, expected);
@@ -1502,7 +1505,8 @@ mod tests {
             ]}]}]},
             {"type": "paragraph", "content": [projected("Other")]}
         ]}});
-        let shape = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let shape =
+            lower_shape_json(&shape, "shape:1:1".to_owned(), 1, &RenderEnv::default()).unwrap();
         assert_eq!(shape.nested_sequences, ["table", "figure", "other"]);
         let paragraphs = shape.inner_text.unwrap();
         assert_eq!(paragraphs.len(), 3);

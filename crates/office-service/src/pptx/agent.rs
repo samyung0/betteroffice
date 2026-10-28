@@ -5,6 +5,7 @@
 //! slide's shapes and paragraphs. Live Undo comes from the room, so no
 //! command returns an inverse.
 
+use pptx_edit::paragraph::find_placeholder;
 use pptx_edit::{
     EditCtx, ParagraphSnapshot, ShapeDraft, ShapeKind, ShapeRect, ShapeSnapshot, SlideSnapshot,
     StorySnapshot, TextStyle, TextStylePatch,
@@ -14,7 +15,7 @@ use std::rc::Rc;
 
 use pptx_parse::{
     GraphicFrameData, Picture, PptxPackage, ShapeNode, ShapeTransform, SlideLayout,
-    find_placeholder, master_for_layout,
+    master_for_layout,
 };
 use serde_json::{Value, json};
 
