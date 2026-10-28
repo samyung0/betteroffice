@@ -457,9 +457,10 @@ impl Presentation {
     /// Serializes the deck with all edits applied. Untouched slides keep their
     /// exact source part bytes; edited slides are patched at the XML level.
     /// The container is rebuilt, so the output is not byte-identical to the
-    /// source even without edits.
+    /// source even without edits. Edited normal-autofit text saves the scale
+    /// the renderer refit it to.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(self.session.save()?)
+        Ok(self.renderer.save(&self.session)?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {

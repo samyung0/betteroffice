@@ -582,13 +582,8 @@ impl SlideRenderer {
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
-        let slide_background = if deck_slide.background_edited {
-            Some(BackgroundSource::from_edit(deck_slide.background.as_ref()))
-        } else {
-            parsed_slide.map(BackgroundSource::from_slide)
-        };
         let background_source = [
-            slide_background,
+            parsed_slide.map(BackgroundSource::from_slide),
             layout.map(BackgroundSource::from_layout),
             master.map(BackgroundSource::from_master),
         ]
@@ -965,15 +960,6 @@ struct BackgroundSource<'a> {
 }
 
 impl<'a> BackgroundSource<'a> {
-    /// An edited slide background, which replaces the part's `p:bg` whole.
-    fn from_edit(fill: Option<&'a ShapeFill>) -> Self {
-        Self {
-            fill,
-            picture: None,
-            reference: None,
-        }
-    }
-
     fn from_slide(slide: &'a Slide) -> Self {
         Self {
             fill: slide.background.as_ref(),
@@ -8907,6 +8893,7 @@ mod tests {
         package.masters[0]
             .shapes
             .push(ShapeNode::Shape(pptx_parse::Shape {
+                equation: false,
                 has_preset_geometry: true,
                 effects: None,
                 base: pptx_parse::ShapeBase {
@@ -8953,84 +8940,6 @@ mod tests {
         };
         assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
         assert!(tile.is_some());
-    }
-
-    #[test]
-    fn an_edited_slide_background_paints_before_the_deck_is_saved() {
-        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
-        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
-        let context = EditCtx::local("background");
-        let painted = |session: &DeckSession| {
-            renderer()
-                .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
-                .unwrap()
-                .display_list
-                .background
-        };
-        let declared = painted(&session);
-        let mut inherited = session.package().clone();
-        inherited.slides[0].background = None;
-        let inherited = renderer()
-            .layout_slide(&inherited, &session.snapshot().unwrap(), 0)
-            .unwrap()
-            .display_list
-            .background;
-        assert_ne!(inherited, declared);
-
-        session
-            .set_slide_background(
-                &context,
-                &slide_id,
-                Some(&ShapeFill {
-                    fill_type: "solid".to_owned(),
-                    color: Some(ColorValue {
-                        rgb: Some("0F1720".to_owned()),
-                        ..ColorValue::default()
-                    }),
-                    gradient: None,
-                }),
-            )
-            .unwrap();
-        assert_eq!(
-            painted(&session),
-            Some(Paint::Solid {
-                color: "#0F1720".to_owned()
-            })
-        );
-
-        session
-            .set_slide_background(&context, &slide_id, None)
-            .unwrap();
-        assert_eq!(painted(&session), inherited);
-    }
-
-    #[test]
-    fn a_scheme_alias_background_paints_its_theme_colour() {
-        let session = DeckSession::open(FIXTURE, 8_304).unwrap();
-        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
-        session
-            .set_slide_background(
-                &EditCtx::local("background"),
-                &slide_id,
-                Some(&ShapeFill {
-                    fill_type: "solid".to_owned(),
-                    color: Some(ColorValue {
-                        theme_color: Some("bg1".to_owned()),
-                        ..ColorValue::default()
-                    }),
-                    gradient: None,
-                }),
-            )
-            .unwrap();
-        let rendered = renderer()
-            .layout_scoped_slide(session.package(), &session.slide_scope(0).unwrap())
-            .unwrap();
-        assert_eq!(
-            rendered.display_list.background,
-            Some(Paint::Solid {
-                color: "#FFFFFF".to_owned()
-            })
-        );
     }
 
     /// a deck whose master fills the slide at alpha 0 still renders on paper.
@@ -11443,7 +11352,6 @@ mod tests {
             flip_h: false,
             flip_v: false,
             hidden: false,
-            text_box: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
             placeholder: Some(title.clone()),
@@ -11455,7 +11363,6 @@ mod tests {
             pending_media: None,
             blip_effects: Vec::new(),
             text_anchor: None,
-            table_structure: None,
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),

@@ -6,7 +6,8 @@ use ooxml_drawingml::{
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{
-    GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, Slide, TextBody, master_for_layout,
+    GraphicFrameData, PptxPackage, ShapeBase, ShapeNode, ShapeTransform, Slide, TextBody,
+    master_for_layout,
 };
 use serde::de::DeserializeOwned;
 use yrs::{
@@ -1392,6 +1393,7 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
     }
     visiting.remove(shape_id);
     let rect = shape_rect(&shape, txn, shape_id, package)?;
+    let kind = parse_shape_kind(&required_string(&shape, txn, "kind")?)?;
     let fill: Option<ShapeFill> = optional_json(&shape, txn, "fillJson")?;
     let outline: Option<ShapeOutline> = optional_json(&shape, txn, "outlineJson")?;
     let resolved_fill_color = fill
@@ -1404,7 +1406,7 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
         source_id: required_u32(&shape, txn, "sourceId")?,
-        kind: parse_shape_kind(&required_string(&shape, txn, "kind")?)?,
+        kind,
         name: required_string(&shape, txn, "name")?,
         x: rect.x,
         y: rect.y,
@@ -1414,6 +1416,10 @@ pub(crate) fn snapshot_shape<T: ReadTxn>(
         flip_h: map_bool(&shape, txn, "flipH").unwrap_or_default(),
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
         hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
+        // Read from the file, so seeds stay as they are; an inserted picture
+        // has no source node and is always locked (upstream #1510).
+        aspect_ratio_locked: kind == ShapeKind::Picture
+            && source_node(package, shape_id).is_none_or(picture_aspect_locked),
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
         placeholder: optional_json(&shape, txn, "placeholderJson")?,
@@ -1604,6 +1610,7 @@ fn baseline_shape(
         flip_h: transform.flip_h,
         flip_v: transform.flip_v,
         hidden: base.hidden,
+        aspect_ratio_locked: picture_aspect_locked(shape),
         geometry,
         adjust_values,
         placeholder: baseline_json_option(&base.placeholder)?,
@@ -1820,9 +1827,9 @@ fn shape_rect<T: ReadTxn>(
     shape_id: &str,
     package: &PptxPackage,
 ) -> EditResult<ShapeRect> {
-    let read = |key: &str, source: fn(&ShapeRect) -> i64| match map_number(shape, txn, key) {
-        None => match source_rect(package, shape_id) {
-            Some(rect) => baseline_integer(key, source(&rect)),
+    let read = |key: &str, source: fn(&ShapeTransform) -> i64| match map_number(shape, txn, key) {
+        None => match source_node(package, shape_id) {
+            Some(node) => baseline_integer(key, source(&shape_base(node).transform)),
             None => required_i64(shape, txn, key),
         },
         Some(_) => required_i64(shape, txn, key),
@@ -1835,32 +1842,33 @@ fn shape_rect<T: ReadTxn>(
     })
 }
 
-/// The uploaded file's position and size of a seeded shape, found by the id
-/// `seed_doc` gave it.
-fn source_rect(package: &PptxPackage, shape_id: &str) -> Option<ShapeRect> {
-    package
-        .slides
-        .iter()
-        .enumerate()
-        .find_map(|(index, slide)| {
-            let slide_id = seeded_slide_id(index, package.presentation.slides.get(index)?.id);
-            let path = shape_id.strip_prefix(&slide_id)?.strip_prefix(":shape:")?;
-            let mut steps = path.split('.').map(str::parse::<usize>);
-            let mut node = slide.shapes.get(steps.next()?.ok()?)?;
-            for step in steps {
-                node = match node {
-                    ShapeNode::Group(group) => group.children.get(step.ok()?)?,
-                    _ => return None,
-                };
-            }
-            let transform = &shape_base(node).transform;
-            Some(ShapeRect {
-                x: transform.x,
-                y: transform.y,
-                width: transform.width,
-                height: transform.height,
-            })
-        })
+/// The uploaded file's node of a seeded shape, found by the id `seed_doc`
+/// gave it; `None` for a shape an edit added.
+fn source_node<'a>(package: &'a PptxPackage, shape_id: &str) -> Option<&'a ShapeNode> {
+    let (slide_id, path) = shape_id.split_once(":shape:")?;
+    let index: usize = slide_id
+        .strip_prefix("slide:")?
+        .split(':')
+        .next()?
+        .parse()
+        .ok()?;
+    let slide = package.slides.get(index)?;
+    if seeded_slide_id(index, package.presentation.slides.get(index)?.id) != slide_id {
+        return None;
+    }
+    let mut steps = path.split('.').map(str::parse::<usize>);
+    let mut node = slide.shapes.get(steps.next()?.ok()?)?;
+    for step in steps {
+        node = match node {
+            ShapeNode::Group(group) => group.children.get(step.ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(node)
+}
+
+fn picture_aspect_locked(node: &ShapeNode) -> bool {
+    matches!(node, ShapeNode::Picture(picture) if picture.aspect_ratio_locked)
 }
 
 fn required_u32<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<u32> {

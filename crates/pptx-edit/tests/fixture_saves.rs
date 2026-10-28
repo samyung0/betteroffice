@@ -2,7 +2,9 @@
 //! shape the editor adds to its first slide, writes its slides byte for
 //! byte as the save did before the chat agent's layout placeholders (the
 //! Editor's condition, 2026-10-22): the pins were computed on fork commit
-//! 7c43320ab, before `ShapeAdd.placeholder`. "-" marks a fixture the
+//! 7c43320ab, before `ShapeAdd.placeholder`, and re-pinned in the 0.5.1 sync
+//! for the added text box's `txBox="1"` (upstream #1507), the only change:
+//! without it every fixture hashed to its old pin. "-" marks a fixture the
 //! editor does not open or that has no slide.
 
 use std::path::PathBuf;
@@ -13,271 +15,271 @@ use sha2::{Digest, Sha256};
 const FIXTURES: &[(&str, &str)] = &[
     (
         "apps/demo/public/betteroffice-demo.pptx",
-        "70039f4165965cddaf3165365ea0d2ab1d0b4e1ed2a2cbaaecb926ea16735fbf",
+        "327c41068bcd499cbc864f7c754e43d73029c10ee1263f3a2ea4a776028db543",
     ),
     (
         "crates/ooxml-drawingml/tests/fixtures/preset-adjustments.pptx",
-        "16d3395663760befcf129cb74c72da400209998259a6ad51ddb722d3f63d1fef",
+        "6026427fe29ffe82339f5fe2d4a47922650d816184034d218bce7ab29adfc86d",
     ),
     (
         "crates/ooxml-opc/tests/fixtures/betteroffice-demo.pptx",
-        "70039f4165965cddaf3165365ea0d2ab1d0b4e1ed2a2cbaaecb926ea16735fbf",
+        "327c41068bcd499cbc864f7c754e43d73029c10ee1263f3a2ea4a776028db543",
     ),
     (
         "crates/pptx-edit/tests/fixtures/blip-shadow.pptx",
-        "0d394a58a376e5d91c88befc1162ab3e8936293b6c6f3eb3110a919a808bd753",
+        "463086b31e9a303af5dc6a5b906d565ffea09b9b0ae635b04540b6903fb1cc27",
     ),
     (
         "crates/pptx-edit/tests/fixtures/chart-text-overflow.pptx",
-        "e5f171e3b4f79041a76c603bb8434eb31f57e5fbc01961c15aa144d84646f4bc",
+        "5e9abf5400b20348f7707b6e721fd69933d180f1a593af039590b9e6ef730d47",
     ),
     (
         "crates/pptx-edit/tests/fixtures/deck-schema-v2-connectors.pptx",
-        "d7683748bdedf5a1169c5fcf5237cbf2e8e40b6d8908c5b470b13c47fd5c888c",
+        "9c86a89c4622def86e7e8e831bc0c052002f57b1ed9e132a5957740a54134fd2",
     ),
     (
         "crates/pptx-edit/tests/fixtures/deck-schema-v2-nested-connectors.pptx",
-        "b69b230428466d43ac904a7a37246bb762e61cc79f744be7c37821bdd9c4cb06",
+        "112ca9a89435e8a5156e51fc28e3b83cc1ef60b4b3e6be0815fb023588c92746",
     ),
     (
         "crates/pptx-edit/tests/fixtures/hidden-shapes.pptx",
-        "817a7d4cb36174e7f416f651bc79e5de8c23b9847c0d03aac1874d33eee27c9d",
+        "66fe0fd37c8f5b2d1b272402b29773a3c9827b5177b15efe9d6f4bed22b6cfe4",
     ),
     (
         "crates/pptx-edit/tests/fixtures/metafile-tracking.pptx",
-        "844f999d8e06cc9aba3faf741e61da229a2901af3c6c8aef9a704beca2eb34b3",
+        "6b7f571e23494b7881a6d87933debf737b5b1adf7b090a6881b9b4bf2cab3a2e",
     ),
     (
         "crates/pptx-edit/tests/fixtures/modern-comments.pptx",
-        "70039f4165965cddaf3165365ea0d2ab1d0b4e1ed2a2cbaaecb926ea16735fbf",
+        "327c41068bcd499cbc864f7c754e43d73029c10ee1263f3a2ea4a776028db543",
     ),
     (
         "crates/pptx-edit/tests/fixtures/run-spacing-shadow.pptx",
-        "0d0b27bdc5f780f8e05f9e8a30595bd5559e133447942d9a73f692857f893af0",
+        "8462b9178fd4d97d7d237850086ab3ad52cc30ae00d3fe33b74e9c6e4f05512b",
     ),
     (
         "crates/pptx-parse/tests/fixtures/chart-deck.pptx",
-        "6af2bc9f01bf08a8bcbe4dcafdfb04b8155f0b3fab5ebb14125b1712df4add72",
+        "279e82e3620ad3b79d8788279d085a2bae64db067791a6f9826f3ea938c038dd",
     ),
     (
         "crates/pptx-parse/tests/fixtures/custom-geometry.pptx",
-        "7048388b8a2ae05227cc1a37fcc140b0cd18b5d53076f185ad0347edd763a6ef",
+        "01f368686fe1d137a82474bde8f2ed77a1838fbd8aa8cd32cc9c99d1a13f24f1",
     ),
     (
         "crates/pptx-parse/tests/fixtures/gradient-outline.pptx",
-        "1f710f5f8a373ce4b4e72ae6d92ee8e693bc8d74586701753cc559ae7270d14e",
+        "1d585e970ca8c7c0b3e72c5c9aa7f9001dab60703e727a2b2c9383560f2ab668",
     ),
     (
         "crates/pptx-parse/tests/fixtures/master-style-deck.pptx",
-        "9665de345b8a9759d21eebad6fcba6575c504d91138e0863c126ed1f36bcb3b7",
+        "6517eeb50963c370dcc0c2c8f4af4bf94d404a25af26aa5d3eb897b3232ff4f8",
     ),
     (
         "crates/pptx-parse/tests/fixtures/picture-fill.pptx",
-        "df4c8fd780625c7a0c7ad8242b5a5c79bcb480b89306702770b2d8454bf71650",
+        "e4eba934b578f47b91c849a95ddacb2b12de7b784e84e6fb3c70a98e906bc750",
     ),
     (
         "crates/pptx-parse/tests/fixtures/run-gradfill.pptx",
-        "4744bf46b6d641d2090f4b11625abffa68c72f1da79b70a865e516c579b3ce30",
+        "424e2c2e36a811e5ddde2ed95214bf36061d21e9c4888246940e17796b440357",
     ),
     (
         "crates/pptx-parse/tests/fixtures/shape-style.pptx",
-        "756b96ac379b2da6093ab6a5232fe36136bfcf57f4fd40ea86864af445b2bfd8",
+        "7d4f3e98d420641968c7fda41fc9aac450562c48c0e64dfdcde7ba982c267791",
     ),
     (
         "crates/pptx-parse/tests/fixtures/slide-number-fields.pptx",
-        "87d5724a4cdc209dbb98a7779ea5aa25e54892ba5bb58dcb3dc34a701ca6bda6",
+        "bb150acd246646e93c3a8f8f9ef25ce6a3623d4194f43e818f8544639bf0c31d",
     ),
     (
         "crates/pptx-parse/tests/fixtures/style-matrix-deck.pptx",
-        "3f8385bdfd01f8c60f9f40c6a25e430adfda7b61999463981a869296b7c0592f",
+        "d74182e134a60e780f9acc6d25fd8f157da497bd3e4aeba8ca33d6ba4e8d7a84",
     ),
     (
         "crates/pptx-render/tests/fixtures/alternate-content.pptx",
-        "6fd8faa0eacde7ae362d2a1f052176f82644494f513d822787670f57b48a3520",
+        "69584e03a8f9a99bf89c894f5d56f913c39ebe77db9c67a05ac453f24f586e09",
     ),
     (
         "crates/pptx-render/tests/fixtures/arrow-adjustments.pptx",
-        "443d73c84617f457fd4a3626b5690d792401674200364b4173c2c3a49a1ec998",
+        "3e6dc3451f205d4f61b9f8f03b9abaac31f6d781cfd71d9dd40c4cfcfacf7303",
     ),
     (
         "crates/pptx-render/tests/fixtures/autonumber-bullets.pptx",
-        "e29bc88e443946e7ac61d0493f645129c13dc47671f14e40835f4ed98dd12dcc",
+        "2a7ebf75bdc164facaed24d14bb2483afa9b10933e439ef88c9975eada4b29c0",
     ),
     (
         "crates/pptx-render/tests/fixtures/blip-effects.pptx",
-        "7a5fb949c2f952a88a611dd47f7f7db9a0f61cfb7f80bfaf730311cadcc51771",
+        "db6ac873b31c0457cf93c52e9df50598274b510d563ce56517bf10162e3a57d1",
     ),
     (
         "crates/pptx-render/tests/fixtures/blip-lum.pptx",
-        "162f64969cac1ce258d62b345b19f94cb437594b34029e476797b9fd0c040daf",
+        "f2cba930c2a69cefb1b5bc3f231e5b816840b3d111ceb7dc4d2f1b9d90df07c4",
     ),
     (
         "crates/pptx-render/tests/fixtures/chart-legend.pptx",
-        "84ce6caf9539d9d038a9eb650c969ed506215d4e829aac933d122810fa061328",
+        "4b4cf570fbb5b812dfed343540d43eaabf9f0ba1b8db9befb8960a6b1bea1d1d",
     ),
     (
         "crates/pptx-render/tests/fixtures/chart-series-line.pptx",
-        "24d0a4d6de3172f18fce5f1eb9bc5f34303fbcbe6b88f4589e81444ee8215b2d",
+        "df6d74ae0698b062d8a65cdefaecce83d0e6e3ff04e92f0ca2b922ef9deb874c",
     ),
     (
         "crates/pptx-render/tests/fixtures/chart-space-fill.pptx",
-        "db7b3cc7d7380b5dba3a52fbf1e8d87326e1da3e5c487e62903b55ac8e67a969",
+        "ca813454dd000b273c5ddec64e6785e98ce5e077ca2f53fb24bc771edec07f39",
     ),
     (
         "crates/pptx-render/tests/fixtures/chart-text-properties.pptx",
-        "db7b3cc7d7380b5dba3a52fbf1e8d87326e1da3e5c487e62903b55ac8e67a969",
+        "ca813454dd000b273c5ddec64e6785e98ce5e077ca2f53fb24bc771edec07f39",
     ),
     (
         "crates/pptx-render/tests/fixtures/data-labels.pptx",
-        "900ced96636e99896c0754c5c2235cc8c63c12e9ec846bc8d03362a75621f374",
+        "af83e374ec97707aa069fa82c68017f6f56037321585417ea4f3593aeb0ac6c7",
     ),
     (
         "crates/pptx-render/tests/fixtures/embedded-lato.pptx",
-        "2c1fdbb661806031ac50dbc47f4d4a475fd04cd4f965a9fa3d332db88db96c02",
+        "985bedcfa04a4784763229196c46939ba33153f9a1d68175fe73f9df6b3cc674",
     ),
     (
         "crates/pptx-render/tests/fixtures/gradient-stop-order.pptx",
-        "215b54c4308e15876a15109fc8f1f2dd9fe3190e2cc6e140af1d1d7d668649c7",
+        "3011bb000657dca9affb4567df8376cf49749ea13905325edc8688abf342f7b6",
     ),
     (
         "crates/pptx-render/tests/fixtures/horizontal-bar-axes.pptx",
-        "900ced96636e99896c0754c5c2235cc8c63c12e9ec846bc8d03362a75621f374",
+        "af83e374ec97707aa069fa82c68017f6f56037321585417ea4f3593aeb0ac6c7",
     ),
     (
         "crates/pptx-render/tests/fixtures/line-ends.pptx",
-        "4e7e06c1f2daa61d37f1a74a899723341415986d63ea5a9652abf9978be899ce",
+        "60c65bb3b3e729dc4ea0b0a1ff38916d2afd0baa462aa1a730b4271ec63d926a",
     ),
     (
         "crates/pptx-render/tests/fixtures/line-spacing.pptx",
-        "9505bbc87e33ebbcd08e4dbe0d5e2d6346fb937c760522861f1a6c594e900fd7",
+        "86f9294b91f9f85d96c7d6c4f9aca663c807b358a3885e3a516e3ff6c75f58d4",
     ),
     (
         "crates/pptx-render/tests/fixtures/list-style-bullets.pptx",
-        "4a6fd3caa0d3beafedd35b850f2bb3bf8b5cc4aad14ea1a72504f6320b5dd7ed",
+        "aeb068e31cdc102476b85c48dadafc43e8a26f378c79ee18df07f47f562f0f5c",
     ),
     (
         "crates/pptx-render/tests/fixtures/list-style-plain-paragraph.pptx",
-        "bf4f9e38a4e2b425f3922a1aea30d7a3c3f43ec68fb71e87d1c4ce05542c3bdf",
+        "a113de17312839421d0ac9e831d57877bfd8b0352612f943b6159d6b847c20b7",
     ),
     (
         "crates/pptx-render/tests/fixtures/metafile-gradient.pptx",
-        "c6b0491a7df9bd854c9f9de39486c8eeba2bad68a2da4ca40680de5089ca88e8",
+        "4d373a44a2588d741c7125c1235f838bb09b40d4a5c2c97a2156c14bd83ff61d",
     ),
     (
         "crates/pptx-render/tests/fixtures/metafile-pictures.pptx",
-        "3b0fb89b1ad7f287249e6546d1786f0924d43574fb73ac92072aabfb5d477467",
+        "36cab83f6df2b9224ff3cdfd1cf69384eb2a5c736d11049d6a4272064825aa29",
     ),
     (
         "crates/pptx-render/tests/fixtures/outer-shadow-picture.pptx",
-        "2516c37b3b80f79933e0e6f08cc9a62a0630d48e470ff69fa6827bb249d78a34",
+        "cb452fc18730517b20d908f5722f8f04b38ea1bd698957d93aa54e49a14c2568",
     ),
     (
         "crates/pptx-render/tests/fixtures/outer-shadow-scale.pptx",
-        "e42069927b96fd50f0afff5aa5c4190905aa3eb9ed38e6d7a11c29122504b3ab",
+        "9b4875db287be9d90b61d42cbb719cab4ab2ac2c451541fd42fb2177360a5f41",
     ),
     (
         "crates/pptx-render/tests/fixtures/outer-shadow.pptx",
-        "b9dd2d43df946e004e464813ebd5cf89b4a84f5064db1621f786b5e648b65442",
+        "ede2ae34d2a31deef91e71c6b20d51ee6db453f3f44d71e23f0aeff9cfb0db97",
     ),
     (
         "crates/pptx-render/tests/fixtures/paragraph-right-margin.pptx",
-        "efdc2b53416b0448926cd01e25bd9b9ae9ef0084cfcdb94c33ff0869d43797c9",
+        "dd547ab94bae8a22dcd0ac230e099cb7f7cf94c8e5b66be62c81dccba0413c9a",
     ),
     (
         "crates/pptx-render/tests/fixtures/paragraph-spacing.pptx",
-        "d2e414f18c3b9ed74cec7ffca872a25a42b12110125f47fe0eae3cee007c6a6a",
+        "7a891a5cb2000a0441c186bd0919dff4b79886f857987393586547cf707f74a8",
     ),
     (
         "crates/pptx-render/tests/fixtures/picture-crop-mask.pptx",
-        "864b5e4c58fdff51c68e0ae7eddbf14ade892dface7575e134782414f584522c",
+        "83598e357559fb79eccbf36910b5cd211f4f233c5e7cae9aa69ec3ca36743de5",
     ),
     (
         "crates/pptx-render/tests/fixtures/prstgeom.pptx",
-        "4872641e3ec6531676fa4605d251b2016c22d0e60c886ccaa004e9d935efbc59",
+        "4d8a15d44164353842b8035d86b978546e7ccc02ae747827304181ed0761ca16",
     ),
     (
         "crates/pptx-render/tests/fixtures/run-caps.pptx",
-        "8af079a847b4ec28d0127be6fcf27b7c34c614e492d3002c58ab6a3581edebb1",
+        "f50f690cb5380092e2cb420893211e4d1163e5df8eb705bc22da91f466ec92e2",
     ),
     (
         "crates/pptx-render/tests/fixtures/run-paint-scope.pptx",
-        "25ce41068eae8a51dd24e73dd8b3095961bfd71df03222bdf7b3cb0a28a627f5",
+        "3de9e635717e0144d7183f8f74b1cdcf9e2f3cd5dd94516159b377546f778096",
     ),
     (
         "crates/pptx-render/tests/fixtures/run-spacing.pptx",
-        "19bd623a80670a541d635436852594a99351221668eef37c711a4381f87a73f1",
+        "0aa854d8ccd586e9dc91a17701f57637b94401e5c7d19361eaf362f7ceaf3ace",
     ),
     (
         "crates/pptx-render/tests/fixtures/star-inner-radius.pptx",
-        "23c182911b13a4337fed79b704a3934e11d1dd634519fb4497a248fa82c73dab",
+        "795f701eb092def720b4d71c46f5a5dd02f8fed05b1a23aefb8f3db85ef5d006",
     ),
     (
         "crates/pptx-render/tests/fixtures/symbol-bullets.pptx",
-        "cfd0a1143e981972ea0edb921a22ec550e41aeb3d682239f91dee088d8516cce",
+        "fc33f8c81123148cbee485ce448f3b0a760e600c2cc8e13b773accfddb42744f",
     ),
     (
         "crates/pptx-render/tests/fixtures/table-basic.pptx",
-        "92cb00f7eacb375f79b953f06a4263f00e19fce147917265e4389ec4c3bb366f",
+        "0754189a707fa406327266c393f0bab568fcb4e81d57bb7cd12307b9b35c49bd",
     ),
     (
         "crates/pptx-render/tests/fixtures/table-rotated.pptx",
-        "5735b3e85a9dc17ecd686e6b9d9fce71c78d8c0d3034de7c830bfb5109172109",
+        "0018342620e3f6ca7154653bdbdd99a44e523ad1229b73b2f2ad2a9f83d02e89",
     ),
     (
         "crates/pptx-render/tests/fixtures/text-baseline-script.pptx",
-        "cb6573480d5d8b638d217a2c408d0786ce03f370893dd62fb35c18d44bcb4085",
+        "21884be9a82edffa3d90f3109eb17a89f136bf6bad5462cad6568869f664f0a4",
     ),
     (
         "crates/pptx-render/tests/fixtures/text-orientation.pptx",
-        "dc25bf4cf0dc70fb6b6b8f0389df56b2dac80e7a17456b64cb64293912f92f12",
+        "2cc87281fac533c12a73a70f15477b8ac1b6fe36a0b5dd16cc7c884b03d89e48",
     ),
     (
         "crates/pptx-render/tests/fixtures/text-overflow.pptx",
-        "a9660d74a886f49b4c7ba6268b62735814f64ec9cee4500f03374ad639703c89",
+        "04d86c00d7aa1acec0660e1a0d3e2d346cee33c38577de8803554c5fe33f38e8",
     ),
     (
         "crates/pptx-render/tests/fixtures/theme-fonts.pptx",
-        "34e4828358a721a3264399ea852b29c5c2846b3d0b956655eaac929b370c205c",
+        "c261977c86205fa8a4c17b8685dbcc490c95dbed765df00aa1f0d74589be0ee2",
     ),
     (
         "crates/pptx-render/tests/fixtures/value-axis-autoscale.pptx",
-        "900ced96636e99896c0754c5c2235cc8c63c12e9ec846bc8d03362a75621f374",
+        "af83e374ec97707aa069fa82c68017f6f56037321585417ea4f3593aeb0ac6c7",
     ),
     (
         "crates/pptx-render/tests/fixtures/vertical-writing-modes.pptx",
-        "2235fce2dc91d85d59306248d34dda74f3a9c75d0da786f205a54c8dd3f5de34",
+        "977181aad0462ed34f621350ac53e78ac2a2e68dfd563dd1d693aa7636b5a5de",
     ),
     (
         "fuzz/corpus/pptx-package-parse/custom-geometry.pptx",
-        "7048388b8a2ae05227cc1a37fcc140b0cd18b5d53076f185ad0347edd763a6ef",
+        "01f368686fe1d137a82474bde8f2ed77a1838fbd8aa8cd32cc9c99d1a13f24f1",
     ),
     (
         "fuzz/corpus/pptx-package-parse/line-ends.pptx",
-        "4e7e06c1f2daa61d37f1a74a899723341415986d63ea5a9652abf9978be899ce",
+        "60c65bb3b3e729dc4ea0b0a1ff38916d2afd0baa462aa1a730b4271ec63d926a",
     ),
     (
         "fuzz/corpus/pptx-package-parse/modern-comments.pptx",
-        "70039f4165965cddaf3165365ea0d2ab1d0b4e1ed2a2cbaaecb926ea16735fbf",
+        "327c41068bcd499cbc864f7c754e43d73029c10ee1263f3a2ea4a776028db543",
     ),
     (
         "fuzz/corpus/pptx-package-parse/slide-number-fields.pptx",
-        "87d5724a4cdc209dbb98a7779ea5aa25e54892ba5bb58dcb3dc34a701ca6bda6",
+        "bb150acd246646e93c3a8f8f9ef25ce6a3623d4194f43e818f8544639bf0c31d",
     ),
     (
         "packages/pptx/src/render/fixtures/tiff-image.pptx",
-        "df4c8fd780625c7a0c7ad8242b5a5c79bcb480b89306702770b2d8454bf71650",
+        "e4eba934b578f47b91c849a95ddacb2b12de7b784e84e6fb3c70a98e906bc750",
     ),
     (
         "poc/fixtures/deck-50.pptx",
-        "92dec8d0a24cae1d4ca3339d46c6ceefaa49abd533a460ba09cbc2c1204963f7",
+        "2ca9ff7a67448258f46355054385906f399a42085528458c4daa07115c072f29",
     ),
     (
         "poc/fixtures/feature-rich.pptx",
-        "46cb5337a8a65e6231229583db55ec6ba5d82a387a528ad050e5d77858afe496",
+        "ac6a38708e29fc891c8647aea128a2c42eba4de8b1f8764bd9d3361876eebf90",
     ),
     (
         "poc/fixtures/lecture.pptx",
-        "13a6155e5c4ce447af6f3954381702f819ebbcb99af6ba97560f7f1c662694fa",
+        "1b6f45a1074a11faaf7c0d067635d5405aeba2d5eb14c118663692785a81ce79",
     ),
 ];
 
